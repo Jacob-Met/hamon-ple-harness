@@ -105,14 +105,21 @@ UNITS = {
     "kip": unit("4448.2216152605",FORCE),
     "Pa": unit(1,PRESSURE), "kPa": unit(1000,PRESSURE),
     "MPa": unit(1000000,PRESSURE), "GPa": unit(1000000000,PRESSURE),
-    "psi": unit("6894.757293168361",PRESSURE),
-    "ksi": unit("6894757.293168361",PRESSURE),
-    "psf": unit("47.88025898033584",PRESSURE),
-    "ksf": unit("47880.25898033584",PRESSURE),
+
     "J": unit(1,ENERGY), "kJ": unit(1000,ENERGY),
     "W": unit(1,POWER), "kW": unit(1000,POWER),
     "V": unit(1,VOLTAGE), "ohm": unit(1,RESISTANCE),
 }
+
+# Derive every imperial pressure scale from the same exactly defined pound-
+# force and international length units. Independently rounded constants would
+# make an otherwise exact 1000 psi == 1 ksi check fail.
+UNITS.update({
+    "psi": UNITS["lbf"]/(UNITS["inch"]*UNITS["inch"]),
+    "ksi": Q(D(1000)) * UNITS["lbf"]/(UNITS["inch"]*UNITS["inch"]),
+    "psf": UNITS["lbf"]/(UNITS["ft"]*UNITS["ft"]),
+    "ksf": Q(D(1000)) * UNITS["lbf"]/(UNITS["ft"]*UNITS["ft"]),
+})
 
 def quantity(expression: str) -> Q:
     """Evaluate an arithmetic unit expression, never Python eval or arbitrary calls."""

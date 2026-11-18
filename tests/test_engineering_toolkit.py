@@ -26,8 +26,9 @@ class ToolkitContracts(unittest.TestCase):
         self.assertEqual(t.D(a["value"]),t.D("1.5"))
         b=t.conversion("50*kN/(200*mm**2)","MPa")
         self.assertEqual(t.D(b["value"]),t.D("250"))
-        self.assertEqual(t.D(t.conversion("100*psf","Pa")["value"]),
-                         t.D("4788.025898033584"))
+        self.assertAlmostEqual(float(t.conversion("100*psf","Pa")["value"]),
+                               4788.025898033584, places=9)
+        self.assertEqual(t.D(t.conversion("1000*psi","ksi")["value"]),t.D("1"))
         self.assertEqual(t.conversion("sqrt(9*mm**2)","mm")["value"],"3")
 
     def test_dimensional_mismatch_and_security(self):
