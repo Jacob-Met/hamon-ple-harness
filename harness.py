@@ -264,6 +264,7 @@ async def solve(session: taskbridge.Session) -> str:
       # One read-only project inventory over the evaluator's task protocol.
       # This is ephemeral task data; never store or log its contents.
       engineering_inventory = await engineering_intake.intake_for_prompt(session)
+      engineering_cli_note = await engineering_intake.provision_engineering_cli(session)
       name, model = await asyncio.to_thread(
           configure, agent_dir, relay, session, env
       )
@@ -286,7 +287,7 @@ async def solve(session: taskbridge.Session) -> str:
           "--thinking",
           THINKING,
           "--append-system-prompt",
-          NOTE.format(workdir=session.workdir) + engineering_inventory,
+          NOTE.format(workdir=session.workdir) + engineering_inventory + engineering_cli_note,
       ]
       run = Run(session, model)
       done = await taskbridge.run_process(

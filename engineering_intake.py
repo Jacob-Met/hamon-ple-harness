@@ -220,3 +220,31 @@ async def intake_for_prompt(session: Any, *, deadline_seconds: int = 19) -> str:
         "IFC entity names do NOT prove spatial clearance. Verify units, "
         "coordinates, and every required deliverable independently."
     )
+
+
+# A deterministic CLI is copied into the task container (not artifacts), so
+# Pi can run it through its ordinary taskbridge-backed bash tool. This is code,
+# not a copy of any task data. A failed install never blocks the starter agent.
+async def provision_engineering_cli(session: Any) -> str:
+    import pathlib
+    source = pathlib.Path(__file__).with_name("engineering_toolkit.py").read_bytes()
+    target = "/tmp/hamon-engineering-toolkit.py"
+    try:
+        reported_size = await asyncio.wait_for(
+            session.write_file(target, source), timeout=12)
+        if reported_size != len(source):
+            return ""
+    except (asyncio.TimeoutError, OSError, RuntimeError, ValueError, KeyError):
+        return ""
+    return (
+        "\nDETERMINISTIC ENGINEERING TOOLS (in the task container; no internet):"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py quantity '12*kip/(8*in_**2)' --to ksi"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py check '1*kN' '1000*N'"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py xlsx-audit FILE.xlsx"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-words DRAWING.pdf --page 1"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py ifc-broadphase MODEL.ifc --a IfcDuctSegment --b IfcBeam"
+        "\nConversions reject mismatched dimensions and ambiguous 'lb'."
+        " PDF word boxes have no verified drawing scale. IFC envelope overlaps"
+        " are not physical mesh-intersection proofs; independently qualify"
+        " every engineering calculation and deliverable."
+    )
