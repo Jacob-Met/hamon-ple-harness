@@ -42,6 +42,7 @@ import tempfile
 from typing import Any
 
 import taskbridge
+import engineering_intake
 
 HERE = pathlib.Path(__file__).resolve().parent
 # npm ci, from package-lock.json
@@ -260,6 +261,9 @@ async def solve(session: taskbridge.Session) -> str:
           NODE_NO_WARNINGS="1",
           TASK_WORKDIR=session.workdir,
       )
+      # One read-only project inventory over the evaluator's task protocol.
+      # This is ephemeral task data; never store or log its contents.
+      engineering_inventory = await engineering_intake.intake_for_prompt(session)
       name, model = await asyncio.to_thread(
           configure, agent_dir, relay, session, env
       )
@@ -282,7 +286,7 @@ async def solve(session: taskbridge.Session) -> str:
           "--thinking",
           THINKING,
           "--append-system-prompt",
-          NOTE.format(workdir=session.workdir),
+          NOTE.format(workdir=session.workdir) + engineering_inventory,
       ]
       run = Run(session, model)
       done = await taskbridge.run_process(
