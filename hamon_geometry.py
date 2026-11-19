@@ -138,6 +138,15 @@ def make_mesh(flat_vertices,flat_faces,max_triangles=20000):
         raise ValueError("mesh has non-finite or implausible world coordinates")
     verts=tuple(tuple(float(vv[i+j]) for j in range(3)) for i in range(0,len(vv),3))
     triangles=[]; tr_boxes=[]; edges=Counter(); oriented=Counter()
+    vertex_links={}; duplicated_link=False
+    # IFC tessellators may emit one vertex index per *face corner*. An
+    # indexed-edge test then calls a perfectly closed shell non-watertight.
+    # Weld only bit-identical world coordinates for topological evidence:
+    # approximate welding could invent closure across a real, narrow gap.
+    first_at={}
+    welded=[]
+    for index,position in enumerate(verts):
+        welded.append(first_at.setdefault(position,index))
     parent=list(range(len(verts)))
     def root(k):
         while parent[k]!=k:
@@ -158,37 +167,114 @@ def make_mesh(flat_vertices,flat_faces,max_triangles=20000):
         if dot(an,an) <= 1e-28:
             raise ValueError("mesh has degenerate zero-area triangle")
         triangles.append(tri);tr_boxes.append(bounds(tri))
+        canonical=[welded[i] for i in abc]
+        if len(set(canonical))!=3:
+            raise ValueError("mesh triangle collapses after exact-coordinate welding")
         for i in range(3):
-            u,v=abc[i],abc[(i+1)%3]
+            u,v,w=canonical[i],canonical[(i+1)%3],canonical[(i+2)%3]
             union(u,v)
             edges[tuple(sorted((u,v)))]+=1
             oriented[(u,v)]+=1
-    closed=all(n==2 for n in edges.values()) and all(
+            link=vertex_links.setdefault(u,{})
+            if w in link:
+                duplicated_link=True
+            else:
+                link[w]=v
+    def one_vertex_cycle(link):
+        # Edge-pair closure alone misses two solid shells touching at one
+        # vertex. Each closed orientable manifold vertex has exactly one
+        # directed neighbor ring, not two cycles joined at one coordinate.
+        if len(link)<3 or set(link)!=set(link.values()):
+            return False
+        seen=set()
+        start=next(iter(link))
+        cur=start
+        while cur not in seen:
+            seen.add(cur)
+            cur=link[cur]
+        return cur==start and len(seen)==len(link)
+    closed=not duplicated_link and all(n==2 for n in edges.values()) and all(
         oriented[(u,v)]==oriented[(v,u)]
-        for u,v in edges)
+        for u,v in edges) and all(one_vertex_cycle(link)
+                                for link in vertex_links.values())
     reps={}
-    active={index for k in range(0,len(ff),3) for index in ff[k:k+3]}
+    active={welded[index] for index in ff}
     for index in sorted(active): reps.setdefault(root(index),index)
     return Mesh(verts,tuple(triangles),tuple(tr_boxes),bounds(verts),
                 node_for(triangles,list(range(len(triangles)))),
                 closed,tuple(verts[i] for i in reps.values()))
 
 
-def inside_closed(point,mesh):
-    """Watertight oriented surface point-in-solid by multiple generic rays."""
+def _ray_hits_box(point,direction,box,epsilon=1e-9):
+    """Conservative forward ray/AABB slab screen in world metres.
+
+    Expand both sides by a positive epsilon so rounding can increase work,
+    but cannot silently prune a triangle whose boundary is on the ray.
+    """
+    near,far=0.0,float("inf")
+    for i in range(3):
+        lo,hi=box[0][i]-epsilon,box[1][i]+epsilon
+        speed=direction[i]
+        if speed==0.0:
+            if point[i]<lo or point[i]>hi:
+                return False
+            continue
+        t0,t1=(lo-point[i])/speed,(hi-point[i])/speed
+        near=max(near,min(t0,t1))
+        far=min(far,max(t0,t1))
+        if far<near:
+            return False
+    return far>=0.0
+
+
+def _ray_crossings_bvh(point,direction,mesh,stats=None):
+    """Count positive ray/surface hits or return None on a grazing witness.
+
+    Indexed BVH traversal replaces a whole-mesh scan; leaf triangle bounds
+    are checked again. No parity decision is made from an unresolved ray.
+    """
+    hits=0
+    stack=[mesh.bvh]
+    while stack:
+        node=stack.pop()
+        if stats is not None:
+            stats["bvh_nodes"]=stats.get("bvh_nodes",0)+1
+        if not _ray_hits_box(point,direction,node[0]):
+            continue
+        if node[3] is None:
+            stack.append(node[2])
+            stack.append(node[1])
+            continue
+        for tri_index in node[3]:
+            if not _ray_hits_box(point,direction,mesh.triangle_boxes[tri_index]):
+                continue
+            if stats is not None:
+                stats["triangle_tests"]=stats.get("triangle_tests",0)+1
+            t=_ray_triangle(point,direction,mesh.triangles[tri_index])
+            if t==-1:
+                return None
+            if t!=0:
+                hits+=1
+    return hits
+
+
+def inside_closed(point,mesh,stats=None):
+    """Watertight oriented point-in-solid, BVH-pruned with 3-ray consensus.
+
+    stats, when passed, records actual BVH nodes and triangle tests without
+    affecting classification. Distinct ray crossings must agree or the
+    caller receives unresolved rather than an invented clearance.
+    """
     if not mesh.closed_oriented:
         return None
     rays=((1.0,0.416234,0.271828),(0.357,1.0,0.618034),
           (0.12345,0.517,1.0),(1.0,0.927,0.211))
     votes=[]
     for direction in rays:
-        crossings=0
-        ambiguous=False
-        for tri in mesh.triangles:
-            t=_ray_triangle(point,direction,tri)
-            if t==-1: ambiguous=True;break
-            if t!=0:crossings+=1
-        if not ambiguous:
+        if stats is not None:
+            stats["rays"]=stats.get("rays",0)+1
+        crossings=_ray_crossings_bvh(point,direction,mesh,stats)
+        if crossings is not None:
             votes.append(bool(crossings%2))
     if len(votes)>=3 and len(set(votes))==1:
         return votes[0]
