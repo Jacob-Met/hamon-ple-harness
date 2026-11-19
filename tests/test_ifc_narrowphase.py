@@ -144,6 +144,14 @@ class RealisticTopologyAndRayScaling(unittest.TestCase):
         self.assertFalse(imperfect.closed_oriented)
         self.assertIsNone(g.inside_closed((0.2,0.2,0.2),imperfect))
 
+    def test_two_shells_touching_one_vertex_are_not_a_certified_solid(self):
+        positive,negative=tetra(edge=2),tetra(edge=-2)
+        va,fa=face_soup(positive)
+        vb,fb=face_soup(negative)
+        joined=g.make_mesh(va+vb,fa+[index+len(va)//3 for index in fb])
+        self.assertFalse(joined.closed_oriented)
+        self.assertIsNone(g.inside_closed((0.1,0.1,0.1),joined))
+
     def test_large_tessellation_uses_bvh_without_changing_ray_parity(self):
         mesh=gridded_cube(12)
         self.assertEqual(len(mesh.triangles),1728)
