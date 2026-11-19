@@ -165,7 +165,7 @@ def calibrate_inventory(page, spec, quantity, metre):
         span = _distance(a, b)
         if span <= 1e-9:
             raise ValueError(f"target {name}: coincident endpoints")
-        to = target.get("to", "m")
+        to = target.get("unit", "m")
         if not isinstance(to, str) or not 1 <= len(to) <= 40:
             raise ValueError(f"target {name}: target unit expression invalid")
         unit = quantity(to)
