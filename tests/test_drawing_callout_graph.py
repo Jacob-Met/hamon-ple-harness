@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import engineering_toolkit as units
 import hamon_drawing
@@ -90,6 +91,33 @@ class DimensionAssociationContracts(unittest.TestCase):
         out=hamon_callout.associate_page(p)
         self.assertEqual(out["matches"][0]["from"]["vector"],"v1")
         self.assertNotIn("v13",[m["from"]["vector"] for m in out["matches"]])
+
+
+    def test_dense_sheet_short_strokes_use_complete_local_index(self):
+        original=page_fixture()
+        dense=copy.deepcopy(original)
+        # Add thousands of drawn but unrelated little strokes in one room,
+        # not candidates for long dimension baselines, without changing the
+        # frozen four true annotations. The index must not scan all 1000 for
+        # each reference-line endpoint.
+        n=len(dense["reported_vectors"])
+        for i in range(1000):
+            x=500.0+(i%20)*4
+            y=595.0+(i//20)*3.6
+            dense["reported_vectors"].append({
+                "id":f"v{n+i+1}","type":"line",
+                "svg_points":[[x,y],[x+3,y]],
+                "svg_segment_vertex_pairs":[[0,1]]})
+        dense["vector_primitives"]=len(dense["reported_vectors"])
+        witness=hamon_callout._point_segment_distance
+        with patch.object(hamon_callout,"_point_segment_distance",
+                          wraps=witness) as distance_calls:
+            found=hamon_callout.associate_page(dense)
+        self.assertEqual(
+            {(m["source_label"],m["from"]["vector"]) for m in found["matches"]},
+            {("1000mm","v1"),("1.0m","v4"),
+             ("929.516mm","v7"),("758.947mm","v10")})
+        self.assertLess(distance_calls.call_count,200)
 
     def test_missing_one_tick_fails_closed_not_best_effort(self):
         p=page_fixture()
