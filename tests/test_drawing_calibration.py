@@ -141,6 +141,25 @@ class AnchoredMeasureContracts(unittest.TestCase):
         self.assertEqual(got["reported_vectors"][1]["svg_points"],
                          [[12.,34.],[12.,134.]])
 
+    def test_selected_vectors_work_beyond_normal_report_truncation(self):
+        # The source PDF may contain thousands of vectors, but only chosen
+        # source IDs should be returned to the task model.
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg" '
+               'viewBox="0 0 100 100">' +
+               ''.join('<line x1="0" y1="0" x2="10" y2="0"/>'
+                       for _ in range(700)) + '</svg>').encode()
+        truncated = hamon_drawing._svg_inventory(svg,limit_paths=3)
+        self.assertTrue(truncated["vector_limit_hit"])
+        selected = hamon_drawing._svg_inventory(
+            svg, limit_paths=3, selected_vector_ids={"v350","v700"})
+        self.assertFalse(selected["vector_limit_hit"])
+        self.assertEqual([v["id"] for v in selected["reported_vectors"]],
+                         ["v350","v700"])
+        self.assertEqual(selected["vector_primitives"],700)
+        missed = hamon_drawing._svg_inventory(
+            svg, limit_paths=3, selected_vector_ids={"v701"})
+        self.assertTrue(missed["vector_limit_hit"])
+
     def test_source_anchor_uses_real_pdf_geometry_when_poppler_available(self):
         # Minimal native vector PDF: a real cold Poppler path, not hand-built
         # inventory used as a substitute for source evidence.
