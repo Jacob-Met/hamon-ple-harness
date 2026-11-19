@@ -95,3 +95,68 @@ the four-direction held-out fit recovers G and the correct oblique length.
 This is a **2-D distance metric**, not proof that the drawing was affinely
 distorted or that any annotation belongs to a particular line. Drawing
 semantics, projection, actual site conditions and code approval remain external.
+
+## Automatic source-geometry dimension association
+
+The older pdf-measure command expects manually linked printed callouts and
+source endpoints. Existence of a label somewhere on a sheet does NOT prove
+that the label belongs to the selected geometry.
+
+The new pdf-dimension-links builds a bounded source-stroke/word-box association
+graph from Poppler with no OCR, invented coordinates or page-DPI scale:
+
+    python3 /tmp/hamon-engineering-toolkit.py pdf-dimension-links plan.pdf --page 2
+
+A possible dimension line must have two independent short perpendicular
+source strokes crossing its opposite original SVG endpoints and a near-axis
+PDF word box containing a numeric value with explicit physical units. The
+matching rejects incomplete inventory, mismatched PDF/SVG coordinate
+frames, unsupported curved geometry, missing endpoint witnesses, candidate
+ambiguity and different source labels claiming the same line. Original
+svg_segment_vertex_pairs do not bridge disjoint M-subpaths in compound SVG
+paths. A matching record includes original word IDs/bounds, exact SVG
+vector and endpoint indices, tick witness geometry, and association margins;
+claim_of_engineering_approval is always false.
+
+To measure an unlabelled target with reference callouts automatically
+recovered from the same source sheet:
+
+    python3 /tmp/hamon-engineering-toolkit.py pdf-auto-measure plan.pdf targets.json
+
+For example, targets.json (replace illustrative IDs with actual source vectors):
+
+    {
+      "schema": "hamon.pdf.auto-measure.v1",
+      "page": 2,
+      "calibration_model": "affine_spd",
+      "max_relative_residual": 0.01,
+      "targets": [
+        {"name": "duct-offset",
+         "from": {"vector": "v65", "vertex": 0},
+         "to": {"vector": "v65", "vertex": 1},
+         "unit": "mm"}
+      ]
+    }
+
+The affine_spd setting requires at least four independently witnessed
+directional dimensions and held-out leave-one-anchor-out metric consistency.
+A changed or contradictory dimension label changes the physical estimate
+or fails the fit: it cannot silently preserve stale measurements. A
+similarity model may use two nonparallel references only when isotropy
+is justified; it cannot detect arbitrary PDF shear.
+
+This is NOT a universal drawing parser. Continuous dimension chains,
+rotated text, multi-panel sheets, jogged leaders, large arrowheads,
+unsupported curves, missing source ticks, raster/OCR plans, duplicate labels,
+and elevation projection may be unknown or rejected. Geometric adjacency
+alone cannot prove architectural author intent. Inspect flagged rejections
+and use a professional drawing review when safety matters. Returned
+physical lengths are conditional source-backed estimates, not proof of
+site dimensions, physical conditions or engineering-code approval.
+
+Source is hamon_callout.py, hamon_drawing.py and hamon_scale.py; the
+test_drawing_callout_graph.py cold suite builds a genuine PDF and runs
+both CLI commands through native Poppler, plus adversarial swapped
+labels, missing ticks, decoys, ambiguous lines, coordinate-frame mismatches
+and compound SVG disjoint-subpath tests. These local checks are not a
+hosted Physical Engineering's Last Exam score.
