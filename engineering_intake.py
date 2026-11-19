@@ -231,6 +231,7 @@ async def provision_engineering_cli(session: Any) -> str:
     drawing_bytes = pathlib.Path(__file__).with_name("hamon_drawing.py").read_bytes()
     scale_bytes = pathlib.Path(__file__).with_name("hamon_scale.py").read_bytes()
     affine_bytes = pathlib.Path(__file__).with_name("hamon_affine_metric.py").read_bytes()
+    callout_bytes = pathlib.Path(__file__).with_name("hamon_callout.py").read_bytes()
     source = pathlib.Path(__file__).with_name("engineering_toolkit.py").read_bytes()
     target = "/tmp/hamon-engineering-toolkit.py"
     try:
@@ -250,6 +251,10 @@ async def provision_engineering_cli(session: Any) -> str:
             session.write_file("/tmp/hamon_affine_metric.py", affine_bytes), timeout=12)
         if affine_size != len(affine_bytes):
             return ""
+        callout_size = await asyncio.wait_for(
+            session.write_file("/tmp/hamon_callout.py", callout_bytes), timeout=12)
+        if callout_size != len(callout_bytes):
+            return ""
         reported_size = await asyncio.wait_for(
             session.write_file(target, source), timeout=12)
         if reported_size != len(source):
@@ -264,6 +269,16 @@ async def provision_engineering_cli(session: Any) -> str:
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-words DRAWING.pdf --page 1"
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-vector DRAWING.pdf --from-page 1 --to-page 3"
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-measure DRAWING.pdf anchors.json"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-dimension-links DRAWING.pdf --page 1"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-auto-measure DRAWING.pdf auto_targets.json"
+        "\nPDF AUTO-MEASURE JSON: {\"schema\":\"hamon.pdf.auto-measure.v1\",\"page\":1,"
+        "\"calibration_model\":\"affine_spd\",\"targets\":[{\"name\":\"offset\","
+        "\"from\":{\"vector\":\"v3\",\"vertex\":0},\"to\":{\"vector\":\"v3\",\"vertex\":1},\"unit\":\"mm\"}]}"
+        "\nPDF DIMENSION LINKS: exact word boxes plus 2 short crossing source"
+        " SVG strokes at BOTH endpoints; rejects duplicates, missing witnesses"
+        " and ambiguous candidate lines. PDF AUTO-MEASURE uses these source"
+        " linked anchors under 4+ direction SPD leave-one-out consistency."
+        " No OCR, invented coordinates, physical certification or code approval."
         "\nPDF MEASURE JSON: {\"schema\":\"hamon.pdf.measure.v1\",\"page\":1,"
         "\"references\":[{\"from\":{\"vector\":\"v1\",\"vertex\":0},"
         "\"to\":{\"vector\":\"v1\",\"vertex\":1},\"length\":\"1000*mm\","
