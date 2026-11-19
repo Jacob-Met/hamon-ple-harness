@@ -1,6 +1,8 @@
-# Submission template: Pi on Claude Opus 5.5
+# HAMON physical-engineering agent harness (Google PLE)
 
-A working entry for the Physical-Engineering’s Last Exam harness competition: the [Pi](https://github.com/badlogic/pi-mono) coding agent calling `google-cloud/claude-opus-5-5`.
+An Apache-2.0 harness derived from Google's Pi / Claude Opus 5.5 sample for the Physical-Engineering's Last Exam. It combines the organizer protocol with task-native IFC4 surface geometry/clearance checks, unit-safe structural and electrical calculation packs, read-only file inventory, vector PDF extraction and [source-anchored dimensional measurement](docs/pdf_measurement.md).
+
+**Evaluation status:** Existing `artifacts/` are inherited organizer sample-run material, not a scored HAMON dev run for current source. Public 29-task dev data access and a sanctioned zero-spend model evaluation route remain unverified. Static CI or historical template rewards do **not** establish an eligible competition score or leaderboard placement.
 
 ## Use it
 
@@ -13,7 +15,11 @@ A working entry for the Physical-Engineering’s Last Exam harness competition: 
    ```
 4. Commit everything, `artifacts/` included, push, and submit the commit on the competition site.
 
-`artifacts/` already holds a dev-set run of Pi on Claude Opus 5.5 over all 29 dev tasks, so the template can be submitted unchanged. Once you change anything, `name` included, step 3 replaces it with your harness's run.
+`artifacts/` currently holds an inherited template run. **Do not present it as a fresh score for this changed harness.** Regenerate it only from the exact submitted source using authorized dev tasks and an approved model endpoint. The source provenance checker explicitly flags the inherited manifest as stale.
+
+## Engineering task commands
+
+Inside the isolated task container, Pi can run `python3 /tmp/hamon-engineering-toolkit.py` with `pdf-vector`, `pdf-measure`, `ifc-narrowphase`, `calc-pack`, `quantity`, `check` and `xlsx-audit`. The tools produce qualified evidence rather than assuming source labels, collision envelopes or engineering code compliance. See the [anchored PDF guide](docs/pdf_measurement.md) for an example that ties SVG vertices to independent dimension callouts.
 
 ## Files
 
