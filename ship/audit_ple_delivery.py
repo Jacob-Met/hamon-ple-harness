@@ -37,7 +37,7 @@ def task_workdir(instruction: str, exported: list[str]) -> str:
     # NEVER be used by the live harness: only session.workdir is authoritative.
     relative = re.findall(
         r"(?<![A-Za-z0-9_.])([A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)+"
-        r"\\.(?:zip|docx|xlsx|xlsm|pdf|ifc|dwg|dxf|csv|json|md|txt|png))",
+        r"\.(?:zip|docx|xlsx|xlsm|pdf|ifc|dwg|dxf|csv|json|md|txt|png))",
         instruction, flags=re.I,
     )
     for path in exported:
