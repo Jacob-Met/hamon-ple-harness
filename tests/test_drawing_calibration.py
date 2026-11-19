@@ -205,6 +205,15 @@ class AnchoredMeasureContracts(unittest.TestCase):
             self.assertEqual(out["pdf_sha256"], __import__("hashlib").sha256(pdf).hexdigest())
             self.assertEqual(out["page"],1)
             self.assertAlmostEqual(out["targets"][0]["estimate"],1000,delta=1)
+            import subprocess
+            import sys
+            cli = subprocess.run([sys.executable, "engineering_toolkit.py",
+                                  "pdf-measure", str(path), str(spec_path)],
+                                 capture_output=True, text=True, check=False)
+            self.assertEqual(cli.returncode, 0, cli.stderr + cli.stdout)
+            response = json.loads(cli.stdout)
+            self.assertTrue(response["ok"])
+            self.assertAlmostEqual(response["targets"][0]["estimate"],1000,delta=1)
 
 
 if __name__ == "__main__":
