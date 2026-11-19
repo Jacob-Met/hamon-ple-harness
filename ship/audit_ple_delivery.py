@@ -100,6 +100,13 @@ def run(root: Path) -> dict:
         "public_tasks": len(manifest["tasks"]),
         "evaluated_traces": len(rows),
         "unavailable": unavailable, "states": states, "rows": rows,
+        "review_cases": [
+            {"task": row["task"], "state": row["state"],
+             "targets": [t["path"] for t in row["targets"]],
+             "unmatched": row["unmatched"],
+             "exported_files": row["exported_files"]}
+            for row in rows if row["state"] != "all_detected_targets_exported"
+        ],
         "caveats": [
             "A path match does not establish semantic or engineering correctness.",
             "Workdirs without an explicit instruction are inferred only for this replay.",
