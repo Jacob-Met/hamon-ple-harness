@@ -85,8 +85,8 @@ def surface_contact(mesh_a,mesh_b,budget=250000,epsilon=1e-9):
             return False
         if left[3] is not None: return visit(left,right[1]) or visit(left,right[2])
         if right[3] is not None: return visit(left[1],right) or visit(left[2],right)
-        return any((visit(left[1],right[1]),visit(left[1],right[2]),
-                    visit(left[2],right[1]),visit(left[2],right[2])))
+        return (visit(left[1],right[1]) or visit(left[1],right[2]) or
+                visit(left[2],right[1]) or visit(left[2],right[2]))
     if not overlaps(mesh_a.bbox,mesh_b.bbox,epsilon):
         return False,0
     hit=visit(mesh_a.bvh,mesh_b.bvh)
@@ -190,8 +190,8 @@ def inside_closed(point,mesh):
             if t!=0:crossings+=1
         if not ambiguous:
             votes.append(bool(crossings%2))
-        if len(votes)>=2 and votes[-1]==votes[-2]:
-            return votes[-1]
+    if len(votes)>=3 and len(set(votes))==1:
+        return votes[0]
     return None
 
 
@@ -264,6 +264,8 @@ def ifc_narrowphase(filename,class_a,class_b,limit=400,
             key=tuple(sorted((aid,bid)))
             if key in examined:continue
             examined.add(key);comparisons+=1
+            if comparisons > 100000:
+                raise ValueError("100000 IFC element-pair budget exhausted; narrow class selectors")
             if not overlaps(am.bbox,bm.bbox):
                 summary["aabb_disjoint"]+=1
                 continue

@@ -227,9 +227,14 @@ async def intake_for_prompt(session: Any, *, deadline_seconds: int = 19) -> str:
 # not a copy of any task data. A failed install never blocks the starter agent.
 async def provision_engineering_cli(session: Any) -> str:
     import pathlib
+    import_bytes = pathlib.Path(__file__).with_name("hamon_geometry.py").read_bytes()
     source = pathlib.Path(__file__).with_name("engineering_toolkit.py").read_bytes()
     target = "/tmp/hamon-engineering-toolkit.py"
     try:
+        module_size = await asyncio.wait_for(
+            session.write_file("/tmp/hamon_geometry.py", import_bytes), timeout=12)
+        if module_size != len(import_bytes):
+            return ""
         reported_size = await asyncio.wait_for(
             session.write_file(target, source), timeout=12)
         if reported_size != len(source):
@@ -243,6 +248,12 @@ async def provision_engineering_cli(session: Any) -> str:
         "\n  python3 /tmp/hamon-engineering-toolkit.py xlsx-audit FILE.xlsx"
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-words DRAWING.pdf --page 1"
         "\n  python3 /tmp/hamon-engineering-toolkit.py ifc-broadphase MODEL.ifc --a IfcDuctSegment --b IfcBeam"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py ifc-narrowphase MODEL.ifc --a IfcDuctSegment --b IfcBeam"
+        "\nIFC NARROW PHASE: IfcOpenShell world-space triangulation with AABB BVH,"
+        " triangle surface-contact SAT, and closed-shell containment checks."
+        " Distinguishes envelope-only overlap from supported mesh evidence."
+        " Open, degenerate, or unverified geometry remains inconclusive;"
+        " no physical interference, code clearance or BIM unit signoff."
         "\n  python3 /tmp/hamon-engineering-toolkit.py calc-pack design_checks.json"
         "\nCALC-PACK: supply quantities with dimensional expressions, sources,"
         " and named limit checks in a JSON dependency graph. It recomputes"
