@@ -36,7 +36,7 @@ MAX_TARGETS = 24
 
 def _safe_path(raw: str, cwd: str) -> str | None:
     """Normalize a literal task path, rejecting traversal and host paths."""
-    path = raw.strip(" \t\r\n\`'\"*.,;:")
+    path = raw.strip(" \t\r\n`'\"*.,;:")
     if not path or "\x00" in path or "\\" in path:
         return None
     if any(part in ("..", "~") for part in path.split("/")):
