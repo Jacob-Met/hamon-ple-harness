@@ -59,6 +59,9 @@ def extract_targets(instruction: str, workdir: str) -> list[dict[str, str]]:
     found: dict[str, dict[str, str]] = {}
     for match in FILE.finditer(instruction):
         context = instruction[max(0, match.start() - 180):match.start()]
+        # Do not silently strip directory traversal into a valid-looking path.
+        if context.endswith("../"):
+            continue
         # A path is an output only when a nearby affirmative write clause says so.
         # Keep the last statement to prevent an earlier "write" marking inputs.
         clause = re.split(r"(?<=[.;])\s+|\n{2,}", context)[-1]
@@ -121,7 +124,6 @@ def scan_file(p):
             if st.st_size > 1_048_576:
                 f.seek(max(0, st.st_size-1_048_576))
                 h.update(f.read(1_048_576))
-        h.update(str(st.st_mtime_ns).encode())
         ext = p.suffix.lower()
         if ext in (".zip",".docx",".xlsx",".xlsm"):
             try:
@@ -206,7 +208,9 @@ async def snapshot(session: Any, targets: list[dict[str, str]]) -> dict | None:
         if not isinstance(data, dict):
             return None
         return data
-    except (OSError, KeyError, ValueError, RuntimeError, asyncio.TimeoutError):
+    except Exception:
+        # Any task-protocol observation failure is unknown, never model failure.
+        # asyncio.CancelledError remains uncaught so harness cancellation propagates.
         return None
 
 
