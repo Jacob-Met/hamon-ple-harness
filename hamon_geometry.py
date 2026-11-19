@@ -218,8 +218,152 @@ def mesh_relation(mesh_a,mesh_b,triangle_budget=250000):
     return {"relation":"no_surface_contact_found","triangle_tests":tested}
 
 
+
+# Closest-point and branch-and-bound surface gap in metres. The separation
+# test uses all triangle vertex-face and edge-edge feature pairs, with an
+# explicit SAT zero-distance branch for interior surface crossings.
+# See Ericson, Real-Time Collision Detection (2005), sections 5.1.5/5.1.9/5.1.11.
+def _sum(a,b): return tuple(x+y for x,y in zip(a,b))
+def _scaled(a,s): return tuple(x*s for x in a)
+def _d2(a,b): return dot(minus(a,b),minus(a,b))
+def _clamp01(x): return max(0.0,min(1.0,x))
+
+
+def _closest_on_triangle(p,tri):
+    a,b,c=tri
+    ab,ac=minus(b,a),minus(c,a)
+    ap=minus(p,a)
+    d1,d2=dot(ab,ap),dot(ac,ap)
+    if d1<=0 and d2<=0:return a
+    bp=minus(p,b)
+    d3,d4=dot(ab,bp),dot(ac,bp)
+    if d3>=0 and d4<=d3:return b
+    vc=d1*d4-d3*d2
+    if vc<=0 and d1>=0 and d3<=0:
+        return _sum(a,_scaled(ab,d1/(d1-d3)))
+    cp=minus(p,c)
+    d5,d6=dot(ab,cp),dot(ac,cp)
+    if d6>=0 and d5<=d6:return c
+    vb=d5*d2-d1*d6
+    if vb<=0 and d2>=0 and d6<=0:
+        return _sum(a,_scaled(ac,d2/(d2-d6)))
+    va=d3*d6-d5*d4
+    if va<=0 and d4-d3>=0 and d5-d6>=0:
+        bc=minus(c,b)
+        return _sum(b,_scaled(bc,(d4-d3)/((d4-d3)+(d5-d6))))
+    denom=va+vb+vc
+    if denom<=0:
+        raise ValueError("numerically unresolved closest triangle feature")
+    v,w=vb/denom,vc/denom
+    return _sum(a,_sum(_scaled(ab,v),_scaled(ac,w)))
+
+
+def _closest_segments(p1,q1,p2,q2):
+    u,v=minus(q1,p1),minus(q2,p2)
+    w=minus(p1,p2)
+    a,e=dot(u,u),dot(v,v)
+    if a<=0 or e<=0:
+        raise ValueError("zero-length mesh segment")
+    b,c,f=dot(u,v),dot(u,w),dot(v,w)
+    denom=a*e-b*b
+    if denom>1e-12*a*e:
+        s=_clamp01((b*f-c*e)/denom)
+    else:s=0.0
+    t=(b*s+f)/e
+    if t<0:
+        t=0.0;s=_clamp01(-c/a)
+    elif t>1:
+        t=1.0;s=_clamp01((b-c)/a)
+    return _sum(p1,_scaled(u,s)),_sum(p2,_scaled(v,t))
+
+
+def _tri_pair_gap(a,b):
+    if tri_overlap(a,b):
+        # Real surfaces intersect/touch; no unique closest-point witness.
+        return 0.0,None,None
+    best=(float("inf"),None,None)
+    for p in a:
+        q=_closest_on_triangle(p,b)
+        cand=(_d2(p,q),p,q)
+        if cand[0]<best[0]:best=cand
+    for q in b:
+        p=_closest_on_triangle(q,a)
+        cand=(_d2(p,q),p,q)
+        if cand[0]<best[0]:best=cand
+    for i in range(3):
+        for j in range(3):
+            p,q=_closest_segments(a[i],a[(i+1)%3],
+                                  b[j],b[(j+1)%3])
+            cand=(_d2(p,q),p,q)
+            if cand[0]<best[0]:best=cand
+    return best
+
+
+def _box_gap2(a,b):
+    gaps=(max(a[0][i]-b[1][i],b[0][i]-a[1][i],0.0)
+          for i in range(3))
+    return sum(g*g for g in gaps)
+
+
+def surface_distance(mesh_a,mesh_b,triangle_budget=250000):
+    """BVH best-first exact triangulated-surface distance, no voxel sampling.
+
+    On a budget exceed, never substitute AABB bound as the actual surface gap.
+    Returns exact source-coordinate closest points for separated triangles.
+    """
+    import heapq
+    if triangle_budget<1:
+        raise ValueError("triangle-distance budget must be positive")
+    best2=float("inf")
+    winner=(None,None)
+    comparisons=0
+    heap=[]
+    seq=0
+    def push(a,b):
+        nonlocal seq
+        lo=_box_gap2(a[0],b[0])
+        if lo<best2:
+            seq+=1
+            heapq.heappush(heap,(lo,seq,a,b))
+    push(mesh_a.bvh,mesh_b.bvh)
+    while heap:
+        lower,_,na,nb=heapq.heappop(heap)
+        if lower>=best2:break
+        if na[3] is not None and nb[3] is not None:
+            for i in na[3]:
+                for j in nb[3]:
+                    if _box_gap2(mesh_a.triangle_boxes[i],
+                                 mesh_b.triangle_boxes[j])>=best2:
+                        continue
+                    comparisons+=1
+                    if comparisons>triangle_budget:
+                        raise ValueError("triangle-distance budget exhausted")
+                    d2,p,q=_tri_pair_gap(mesh_a.triangles[i],mesh_b.triangles[j])
+                    if d2<best2:best2=d2;winner=(p,q)
+            continue
+        if na[3] is not None:
+            push(na,nb[1]);push(na,nb[2])
+        elif nb[3] is not None:
+            push(na[1],nb);push(na[2],nb)
+        else:
+            sa=sum((na[0][1][i]-na[0][0][i])**2 for i in range(3))
+            sb=sum((nb[0][1][i]-nb[0][0][i])**2 for i in range(3))
+            if sa>=sb:
+                push(na[1],nb);push(na[2],nb)
+            else:
+                push(na,nb[1]);push(na,nb[2])
+    if not math.isfinite(best2):
+        raise ValueError("no closest triangle pair qualified")
+    return {
+        "surface_distance_m":math.sqrt(max(0.0,best2)),
+        "closest_a_world_m":list(winner[0]) if winner[0] is not None else None,
+        "closest_b_world_m":list(winner[1]) if winner[1] is not None else None,
+        "distance_triangle_tests":comparisons,
+    }
+
+
 def ifc_narrowphase(filename,class_a,class_b,limit=400,
-                    triangle_budget=250000):
+                    triangle_budget=250000,min_clearance_mm=None):
     """Source-qualified IFC tessellation screen; NO automatic clash approval."""
     try:
         import ifcopenshell
@@ -228,6 +372,12 @@ def ifc_narrowphase(filename,class_a,class_b,limit=400,
         raise RuntimeError("ifcopenshell absent in task container; optional IFC kernel required") from exc
     if not 1<=limit<=2000 or not 100<=triangle_budget<=5000000:
         raise ValueError("element limit 1..2000; triangle budget 100..5000000")
+    if min_clearance_mm is not None and (
+        isinstance(min_clearance_mm,bool) or not isinstance(min_clearance_mm,(int,float))
+        or not math.isfinite(min_clearance_mm) or min_clearance_mm<0
+        or min_clearance_mm>1000000):
+        raise ValueError("minimum clearance must be finite millimetres within [0,1000000]")
+    clearance_m=None if min_clearance_mm is None else min_clearance_mm/1000.0
     def names(expr):
         values=[s.strip() for s in expr.split(",")]
         if not values or any(not re.fullmatch(r"Ifc[A-Za-z0-9]{2,50}",v) for v in values):
@@ -257,7 +407,8 @@ def ifc_narrowphase(filename,class_a,class_b,limit=400,
         return result
     left,right=elements(names(class_a)),elements(names(class_b))
     summary=Counter(); witnesses=[]; examined=set()
-    comparisons=0; ambiguous=0
+    comparisons=0; ambiguous=0; distance_queries=0
+    clearance_failures=0; clearance_unknown=0
     for aid,ac,am in left:
         for bid,bc,bm in right:
             if aid==bid:continue
@@ -266,20 +417,66 @@ def ifc_narrowphase(filename,class_a,class_b,limit=400,
             examined.add(key);comparisons+=1
             if comparisons > 100000:
                 raise ValueError("100000 IFC element-pair budget exhausted; narrow class selectors")
-            if not overlaps(am.bbox,bm.bbox):
-                summary["aabb_disjoint"]+=1
-                continue
-            try:
-                decision=mesh_relation(am,bm,triangle_budget)
-            except ValueError as exc:
-                decision={"relation":"unresolved_budget_or_geometry",
-                          "reason":str(exc)[:140]}
+            aabb_overlap=overlaps(am.bbox,bm.bbox)
+            if not aabb_overlap:
+                decision={"relation":"aabb_disjoint","triangle_tests":0}
+            else:
+                try:
+                    decision=mesh_relation(am,bm,triangle_budget)
+                except ValueError as exc:
+                    decision={"relation":"unresolved_budget_or_geometry",
+                              "reason":str(exc)[:140]}
             relation=decision["relation"]
             summary[relation]+=1
             if relation.startswith("unresolved"): ambiguous+=1
-            if len(witnesses)<100:
-                witnesses.append({"a":aid,"a_class":ac,"b":bid,"b_class":bc,
-                                  **decision})
+            required=clearance_m
+            # Without an explicit tolerance, quantify all envelope overlaps
+            # where the previous broad phase had only a false-positive box.
+            need_distance=aabb_overlap
+            if required is not None and not aabb_overlap:
+                # AABBs farther than the requested threshold are safe lower
+                # bounds; near but disjoint AABBs MUST get triangle distances.
+                need_distance=(_box_gap2(am.bbox,bm.bbox) <= required**2)
+            if need_distance and relation!="surface_contact":
+                try:
+                    metric=surface_distance(am,bm,triangle_budget)
+                    decision.update(metric)
+                    decision["surface_distance_mm"]=metric["surface_distance_m"]*1000
+                    distance_queries+=1
+                except ValueError as exc:
+                    decision["distance_error"]=str(exc)[:140]
+            elif relation=="surface_contact":
+                decision["surface_distance_mm"]=0.0
+            if required is not None:
+                if relation in ("surface_contact","solid_containment"):
+                    decision["clearance_status"]="contact_or_solid_overlap"
+                    clearance_failures+=1
+                elif relation.startswith("unresolved") or "distance_error" in decision:
+                    decision["clearance_status"]="unresolved"
+                    clearance_unknown+=1
+                elif not aabb_overlap and not need_distance:
+                    decision["clearance_status"]="meets_from_aabb_lower_bound"
+                elif not am.closed_oriented or not bm.closed_oriented:
+                    # Distance between two incomplete surfaces does not prove
+                    # minimum volume clearance; retain uncertainty.
+                    decision["clearance_status"]="unresolved_open_surface"
+                    clearance_unknown+=1
+                elif decision.get("surface_distance_mm") is None:
+                    decision["clearance_status"]="unresolved_missing_distance"
+                    clearance_unknown+=1
+                elif decision["surface_distance_mm"] < min_clearance_mm:
+                    decision["clearance_status"]="below_specified_gap"
+                    clearance_failures+=1
+                else:
+                    decision["clearance_status"]="meets_triangulated_gap"
+            if len(witnesses)<100 or (required is not None and
+                                     decision.get("clearance_status") not in
+                                     ("meets_from_aabb_lower_bound","meets_triangulated_gap")):
+                # Preserve failing witnesses even after 100 safe pairs; bound
+                # reporting to 1000 to avoid the evaluator flooding the context.
+                if len(witnesses)<1000:
+                    witnesses.append({"a":aid,"a_class":ac,"b":bid,"b_class":bc,
+                                      **decision})
     return {
         "kind":"ifc-triangulated-contact-screen",
         "element_a_count":len(left),"element_b_count":len(right),
@@ -289,8 +486,12 @@ def ifc_narrowphase(filename,class_a,class_b,limit=400,
         "by_relation":dict(sorted(summary.items())),
         "surface_contact_pairs":summary["surface_contact"],
         "solid_containment_pairs":summary["solid_containment"],
-        "inconclusive_pairs":ambiguous+len(skipped),
-        "all_pairs_qualified":ambiguous==0 and not skipped,
+        "inconclusive_pairs":ambiguous+len(skipped)+clearance_unknown,
+        "distance_pairs_evaluated":distance_queries,
+        "min_clearance_required_mm":min_clearance_mm,
+        "clearance_failures":clearance_failures,
+        "clearance_unresolved_pairs":clearance_unknown,
+        "all_pairs_qualified":ambiguous==0 and clearance_unknown==0 and not skipped,
         "witnesses":witnesses,
-        "warning":"Surface SAT detects contact, not physical penetration or code clashes. IFC tessellation is approximate; all results require project-unit confirmation, tolerances, BRep validation, and design review. No clearance distance established.",
+        "warning":"All gaps are on emitted SI-metre triangle surfaces, not validated BRep solids. Surface contact/containment can represent physical overlap; verify design semantics, tolerance, openings, source units and governing code independently.",
     }

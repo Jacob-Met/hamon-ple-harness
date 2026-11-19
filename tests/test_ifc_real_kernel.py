@@ -4,6 +4,7 @@ Build project solids from source-controlled coordinates; write IFC4, reopen thro
 the actual optional geometry kernel. No competition files or mock geometry.
 """
 from pathlib import Path
+import math
 import tempfile
 import unittest
 
@@ -44,15 +45,20 @@ class RealIFCMesh(unittest.TestCase):
         duct=create("IfcDuctSegment",(0.0,0.0,0.0),2.0)
         disjoint=create("IfcBeam",(1.6,1.6,1.6),2.0)
         crossing=create("IfcBeam",(0.3,0.3,0.3),2.0)
+        near=create("IfcBeam",(2.1,0.0,0.0),2.0)
         with tempfile.TemporaryDirectory() as tmp:
             file=Path(tmp)/"fixture.ifc"
             model.write(str(file))
             reopened=ifcopenshell.open(str(file))
-            self.assertEqual(len(reopened.by_type("IfcBeam")),2)
+            self.assertEqual(len(reopened.by_type("IfcBeam")),3)
             screen=h.ifc_narrowphase(str(file),"IfcDuctSegment","IfcBeam",limit=10)
+            threshold=h.ifc_narrowphase(str(file),"IfcDuctSegment","IfcBeam",
+                                        limit=10,min_clearance_mm=150)
+            stringent=h.ifc_narrowphase(str(file),"IfcDuctSegment","IfcBeam",
+                                        limit=10,min_clearance_mm=2000)
         self.assertEqual(screen["element_a_count"],1,screen)
-        self.assertEqual(screen["element_b_count"],2,screen)
-        self.assertEqual(screen["compared_pairs"],2,screen)
+        self.assertEqual(screen["element_b_count"],3,screen)
+        self.assertEqual(screen["compared_pairs"],3,screen)
         self.assertEqual(screen["broadphase_overlaps"],2,screen)
         self.assertEqual(screen["surface_contact_pairs"],1,screen)
         self.assertEqual(screen["by_relation"].get("no_surface_contact_found"),1,screen)
@@ -61,6 +67,18 @@ class RealIFCMesh(unittest.TestCase):
         pair_rel={entry["b"]:entry["relation"] for entry in screen["witnesses"]}
         self.assertEqual(pair_rel[disjoint.GlobalId],"no_surface_contact_found")
         self.assertEqual(pair_rel[crossing.GlobalId],"surface_contact")
+        self.assertEqual(pair_rel[near.GlobalId],"aabb_disjoint")
+        self.assertAlmostEqual(
+            next(x for x in screen["witnesses"] if x["b"]==disjoint.GlobalId)
+            ["surface_distance_mm"],2800/math.sqrt(3),places=5)
+        classified={x["b"]:x for x in threshold["witnesses"]}
+        self.assertEqual(classified[near.GlobalId]["clearance_status"],"below_specified_gap")
+        self.assertAlmostEqual(classified[near.GlobalId]["surface_distance_mm"],100,places=5)
+        self.assertEqual(classified[disjoint.GlobalId]["clearance_status"],"meets_triangulated_gap")
+        self.assertEqual(classified[crossing.GlobalId]["clearance_status"],"contact_or_solid_overlap")
+        self.assertEqual(threshold["clearance_failures"],2)
+        self.assertTrue(threshold["all_pairs_qualified"],threshold)
+        self.assertEqual(stringent["clearance_failures"],3)
 
 
 if __name__=="__main__":unittest.main()

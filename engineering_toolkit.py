@@ -425,6 +425,7 @@ def run(argv=None):
     n.add_argument("--b",default="IfcBeam,IfcColumn")
     n.add_argument("--limit",type=int,default=400)
     n.add_argument("--triangle-budget",type=int,default=250000)
+    n.add_argument("--min-clearance-mm",type=float,default=None)
     args=p.parse_args(argv)
     try:
         if args.cmd=="calc-pack": out=calc_pack(args.file)
@@ -436,7 +437,7 @@ def run(argv=None):
         elif args.cmd=="ifc-narrowphase":
             import hamon_geometry
             out=hamon_geometry.ifc_narrowphase(
-                args.file,args.a,args.b,args.limit,args.triangle_budget)
+                args.file,args.a,args.b,args.limit,args.triangle_budget,args.min_clearance_mm)
         else: raise ValueError("unsupported command")
         print(json.dumps({"ok":True,**out},ensure_ascii=True,default=str))
         return 3 if args.cmd=="calc-pack" and not out["all_checks_pass"] else 0
