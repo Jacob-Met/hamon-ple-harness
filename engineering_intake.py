@@ -230,6 +230,7 @@ async def provision_engineering_cli(session: Any) -> str:
     import_bytes = pathlib.Path(__file__).with_name("hamon_geometry.py").read_bytes()
     drawing_bytes = pathlib.Path(__file__).with_name("hamon_drawing.py").read_bytes()
     scale_bytes = pathlib.Path(__file__).with_name("hamon_scale.py").read_bytes()
+    affine_bytes = pathlib.Path(__file__).with_name("hamon_affine_metric.py").read_bytes()
     source = pathlib.Path(__file__).with_name("engineering_toolkit.py").read_bytes()
     target = "/tmp/hamon-engineering-toolkit.py"
     try:
@@ -244,6 +245,10 @@ async def provision_engineering_cli(session: Any) -> str:
         scale_size = await asyncio.wait_for(
             session.write_file("/tmp/hamon_scale.py", scale_bytes), timeout=12)
         if scale_size != len(scale_bytes):
+            return ""
+        affine_size = await asyncio.wait_for(
+            session.write_file("/tmp/hamon_affine_metric.py", affine_bytes), timeout=12)
+        if affine_size != len(affine_bytes):
             return ""
         reported_size = await asyncio.wait_for(
             session.write_file(target, source), timeout=12)
@@ -267,6 +272,12 @@ async def provision_engineering_cli(session: Any) -> str:
         "\"source_label\":\"1.0m\"}],\"targets\":[{\"name\":\"offset\","
         "\"from\":{\"vector\":\"v3\",\"vertex\":0},"
         "\"to\":{\"vector\":\"v3\",\"vertex\":1},\"unit\":\"mm\"}]}"
+        "\nPDF MEASURE: default similarity assumes no shear. To qualify"
+        " sheared/anisotropic drawings instead set calibration_model:affine_spd"
+        " in anchors.json with 4+ distinct source-labeled orientations;"
+        " fitted SPD metric and leave-one-out residuals must agree under"
+        " max_relative_residual, else no result. Never infer affine parameters"
+        " from 2 orthogonal refs alone; two identical axis scales can hide shear."
         "\nPDF MEASURE: explicit 2+ independent nonparallel dimension callouts"
         " with text evidence and actual extracted SVG vector vertices;"
         " requires consistent length scale to 1% by default. Output remains"
