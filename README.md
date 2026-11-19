@@ -19,7 +19,7 @@ An Apache-2.0 harness derived from Google's Pi / Claude Opus 5.5 sample for the 
 
 ## Engineering task commands
 
-Inside the isolated task container, Pi can run `python3 /tmp/hamon-engineering-toolkit.py` with `pdf-vector`, `pdf-measure`, `ifc-narrowphase`, `calc-pack`, `quantity`, `check` and `xlsx-audit`. The tools produce qualified evidence rather than assuming source labels, collision envelopes or engineering code compliance. See the [anchored PDF guide](docs/pdf_measurement.md) for an example that ties SVG vertices to independent dimension callouts.
+Inside the isolated task container, Pi can run `python3 /tmp/hamon-engineering-toolkit.py` with `pdf-vector`, `pdf-dimension-links`, `pdf-auto-measure`, `pdf-measure`, `ifc-narrowphase`, `calc-pack`, `quantity`, `check` and `xlsx-audit`. The tools produce qualified evidence rather than assuming source labels, collision envelopes or engineering code compliance. See the [anchored PDF guide](docs/pdf_measurement.md) for the new source-verified dimension graph: it requires a real PDF word box and two separate crossing endpoint strokes before using an automatically associated reference, then validates four independent directions against the physical affine tensor. Missing/ambiguous evidence fails closed; neither visual proximity nor a passing metric is building-code approval.
 
 ## Files
 

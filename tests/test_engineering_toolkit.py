@@ -14,9 +14,9 @@ from engineering_intake import provision_engineering_cli
 
 
 class FakeSession:
-    def __init__(self): self.path = ""; self.payload = b""
+    def __init__(self): self.path = ""; self.payload = b""; self.files = {}
     async def write_file(self,path,payload):
-        self.path=path;self.payload=payload
+        self.path=path;self.payload=payload;self.files[path]=payload
         return len(payload)
 
 
@@ -75,6 +75,12 @@ class ToolkitContracts(unittest.TestCase):
         self.assertEqual(fake.payload,(Path(__file__).resolve().parents[1]/
                                         "engineering_toolkit.py").read_bytes())
         self.assertIn("in the task container",instructions)
+        self.assertIn("/tmp/hamon_callout.py",fake.files)
+        self.assertEqual(fake.files["/tmp/hamon_callout.py"],
+                         (Path(__file__).resolve().parents[1]/"hamon_callout.py").read_bytes())
+        self.assertIn("/tmp/hamon_drawing.py",fake.files)
+        self.assertIn("pdf-dimension-links",instructions)
+        self.assertIn("pdf-auto-measure",instructions)
 
 
 if __name__=="__main__":
