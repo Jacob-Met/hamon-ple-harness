@@ -43,6 +43,7 @@ from typing import Any
 
 import taskbridge
 import engineering_intake
+import delivery_guard
 
 HERE = pathlib.Path(__file__).resolve().parent
 # npm ci, from package-lock.json
@@ -265,6 +266,17 @@ async def solve(session: taskbridge.Session) -> str:
       # This is ephemeral task data; never store or log its contents.
       engineering_inventory = await engineering_intake.intake_for_prompt(session)
       engineering_cli_note = await engineering_intake.provision_engineering_cli(session)
+      delivery_targets = delivery_guard.extract_targets(
+          session.instruction, session.workdir
+      )
+      before_delivery = await delivery_guard.snapshot(session, delivery_targets)
+      delivery_note = (
+          "\n\nOUTPUT DELIVERY CONTRACT (literal destinations from the instruction):\n"
+          + "\n".join("  " + item["path"] for item in delivery_targets)
+          + "\nWrite a complete initial deliverable early, then verify its actual"
+            " file integrity and required format. Input examples are NOT outputs."
+          if delivery_targets else ""
+      )
       name, model = await asyncio.to_thread(
           configure, agent_dir, relay, session, env
       )
@@ -287,7 +299,7 @@ async def solve(session: taskbridge.Session) -> str:
           "--thinking",
           THINKING,
           "--append-system-prompt",
-          NOTE.format(workdir=session.workdir) + engineering_inventory + engineering_cli_note,
+          NOTE.format(workdir=session.workdir) + engineering_inventory + engineering_cli_note + delivery_note,
       ]
       run = Run(session, model)
       done = await taskbridge.run_process(
@@ -300,6 +312,31 @@ async def solve(session: taskbridge.Session) -> str:
           stop_before_sec=STOP_BEFORE_SEC,
           log_prefix="pi: ",
       )
+      if delivery_targets and before_delivery is not None:
+        after_delivery = await delivery_guard.snapshot(session, delivery_targets)
+        issues = delivery_guard.compare(before_delivery, after_delivery)
+        if issues:
+          await session.log("delivery_gate: incomplete=" + str(len(issues)))
+          left = session.time_left()
+          # A second model run costs time and tokens. Trigger only for
+          # concrete, potentially zero-scoring missing or invalid outputs.
+          if left is None or left > 600:
+            await taskbridge.run_process(
+                argv,
+                session,
+                env=env,
+                cwd=str(work),
+                on_line=run.on_line,
+                stdin=(session.instruction
+                       + delivery_guard.repair_instruction(issues)).encode(),
+                stop_before_sec=STOP_BEFORE_SEC,
+                log_prefix="pi-delivery-repair: ",
+            )
+            after_repair = await delivery_guard.snapshot(session, delivery_targets)
+            still_missing = delivery_guard.compare(before_delivery, after_repair)
+            await session.log(
+                "delivery_gate: residual=" + str(len(still_missing))
+            )
   if not run.replies:
     raise RuntimeError(
         f"pi exited with {done.code} before the model answered:"

@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - "engineering_intake.py"
+      - "delivery_guard.py"
       - "engineering_toolkit.py"
       - "hamon_drawing.py"
       - "hamon_scale.py"
@@ -28,7 +29,7 @@ jobs:
       - name: System PDF vector tools for real two-sheet drawing contract
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends poppler-utils
       - run: python -m unittest discover -s tests -v
-      - run: python -m compileall -q engineering_intake.py engineering_toolkit.py hamon_drawing.py hamon_scale.py hamon_affine_metric.py hamon_callout.py harness.py taskbridge.py ship/check_artifact_provenance.py
+      - run: python -m compileall -q engineering_intake.py engineering_toolkit.py hamon_drawing.py hamon_scale.py hamon_affine_metric.py hamon_callout.py harness.py taskbridge.py delivery_guard.py ship/check_artifact_provenance.py
       - name: Exact pinned organizer PLE kit, static validation only
         run: |
           set -euo pipefail
