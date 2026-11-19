@@ -110,7 +110,7 @@ class AnchoredMeasureContracts(unittest.TestCase):
     def test_partial_or_curved_vector_inventory_fails_closed(self):
         page = inventory()
         page["vector_limit_hit"] = True
-        with self.assertRaisesRegex(ValueError, "listing truncated"):
+        with self.assertRaisesRegex(ValueError, "selection incomplete"):
             self.calculate(page=page)
         page = inventory()
         del page["reported_vectors"][0]["id"]
