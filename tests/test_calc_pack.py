@@ -17,11 +17,11 @@ def sample():
                 "q":{"expr":"10*kN/m","source":"input line load"},
                 "L":{"expr":"5*m","source":"input span"},
                 "M":{"expr":"q*L**2/2","to":"kN*m","source":"cantilever UDL"},
-                "V":{"expr":"q*L","source":"cantilever shear"},
+                "Vshear":{"expr":"q*L","source":"cantilever shear"},
                 "Vallow":{"expr":"30*kN","source":"shear limit"}},
             "checks":[{"id":"bending","lhs":"M","rhs":"Mallow","relation":"<=",
                        "source":"provided strength criterion"},
-                      {"id":"shear","lhs":"V","rhs":"Vallow","relation":"<=",
+                      {"id":"shear","lhs":"Vshear","rhs":"Vallow","relation":"<=",
                        "source":"provided shear criterion"}]}
 
 class CalculationPack(unittest.TestCase):
