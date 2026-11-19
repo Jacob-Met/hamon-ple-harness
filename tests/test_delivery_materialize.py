@@ -118,6 +118,19 @@ class RemoteProtocol(unittest.IsolatedAsyncioTestCase):
         self.assertIn("subprocess.run(", argv[2])
         self.assertIn("shell=False", argv[2])
 
+    async def test_protocol_task_error_fails_open(self):
+        class NotAvailable(Exception):
+            pass
+        class FakeSession:
+            def time_left(self):
+                return 1000
+            async def exec(self, command, timeout_sec):
+                raise NotAvailable("offline evaluator task protocol")
+        item = {"script": "/app/files/hall/output/solution.py",
+                "target": "/app/files/hall/output/model.ifc"}
+        self.assertEqual(await m.materialize(FakeSession(), [item]),
+                         [{"target": item["target"], "state": "unknown"}])
+
     async def test_short_deadline_does_not_execute(self):
         class FakeSession:
             def time_left(self):
