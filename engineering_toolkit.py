@@ -421,6 +421,8 @@ def run(argv=None):
     dv.add_argument("--limit-words",type=int,default=500)
     dv.add_argument("--region",type=float,nargs=4,default=None,
                     metavar=("XMIN","YMIN","XMAX","YMAX"))
+    dm=sub.add_parser("pdf-measure",help="Source-anchored metric length estimates from real PDF SVG vertices")
+    dm.add_argument("file");dm.add_argument("spec")
     c=sub.add_parser("ifc-broadphase",help="Optional IfcOpenShell world-coordinate envelope overlaps")
     c.add_argument("file");c.add_argument("--a",default="IfcDuctSegment,IfcPipeSegment")
     c.add_argument("--b",default="IfcBeam,IfcColumn");c.add_argument("--limit",type=int,default=400)
@@ -445,6 +447,9 @@ def run(argv=None):
             out=hamon_drawing.scan_pdf(
                 args.file,args.from_page,args.to_page,args.limit_paths,
                 args.limit_words,args.region)
+        elif args.cmd=="pdf-measure":
+            import hamon_scale
+            out=hamon_scale.measure_pdf(args.file,args.spec,quantity,UNITS["m"])
         elif args.cmd=="ifc-broadphase": out=ifc_broadphase(args.file,args.a,args.b,args.limit)
         elif args.cmd=="ifc-narrowphase":
             import hamon_geometry
