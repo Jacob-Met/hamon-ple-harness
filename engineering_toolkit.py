@@ -419,6 +419,12 @@ def run(argv=None):
     c.add_argument("--b",default="IfcBeam,IfcColumn");c.add_argument("--limit",type=int,default=400)
     pack=sub.add_parser("calc-pack",help="Audit a source-qualified unit-safe calculation graph")
     pack.add_argument("file")
+    n=sub.add_parser("ifc-narrowphase",help="Qualified IFC mesh contact/containment screen")
+    n.add_argument("file")
+    n.add_argument("--a",default="IfcDuctSegment,IfcPipeSegment")
+    n.add_argument("--b",default="IfcBeam,IfcColumn")
+    n.add_argument("--limit",type=int,default=400)
+    n.add_argument("--triangle-budget",type=int,default=250000)
     args=p.parse_args(argv)
     try:
         if args.cmd=="calc-pack": out=calc_pack(args.file)
@@ -427,10 +433,14 @@ def run(argv=None):
         elif args.cmd=="xlsx-audit": out=xlsx_audit(args.file)
         elif args.cmd=="pdf-words": out=pdf_words(args.file,args.page,args.limit)
         elif args.cmd=="ifc-broadphase": out=ifc_broadphase(args.file,args.a,args.b,args.limit)
+        elif args.cmd=="ifc-narrowphase":
+            import hamon_geometry
+            out=hamon_geometry.ifc_narrowphase(
+                args.file,args.a,args.b,args.limit,args.triangle_budget)
         else: raise ValueError("unsupported command")
         print(json.dumps({"ok":True,**out},ensure_ascii=True,default=str))
         return 3 if args.cmd=="calc-pack" and not out["all_checks_pass"] else 0
-    except (OSError,ValueError,InvalidOperation,RuntimeError,ET.ParseError,zipfile.BadZipFile,
+    except (OSError,ValueError,InvalidOperation,RuntimeError,ImportError,ET.ParseError,zipfile.BadZipFile,
             subprocess.TimeoutExpired,ZeroDivisionError,OverflowError,SyntaxError) as exc:
         print(json.dumps({"ok":False,"error":type(exc).__name__,
                           "message":str(exc)[:300],"command":args.cmd}))
