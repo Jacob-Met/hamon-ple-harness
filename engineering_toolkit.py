@@ -423,6 +423,10 @@ def run(argv=None):
                     metavar=("XMIN","YMIN","XMAX","YMAX"))
     dm=sub.add_parser("pdf-measure",help="Source-anchored metric length estimates from real PDF SVG vertices")
     dm.add_argument("file");dm.add_argument("spec")
+    dl=sub.add_parser("pdf-dimension-links",help="Ground printed dimensions to actual PDF vector lines with two witnessed ends")
+    dl.add_argument("file");dl.add_argument("--page",type=int,default=1)
+    da=sub.add_parser("pdf-auto-measure",help="Conditionally calibrate and measure from machine-witnessed source dimensions")
+    da.add_argument("file");da.add_argument("spec")
     c=sub.add_parser("ifc-broadphase",help="Optional IfcOpenShell world-coordinate envelope overlaps")
     c.add_argument("file");c.add_argument("--a",default="IfcDuctSegment,IfcPipeSegment")
     c.add_argument("--b",default="IfcBeam,IfcColumn");c.add_argument("--limit",type=int,default=400)
@@ -450,6 +454,12 @@ def run(argv=None):
         elif args.cmd=="pdf-measure":
             import hamon_scale
             out=hamon_scale.measure_pdf(args.file,args.spec,quantity,UNITS["m"])
+        elif args.cmd=="pdf-dimension-links":
+            import hamon_callout
+            out=hamon_callout.associate_pdf(args.file,args.page)
+        elif args.cmd=="pdf-auto-measure":
+            import hamon_callout
+            out=hamon_callout.auto_measure_pdf(args.file,args.spec,quantity,UNITS["m"])
         elif args.cmd=="ifc-broadphase": out=ifc_broadphase(args.file,args.a,args.b,args.limit)
         elif args.cmd=="ifc-narrowphase":
             import hamon_geometry
