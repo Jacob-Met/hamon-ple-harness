@@ -228,12 +228,17 @@ async def intake_for_prompt(session: Any, *, deadline_seconds: int = 19) -> str:
 async def provision_engineering_cli(session: Any) -> str:
     import pathlib
     import_bytes = pathlib.Path(__file__).with_name("hamon_geometry.py").read_bytes()
+    drawing_bytes = pathlib.Path(__file__).with_name("hamon_drawing.py").read_bytes()
     source = pathlib.Path(__file__).with_name("engineering_toolkit.py").read_bytes()
     target = "/tmp/hamon-engineering-toolkit.py"
     try:
         module_size = await asyncio.wait_for(
             session.write_file("/tmp/hamon_geometry.py", import_bytes), timeout=12)
         if module_size != len(import_bytes):
+            return ""
+        drawing_size = await asyncio.wait_for(
+            session.write_file("/tmp/hamon_drawing.py", drawing_bytes), timeout=12)
+        if drawing_size != len(drawing_bytes):
             return ""
         reported_size = await asyncio.wait_for(
             session.write_file(target, source), timeout=12)
@@ -247,6 +252,12 @@ async def provision_engineering_cli(session: Any) -> str:
         "\n  python3 /tmp/hamon-engineering-toolkit.py check '1*kN' '1000*N'"
         "\n  python3 /tmp/hamon-engineering-toolkit.py xlsx-audit FILE.xlsx"
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-words DRAWING.pdf --page 1"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-vector DRAWING.pdf --from-page 1 --to-page 3"
+        "\nPDF VECTOR: native Poppler path/line extraction, page-space PDF word"
+        " boxes, SVG vector bounds and printed-scale candidates. Page count"
+        " is authoritative; printed labels 1:50/NTS are NOT calibrated scale."
+        " Cropped --region xmin ymin xmax ymax uses SVG page coordinates;"
+        " curves without exact line bounds remain unlocalized, not omitted."
         "\n  python3 /tmp/hamon-engineering-toolkit.py ifc-broadphase MODEL.ifc --a IfcDuctSegment --b IfcBeam"
         "\n  python3 /tmp/hamon-engineering-toolkit.py ifc-narrowphase MODEL.ifc --a IfcDuctSegment --b IfcBeam"
         "\nIFC NARROW PHASE: IfcOpenShell world-space triangulation with AABB BVH,"
