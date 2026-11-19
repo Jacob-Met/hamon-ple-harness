@@ -165,7 +165,16 @@ def _svg_inventory(payload,limit_paths=2000,region=None):
                 (box[0]<=region[2] and box[2]>=region[0] and
                  box[1]<=region[3] and box[3]>=region[1]))
             if retained and len(out)<limit_paths:
-                row={"type":name,"svg_bbox":box,"bbox_exact_for_centerline":box is not None}
+                vertices = ([transform_point(matrix, p) for p in points]
+                            if points is not None and matrix is not None
+                            and len(points) <= 64 else None)
+                if vertices is not None and any(
+                        not math.isfinite(q) for point in vertices for q in point):
+                    vertices = None
+                row={"id":f"v{stats['vector_primitives']}",
+                     "type":name,"svg_bbox":box,
+                     "bbox_exact_for_centerline":box is not None,
+                     "svg_points":[list(p) for p in vertices] if vertices else None}
                 if name=="path":row["d"]=node.attrib.get("d","")[:500]
                 if node.attrib.get("stroke"):row["stroke"]=node.attrib["stroke"][:80]
                 if node.attrib.get("stroke-width"):
