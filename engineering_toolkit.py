@@ -121,7 +121,7 @@ UNITS.update({
     "ksf": Q(D(1000)) * UNITS["lbf"]/(UNITS["ft"]*UNITS["ft"]),
 })
 
-def quantity(expression: str) -> Q:
+def quantity(expression: str, symbols: dict[str,Q] | None = None) -> Q:
     """Evaluate an arithmetic unit expression, never Python eval or arbitrary calls."""
     if len(expression) > 1000:
         raise ValueError("quantity expression exceeds 1000 characters")
@@ -133,6 +133,8 @@ def quantity(expression: str) -> Q:
         if isinstance(node, ast.Constant) and type(node.value) in (int, float):
             return Q(D(node.value))
         if isinstance(node, ast.Name):
+            if symbols is not None and node.id in symbols:
+                return symbols[node.id]
             if node.id not in UNITS:
                 raise ValueError(f"unknown or ambiguous unit '{node.id}'")
             return UNITS[node.id]
@@ -303,6 +305,104 @@ def ifc_broadphase(filename: str, class_a: str, class_b: str, limit: int):
             "warning":"Envelope overlap only; not a verified mesh clash. Verify units, tolerances, geometry and allowed penetrations before engineering decisions."}
 
 
+
+# Offline, dimension-checked calculation DAG: verifies supplied expressions and
+# limit values, not the physical assumptions or governing engineering codes.
+def calc_pack(filename: str):
+    import hashlib
+    path = pathlib.Path(filename)
+    if path.stat().st_size > 2_000_000:
+        raise ValueError("calc-pack input exceeds 2 MB")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("schema") != "hamon.engineering.calcpack.v1":
+        raise ValueError("expected hamon.engineering.calcpack.v1")
+    definitions, checks = data.get("quantities"), data.get("checks")
+    if not isinstance(definitions, dict) or not isinstance(checks, list):
+        raise ValueError("quantities object and checks array required")
+    if not 1 <= len(definitions) <= 256 or len(checks) > 256:
+        raise ValueError("quantity/check count exceeds limits")
+    for name, spec in definitions.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}",name) or name in UNITS or name == "sqrt":
+            raise ValueError(f"invalid or reserved quantity name {str(name)[:64]!r}")
+        if not isinstance(spec, dict) or not isinstance(spec.get("expr"),str) or len(spec["expr"]) > 1000:
+            raise ValueError(f"{name}: bounded expression string required")
+    values, visiting = {}, set()
+    def resolve(name):
+        if name in values: return values[name]
+        if name in visiting: raise ValueError(f"circular quantity dependency at {name}")
+        visiting.add(name)
+        try:
+            expr = definitions[name]["expr"]
+            deps = {n.id for n in ast.walk(ast.parse(expr,mode="eval"))
+                    if isinstance(n, ast.Name) and n.id in definitions}
+            symbols = {n:resolve(n) for n in sorted(deps)}
+            values[name] = quantity(expr, symbols)
+            return values[name]
+        finally:
+            visiting.remove(name)
+    for name in sorted(definitions): resolve(name)
+    quantities, warnings = {}, []
+    for name in sorted(definitions):
+        spec, q = definitions[name], values[name]
+        target = spec.get("to")
+        if target is not None and (not isinstance(target,str) or len(target)>100):
+            raise ValueError(f"{name}: invalid target unit")
+        if target:
+            u = quantity(target)
+            if q.dim != u.dim or u.val <= 0:
+                raise ValueError(f"{name}: incompatible target unit")
+            shown = q.val/u.val
+        else:
+            shown = q.val
+        source = spec.get("source")
+        if not source: warnings.append(f"{name}: supplied quantity lacks a source")
+        quantities[name] = {"expr":spec["expr"],"si_value":str(q.val),
+                            "value":str(shown),"target":target,
+                            "dimensions":list(q.dim),"source":source}
+    out, used = [], set()
+    for n, spec in enumerate(checks):
+        if not isinstance(spec,dict): raise ValueError(f"check {n}: object required")
+        key, op = spec.get("id"), spec.get("relation")
+        if not isinstance(key,str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}",key) or key in used:
+            raise ValueError(f"check {n}: invalid or duplicate id")
+        used.add(key)
+        if op not in ("<","<=",">",">=","==","~="):
+            raise ValueError(f"{key}: unsupported relation")
+        lhs, rhs = spec.get("lhs"), spec.get("rhs")
+        if not isinstance(lhs,str) or not isinstance(rhs,str):
+            raise ValueError(f"{key}: two expressions required")
+        a,b = quantity(lhs,values),quantity(rhs,values)
+        if a.dim != b.dim: raise ValueError(f"{key}: dimension mismatch {a.dim} vs {b.dim}")
+        tolerance = D(spec.get("relative_tolerance","0"))
+        if not tolerance.is_finite() or tolerance < 0 or tolerance >= 1:
+            raise ValueError(f"{key}: invalid relative tolerance")
+        diff = a.val-b.val
+        if op == "<": passed=diff<0
+        elif op == "<=": passed=diff<=0
+        elif op == ">": passed=diff>0
+        elif op == ">=": passed=diff>=0
+        elif op == "==": passed=diff==0
+        else: passed=abs(diff)<=tolerance*max(abs(a.val),abs(b.val),D("1e-30"))
+        if not spec.get("source"): warnings.append(f"{key}: limit state lacks a source")
+        out.append({"id":key,"lhs":lhs,"relation":op,"rhs":rhs,
+                    "passed":passed,"lhs_si":str(a.val),"rhs_si":str(b.val),
+                    "signed_residual_si":str(diff),"dimensions":list(a.dim),
+                    "utilization":str(a.val/b.val) if b.val>0 else None,
+                    "source":spec.get("source")})
+    assumptions = data.get("assumptions",[])
+    if not isinstance(assumptions,list) or len(assumptions)>128 or any(
+        not isinstance(x,str) or len(x)>1000 for x in assumptions):
+        raise ValueError("assumptions must be a bounded string array")
+    if not checks: warnings.append("no design checks supplied")
+    digest=hashlib.sha256(json.dumps(data,sort_keys=True,
+                          separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
+    return {"kind":"engineering-calculation-pack","input_sha256":digest,
+            "all_checks_pass":all(c["passed"] for c in out),
+            "quantities":quantities,"checks":out,"warnings":warnings,
+            "assumptions":assumptions,"code_compliance_checked":False,
+            "note":"Algebraic verification only. Independently verify the physics, source documents, load cases, assumptions and governing design code."}
+
+
 def run(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     sub=p.add_subparsers(dest="cmd",required=True)
@@ -317,16 +417,19 @@ def run(argv=None):
     c=sub.add_parser("ifc-broadphase",help="Optional IfcOpenShell world-coordinate envelope overlaps")
     c.add_argument("file");c.add_argument("--a",default="IfcDuctSegment,IfcPipeSegment")
     c.add_argument("--b",default="IfcBeam,IfcColumn");c.add_argument("--limit",type=int,default=400)
+    pack=sub.add_parser("calc-pack",help="Audit a source-qualified unit-safe calculation graph")
+    pack.add_argument("file")
     args=p.parse_args(argv)
     try:
-        if args.cmd=="quantity": out=conversion(args.expression,args.to)
+        if args.cmd=="calc-pack": out=calc_pack(args.file)
+        elif args.cmd=="quantity": out=conversion(args.expression,args.to)
         elif args.cmd=="check": out=equal_dimensions(args.lhs,args.rhs,args.rtol)
         elif args.cmd=="xlsx-audit": out=xlsx_audit(args.file)
         elif args.cmd=="pdf-words": out=pdf_words(args.file,args.page,args.limit)
         elif args.cmd=="ifc-broadphase": out=ifc_broadphase(args.file,args.a,args.b,args.limit)
         else: raise ValueError("unsupported command")
         print(json.dumps({"ok":True,**out},ensure_ascii=True,default=str))
-        return 0
+        return 3 if args.cmd=="calc-pack" and not out["all_checks_pass"] else 0
     except (OSError,ValueError,InvalidOperation,RuntimeError,ET.ParseError,zipfile.BadZipFile,
             subprocess.TimeoutExpired,ZeroDivisionError,OverflowError,SyntaxError) as exc:
         print(json.dumps({"ok":False,"error":type(exc).__name__,
