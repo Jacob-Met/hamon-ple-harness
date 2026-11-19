@@ -138,6 +138,7 @@ def make_mesh(flat_vertices,flat_faces,max_triangles=20000):
         raise ValueError("mesh has non-finite or implausible world coordinates")
     verts=tuple(tuple(float(vv[i+j]) for j in range(3)) for i in range(0,len(vv),3))
     triangles=[]; tr_boxes=[]; edges=Counter(); oriented=Counter()
+    vertex_links={}; duplicated_link=False
     # IFC tessellators may emit one vertex index per *face corner*. An
     # indexed-edge test then calls a perfectly closed shell non-watertight.
     # Weld only bit-identical world coordinates for topological evidence:
@@ -170,13 +171,32 @@ def make_mesh(flat_vertices,flat_faces,max_triangles=20000):
         if len(set(canonical))!=3:
             raise ValueError("mesh triangle collapses after exact-coordinate welding")
         for i in range(3):
-            u,v=canonical[i],canonical[(i+1)%3]
+            u,v,w=canonical[i],canonical[(i+1)%3],canonical[(i+2)%3]
             union(u,v)
             edges[tuple(sorted((u,v)))]+=1
             oriented[(u,v)]+=1
-    closed=all(n==2 for n in edges.values()) and all(
+            link=vertex_links.setdefault(u,{})
+            if w in link:
+                duplicated_link=True
+            else:
+                link[w]=v
+    def one_vertex_cycle(link):
+        # Edge-pair closure alone misses two solid shells touching at one
+        # vertex. Each closed orientable manifold vertex has exactly one
+        # directed neighbor ring, not two cycles joined at one coordinate.
+        if len(link)<3 or set(link)!=set(link.values()):
+            return False
+        seen=set()
+        start=next(iter(link))
+        cur=start
+        while cur not in seen:
+            seen.add(cur)
+            cur=link[cur]
+        return cur==start and len(seen)==len(link)
+    closed=not duplicated_link and all(n==2 for n in edges.values()) and all(
         oriented[(u,v)]==oriented[(v,u)]
-        for u,v in edges)
+        for u,v in edges) and all(one_vertex_cycle(link)
+                                for link in vertex_links.values())
     reps={}
     active={welded[index] for index in ff}
     for index in sorted(active): reps.setdefault(root(index),index)
