@@ -257,7 +257,7 @@ def scan_pdf(filename,first=1,last=None,limit_paths=2000,
             words,box=_word_inventory(text.stdout,limit_words)
             output=pathlib.Path(tmp)/f"page_{page}.svg"
             render=subprocess.run([pdftocairo,"-svg","-f",str(page),
-                                   "-l",str(page),"-singlefile",
+                                   "-l",str(page),
                                    str(path),str(output)],
                                   capture_output=True,timeout=30,check=False)
             if render.returncode!=0:
