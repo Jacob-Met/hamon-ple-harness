@@ -51,17 +51,23 @@ def candidates(targets: list[dict[str, str]]) -> list[dict[str, str]]:
                 or posixpath.splitext(path)[1].lower() not in GENERATABLE_EXTENSIONS):
             continue
         groups.setdefault(posixpath.dirname(path), []).append(path)
+    # Read-only observation is bounded by delivery_guard.REMOTE_PROBE's 24
+    # target cap. Allocate the first convention across all target directories
+    # before spending probe slots on alternative script conventions.
     result = []
-    for folder, outputs in groups.items():
-        # Output should be chosen deterministically without baking task IDs in.
-        first = sorted(outputs, key=lambda p: (
+    firsts = {
+        folder: sorted(outputs, key=lambda p: (
             0 if p.lower().endswith(".ifc") else 1, p
         ))[0]
-        for name in GENERATOR_NAMES:
-            script = posixpath.join(folder, name)
-            result.append({"script": script, "target": first})
-            if len(result) >= MAX_GENERATORS * len(groups):
-                break
+        for folder, outputs in groups.items()
+    }
+    for name in GENERATOR_NAMES:
+        for folder, target in firsts.items():
+            if len(result) >= 24:
+                return result
+            result.append({
+                "script": posixpath.join(folder, name), "target": target,
+            })
     return result
 
 
@@ -86,8 +92,9 @@ def newly_written(before: dict | None, after: dict | None,
     if initial.get("state") in ("unknown", "invalid"):
         return False
     if initial.get("state") == "ready":
-        return (initial.get("fingerprint")
-                and initial.get("fingerprint") != latest.get("fingerprint"))
+        return bool(initial.get("fingerprint") and (
+            initial.get("fingerprint") != latest.get("fingerprint")
+        ))
     return initial.get("state") in ("missing", "empty")
 
 
@@ -205,6 +212,10 @@ async def materialize(session: Any, selected: list[dict[str, str]]) -> list[dict
             observations.append({
                 "target": item["target"], "state": state
             })
-        except (OSError, KeyError, ValueError, RuntimeError, asyncio.TimeoutError):
+        except Exception:
+            # The official protocol raises its own TaskError, which is not
+            # an OSError or RuntimeError. Unavailable observation must never
+            # abort the user's original deliverable task. Cancellation still
+            # propagates (asyncio.CancelledError derives from BaseException).
             observations.append({"target": item["target"], "state": "unknown"})
     return observations
