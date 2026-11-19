@@ -72,7 +72,9 @@ def calibrate_inventory(page, spec, quantity, metre):
       references: >=2 independent, nonparallel SVG vertex-to-vertex segments,
           each with "from", "to", "length" (e.g. "2400*mm"), and
           "source_label" (text visibly extracted from this same PDF page).
-      targets: vertex-to-vertex segments with a "name" and optional "to" unit.
+      targets: vertex-to-vertex segments with a "name" and optional "unit".
+      calibration_model: similarity (default) or affine_spd (>=4 independent
+          directions; leave-one-out scale consistency).
       max_relative_residual: 0..0.1; default 0.01.
 
     Each endpoint uses {"vector":"v5","vertex":0} and selects an extracted,
@@ -84,8 +86,12 @@ def calibrate_inventory(page, spec, quantity, metre):
     if not isinstance(page, dict) or not isinstance(page.get("words"), list):
         raise ValueError("PDF page word/vector inventory required")
     references, targets = spec.get("references"), spec.get("targets")
-    if not isinstance(references, list) or not 2 <= len(references) <= 64:
-        raise ValueError("2..64 independently grounded references required")
+    model = spec.get("calibration_model", "similarity")
+    if model not in ("similarity","affine_spd"):
+        raise ValueError("calibration_model must be similarity or affine_spd")
+    min_anchors = 4 if model == "affine_spd" else 2
+    if not isinstance(references, list) or not min_anchors <= len(references) <= 64:
+        raise ValueError(f"{model}: {min_anchors}..64 independent references required")
     if not isinstance(targets, list) or not 1 <= len(targets) <= 256:
         raise ValueError("1..256 target segments required")
     tolerance = spec.get("max_relative_residual", 0.01)
@@ -142,15 +148,23 @@ def calibrate_inventory(page, spec, quantity, metre):
     )
     if largest_cross < 0.25:
         raise ValueError("two nonparallel reference dimensions required")
-    # Origin-constrained least squares: physical_m ~= metres_per_svg * svg_len.
-    num = sum(r["svg_units"] * r["physical_m"] for r in observations)
-    den = sum(r["svg_units"] ** 2 for r in observations)
-    factor = num / den
-    residuals = [abs(factor * r["svg_units"] - r["physical_m"]) / r["physical_m"]
-                 for r in observations]
-    if not math.isfinite(factor) or factor <= 0 \
-            or max(residuals) > tolerance + 1e-12:
-        raise ValueError("inconsistent dimension anchors; scale not qualified")
+    affine = None
+    if model == "affine_spd":
+        from hamon_affine_metric import fit_affine_metric, _length_metres
+        affine = fit_affine_metric(observations, direction_vectors, tolerance)
+        factor = None
+        residuals = affine["reference_relative_residuals"]
+    else:
+        # One isotropic global scale cannot detect off-diagonal affine shear
+        # when the two source anchors are orthogonal with equal lengths.
+        num = sum(r["svg_units"] * r["physical_m"] for r in observations)
+        den = sum(r["svg_units"] ** 2 for r in observations)
+        factor = num / den
+        residuals = [abs(factor * r["svg_units"] - r["physical_m"]) / r["physical_m"]
+                     for r in observations]
+        if not math.isfinite(factor) or factor <= 0 \
+                or max(residuals) > tolerance + 1e-12:
+            raise ValueError("inconsistent dimension anchors; scale not qualified")
 
     result = []
     names = set()
@@ -171,7 +185,9 @@ def calibrate_inventory(page, spec, quantity, metre):
         unit = quantity(to)
         if unit.dim != metre.dim or unit.val <= 0:
             raise ValueError(f"target {name}: conversion unit must have length dimension")
-        distance_m = factor * span
+        distance_m = (_length_metres(affine["metric"],
+                         (b[0]-a[0],b[1]-a[1])) if affine is not None
+                      else factor * span)
         result.append({"name": name, "svg_length": span,
                        "estimate_m": distance_m,
                        "estimate": distance_m * float(metre_value / unit.val),
@@ -180,17 +196,25 @@ def calibrate_inventory(page, spec, quantity, metre):
                        "status": "conditional_source_anchored_length"})
 
     return {"kind": "pdf-source-anchored-measurement",
-            "page": page.get("page"), "calibration_method": "origin_least_squares",
+            "page": page.get("page"),
+            "calibration_method": ("affine_metric_heldout" if affine is not None
+                                   else "origin_least_squares"),
+            "assumed_isotropic": affine is None,
+            "affine_metric": ({k:v for k,v in affine.items() if k != "metric"}
+                              if affine is not None else None),
             "physical_scale_verified": False,
             "conditional_scale_m_per_svg_unit": factor,
             "reference_count": len(observations),
             "reference_max_relative_residual": max(residuals),
+            "reference_max_heldout_relative_residual":
+                (affine["max_heldout_relative_residual"] if affine is not None
+                 else None),
             "reference_pair_max_sine": largest_cross,
             "max_allowed_relative_residual": tolerance,
             "references": [{**r, "relative_residual": e}
                            for r, e in zip(observations, residuals)],
             "targets": result,
-            "warning": "Conditional measurement ONLY: text presence and vector vertices do not prove a callout labels those endpoints. Independently check leader lines, projection, viewport, plotted scale, source geometry, units and engineering code; never use as autonomous approval."}
+            "warning": "Conditional measurement ONLY: text presence and vector vertices do not prove a callout labels those endpoints. Similarity calibration can silently miss affine shear between sampled directions; use affine_spd with >=4 directional dimensions and left-out fit checks when deformation is plausible. Even affine calibration does not establish leader, projection, viewport, source geometry, units or engineering-code approval."}
 
 
 def measure_pdf(pdf_file, spec_file, quantity, metre):
