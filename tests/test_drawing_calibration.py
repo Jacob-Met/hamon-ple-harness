@@ -49,7 +49,7 @@ def specification():
         ],
         "targets": [
             segment(endpoint("v3", 0), endpoint("v3", 1),
-                    name="duct-offset", to="mm"),
+                    name="duct-offset", unit="mm"),
         ],
     }
 
@@ -199,7 +199,7 @@ class AnchoredMeasureContracts(unittest.TestCase):
             spec = {"schema":"hamon.pdf.measure.v1", "page":1,
                     "references":refs[:2],
                     "targets":[segment(refs[0]["from"],refs[0]["to"],
-                                       name="baseline",to="mm")]}
+                                       name="baseline",unit="mm")]}
             spec_path.write_text(json.dumps(spec))
             out=hamon_scale.measure_pdf(path,spec_path,tool.quantity,tool.UNITS["m"])
             self.assertEqual(out["pdf_sha256"], __import__("hashlib").sha256(pdf).hexdigest())
