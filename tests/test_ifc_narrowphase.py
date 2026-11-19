@@ -98,4 +98,83 @@ class NarrowPhaseContracts(unittest.TestCase):
             self.assertEqual(payload["command"],"ifc-narrowphase")
 
 
+def face_soup(mesh):
+    """A real IFC-style triangle soup: independent indices per face corner."""
+    vertices = [coordinate for triangle in mesh.triangles
+                for point in triangle for coordinate in point]
+    return vertices, list(range(len(vertices)//3))
+
+
+def gridded_cube(n=12):
+    """Closed tessellation with no shared vertex indices across any triangles."""
+    vertices=[]
+    orient=[
+        ((0,0,1),(1,0,0),(0,1,0)),
+        ((0,0,0),(0,1,0),(1,0,0)),
+        ((1,0,0),(0,1,0),(0,0,1)),
+        ((0,0,0),(0,0,1),(0,1,0)),
+        ((0,1,0),(0,0,1),(1,0,0)),
+        ((0,0,0),(1,0,0),(0,0,1)),
+    ]
+    for origin,u,v in orient:
+        def at(i,j):
+            return tuple(origin[k]+(i/n)*u[k]+(j/n)*v[k] for k in range(3))
+        for i in range(n):
+            for j in range(n):
+                a,b,c,d=at(i,j),at(i+1,j),at(i+1,j+1),at(i,j+1)
+                for p in (a,b,c,a,c,d):
+                    vertices.extend(p)
+    return g.make_mesh(vertices,list(range(len(vertices)//3)))
+
+
+class RealisticTopologyAndRayScaling(unittest.TestCase):
+    def test_duplicate_per_triangle_vertices_still_form_a_certified_shell(self):
+        original=tetra()
+        verts,faces=face_soup(original)
+        duplicated=g.make_mesh(verts,faces)
+        self.assertTrue(duplicated.closed_oriented)
+        self.assertEqual(len(duplicated.representatives),1)
+        small=tetra((0.15,0.15,0.15),0.1)
+        self.assertEqual(g.mesh_relation(duplicated,small)["relation"],"solid_containment")
+
+    def test_real_seam_gap_is_not_falsely_welded(self):
+        verts,faces=face_soup(tetra())
+        verts[0]+=1e-6
+        imperfect=g.make_mesh(verts,faces)
+        self.assertFalse(imperfect.closed_oriented)
+        self.assertIsNone(g.inside_closed((0.2,0.2,0.2),imperfect))
+
+    def test_large_tessellation_uses_bvh_without_changing_ray_parity(self):
+        mesh=gridded_cube(12)
+        self.assertEqual(len(mesh.triangles),1728)
+        self.assertTrue(mesh.closed_oriented)
+        for point,expected in [
+            ((0.5,0.5,0.5),True),
+            ((1.5,0.5,0.5),False),
+            ((-1.0,0.5,0.5),False),
+            ((0.15,0.3,0.81),True),
+        ]:
+            with self.subTest(point=point):
+                stats={}
+                self.assertIs(g.inside_closed(point,mesh,stats),expected)
+                self.assertEqual(stats["rays"],4)
+                self.assertGreater(stats["bvh_nodes"],0)
+                self.assertLess(stats.get("triangle_tests",0),len(mesh.triangles)//5)
+
+    def test_bvh_parity_matches_full_scan_on_off_surface_ray_fixtures(self):
+        mesh=gridded_cube(8)
+        rays=((1.0,0.416234,0.271828),(0.357,1.0,0.618034),
+              (0.12345,0.517,1.0),(1.0,0.927,0.211))
+        points=((.23,.37,.61),(-.35,.23,.44),(1.7,.7,.2),(.11,.4,1.3))
+        for point in points:
+            for direction in rays:
+                with self.subTest(point=point,direction=direction):
+                    reference=[g._ray_triangle(point,direction,t)
+                               for t in mesh.triangles]
+                    self.assertNotIn(-1,reference)
+                    expected=sum(t!=0 for t in reference)
+                    self.assertEqual(g._ray_crossings_bvh(point,direction,mesh),
+                                     expected)
+
+
 if __name__=="__main__":unittest.main()
