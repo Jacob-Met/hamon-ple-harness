@@ -12,6 +12,8 @@ import json
 import math
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -211,6 +213,50 @@ class DimensionAssociationContracts(unittest.TestCase):
             self.assertEqual(len(labels_and_vectors),4)
             self.assertNotEqual(next(iter(labels_and_vectors.values())),"v500")
             self.assertEqual(len(hashlib.sha256(pdf.read_bytes()).hexdigest()),64)
+            links_cli=subprocess.run(
+                [sys.executable,"engineering_toolkit.py","pdf-dimension-links",
+                 str(pdf),"--page","1"],
+                capture_output=True,text=True,check=False)
+            self.assertEqual(links_cli.returncode,0,links_cli.stdout+links_cli.stderr)
+            link_payload=json.loads(links_cli.stdout)
+            self.assertTrue(link_payload["ok"])
+            self.assertEqual(len(link_payload["matches"]),4)
+            # Target the actual source stroke matching delta=(110,+40) in SVG.
+            targets=[]
+            for vector in sheet["reported_vectors"]:
+                pts=vector.get("svg_points")
+                for a,b in vector.get("svg_segment_vertex_pairs") or []:
+                    dx=abs(pts[a][0]-pts[b][0])
+                    dy=abs(pts[a][1]-pts[b][1])
+                    if abs(dx-110)<0.1 and abs(dy-40)<0.1:
+                        targets.append({"name":"source-oblique",
+                                        "from":{"vector":vector["id"],"vertex":a},
+                                        "to":{"vector":vector["id"],"vertex":b},
+                                        "unit":"mm"})
+            self.assertEqual(len(targets),1,targets)
+            spec_path=Path(tmp)/"targets.json"
+            spec_path.write_text(json.dumps({
+                "schema":"hamon.pdf.auto-measure.v1","page":1,
+                "calibration_model":"affine_spd",
+                "max_relative_residual":0.001,
+                "targets":targets,
+            }))
+            measured=subprocess.run(
+                [sys.executable,"engineering_toolkit.py","pdf-auto-measure",
+                 str(pdf),str(spec_path)],
+                capture_output=True,text=True,check=False)
+            self.assertEqual(measured.returncode,0,measured.stdout+measured.stderr)
+            output=json.loads(measured.stdout)
+            self.assertTrue(output["ok"])
+            self.assertEqual(output["annotation_binding"],
+                             "two_endpoint_source_witness")
+            self.assertEqual(output["source_pdf_sha256"],
+                             hashlib.sha256(pdf.read_bytes()).hexdigest())
+            self.assertAlmostEqual(
+                output["targets"][0]["estimate"],
+                math.sqrt(110**2*2.5e-5+40**2*2.5e-5+
+                          2*110*40*5e-6)*1000,delta=0.2)
+            self.assertFalse(output["physical_scale_verified"])
 
 
 if __name__=="__main__":
