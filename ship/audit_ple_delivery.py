@@ -21,7 +21,7 @@ def exported_path(key: str) -> str | None:
     if key.startswith("filesystem/"):
         return "/" + key
     if key.startswith("app/files/"):
-        return "/app/" + key[len("app/files/"):]
+        return "/" + key
     if key.startswith("app/"):
         return "/" + key
     return None
@@ -33,9 +33,24 @@ def task_workdir(instruction: str, exported: list[str]) -> str:
                   instruction, re.IGNORECASE)
     if m:
         return m.group(1).rstrip(".")
-    if any(p.startswith("/app/") for p in exported):
-        return "/app"
-    return "/filesystem"
+    # Replay infers the task root from an observed export suffix. This must
+    # NEVER be used by the live harness: only session.workdir is authoritative.
+    relative = re.findall(
+        r"(?<![A-Za-z0-9_.])([A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)+"
+        r"\\.(?:zip|docx|xlsx|xlsm|pdf|ifc|dwg|dxf|csv|json|md|txt|png))",
+        instruction, flags=re.I,
+    )
+    for path in exported:
+        for suffix in relative:
+            if path.endswith("/" + suffix):
+                prefix = path[:-(len(suffix) + 1)]
+                if prefix.startswith("/app/files"):
+                    return prefix
+        if "/output/" in path:
+            return path.split("/output/", 1)[0]
+        if "/submission/" in path:
+            return path.split("/submission/", 1)[0]
+    return "/app/files" if any(p.startswith("/app/files/") for p in exported) else "/filesystem"
 
 
 def evaluate_task(name: str, prompt: str, files: dict[str, str],
