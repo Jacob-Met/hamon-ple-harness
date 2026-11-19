@@ -139,7 +139,12 @@ def _shape_points(tag,attr):
     return None
 
 
-def _svg_inventory(payload,limit_paths=2000,region=None):
+def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None):
+    if selected_vector_ids is not None:
+        if (not isinstance(selected_vector_ids,set) or len(selected_vector_ids)>2048
+                or any(not isinstance(i,str) or not re.fullmatch(r"v[1-9][0-9]*",i)
+                       for i in selected_vector_ids)):
+            raise ValueError("selected vector IDs must be <=2048 exact vN identifiers")
     root=ET.fromstring(payload)
     if local(root.tag)!="svg":raise ValueError("SVG converter output lacks root svg")
     dims=[float(t) for t in _NUMBER.findall(root.attrib.get("viewBox",""))]
@@ -164,8 +169,19 @@ def _svg_inventory(payload,limit_paths=2000,region=None):
             retained=(region is None or box is None or
                 (box[0]<=region[2] and box[2]>=region[0] and
                  box[1]<=region[3] and box[3]>=region[1]))
-            if retained and len(out)<limit_paths:
-                row={"type":name,"svg_bbox":box,"bbox_exact_for_centerline":box is not None}
+            selected = (selected_vector_ids is None or
+                        f"v{stats['vector_primitives']}" in selected_vector_ids)
+            if selected and retained and len(out)<limit_paths:
+                vertices = ([transform_point(matrix, p) for p in points]
+                            if points is not None and matrix is not None
+                            and len(points) <= 64 else None)
+                if vertices is not None and any(
+                        not math.isfinite(q) for point in vertices for q in point):
+                    vertices = None
+                row={"id":f"v{stats['vector_primitives']}",
+                     "type":name,"svg_bbox":box,
+                     "bbox_exact_for_centerline":box is not None,
+                     "svg_points":[list(p) for p in vertices] if vertices else None}
                 if name=="path":row["d"]=node.attrib.get("d","")[:500]
                 if node.attrib.get("stroke"):row["stroke"]=node.attrib["stroke"][:80]
                 if node.attrib.get("stroke-width"):
@@ -177,7 +193,10 @@ def _svg_inventory(payload,limit_paths=2000,region=None):
             "embedded_images":stats["embedded_images"],
             "text_glyph_instances":stats["text_glyph_uses"],
             "reported_count":len(out),
-            "vector_limit_hit":stats["vector_primitives"]>limit_paths,
+            "vector_limit_hit":(stats["vector_primitives"]>limit_paths
+                                if selected_vector_ids is None else
+                                len(out)<len(selected_vector_ids)),
+            "selected_vector_ids":len(selected_vector_ids) if selected_vector_ids is not None else None,
             "region_svg_units":region}
 
 
@@ -220,7 +239,7 @@ def _scales(words):
 
 
 def scan_pdf(filename,first=1,last=None,limit_paths=2000,
-             limit_words=3000,region=None):
+             limit_words=3000,region=None,selected_vector_ids=None):
     """Read-only exact native PDF pages; never infer real-world drawing units."""
     path=pathlib.Path(filename)
     if path.stat().st_size>50_000_000:
@@ -270,7 +289,7 @@ def scan_pdf(filename,first=1,last=None,limit_paths=2000,
             svg=candidates[0]
             if svg.stat().st_size>15_000_000:
                 raise ValueError(f"page {page}: vector SVG exceeds 15 MB")
-            inventory=_svg_inventory(svg.read_bytes(),limit_paths,region)
+            inventory=_svg_inventory(svg.read_bytes(),limit_paths,region,selected_vector_ids)
             pages.append({"page":page,"pdf_page_size_pt":box,
                           "word_boxes_reported":len(words),
                           "words":words,"scale_annotations":_scales(words),
