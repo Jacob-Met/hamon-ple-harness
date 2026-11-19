@@ -100,7 +100,7 @@ def calibrate_inventory(page, spec, quantity, metre):
     if len(vectors) != len(reported):
         raise ValueError("source vector identifiers must be unique and complete")
     if page.get("vector_limit_hit"):
-        raise ValueError("source vector listing truncated; rescan a bounded region")
+        raise ValueError("source vector selection incomplete; inspect page and vector IDs")
     if page.get("unlocalized_vectors"):
         # Other curves can coexist, but calibration uses only exact SVG vertices.
         pass
@@ -204,9 +204,29 @@ def measure_pdf(pdf_file, spec_file, quantity, metre):
     if isinstance(page_number, bool) or not isinstance(page_number, int) \
             or not 1 <= page_number <= 10000:
         raise ValueError("positive PDF page required")
+    selected_ids = set()
+    for kind in ("references", "targets"):
+        rows = spec.get(kind)
+        if not isinstance(rows, list):
+            raise ValueError(f"{kind} must be a bounded array")
+        for item in rows:
+            if not isinstance(item, dict):
+                raise ValueError(f"{kind} contains a non-object segment")
+            for end in ("from", "to"):
+                point = item.get(end)
+                if not isinstance(point, dict):
+                    raise ValueError(f"{kind} requires source vector endpoints")
+                vector_id = point.get("vector")
+                if not isinstance(vector_id, str) or not re.fullmatch(
+                        r"v[1-9][0-9]*", vector_id):
+                    raise ValueError(f"{kind} has invalid SVG vector selector")
+                selected_ids.add(vector_id)
+    if len(selected_ids) > 2048:
+        raise ValueError("source SVG vector selection exceeds 2048")
     inventory = hamon_drawing.scan_pdf(
         pdf_file, first=page_number, last=page_number,
-        limit_paths=5000, limit_words=5000)
+        limit_paths=5000, limit_words=5000,
+        selected_vector_ids=selected_ids)
     page = inventory["pages"][0]
     if not page.get("word_boxes_reported"):
         raise ValueError("no extracted source labels; cannot qualify dimensions")
