@@ -54,6 +54,9 @@ THINKING = "max"
 # stop pi this long before the deadline (less on short tasks) so its answer
 # arrives
 STOP_BEFORE_SEC = 90
+# time_share caps this reserve at one quarter of the remaining task time.
+DELIVERY_RESERVE_SEC = 30 * 60
+MIN_DELIVERY_RUN_SEC = 60
 CATALOG_TIMEOUT_SEC = 30
 # Request features the Google Cloud route for Claude refuses. pi leaves them
 # out, and the Anthropic API works without them too.
@@ -271,6 +274,11 @@ async def solve(session: taskbridge.Session) -> str:
           session.instruction, session.workdir
       )
       before_delivery = await delivery_guard.snapshot(session, delivery_targets)
+      checked_delivery = bool(delivery_targets) and before_delivery is not None
+      session_dir = pathlib.Path(scratch) / "delivery-session"
+      session_args = (
+          ["--session-dir", str(session_dir)] if checked_delivery else ["--no-session"]
+      )
       # A generator written during this task can deterministically finish an
       # exact requested artifact; inherited unchanged scripts are never run.
       materialize_candidates = delivery_materialize.candidates(delivery_targets)
@@ -292,7 +300,7 @@ async def solve(session: taskbridge.Session) -> str:
           "--print",
           "--mode",
           "json",
-          "--no-session",
+          *session_args,
           "-nc",
           "-ns",
           "-np",
@@ -316,7 +324,7 @@ async def solve(session: taskbridge.Session) -> str:
           cwd=str(work),
           on_line=run.on_line,
           stdin=session.instruction.encode(),
-          stop_before_sec=STOP_BEFORE_SEC,
+          stop_before_sec=DELIVERY_RESERVE_SEC if checked_delivery else STOP_BEFORE_SEC,
           log_prefix="pi: ",
       )
       if delivery_targets and before_delivery is not None:
@@ -345,18 +353,21 @@ async def solve(session: taskbridge.Session) -> str:
               )
               issues = delivery_guard.compare(before_delivery, after_delivery)
               await session.log("delivery_gate: post_materialize=" + str(len(issues)))
-          left = session.time_left()
-          # A second model run costs time and tokens. Trigger only for
-          # concrete, potentially zero-scoring missing or invalid outputs.
-          if issues and (left is None or left > 600):
+          delivery_time = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC)
+          if issues and (delivery_time is None or delivery_time >= MIN_DELIVERY_RUN_SEC):
+            # Each task has its own temporary session directory. Continue the
+            # actual calculation history if Pi persisted it before the cutoff.
+            resume = any(session_dir.glob("*.jsonl"))
+            instruction = delivery_guard.repair_instruction(issues)
+            if not resume:
+              instruction = session.instruction + instruction
             await taskbridge.run_process(
-                argv,
+                [*argv, "--continue"] if resume else argv,
                 session,
                 env=env,
                 cwd=str(work),
                 on_line=run.on_line,
-                stdin=(session.instruction
-                       + delivery_guard.repair_instruction(issues)).encode(),
+                stdin=instruction.encode(),
                 stop_before_sec=STOP_BEFORE_SEC,
                 log_prefix="pi-delivery-repair: ",
             )
