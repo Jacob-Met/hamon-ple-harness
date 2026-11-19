@@ -109,6 +109,63 @@ def _path_points(data):
     return pts
 
 
+def _straight_segment_vertex_pairs(shape, attr, points):
+    """Only SVG strokes actually drawn; never bridge distinct M subpaths.
+
+    Pairs index the returned SVG vertex array. In particular, an SVG path
+    "M 0 0 L 10 0 M 90 0 L 100 0" has edges (0,1),(2,3):
+    the jump from 10 to 90 is NOT a source edge. Unsupported/curved
+    commands have no extractable pairs and cannot certify a dimension.
+    """
+    if points is None:
+        return None
+    n = len(points)
+    if shape == "line":
+        return [[0,1]] if n == 2 else None
+    if shape in ("polyline","polygon","rect"):
+        pairs=[[i,i+1] for i in range(n-1)]
+        if shape in ("polygon","rect") and n>=3:
+            pairs.append([n-1,0])
+        return pairs if len(pairs)<=128 else None
+    if shape != "path":
+        return None
+    tokens=[c if c else num for c,num in _TOKENS.findall(attr.get("d",""))]
+    index=0; cursor=0; previous=None; subpath=None; command=None; pairs=[]
+    while index < len(tokens):
+        if tokens[index].isalpha():
+            command=tokens[index];index+=1
+            if command not in "MmLlHhVvZz":
+                return None
+            if command in "Zz":
+                if subpath is None or previous is None:
+                    return None
+                if cursor>=n:
+                    return None
+                if points[previous]!=points[cursor]:
+                    pairs.append([previous,cursor])
+                previous=cursor;cursor+=1;command=None
+                continue
+        if command is None:
+            return None
+        typ=command.upper()
+        need=2 if typ in ("M","L") else 1
+        if index+need>len(tokens) or cursor>=n:
+            return None
+        index+=need
+        if typ=="M":
+            previous=cursor;subpath=cursor;cursor+=1
+            command="l" if command.islower() else "L"
+        else:
+            if previous is None:
+                return None
+            if points[previous]!=points[cursor]:
+                pairs.append([previous,cursor])
+            previous=cursor;cursor+=1
+        if len(pairs)>128:
+            return None
+    return pairs if cursor==n else None
+
+
 def _bounds(points,matrix):
     if points is None or matrix is None:return None
     moved=[transform_point(matrix,p) for p in points]
@@ -181,7 +238,10 @@ def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None
                 row={"id":f"v{stats['vector_primitives']}",
                      "type":name,"svg_bbox":box,
                      "bbox_exact_for_centerline":box is not None,
-                     "svg_points":[list(p) for p in vertices] if vertices else None}
+                     "svg_points":[list(p) for p in vertices] if vertices else None,
+                     "svg_segment_vertex_pairs":(
+                         _straight_segment_vertex_pairs(name,node.attrib,points)
+                         if vertices is not None else None)}
                 if name=="path":row["d"]=node.attrib.get("d","")[:500]
                 if node.attrib.get("stroke"):row["stroke"]=node.attrib["stroke"][:80]
                 if node.attrib.get("stroke-width"):
