@@ -9,7 +9,7 @@ class CorpusAuditContracts(unittest.TestCase):
             "filesystem/final_batch4__mechanical_task5_pcw_flush_mop__blind/output/submission.zip"),
             "/filesystem/final_batch4__mechanical_task5_pcw_flush_mop__blind/output/submission.zip")
         self.assertEqual(audit.exported_path(
-            "app/files/output/report.docx"), "/app/output/report.docx")
+            "app/files/output/report.docx"), "/app/files/output/report.docx")
         self.assertIsNone(audit.exported_path("other/source.txt"))
         self.assertIsNone(audit.exported_path("filesystem/../../secret.txt"))
 
@@ -36,8 +36,28 @@ class CorpusAuditContracts(unittest.TestCase):
         result=audit.evaluate_task(
             "landscape-sheet-revision",prompt,
             {"app/files/output/Street_Tree_Memo.docx":"hash"})
-        self.assertEqual(result["cwd_inferred"],"/app")
+        self.assertEqual(result["cwd_inferred"],"/app/files")
         self.assertEqual(result["state"],"all_detected_targets_exported")
+
+
+    def test_nested_ifc_project_root_is_preserved(self):
+        prompt=("Inputs: docs/example.ifc is a starter. "
+                "## Expected outputSubmit submission/model.ifc. "
+                "The final grade uses the final file only.")
+        result=audit.evaluate_task("data-center-site-model",prompt,{
+            "app/files/frontier__DCBim__p6_002/submission/model.ifc":"hash"})
+        self.assertEqual(result["cwd_inferred"],"/app/files/frontier__DCBim__p6_002")
+        self.assertEqual(result["state"],"all_detected_targets_exported")
+
+    def test_mep_script_does_not_count_as_required_ifc(self):
+        prompt=("Write your deliverable to output/model.ifc, "
+                "and verify its geometry before final submission.")
+        result=audit.evaluate_task("data-hall-mep-routing",prompt,{
+            "app/files/dc_model__hall_seed000_d000__mep_routing/output/solution.py":"hash"})
+        self.assertEqual(result["cwd_inferred"],
+                         "/app/files/dc_model__hall_seed000_d000__mep_routing")
+        self.assertEqual(result["state"],"no_detected_target_export")
+        self.assertEqual(len(result["unmatched"]),1)
 
     def test_docstore_only_is_not_falsely_granted_local_file(self):
         prompt=("Return your work as a single Word document named "
