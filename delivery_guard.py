@@ -27,7 +27,8 @@ ACTION = re.compile(
     r"|write\b.{0,90}?\b(?:to|as|under)\b"
     r"|(?:final\s+)?deliverable\b.{0,90}?\b(?:is|to|as)\b"
     r"|(?:produce|export|submit|place|put)\b.{0,90}?\b(?:in|to|as|under)\b"
-    r"|(?:files?|outputs?)\b.{0,70}?\b(?:under|to)\b)",
+    r"|(?:files?|outputs?)\b.{0,70}?\b(?:under|to)\b"
+    r"|expected\s+output\s*submit\b)",
     re.I | re.S,
 )
 MAX_TARGETS = 24
