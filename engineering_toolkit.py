@@ -414,6 +414,13 @@ def run(argv=None):
     x.add_argument("file")
     f=sub.add_parser("pdf-words",help="Extract PDF word boxes on one page (not drawing scale)")
     f.add_argument("file");f.add_argument("--page",type=int,default=1);f.add_argument("--limit",type=int,default=250)
+    dv=sub.add_parser("pdf-vector",help="Multi-sheet native PDF vector and printed-scale inventory")
+    dv.add_argument("file");dv.add_argument("--from-page",type=int,default=1)
+    dv.add_argument("--to-page",type=int,default=None)
+    dv.add_argument("--limit-paths",type=int,default=250)
+    dv.add_argument("--limit-words",type=int,default=500)
+    dv.add_argument("--region",type=float,nargs=4,default=None,
+                    metavar=("XMIN","YMIN","XMAX","YMAX"))
     c=sub.add_parser("ifc-broadphase",help="Optional IfcOpenShell world-coordinate envelope overlaps")
     c.add_argument("file");c.add_argument("--a",default="IfcDuctSegment,IfcPipeSegment")
     c.add_argument("--b",default="IfcBeam,IfcColumn");c.add_argument("--limit",type=int,default=400)
@@ -433,6 +440,11 @@ def run(argv=None):
         elif args.cmd=="check": out=equal_dimensions(args.lhs,args.rhs,args.rtol)
         elif args.cmd=="xlsx-audit": out=xlsx_audit(args.file)
         elif args.cmd=="pdf-words": out=pdf_words(args.file,args.page,args.limit)
+        elif args.cmd=="pdf-vector":
+            import hamon_drawing
+            out=hamon_drawing.scan_pdf(
+                args.file,args.from_page,args.to_page,args.limit_paths,
+                args.limit_words,args.region)
         elif args.cmd=="ifc-broadphase": out=ifc_broadphase(args.file,args.a,args.b,args.limit)
         elif args.cmd=="ifc-narrowphase":
             import hamon_geometry
