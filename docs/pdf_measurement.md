@@ -58,3 +58,40 @@ Implementation: `hamon_scale.py`, `hamon_drawing.py`,
 `engineering_intake.py`. Regression controls exercise real Poppler-native
 vectors and negative dimension checks. These are local engineering tool checks,
 not a hosted PLE leaderboard score.
+
+## Affine/sheared drawing exports: do not trust two-axis scale
+
+A global similarity scale can fit horizontal and vertical reference dimensions
+**exactly** and still be wrong on a slanted edge. An unknown affine distortion
+requires a 2-D symmetric positive-definite metric G, so physical length is the
+square root of v-transpose-G-v for each SVG source displacement v. The richer
+model requires **four or more** distinct independently source-labeled
+directions, rather than interpolating three dimensions with three unknowns.
+
+In the same source-anchored JSON, set "calibration_model":"affine_spd" and
+supply four independent references with true source vertices and distinct
+printed labels. Typical directions include horizontal, vertical, positive
+diagonal, and negative diagonal. The CLI solves the tensor from all dimensions,
+independently refits with EACH reference omitted, and refuses output if the
+worst in-fit or held-out length residual exceeds the specified tolerance.
+Near-dependent directions, a non-positive-definite tensor, and principal-axis
+distortion exceeding 10x also fail closed. A full-rank fit with only three
+references is *not* accepted, even when it interpolates perfectly.
+
+The result supplies "affine_metric.metric_tensor_m2_per_svg_unit2",
+"affine_metric.distortion_principal_scale_ratio",
+"reference_max_heldout_relative_residual", conditional length estimates, and
+source provenance. The "conditional_scale_m_per_svg_unit" is null because an
+affine physical metric has no single scalar scale.
+
+**Counterexample:** native source vectors (100,0) and (0,100) each label 1m,
+so the similarity scale is 0.01m/SVG unit. With physical shear metric
+G = [[0.0001,0.00004],[0.00004,0.0001]], a (80,40) target is
+sqrt(1.056)m rather than the similarity estimate sqrt(0.8)m: a ~13% miss,
+despite both original reference dimensions having zero residual. Source
+dimensions along (100,100) and (100,-100) are sqrt(2.8)m and sqrt(1.2)m;
+the four-direction held-out fit recovers G and the correct oblique length.
+
+This is a **2-D distance metric**, not proof that the drawing was affinely
+distorted or that any annotation belongs to a particular line. Drawing
+semantics, projection, actual site conditions and code approval remain external.

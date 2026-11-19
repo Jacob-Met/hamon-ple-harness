@@ -106,7 +106,7 @@ class OfficialProtocolRoundtrip(unittest.TestCase):
                 self.assertEqual(record["stdin"],b"Determine MEP clashes and stress values")
                 self.assertEqual(len(record["commands"]),1)
                 self.assertIn("python3 -c",record["commands"][0])
-                self.assertEqual(list(record["writes"]),["/tmp/hamon_geometry.py","/tmp/hamon_drawing.py","/tmp/hamon_scale.py","/tmp/hamon-engineering-toolkit.py"])
+                self.assertEqual(list(record["writes"]),["/tmp/hamon_geometry.py","/tmp/hamon_drawing.py","/tmp/hamon_scale.py","/tmp/hamon_affine_metric.py","/tmp/hamon-engineering-toolkit.py"])
                 self.assertEqual(record["writes"]["/tmp/hamon_drawing.py"],
                                  (Path(engineering_toolkit.__file__).parent/"hamon_drawing.py").read_bytes())
                 self.assertEqual(record["writes"]["/tmp/hamon_geometry.py"],
