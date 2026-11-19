@@ -211,7 +211,33 @@ def _point_segment_distance(p,a,b):
     return math.dist(p,(a[0]+t*dx,a[1]+t*dy))
 
 
-def _endpoint_witnesses(stroke,strokes,box_height):
+def _witness_grid(strokes):
+    """Index original short line segments by intersected 16-unit SVG cells.
+
+    An endpoint witness can only be <=48 units long and <=3.5 units from
+    an actual segment. Index each exact segment bbox expanded by 3.5, so
+    the matched cell is complete for all allowed endpoint distances.
+    This collapses dense-sheet all-stroke O(label*paths**2) witnesses
+    into bounded local lookups without an approximate nearest neighbor.
+    """
+    grid={}
+    for stroke in strokes:
+        if stroke["length"]>48:
+            continue
+        a,b=stroke["a"],stroke["b"]
+        lo_x=math.floor((min(a[0],b[0])-3.5)/16)
+        hi_x=math.floor((max(a[0],b[0])+3.5)/16)
+        lo_y=math.floor((min(a[1],b[1])-3.5)/16)
+        hi_y=math.floor((max(a[1],b[1])+3.5)/16)
+        if (hi_x-lo_x+1)*(hi_y-lo_y+1)>49:
+            raise ValueError("short source stroke exceeds bounded witness grid")
+        for x in range(lo_x,hi_x+1):
+            for y in range(lo_y,hi_y+1):
+                grid.setdefault((x,y),[]).append(stroke)
+    return grid
+
+
+def _endpoint_witnesses(stroke,strokes,box_height,witness_grid):
     base_a,base_b=stroke["a"],stroke["b"]
     ux=(base_b[0]-base_a[0])/stroke["length"]
     uy=(base_b[1]-base_a[1])/stroke["length"]
@@ -219,7 +245,8 @@ def _endpoint_witnesses(stroke,strokes,box_height):
     eps=max(2.3,min(3.5,0.16*box_height))
     for p in (base_a,base_b):
         options=[]
-        for s in strokes:
+        local=witness_grid.get((math.floor(p[0]/16),math.floor(p[1]/16)),())
+        for s in local:
             if s is stroke or s["length"]>min(48,max(12,0.35*stroke["length"])):
                 continue
             vx=(s["b"][0]-s["a"][0])/s["length"]
@@ -257,6 +284,7 @@ def associate_page(page):
     frame=_page_map(page)
     labels=_text_rects(page,frame)
     strokes=_strokes(page)
+    witness_grid=_witness_grid(strokes)
     matches=[]
     rejected=[]
     claimed={}
@@ -278,7 +306,7 @@ def associate_page(page):
             if signature in unique:
                 continue
             unique.add(signature)
-            links=_endpoint_witnesses(stroke,strokes,height)
+            links=_endpoint_witnesses(stroke,strokes,height,witness_grid)
             if links is None:
                 continue
             score=(perp/max(4,height)+1.25*abs(t-0.5))
@@ -355,12 +383,13 @@ def auto_measure_page(page,targets,quantity,metre,calibration_model="affine_spd"
     # families discarded). A bad numerical anchor cannot be silently
     # optimized away after scale-fitting.
     refs=[];axes=[];label_texts=set()
+    source_strokes=_strokes(page)
     for m in source:
         if m["source_label"] in label_texts:
             raise ValueError("duplicate source label text; disambiguate independently")
         label_texts.add(m["source_label"])
         if calibration_model=="affine_spd":
-            targetline=_stroke_for_match(m,_strokes(page))
+            targetline=_stroke_for_match(m,source_strokes)
             a,b=targetline["a"],targetline["b"]
             unit=((b[0]-a[0])/targetline["length"],
                   (b[1]-a[1])/targetline["length"])
