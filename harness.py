@@ -44,6 +44,7 @@ from typing import Any
 import taskbridge
 import engineering_intake
 import delivery_guard
+import delivery_materialize
 
 HERE = pathlib.Path(__file__).resolve().parent
 # npm ci, from package-lock.json
@@ -270,6 +271,12 @@ async def solve(session: taskbridge.Session) -> str:
           session.instruction, session.workdir
       )
       before_delivery = await delivery_guard.snapshot(session, delivery_targets)
+      # A generator written during this task can deterministically finish an
+      # exact requested artifact; inherited unchanged scripts are never run.
+      materialize_candidates = delivery_materialize.candidates(delivery_targets)
+      before_generators = await delivery_guard.snapshot(
+          session, delivery_materialize.snapshot_targets(materialize_candidates)
+      )
       delivery_note = (
           "\n\nOUTPUT DELIVERY CONTRACT (literal destinations from the instruction):\n"
           + "\n".join("  " + item["path"] for item in delivery_targets)
@@ -317,10 +324,31 @@ async def solve(session: taskbridge.Session) -> str:
         issues = delivery_guard.compare(before_delivery, after_delivery)
         if issues:
           await session.log("delivery_gate: incomplete=" + str(len(issues)))
+          # A cheap task-native deterministic pass precedes another model call.
+          if materialize_candidates and before_generators is not None:
+            after_generators = await delivery_guard.snapshot(
+                session,
+                delivery_materialize.snapshot_targets(materialize_candidates),
+            )
+            selected = delivery_materialize.plan(
+                materialize_candidates, issues,
+                before_generators, after_generators,
+            )
+            if selected:
+              observed = await delivery_materialize.materialize(session, selected)
+              await session.log(
+                  "delivery_gate: materializers="
+                  + json.dumps(observed, separators=(",",":"))[:800]
+              )
+              after_delivery = await delivery_guard.snapshot(
+                  session, delivery_targets,
+              )
+              issues = delivery_guard.compare(before_delivery, after_delivery)
+              await session.log("delivery_gate: post_materialize=" + str(len(issues)))
           left = session.time_left()
           # A second model run costs time and tokens. Trigger only for
           # concrete, potentially zero-scoring missing or invalid outputs.
-          if left is None or left > 600:
+          if issues and (left is None or left > 600):
             await taskbridge.run_process(
                 argv,
                 session,
