@@ -19,7 +19,7 @@ FILE = re.compile(
     r"(?<![A-Za-z0-9_.])(?P<path>(?:/(?:filesystem|app)/)?"
     r"(?:[A-Za-z0-9_.+\-]+/)*[A-Za-z0-9_.+\-]+"
     r"\.(?:zip|docx|xlsx|xlsm|pdf|ifc|dwg|dxf|csv|json|md|txt|png))"
-    r"(?=[^A-Za-z0-9_.]|$)", re.I
+    r"(?=\.(?:\s|$)|[^A-Za-z0-9_.]|$)", re.I
 )
 DIRECTORY = re.compile(r"(?<![A-Za-z0-9_])(?P<path>output/)(?![A-Za-z0-9_])", re.I)
 ACTION = re.compile(
