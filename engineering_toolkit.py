@@ -264,34 +264,53 @@ def ifc_broadphase(filename: str, class_a: str, class_b: str, limit: int):
     settings=ifcopenshell.geom.settings()
     settings.set(settings.USE_WORLD_COORDS,True)
 
+    bounds_by_id = {}
+
     def boxes(class_names):
-        found=[]; skipped=0
+        found = []
+        skipped = 0
+        seen = set()
         for class_name in class_names.split(","):
-            class_name=class_name.strip()
-            if not re.fullmatch(r"Ifc[A-Za-z0-9]{2,50}",class_name):
+            class_name = class_name.strip()
+            if not re.fullmatch(r"Ifc[A-Za-z0-9]{2,50}", class_name):
                 raise ValueError(f"invalid IFC class: {class_name}")
-            for el in obj.by_type(class_name):
-                if len(found)>=limit:
-                    skipped+=1
+            for element in obj.by_type(class_name):
+                uid = str(element.GlobalId)
+                if uid in seen:
                     continue
-                try:
-                    geom=ifcopenshell.geom.create_shape(settings,el).geometry
-                    coords=list(geom.verts)
-                    if not coords or len(coords)%3:
-                        skipped+=1;continue
-                    axes=[coords[i::3] for i in range(3)]
-                    lo=[min(axes[i]) for i in range(3)]
-                    hi=[max(axes[i]) for i in range(3)]
-                    found.append((str(el.GlobalId),class_name,lo,hi))
-                except (AttributeError,RuntimeError,ValueError):
-                    skipped+=1
-        return found,skipped
+                seen.add(uid)
+                if len(found) >= limit:
+                    skipped += 1
+                    continue
+                if uid not in bounds_by_id:
+                    bounds = None
+                    try:
+                        shape = ifcopenshell.geom.create_shape(settings, element)
+                        coords = list(shape.geometry.verts)
+                        if coords and len(coords) % 3 == 0:
+                            axes = [coords[i::3] for i in range(3)]
+                            bounds = ([min(axis) for axis in axes], [max(axis) for axis in axes])
+                    except (AttributeError, RuntimeError, ValueError):
+                        pass
+                    bounds_by_id[uid] = bounds
+                bounds = bounds_by_id[uid]
+                if bounds is None:
+                    skipped += 1
+                else:
+                    found.append((uid, class_name, *bounds))
+        return found, skipped
+
     left,skip_left=boxes(class_a)
     right,skip_right=boxes(class_b)
+    left_rank = {entry[0]: i for i, entry in enumerate(left)}
+    right_ids = {entry[0] for entry in right}
     witnesses=[]; comparisons=0;total=0
-    for aid,ac,alo,ahi in left:
+    for i, (aid,ac,alo,ahi) in enumerate(left):
         for bid,bc,blo,bhi in right:
             if aid==bid: continue
+            # The reverse pair was visited only if both switched roles were eligible.
+            if aid in right_ids and left_rank.get(bid, i) < i:
+                continue
             comparisons+=1
             if overlaps((alo,ahi),(blo,bhi)):
                 total+=1
