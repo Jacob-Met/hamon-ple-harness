@@ -421,6 +421,13 @@ def run(argv=None):
     dv.add_argument("--limit-words",type=int,default=500)
     dv.add_argument("--region",type=float,nargs=4,default=None,
                     metavar=("XMIN","YMIN","XMAX","YMAX"))
+    dw=sub.add_parser("pdf-window",help="Render a bounded PNG in the same SVG coordinate frame, with source provenance")
+    dw.add_argument("file");dw.add_argument("--output",required=True)
+    dw.add_argument("--page",type=int,default=1)
+    dw.add_argument("--dpi",type=float,default=120)
+    dw.add_argument("--limit-paths",type=int,default=128)
+    dw.add_argument("--region",type=float,nargs=4,default=None,
+                    metavar=("XMIN","YMIN","XMAX","YMAX"))
     dx=sub.add_parser("dxf-dimensions",help="Read native ASCII DXF dimensions and qualify linear source geometry")
     dx.add_argument("file");dx.add_argument("--limit",type=int,default=1000)
     dm=sub.add_parser("pdf-measure",help="Source-anchored metric length estimates from real PDF SVG vertices")
@@ -448,6 +455,10 @@ def run(argv=None):
         elif args.cmd=="check": out=equal_dimensions(args.lhs,args.rhs,args.rtol)
         elif args.cmd=="xlsx-audit": out=xlsx_audit(args.file)
         elif args.cmd=="pdf-words": out=pdf_words(args.file,args.page,args.limit)
+        elif args.cmd=="pdf-window":
+            import hamon_drawing
+            out=hamon_drawing.render_window(args.file,args.output,args.page,args.region,
+                                           args.dpi,args.limit_paths)
         elif args.cmd=="pdf-vector":
             import hamon_drawing
             out=hamon_drawing.scan_pdf(
