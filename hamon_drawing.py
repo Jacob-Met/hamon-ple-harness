@@ -109,6 +109,168 @@ def _path_points(data):
     return pts
 
 
+def _svg_curve_bbox(data, matrix):
+    """Exact affine-transformed M/L/H/V/C/S/Q/T/Z SVG centerline bounds.
+
+    Curves are bounded at true interior derivative roots, not at control
+    polygons, endpoints or arbitrary sampled points. Unsupported arc and
+    malformed commands are unlocalized rather than silently approximated.
+    """
+    if matrix is None or not data or len(data)>500000:
+        return None
+    if re.sub(r"[\s,]+","",_TOKENS.sub("",data)):
+        return None
+    tokens=[c if c else n for c,n in _TOKENS.findall(data)]
+    if len(tokens)>100000:
+        return None
+    bounds=[math.inf,math.inf,-math.inf,-math.inf]
+    cur=(0.0,0.0)
+    start=None
+    op=None
+    cmd=None
+    previous=None
+    previous_cubic=None
+    previous_quadratic=None
+    index=0
+    steps=0
+    def add_point(p):
+        q=transform_point(matrix,p)
+        if not all(math.isfinite(v) for v in q):
+            raise ArithmeticError("SVG coordinate overflow")
+        bounds[0]=min(bounds[0],q[0])
+        bounds[1]=min(bounds[1],q[1])
+        bounds[2]=max(bounds[2],q[0])
+        bounds[3]=max(bounds[3],q[1])
+    def roots(p0,p1,p2,p3):
+        a=-p0+3*p1-3*p2+p3
+        b=2*(p0-2*p1+p2)
+        c=p1-p0
+        if abs(a)<1e-12:
+            return [-c/b] if abs(b)>1e-12 else []
+        disc=b*b-4*a*c
+        if disc<0:return []
+        sqrt=math.sqrt(disc)
+        q=-0.5*(b+math.copysign(sqrt,b))
+        if abs(q)<1e-12:
+            return [-b/(2*a)]
+        return [q/a,c/q]
+    def add_curve(p0,p1,p2,p3):
+        pts=[transform_point(matrix,p) for p in (p0,p1,p2,p3)]
+        if any(not math.isfinite(v) for p in pts for v in p):
+            raise ArithmeticError("SVG curve overflow")
+        ts=[0.0,1.0]
+        for axis in (0,1):
+            v=[p[axis] for p in pts]
+            for t in roots(*v):
+                if 0<t<1:ts.append(t)
+        for t in ts:
+            r=1-t
+            q=(r*r*r*pts[0][0]+3*r*r*t*pts[1][0]+
+               3*r*t*t*pts[2][0]+t*t*t*pts[3][0],
+               r*r*r*pts[0][1]+3*r*r*t*pts[1][1]+
+               3*r*t*t*pts[2][1]+t*t*t*pts[3][1])
+            if not all(math.isfinite(v) for v in q):
+                raise ArithmeticError("SVG evaluated curve overflow")
+            bounds[0]=min(bounds[0],q[0]);bounds[1]=min(bounds[1],q[1])
+            bounds[2]=max(bounds[2],q[0]);bounds[3]=max(bounds[3],q[1])
+    def point(x,y,origin,relative):
+        return (x+origin[0],y+origin[1]) if relative else (x,y)
+    allowed={"M":2,"L":2,"H":1,"V":1,"C":6,"S":4,"Q":4,"T":2}
+    try:
+        while index<len(tokens):
+            steps+=1
+            if steps>20000:return None
+            if tokens[index].isalpha():
+                cmd=tokens[index]
+                index+=1
+                if cmd in "Zz":
+                    if start is None:return None
+                    add_point(cur);add_point(start)
+                    cur=start;previous="Z";cmd=None
+                    previous_cubic=None;previous_quadratic=None
+                    continue
+                if cmd.upper() not in allowed:return None
+            if cmd is None:return None
+            typ=cmd.upper()
+            need=allowed[typ]
+            if index+need>len(tokens) or any(t.isalpha() for t in tokens[index:index+need]):
+                return None
+            args=[float(v) for v in tokens[index:index+need]]
+            if not all(math.isfinite(v) for v in args):return None
+            index+=need
+            rel=cmd.islower()
+            p0=cur
+            if typ=="M":
+                cur=point(args[0],args[1],p0,rel)
+                start=cur;add_point(cur)
+                cmd="l" if rel else "L"
+                previous="M";previous_cubic=None;previous_quadratic=None
+                continue
+            if start is None:return None
+            if typ=="L":
+                cur=point(args[0],args[1],p0,rel)
+                add_point(p0);add_point(cur)
+            elif typ=="H":
+                cur=(p0[0]+args[0] if rel else args[0],p0[1])
+                add_point(p0);add_point(cur)
+            elif typ=="V":
+                cur=(p0[0],p0[1]+args[0] if rel else args[0])
+                add_point(p0);add_point(cur)
+            elif typ in ("C","S"):
+                if typ=="C":
+                    c1=point(args[0],args[1],p0,rel)
+                    c2=point(args[2],args[3],p0,rel)
+                    cur=point(args[4],args[5],p0,rel)
+                else:
+                    c1=(2*p0[0]-previous_cubic[0],
+                        2*p0[1]-previous_cubic[1]) if (
+                            previous in ("C","S") and previous_cubic is not None) else p0
+                    c2=point(args[0],args[1],p0,rel)
+                    cur=point(args[2],args[3],p0,rel)
+                add_curve(p0,c1,c2,cur)
+                previous_cubic=c2;previous_quadratic=None
+            else:
+                if typ=="Q":
+                    quad=point(args[0],args[1],p0,rel)
+                    cur=point(args[2],args[3],p0,rel)
+                else:
+                    quad=(2*p0[0]-previous_quadratic[0],
+                          2*p0[1]-previous_quadratic[1]) if (
+                              previous in ("Q","T") and previous_quadratic is not None) else p0
+                    cur=point(args[0],args[1],p0,rel)
+                c1=(p0[0]+2*(quad[0]-p0[0])/3,p0[1]+2*(quad[1]-p0[1])/3)
+                c2=(cur[0]+2*(quad[0]-cur[0])/3,cur[1]+2*(quad[1]-cur[1])/3)
+                add_curve(p0,c1,c2,cur)
+                previous_quadratic=quad;previous_cubic=None
+            if typ not in ("C","S","Q","T"):
+                previous_cubic=None;previous_quadratic=None
+            previous=typ
+    except (ValueError,OverflowError,ArithmeticError,ZeroDivisionError):
+        return None
+    return bounds if all(math.isfinite(v) for v in bounds) else None
+
+
+def _svg_ellipse_bbox(shape, attrs, matrix):
+    """Exact support-function bbox for affine circles and ellipses."""
+    if matrix is None:return None
+    try:
+        cx,cy=float(attrs.get("cx","0")),float(attrs.get("cy","0"))
+        if shape=="circle":
+            rx=ry=float(attrs["r"])
+        else:
+            rx,ry=float(attrs["rx"]),float(attrs["ry"])
+        if rx<=0 or ry<=0 or not all(
+                math.isfinite(v) for v in (cx,cy,rx,ry)):
+            return None
+        center=transform_point(matrix,(cx,cy))
+        hw=math.hypot(matrix[0]*rx,matrix[2]*ry)
+        hh=math.hypot(matrix[1]*rx,matrix[3]*ry)
+        out=[center[0]-hw,center[1]-hh,center[0]+hw,center[1]+hh]
+        return out if all(math.isfinite(v) for v in out) else None
+    except (KeyError,ValueError,OverflowError):
+        return None
+
+
 def _straight_segment_vertex_pairs(shape, attr, points):
     """Only SVG strokes actually drawn; never bridge distinct M subpaths.
 
@@ -222,6 +384,12 @@ def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None
             stats["vector_primitives"]+=1
             points=_shape_points(name,node.attrib)
             box=_bounds(points,matrix)
+            if box is None and name=="path":
+                box=_svg_curve_bbox(node.attrib.get("d",""),matrix)
+                if box is not None:stats["bezier_localized_paths"]+=1
+            elif box is None and name in ("circle","ellipse"):
+                box=_svg_ellipse_bbox(name,node.attrib,matrix)
+                if box is not None:stats["ellipse_localized_paths"]+=1
             if box is None:unlocalized+=1
             retained=(region is None or box is None or
                 (box[0]<=region[2] and box[2]>=region[0] and
@@ -252,6 +420,8 @@ def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None
             "reported_vectors":out,"unlocalized_vectors":unlocalized,
             "embedded_images":stats["embedded_images"],
             "text_glyph_instances":stats["text_glyph_uses"],
+            "exact_bezier_centerline_bboxes":stats["bezier_localized_paths"],
+            "exact_ellipse_centerline_bboxes":stats["ellipse_localized_paths"],
             "reported_count":len(out),
             "vector_limit_hit":(stats["vector_primitives"]>limit_paths
                                 if selected_vector_ids is None else
@@ -358,4 +528,4 @@ def scan_pdf(filename,first=1,last=None,limit_paths=2000,
             "file":str(path),"document_pages":total,
             "first_page":first,"last_page":end,"pages":pages,
             "physical_drawing_scale_verified":False,
-            "warning":"Native PDF word boxes and SVG vector centerlines use separate page coordinate frames; printed scale text is annotation only. SVG curves without straight-line bounds remain unlocalized, crop is exploratory, and no OCR, plotted geometric calibration, or code compliance is inferred."}
+            "warning":"Native PDF word boxes and SVG vector centerlines use separate page coordinate frames; printed scale text is annotation only. SVG M/L/H/V/C/S/Q/T/Z curve centerline bboxes are exact under affine transforms; unsupported arc paths remain unlocalized, crop is exploratory, and no OCR, plotted geometric calibration, or code compliance is inferred."}

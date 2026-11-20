@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import hamon_dxf, subprocess, tempfile, math, json
+import hamon_drawing
 CASES={
  'bai_a/CST-A-001_mounting_plate':('mm',15,15,(120,80,6,3)),
  'bai_b/CST-B-001_studio_plan':('mm',25,25,(6400,4900,1800)),
@@ -21,8 +22,17 @@ def run(root):
         values=[d['usable_qualified_value'] for d in result['dimensions'] if d['usable_qualified_value'] is not None]
         for expected_value in proofs:
             assert any(math.isclose(v,expected_value,abs_tol=1e-8) for v in values),(dxf,expected_value,values)
+        pdf_vector=hamon_drawing.scan_pdf(pdf,limit_paths=1000,limit_words=1000)
+        page=pdf_vector['pages'][0]
+        assert page['word_boxes_reported']==0,(pdf,'word-box baseline changed')
+        assert page['unlocalized_vectors']==0,(pdf,page['unlocalized_vectors'])
+        assert page['exact_bezier_centerline_bboxes']>0,(pdf,page)
         out.append({'drawing':base,'pdf_native_words':0,'dxf_dimensions':expected,
-                    'geometry_supported':usable,'sha256':result['source_sha256']})
+                    'geometry_supported':usable,
+                    'pdf_vector_primitives':page['vector_primitives'],
+                    'pdf_exact_bezier_bboxes':page['exact_bezier_centerline_bboxes'],
+                    'pdf_unlocalized':page['unlocalized_vectors'],
+                    'sha256':result['source_sha256']})
     path=root/'bai_a/CST-A-001_mounting_plate.dxf'
     original=hamon_dxf.scan_dxf(path)
     groups=path.read_text().splitlines()
