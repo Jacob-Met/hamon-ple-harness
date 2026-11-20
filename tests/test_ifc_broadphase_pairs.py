@@ -47,6 +47,14 @@ class PhysicalPairIdentity(unittest.TestCase):
                     pairs = {frozenset((hit["a"],hit["b"])) for hit in result["witnesses"]}
                     self.assertEqual(len(pairs), expected)
                     self.assertTrue(all(len(pair)==2 and pair<=set(elements) for pair in pairs))
+            point_count = len(model.by_type("IfcCartesianPoint"))
+            self.assertGreater(point_count, 0)
+            for selector in ("IfcCartesianPoint", "IfcCartesianPoint,IfcCartesianPoint"):
+                with self.subTest(selector=selector):
+                    result = ifc_broadphase(str(file), selector, "IfcBeam", limit=2)
+                    self.assertEqual(result["a_count"], 0)
+                    self.assertEqual(result["skipped_a"], point_count)
+                    self.assertEqual(result["comparisons"], 0)
             capped = ifc_broadphase(str(file), "IfcBeam,IfcBeam", "IfcBeam", limit=2)
             self.assertEqual((capped["skipped_a"],capped["skipped_b"]), (1,1))
             self.assertEqual(capped["comparisons"], 1)

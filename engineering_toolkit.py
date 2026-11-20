@@ -275,11 +275,12 @@ def ifc_broadphase(filename: str, class_a: str, class_b: str, limit: int):
             if not re.fullmatch(r"Ifc[A-Za-z0-9]{2,50}", class_name):
                 raise ValueError(f"invalid IFC class: {class_name}")
             for element in obj.by_type(class_name):
-                uid = str(element.GlobalId)
-                if uid in seen:
+                uid = getattr(element, "GlobalId", None)
+                identity = uid if uid else element.id()
+                if identity in seen:
                     continue
-                seen.add(uid)
-                if len(found) >= limit:
+                seen.add(identity)
+                if not uid or len(found) >= limit:
                     skipped += 1
                     continue
                 if uid not in bounds_by_id:
