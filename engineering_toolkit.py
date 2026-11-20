@@ -184,33 +184,152 @@ def equal_dimensions(lhs: str, rhs: str, rtol: str):
             "dimensions":list(a.dim)}
 
 
+_SPREADSHEET_NS = {
+    "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+    "http://purl.oclc.org/ooxml/spreadsheetml/main",
+}
+_DOCUMENT_RELS = {
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships",
+}
+_PACKAGE_RELS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+
+
+def _xlsx_xml(archive, name, limit):
+    try:
+        part = archive.getinfo(name)
+    except KeyError as exc:
+        raise ValueError(f"Missing OOXML part: {name}") from exc
+    if part.file_size > limit:
+        raise ValueError(f"OOXML part exceeds {limit} bytes: {name}")
+    return ET.fromstring(archive.read(part))
+
+
+def _xlsx_target(source, target):
+    """Resolve an internal OPC part URI without consulting a filesystem or network."""
+    from urllib.parse import urlsplit
+    uri = urlsplit(target)
+    if (not target or uri.scheme or uri.netloc or uri.query or uri.fragment
+            or "\\" in target or target.startswith("//")):
+        raise ValueError(f"Invalid internal OOXML part target: {target!r}")
+    segments = [] if target.startswith("/") else source.split("/")[:-1]
+    for segment in uri.path.split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            if not segments:
+                raise ValueError(f"OOXML part target leaves package: {target!r}")
+            segments.pop()
+        else:
+            segments.append(segment)
+    if not segments:
+        raise ValueError("Empty OOXML part target")
+    return "/".join(segments)
+
+
+def _xlsx_relationships(archive, name):
+    root = _xlsx_xml(archive, name, 2_000_000)
+    if root.tag != _PACKAGE_RELS + "Relationships":
+        raise ValueError(f"Invalid OOXML relationship part: {name}")
+    result = {}
+    for rel in root.findall(_PACKAGE_RELS + "Relationship"):
+        rid = rel.get("Id")
+        if not rid or rid in result:
+            raise ValueError(f"Missing or repeated relationship Id in {name}")
+        result[rid] = rel
+    return result
+
+
+def _xlsx_parts(archive):
+    names = archive.namelist()
+    if len(names) != len(set(names)):
+        raise ValueError("Duplicate OOXML package member")
+    if "_rels/.rels" not in names and "xl/workbook.xml" not in names:
+        # Earlier callers also audit standalone worksheet fragments.
+        parts = sorted(n for n in names if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n))
+        if not parts:
+            raise ValueError("No workbook or standalone worksheet parts")
+        return None, [{"part": n, "kind": "worksheet", "name": None} for n in parts]
+    if "_rels/.rels" not in names:
+        workbook = "xl/workbook.xml"
+    else:
+        office = [r for r in _xlsx_relationships(archive, "_rels/.rels").values()
+                  if r.get("Type") in {base + "/officeDocument" for base in _DOCUMENT_RELS}]
+        if len(office) != 1 or office[0].get("TargetMode", "Internal") != "Internal":
+            raise ValueError("Expected exactly one internal workbook relationship")
+        workbook = _xlsx_target("", office[0].get("Target", ""))
+    root = _xlsx_xml(archive, workbook, 2_000_000)
+    ns = root.tag.removesuffix("workbook")
+    if ns not in {"{" + v + "}" for v in _SPREADSHEET_NS}:
+        raise ValueError(f"Invalid spreadsheet workbook: {workbook}")
+    sheets = root.find(ns + "sheets")
+    if sheets is None:
+        raise ValueError("Workbook is missing its sheets collection")
+    source = pathlib.PurePosixPath(workbook)
+    rels = _xlsx_relationships(archive, str(source.parent / "_rels" / (source.name + ".rels")))
+    result = []
+    for sheet in sheets.findall(ns + "sheet"):
+        ids = [sheet.get("{" + prefix + "}id") for prefix in _DOCUMENT_RELS]
+        ids = [rid for rid in ids if rid is not None]
+        if len(ids) != 1 or ids[0] not in rels:
+            raise ValueError(f"Unresolved relationship for sheet {sheet.get('name')!r}")
+        rel = rels[ids[0]]
+        if rel.get("TargetMode", "Internal") != "Internal":
+            raise ValueError(f"Workbook sheet {sheet.get('name')!r} has an external target")
+        base, _, kind = rel.get("Type", "").rpartition("/")
+        if base not in _DOCUMENT_RELS:
+            kind = rel.get("Type", "unknown")
+        result.append({"name": sheet.get("name"), "sheet_id": sheet.get("sheetId"),
+                       "state": sheet.get("state", "visible"), "kind": kind,
+                       "part": _xlsx_target(workbook, rel.get("Target", ""))})
+    return workbook, result
+
+
 def xlsx_audit(filename: str):
-    """Read OOXML XML without computing formulas or trusting cached result values."""
-    manifest={"file":filename,"kind":"xlsx-formula-audit","sheets":[]}
-    with zipfile.ZipFile(filename) as z:
-        names=[s for s in z.namelist() if re.fullmatch(r"xl/worksheets/sheet\d+\.xml",s)]
-        if len(names)>300:
-            raise ValueError("over 300 worksheets; run focused audit")
-        for name in sorted(names):
-            if z.getinfo(name).file_size > 25_000_000:
-                raise ValueError(f"{name}: uncompressed worksheet exceeds 25 MB")
-            root=ET.fromstring(z.read(name))
-            ns="{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-            formulas=0;missing_cache=0;errors=[];cells=0
-            for cell in root.iter(ns+"c"):
-                cells+=1
-                f=cell.find(ns+"f")
-                if f is not None:
-                    formulas+=1
-                    if cell.find(ns+"v") is None:
-                        missing_cache+=1
-                if cell.attrib.get("t") == "e":
-                    v=cell.find(ns+"v")
-                    errors.append({"cell":cell.attrib.get("r",""),"value":v.text if v is not None else ""})
-            manifest["sheets"].append({"part":name,"cells":cells,"formulas":formulas,
-                  "formulas_without_cached_values":missing_cache,"error_cells":errors[:50],
-                  "error_count":len(errors)})
-    manifest["note"]="Formula results are not evaluated; cached results can be stale."
+    """Audit declared worksheet cells and formula caches without evaluating a workbook."""
+    manifest = {"file": filename, "kind": "xlsx-formula-audit", "sheets": [], "other_sheets": []}
+    with zipfile.ZipFile(filename) as archive:
+        workbook, parts = _xlsx_parts(archive)
+        manifest["workbook_part"] = workbook
+        manifest["discovery"] = "workbook_relationships" if workbook else "standalone_parts"
+        if len(parts) > 300:
+            raise ValueError("over 300 sheets; run focused audit")
+        for sheet in parts:
+            if sheet["kind"] != "worksheet":
+                manifest["other_sheets"].append(sheet)
+                continue
+            root = _xlsx_xml(archive, sheet["part"], 25_000_000)
+            ns = root.tag.removesuffix("worksheet")
+            if ns not in {"{" + v + "}" for v in _SPREADSHEET_NS}:
+                raise ValueError(f"Invalid worksheet namespace or root: {sheet['part']}")
+            cells = formulas = missing = empty_strings = followers = error_count = 0
+            errors = []
+            for cell in root.iterfind(f"{ns}sheetData/{ns}row/{ns}c"):
+                cells += 1
+                formula = cell.find(ns + "f")
+                value = cell.find(ns + "v")
+                typ = cell.get("t", "n")
+                if formula is not None:
+                    formulas += 1
+                    if value is None:
+                        missing += 1
+                    elif typ == "str":
+                        empty_strings += not value.text
+                    elif not (value.text or "").strip():
+                        missing += 1
+                    if (formula.get("t") == "shared" and not (formula.text or "").strip()
+                            and formula.get("ref") is None):
+                        followers += 1
+                if typ == "e":
+                    error_count += 1
+                    if len(errors) < 50:
+                        errors.append({"cell": cell.get("r", ""), "value": value.text if value is not None else ""})
+            manifest["sheets"].append({**sheet, "cells": cells, "formulas": formulas,
+                                       "formulas_without_cached_values": missing,
+                                       "formulas_with_empty_string_cache": empty_strings,
+                                       "shared_formula_followers": followers, "error_cells": errors,
+                                       "error_count": error_count})
+    manifest["note"] = "Formula results are not evaluated; cached results can be stale."
     return manifest
 
 
