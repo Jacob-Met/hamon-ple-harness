@@ -9,12 +9,14 @@ on:
       - "delivery_materialize.py"
       - "engineering_toolkit.py"
       - "hamon_drawing.py"
+      - "hamon_dxf.py"
       - "hamon_scale.py"
       - "hamon_affine_metric.py"
       - "hamon_callout.py"
       - "harness.py"
       - "ship/check_artifact_provenance.py"
       - "ship/audit_ple_delivery.py"
+      - "ship/verify_native_dxf_corpus.py"
       - "tests/**"
       - ".github/workflows/engineering-intake.yml"
 jobs:
@@ -31,7 +33,7 @@ jobs:
       - name: System PDF vector tools for real two-sheet drawing contract
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends poppler-utils
       - run: python -m unittest discover -s tests -v
-      - run: python -m compileall -q engineering_intake.py engineering_toolkit.py hamon_drawing.py hamon_scale.py hamon_affine_metric.py hamon_callout.py harness.py taskbridge.py delivery_guard.py delivery_materialize.py ship/check_artifact_provenance.py ship/audit_ple_delivery.py
+      - run: python -m compileall -q engineering_intake.py engineering_toolkit.py hamon_drawing.py hamon_dxf.py hamon_scale.py hamon_affine_metric.py hamon_callout.py harness.py taskbridge.py delivery_guard.py delivery_materialize.py ship/check_artifact_provenance.py ship/audit_ple_delivery.py
       - name: Historical public PLE output contract replay (not scored)
         run: python ship/audit_ple_delivery.py
       - name: Exact pinned organizer PLE kit, static validation only
@@ -49,6 +51,12 @@ jobs:
                             "organizer_static_only":True,
                             "not_a_scored_dev_run":True}))
           PY
+      - name: Independent outlined-font CAD sources (not scored PLE)
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/haiha-ux/cad-sample-tests.git "$RUNNER_TEMP/cad-sample-tests"
+          git -C "$RUNNER_TEMP/cad-sample-tests" checkout -q --detach 150f4dce05a41a85d956189de8ded2cdd0d4a4d3
+          python ship/verify_native_dxf_corpus.py "$RUNNER_TEMP/cad-sample-tests"
       - name: Source provenance gate (does not conflate static acceptance with a new model score)
         run: |
           set +e
