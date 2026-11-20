@@ -45,3 +45,15 @@ evidence recovers 62 of 62 dimension geometries (15/15, 25/25, 22/22).
 Diameter and radius entities use separate native center/circumference
 geometry, never disguised as linear dimensions. This is neither PDF-DXF equivalence nor an official
 scored PLE development run. See docs/dxf_native_dimensions.md.
+
+
+## Curve-aware PDF vector geometry (outlined-text pages)
+
+The existing pdf-vector inventory now computes exact affine-transformed
+centerline bounds for SVG cubic and quadratic Bezier paths, including
+smooth/relative commands, and affine ellipse/circle extrema. It does not
+bridge curved path endpoints as source-certified straight edges. Unknown SVG
+arc syntax remains unlocalized instead of guessed; these bboxes reveal
+where outlined glyph and curved engineering geometry sits but do not
+invent the lettering or physical drawing scale.
+See docs/svg_curve_bounds.md and the pinned real-CAD regression.
