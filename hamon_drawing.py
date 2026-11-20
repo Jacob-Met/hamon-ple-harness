@@ -1,15 +1,18 @@
-"""Bounded multi-sheet PDF text, vector and scale-annotation inventory.
+"""Bounded PDF text, vector inventory and coordinate-grounded raster windows.
 
 Text boxes are in the PDF-page coordinate frame, vector paths in Cairo SVG
 viewBox coordinates. Any physical drawing scale is an unverified annotation,
-never automatically applied to measurements. No raster/OCR or network calls.
+never automatically applied to measurements. No OCR or network calls.
 """
 from __future__ import annotations
 from collections import Counter
+import hashlib
 import math
+import os
 import pathlib
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
@@ -20,6 +23,7 @@ _PART=re.compile(r"([A-Za-z]+)\s*\(([^)]*)\)")
 _NUMBER=re.compile(_FLOAT)
 _TOKENS=re.compile(r"([A-Za-z])|("+_FLOAT+r")")
 _ID=(1.0,0.0,0.0,1.0,0.0,0.0)
+_SVG_FRAME = "poppler-cropbox-rotated-no-fit-v1"
 
 
 def local(tag):return str(tag).rsplit("}",1)[-1]
@@ -468,6 +472,111 @@ def _scales(words):
     return found[:80]
 
 
+def _page_count(path):
+    pdfinfo = shutil.which("pdfinfo")
+    if not pdfinfo:
+        raise RuntimeError("pdfinfo required (Poppler)")
+    info = subprocess.run([pdfinfo, str(path)], capture_output=True,
+                          timeout=10, check=False)
+    if info.returncode != 0:
+        raise ValueError("pdfinfo failed: encrypted/invalid PDF")
+    match = re.search(rb"^Pages:\s*(\d+)\s*$", info.stdout, re.M)
+    if not match:
+        raise ValueError("PDF has no readable page count")
+    return int(match.group(1))
+
+
+def _page_svg(path, page, directory):
+    """One canonical CropBox frame, with page rotation and no paper fitting.
+
+    Cairo's default vector printing may shrink/center fractional page sizes.
+    Explicit no-fit settings keep the SVG coordinates aligned with a CropBox
+    raster at dpi/72. PDF word boxes retain their separate coordinate frame.
+    """
+    renderer = shutil.which("pdftocairo")
+    if not renderer:
+        raise RuntimeError("pdftocairo required (Poppler)")
+    output = pathlib.Path(directory) / f"page_{page}.svg"
+    result = subprocess.run(
+        [renderer, "-svg", "-origpagesizes", "-nocenter", "-noshrink",
+         "-f", str(page), "-l", str(page), str(path), str(output)],
+        capture_output=True, timeout=30, check=False)
+    if result.returncode != 0:
+        message = result.stderr.decode(errors="replace")[:140]
+        raise ValueError(f"page {page}: SVG conversion failed: {message}")
+    candidates = sorted(pathlib.Path(directory).glob(f"page_{page}*.svg"))
+    if len(candidates) != 1:
+        raise ValueError(f"page {page}: SVG produced missing/ambiguous page files")
+    svg = candidates[0]
+    if svg.stat().st_size > 15_000_000:
+        raise ValueError(f"page {page}: vector SVG exceeds 15 MB")
+    return svg.read_bytes()
+
+
+def _crop_native_png(source, destination, full_size, pixel_box):
+    """Copy exact pixels using libpng's public, versioned simplified C API.
+
+    Poppler already links libpng. Its native decoder keeps this path independent
+    of the Python test oracle and avoids handwritten PNG filtering or Pillow.
+    ABI: pnggroup/libpng v1.6.43 png.h, PNG_IMAGE_VERSION and simplified APIs.
+    """
+    import ctypes
+    import ctypes.util
+
+    class PngImage(ctypes.Structure):
+        _fields_ = [("opaque", ctypes.c_void_p), ("version", ctypes.c_uint32),
+                    ("width", ctypes.c_uint32), ("height", ctypes.c_uint32),
+                    ("format", ctypes.c_uint32), ("flags", ctypes.c_uint32),
+                    ("colormap_entries", ctypes.c_uint32),
+                    ("warning_or_error", ctypes.c_uint32), ("message", ctypes.c_char * 64)]
+
+    library = ctypes.util.find_library("png16")
+    if not library:
+        raise RuntimeError("libpng16 required for exact raster windows")
+    codec = ctypes.CDLL(library)
+    pointer = ctypes.POINTER(PngImage)
+    try:
+        codec.png_image_begin_read_from_file.argtypes = [pointer, ctypes.c_char_p]
+        codec.png_image_begin_read_from_file.restype = ctypes.c_int
+        codec.png_image_finish_read.argtypes = [pointer, ctypes.c_void_p, ctypes.c_void_p,
+                                                ctypes.c_int32, ctypes.c_void_p]
+        codec.png_image_finish_read.restype = ctypes.c_int
+        codec.png_image_write_to_file.argtypes = [pointer, ctypes.c_char_p, ctypes.c_int,
+                                                  ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p]
+        codec.png_image_write_to_file.restype = ctypes.c_int
+        codec.png_image_free.argtypes = [pointer]
+        codec.png_image_free.restype = None
+    except AttributeError as exc:
+        raise RuntimeError("libpng16 simplified image API unavailable") from exc
+    image, cropped = PngImage(), PngImage()
+    image.version = cropped.version = 1
+    left, top, right, bottom = pixel_box
+    try:
+        if not codec.png_image_begin_read_from_file(ctypes.byref(image), os.fsencode(source)):
+            raise ValueError("PNG decoding failed: " + image.message.decode(errors="replace"))
+        if (image.width, image.height) != tuple(full_size):
+            raise ValueError("native full-page PNG dimensions disagree with source coordinates")
+        if image.width * image.height > 32_000_000:
+            raise ValueError("full-page raster exceeds 32 million pixel bound")
+        if not (0 <= left < right <= image.width and 0 <= top < bottom <= image.height):
+            raise ValueError("pixel crop outside native full-page raster")
+        # PNG_FORMAT_RGBA = COLOR (0x02) | ALPHA (0x01). Keep every channel;
+        # the opaque Cairo background is not replaced or recomposited.
+        image.format = 3
+        stride = image.width * 4
+        buffer = (ctypes.c_ubyte * (stride * image.height))()
+        if not codec.png_image_finish_read(ctypes.byref(image), None, buffer, stride, None):
+            raise ValueError("PNG decoding failed: " + image.message.decode(errors="replace"))
+        cropped.width, cropped.height, cropped.format = right - left, bottom - top, 3
+        start = ctypes.byref(buffer, top * stride + left * 4)
+        if not codec.png_image_write_to_file(ctypes.byref(cropped), os.fsencode(destination),
+                                             0, start, stride, None):
+            raise ValueError("PNG encoding failed: " + cropped.message.decode(errors="replace"))
+    finally:
+        codec.png_image_free(ctypes.byref(image))
+        codec.png_image_free(ctypes.byref(cropped))
+
+
 def scan_pdf(filename,first=1,last=None,limit_paths=2000,
              limit_words=3000,region=None,selected_vector_ids=None):
     """Read-only exact native PDF pages; never infer real-world drawing units."""
@@ -486,12 +595,7 @@ def scan_pdf(filename,first=1,last=None,limit_paths=2000,
         if (len(region)!=4 or any(not math.isfinite(v) for v in region) or
             region[0]>=region[2] or region[1]>=region[3]):
             raise ValueError("region requires finite SVG xMin yMin xMax yMax")
-    info=subprocess.run([pdfinfo,str(path)],capture_output=True,
-                        timeout=10,check=False)
-    if info.returncode!=0:raise ValueError("pdfinfo failed: encrypted/invalid PDF")
-    match=re.search(rb"^Pages:\s*(\d+)\s*$",info.stdout,re.M)
-    if not match:raise ValueError("PDF has no readable page count")
-    total=int(match.group(1))
+    total=_page_count(path)
     end=last if last is not None else first
     if end>total or end-first+1>20:
         raise ValueError("page range outside PDF or exceeds 20-sheet bound")
@@ -504,23 +608,9 @@ def scan_pdf(filename,first=1,last=None,limit_paths=2000,
             if text.returncode!=0 or len(text.stdout)>8_000_000:
                 raise ValueError(f"page {page}: PDF word extraction failed/budget exceeded")
             words,box=_word_inventory(text.stdout,limit_words)
-            output=pathlib.Path(tmp)/f"page_{page}.svg"
-            render=subprocess.run([pdftocairo,"-svg","-f",str(page),
-                                   "-l",str(page),
-                                   str(path),str(output)],
-                                  capture_output=True,timeout=30,check=False)
-            if render.returncode!=0:
-                raise ValueError(f"page {page}: SVG conversion failed: {render.stderr.decode(errors='replace')[:140]}")
-            candidates=sorted(pathlib.Path(tmp).glob(f"page_{page}*.svg"))
-            if not candidates:
-                raise ValueError(f"page {page}: SVG conversion emitted no page file")
-            if len(candidates)>1:
-                raise ValueError(f"page {page}: SVG produced ambiguous page files")
-            svg=candidates[0]
-            if svg.stat().st_size>15_000_000:
-                raise ValueError(f"page {page}: vector SVG exceeds 15 MB")
-            inventory=_svg_inventory(svg.read_bytes(),limit_paths,region,selected_vector_ids)
+            inventory=_svg_inventory(_page_svg(path,page,tmp),limit_paths,region,selected_vector_ids)
             pages.append({"page":page,"pdf_page_size_pt":box,
+                          "svg_coordinate_frame":_SVG_FRAME,
                           "word_boxes_reported":len(words),
                           "words":words,"scale_annotations":_scales(words),
                           **inventory})
@@ -528,4 +618,143 @@ def scan_pdf(filename,first=1,last=None,limit_paths=2000,
             "file":str(path),"document_pages":total,
             "first_page":first,"last_page":end,"pages":pages,
             "physical_drawing_scale_verified":False,
-            "warning":"Native PDF word boxes and SVG vector centerlines use separate page coordinate frames; printed scale text is annotation only. SVG M/L/H/V/C/S/Q/T/Z curve centerline bboxes are exact under affine transforms; unsupported arc paths remain unlocalized, crop is exploratory, and no OCR, plotted geometric calibration, or code compliance is inferred."}
+            "warning":"Native PDF word boxes and SVG vector centerlines use separate page coordinate frames; SVG uses the rotated CropBox without paper fitting. Printed scale text is annotation only. SVG M/L/H/V/C/S/Q/T/Z curve centerline bboxes are exact under affine transforms; unsupported arc paths remain unlocalized, crop is exploratory, and no OCR, plotted geometric calibration, or code compliance is inferred."}
+
+
+def render_window(filename, output, page=1, region=None, dpi=120, limit_paths=128):
+    """Render a bounded PNG and return its exact pixel-to-SVG provenance.
+
+    The supplied region uses the same rotated CropBox frame as ``scan_pdf``.
+    Its edges are rounded outward to raster pixels; the returned inverse
+    transform describes those actual pixel edges. A private source snapshot
+    binds the vectors and image to one digest. Existing files are never replaced.
+    """
+    source, destination = pathlib.Path(filename), pathlib.Path(output)
+    if type(page) is not int or not 1 <= page <= 10000:
+        raise ValueError("invalid PDF page bounds")
+    if not isinstance(dpi, (int, float)) or not math.isfinite(dpi) or not 36 <= dpi <= 600:
+        raise ValueError("dpi must be finite and in [36,600]")
+    if type(limit_paths) is not int or not 1 <= limit_paths <= 5000:
+        raise ValueError("limits must be in [1,5000]")
+    if region is not None:
+        if (len(region) != 4 or any(not math.isfinite(v) for v in region)
+                or region[0] >= region[2] or region[1] >= region[3]):
+            raise ValueError("region requires finite SVG xMin yMin xMax yMax")
+        region = list(region)
+    if destination.suffix.lower() != ".png":
+        raise ValueError("output must be a new .png file")
+    if os.path.lexists(destination) or destination.resolve() == source.resolve():
+        raise ValueError("output already exists or aliases the source; choose a new PNG path")
+    if not destination.parent.is_dir():
+        raise ValueError("output parent directory does not exist")
+    if source.stat().st_size > 50_000_000:
+        raise ValueError("PDF exceeds 50 MB task-container inspection bound")
+    renderer = shutil.which("pdftocairo")
+    if not renderer:
+        raise RuntimeError("pdftocairo required (Poppler)")
+
+    with tempfile.TemporaryDirectory(prefix="hamon-pdf-window-") as temporary:
+        root = pathlib.Path(temporary)
+        snapshot = root / "source.pdf"
+        digest, source_size = hashlib.sha256(), 0
+        with source.open("rb") as incoming, snapshot.open("xb") as copied:
+            while chunk := incoming.read(131072):
+                source_size += len(chunk)
+                if source_size > 50_000_000:
+                    raise ValueError("PDF exceeds 50 MB task-container inspection bound")
+                digest.update(chunk)
+                copied.write(chunk)
+        total = _page_count(snapshot)
+        if page > total:
+            raise ValueError("page range outside PDF")
+        svg = _page_svg(snapshot, page, root)
+        inventory = _svg_inventory(svg, limit_paths, region)
+        viewbox = inventory["viewbox_svg_units"]
+        if (viewbox is None or len(viewbox) != 4
+                or any(not math.isfinite(v) for v in viewbox)
+                or viewbox[:2] != [0.0, 0.0]
+                or viewbox[2] <= 0 or viewbox[3] <= 0):
+            raise ValueError("unsupported SVG page coordinate frame")
+        width_pt, height_pt = viewbox[2:]
+        requested = region if region is not None else [0.0, 0.0, width_pt, height_pt]
+        if (requested[0] < 0 or requested[1] < 0
+                or requested[2] > width_pt or requested[3] > height_pt):
+            raise ValueError("region outside the rotated PDF CropBox")
+        scale = dpi / 72
+        full_width, full_height = math.ceil(width_pt * scale), math.ceil(height_pt * scale)
+        if max(full_width, full_height) > 32767:
+            raise ValueError("page raster axis exceeds 32767 pixels; choose lower dpi")
+        if full_width * full_height > 32_000_000:
+            raise ValueError("full-page raster exceeds 32 million pixels; choose lower dpi")
+        left, top = math.floor(requested[0] * scale), math.floor(requested[1] * scale)
+        right, bottom = math.ceil(requested[2] * scale), math.ceil(requested[3] * scale)
+        width, height = right - left, bottom - top
+        if width <= 0 or height <= 0 or max(width, height) > 8192 or width * height > 4_000_000:
+            raise ValueError("window exceeds 4 million pixels or 8192-pixel side; choose a smaller region or lower dpi")
+        prefix = root / "window"
+        rendered = subprocess.run(
+            [renderer, "-png", "-cropbox", "-singlefile", "-f", str(page), "-l", str(page),
+             "-r", str(dpi), str(snapshot), str(prefix)],
+            capture_output=True, timeout=30, check=False)
+        if rendered.returncode != 0:
+            message = rendered.stderr.decode(errors="replace")[:140]
+            raise ValueError(f"page {page}: PNG conversion failed: {message}")
+        png = prefix.with_suffix(".png")
+        if png.stat().st_size > 128_000_000:
+            raise ValueError("full-page PNG exceeds 128 MB intermediate bound")
+        with png.open("rb") as native:
+            header = native.read(33)
+        if (len(header) != 33 or header[:8] != b"\x89PNG\r\n\x1a\n"
+                or header[12:16] != b"IHDR"
+                or struct.unpack(">II", header[16:24]) != (full_width, full_height)):
+            raise ValueError("native full-page PNG dimensions disagree with source coordinates")
+        if (left, top, right, bottom) != (0, 0, full_width, full_height):
+            cropped_png = root / "cropped.png"
+            _crop_native_png(png, cropped_png, (full_width, full_height), (left, top, right, bottom))
+            png = cropped_png
+        if png.stat().st_size > 8_000_000:
+            raise ValueError("window PNG exceeds 8 MB; choose a smaller region or lower dpi")
+        pixels = png.read_bytes()
+        if (len(pixels) < 33 or pixels[:8] != b"\x89PNG\r\n\x1a\n"
+                or pixels[12:16] != b"IHDR" or struct.unpack(">II", pixels[16:24]) != (width, height)):
+            raise ValueError("native PNG dimensions disagree with the declared coordinate transform")
+
+        # A same-directory temporary plus an exclusive hard link is atomic and
+        # cannot truncate an existing output, including a concurrent writer.
+        pending = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix="hamon-window-", suffix=".png",
+                                             dir=destination.parent, delete=False) as staged:
+                pending = pathlib.Path(staged.name)
+                staged.write(pixels)
+                staged.flush()
+                os.fsync(staged.fileno())
+            os.link(pending, destination)
+        finally:
+            if pending is not None:
+                pending.unlink(missing_ok=True)
+
+    return {
+        "kind": "pdf-coordinate-window", "schema": "hamon.pdf.window.v1",
+        "file": str(source), "source_pdf_sha256": digest.hexdigest(),
+        "source_pdf_bytes": source_size, "document_pages": total, "page": page,
+        "svg_sha256": hashlib.sha256(svg).hexdigest(),
+        "image": {"path": str(destination), "mime_type": "image/png",
+                  "sha256": hashlib.sha256(pixels).hexdigest(), "bytes": len(pixels),
+                  "width": width, "height": height},
+        "coordinate_frame": {
+            "name": _SVG_FRAME, "viewbox_svg_units": viewbox,
+            "requested_region_svg": requested,
+            "covered_region_svg": [left * 72 / dpi, top * 72 / dpi,
+                                   right * 72 / dpi, bottom * 72 / dpi],
+            "dpi": dpi, "pixel_box_on_full_raster": [left, top, right, bottom],
+            "full_raster_size_pixels": [full_width, full_height],
+            "raster_selection": "exact native full-page pixels; no local re-render",
+            "svg_to_pixel": [scale, 0, 0, scale, -left, -top],
+            "pixel_to_svg": [72 / dpi, 0, 0, 72 / dpi, left * 72 / dpi, top * 72 / dpi],
+            "pixel_convention": "integer pixel edges; centers at (x+0.5,y+0.5)",
+        },
+        "vector_inventory": inventory, "ocr_performed": False,
+        "physical_drawing_scale_verified": False,
+        "warning": "Read the emitted PNG to inspect the actual marks. Pixel-to-SVG mapping is page geometry, not physical calibration. Native word boxes use a separate frame; no dimension label, OCR result, engineering measurement or code approval is inferred.",
+    }

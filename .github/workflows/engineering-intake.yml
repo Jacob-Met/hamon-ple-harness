@@ -17,6 +17,7 @@ on:
       - "ship/check_artifact_provenance.py"
       - "ship/audit_ple_delivery.py"
       - "ship/verify_native_dxf_corpus.py"
+      - "ship/verify_pdf_window_corpus.py"
       - "tests/**"
       - ".github/workflows/engineering-intake.yml"
 jobs:
@@ -57,6 +58,7 @@ jobs:
           git clone -q https://github.com/haiha-ux/cad-sample-tests.git "$RUNNER_TEMP/cad-sample-tests"
           git -C "$RUNNER_TEMP/cad-sample-tests" checkout -q --detach 150f4dce05a41a85d956189de8ded2cdd0d4a4d3
           python ship/verify_native_dxf_corpus.py "$RUNNER_TEMP/cad-sample-tests"
+          python ship/verify_pdf_window_corpus.py "$RUNNER_TEMP/cad-sample-tests" --output-dir "$RUNNER_TEMP/pdf-window-corpus"
       - name: Source provenance gate (does not conflate static acceptance with a new model score)
         run: |
           set +e
