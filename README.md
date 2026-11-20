@@ -1,6 +1,6 @@
 # HAMON physical-engineering agent harness (Google PLE)
 
-An Apache-2.0 harness derived from Google's Pi / Claude Opus 5.5 sample for the Physical-Engineering's Last Exam. It combines the organizer protocol with task-native IFC4 surface geometry/clearance checks, unit-safe structural and electrical calculation packs, read-only file inventory, vector PDF extraction and [source-anchored dimensional measurement](docs/pdf_measurement.md).
+An Apache-2.0 harness derived from Google's Pi / Claude Opus 5.5 sample for the Physical-Engineering's Last Exam. It combines the organizer protocol with task-native IFC4 surface geometry/clearance checks and source-native DXF dimensions, unit-safe structural and electrical calculation packs, read-only file inventory, vector PDF extraction and [source-anchored dimensional measurement](docs/pdf_measurement.md).
 
 **Evaluation status:** Existing `artifacts/` are inherited organizer sample-run material, not a scored HAMON dev run for current source. Public 29-task dev data access and a sanctioned zero-spend model evaluation route remain unverified. Static CI or historical template rewards do **not** establish an eligible competition score or leaderboard placement.
 
@@ -33,3 +33,15 @@ Inside the isolated task container, Pi can run `python3 /tmp/hamon-engineering-t
 | `package.json`, `package-lock.json` | Pi 1.1.0 and every package it uses, pinned. To upgrade, edit `package.json`, run `npm install --package-lock-only`, commit both |
 | `artifacts/` | The dev-set artifacts the portal grades, one folder per dev task |
 | `AGENTS.md` | The full rules, for a coding agent working on your entry |
+
+
+## Native CAD dimension recovery on PDF-outlined drawing text
+
+Run python3 /tmp/hamon-engineering-toolkit.py dxf-dimensions SOURCE.dxf
+when the original ASCII DXF accompanies a drawing PDF whose glyphs are
+all outlines rather than extractable words. Three independently published
+source CAD drawings have zero PDF native words, yet source-native geometric
+evidence recovers 62 of 62 dimension geometries (15/15, 25/25, 22/22).
+Diameter and radius entities use separate native center/circumference
+geometry, never disguised as linear dimensions. This is neither PDF-DXF equivalence nor an official
+scored PLE development run. See docs/dxf_native_dimensions.md.

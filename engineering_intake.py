@@ -232,6 +232,7 @@ async def provision_engineering_cli(session: Any) -> str:
     scale_bytes = pathlib.Path(__file__).with_name("hamon_scale.py").read_bytes()
     affine_bytes = pathlib.Path(__file__).with_name("hamon_affine_metric.py").read_bytes()
     callout_bytes = pathlib.Path(__file__).with_name("hamon_callout.py").read_bytes()
+    dxf_bytes = pathlib.Path(__file__).with_name("hamon_dxf.py").read_bytes()
     source = pathlib.Path(__file__).with_name("engineering_toolkit.py").read_bytes()
     target = "/tmp/hamon-engineering-toolkit.py"
     try:
@@ -255,6 +256,10 @@ async def provision_engineering_cli(session: Any) -> str:
             session.write_file("/tmp/hamon_callout.py", callout_bytes), timeout=12)
         if callout_size != len(callout_bytes):
             return ""
+        dxf_size = await asyncio.wait_for(
+            session.write_file("/tmp/hamon_dxf.py", dxf_bytes), timeout=12)
+        if dxf_size != len(dxf_bytes):
+            return ""
         reported_size = await asyncio.wait_for(
             session.write_file(target, source), timeout=12)
         if reported_size != len(source):
@@ -271,6 +276,7 @@ async def provision_engineering_cli(session: Any) -> str:
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-measure DRAWING.pdf anchors.json"
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-dimension-links DRAWING.pdf --page 1"
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-auto-measure DRAWING.pdf auto_targets.json"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py dxf-dimensions SOURCE.dxf"
         "\nPDF AUTO-MEASURE JSON: {\"schema\":\"hamon.pdf.auto-measure.v1\",\"page\":1,"
         "\"calibration_model\":\"affine_spd\",\"targets\":[{\"name\":\"offset\","
         "\"from\":{\"vector\":\"v3\",\"vertex\":0},\"to\":{\"vector\":\"v3\",\"vertex\":1},\"unit\":\"mm\"}]}"
@@ -298,6 +304,8 @@ async def provision_engineering_cli(session: Any) -> str:
         " requires consistent length scale to 1% by default. Output remains"
         " conditional until human checks which dimension lines the labels"
         " really identify. No inferred page scale, DPI, or code approval."
+        "\nDXF DIMENSIONS: native entity geometry and CAD measurement agreement,"
+        " units only from declared INSUNITS. PDF equivalence is not implied."
         "\nPDF VECTOR: native Poppler path/line extraction, page-space PDF word"
         " boxes, SVG vector bounds and printed-scale candidates. Page count"
         " is authoritative; printed labels 1:50/NTS are NOT calibrated scale."

@@ -421,6 +421,8 @@ def run(argv=None):
     dv.add_argument("--limit-words",type=int,default=500)
     dv.add_argument("--region",type=float,nargs=4,default=None,
                     metavar=("XMIN","YMIN","XMAX","YMAX"))
+    dx=sub.add_parser("dxf-dimensions",help="Read native ASCII DXF dimensions and qualify linear source geometry")
+    dx.add_argument("file");dx.add_argument("--limit",type=int,default=1000)
     dm=sub.add_parser("pdf-measure",help="Source-anchored metric length estimates from real PDF SVG vertices")
     dm.add_argument("file");dm.add_argument("spec")
     dl=sub.add_parser("pdf-dimension-links",help="Ground printed dimensions to actual PDF vector lines with two witnessed ends")
@@ -451,6 +453,9 @@ def run(argv=None):
             out=hamon_drawing.scan_pdf(
                 args.file,args.from_page,args.to_page,args.limit_paths,
                 args.limit_words,args.region)
+        elif args.cmd=="dxf-dimensions":
+            import hamon_dxf
+            out=hamon_dxf.scan_dxf(args.file,args.limit)
         elif args.cmd=="pdf-measure":
             import hamon_scale
             out=hamon_scale.measure_pdf(args.file,args.spec,quantity,UNITS["m"])
