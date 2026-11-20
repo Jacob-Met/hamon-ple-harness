@@ -68,12 +68,32 @@ def probe_xlsx(path):
     result = {"kind": "spreadsheet"}
     try:
         with zipfile.ZipFile(path) as z:
-            info = z.getinfo("xl/workbook.xml")
+            workbook = "xl/workbook.xml"
+            if "_rels/.rels" in z.namelist():
+                rels = z.getinfo("_rels/.rels")
+                if rels.file_size > 2_000_000:
+                    return {**result, "warning": "workbook_manifest_too_large"}
+                prefixes = ("http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+                            "http://purl.oclc.org/ooxml/officeDocument/relationships")
+                office = [r for r in ET.fromstring(z.read(rels)).findall(
+                    "{http://schemas.openxmlformats.org/package/2006/relationships}Relationship")
+                    if r.get("Type") in {p + "/officeDocument" for p in prefixes}]
+                if len(office) != 1 or office[0].get("TargetMode", "Internal") != "Internal":
+                    raise ValueError("expected one internal workbook")
+                import posixpath
+                workbook = posixpath.normpath(office[0].get("Target", "").lstrip("/"))
+                if workbook.startswith("../") or workbook in (".", ".."):
+                    raise ValueError("invalid workbook part")
+            info = z.getinfo(workbook)
             if info.file_size > 2_000_000:
                 return {**result, "warning": "workbook_manifest_too_large"}
             root = ET.fromstring(z.read(info))
-            ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-            names = [e.attrib["name"][:100] for e in root.iter(ns + "sheet")
+            namespaces = ("http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+                          "http://purl.oclc.org/ooxml/spreadsheetml/main")
+            if root.tag not in {"{" + uri + "}workbook" for uri in namespaces}:
+                raise ValueError("unsupported workbook namespace")
+            ns = root.tag.removesuffix("workbook")
+            names = [e.attrib["name"][:100] for e in root.findall(ns + "sheets/" + ns + "sheet")
                      if "name" in e.attrib]
             result["sheets"] = names[:24]
             result["sheet_count"] = len(names)
