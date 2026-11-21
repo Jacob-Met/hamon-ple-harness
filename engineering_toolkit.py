@@ -315,6 +315,58 @@ def _address(column, row):
     return letters + str(row)
 
 
+def _shared_lookup_masters(cells, ns):
+    """Find sheet-scoped master definitions before a follower is inspected."""
+    masters = {}
+    for cell in cells:
+        formula = cell.find(ns + "f")
+        if formula is None or formula.get("t") != "shared":
+            continue
+        if not (formula.text or "").strip() and "ref" not in formula.attrib:
+            continue
+        group = formula.get("si", "")
+        if not re.fullmatch(r"[0-9]{1,10}", group) or int(group) > 4294967295:
+            continue
+        group = int(group)
+        if group in masters:
+            masters[group] = None
+        elif len(masters) >= 1024:
+            return {}
+        else:
+            masters[group] = (cell.get("r", ""), formula.get("ref", ""), (formula.text or "").strip())
+    return masters
+
+
+def _shared_lookup_at(master, address):
+    """Translate only captured A1 references, leaving quoted sheet names intact."""
+    origin, area, expression = master
+    match = _EXACT_LOOKUP.fullmatch(expression)
+    bounds = re.fullmatch(rf"({_CELL_REF})(?::({_CELL_REF}))?", area, re.I | re.ASCII)
+    if match is None or bounds is None:
+        return ""
+    try:
+        x, y = _grid_position(origin)
+        to_x, to_y = _grid_position(address)
+        x1, y1 = _grid_position(bounds[1])
+        x2, y2 = _grid_position(bounds[2] or bounds[1])
+        if not (x1 <= x <= x2 and y1 <= y <= y2 and x1 <= to_x <= x2 and y1 <= to_y <= y2):
+            return ""
+        for field in ("end", "start", "key"):
+            ref = match[field]
+            col, row = _grid_position(ref)
+            if not ref.startswith("$"):
+                col += to_x - x
+            if "$" not in ref[1:]:
+                row += to_y - y
+            if not (1 <= col <= 16384 and 1 <= row <= 1048576):
+                return ""
+            lo, hi = match.span(field)
+            expression = expression[:lo] + _address(col, row) + expression[hi:]
+    except ValueError:
+        return ""
+    return expression
+
+
 def _numeric_cell(cell, value):
     if cell.get("t", "n") != "n" or value is None or not value.text:
         return None
@@ -393,7 +445,10 @@ def xlsx_audit(filename: str):
                 complete_index = False
             sheet_values = literals.setdefault(name, {})
             derived_ranges = []
-            for cell in root.iterfind(f"{ns}sheetData/{ns}row/{ns}c"):
+            cell_path = f"{ns}sheetData/{ns}row/{ns}c"
+            unresolved_shared_followers = 0
+            masters = _shared_lookup_masters(root.iterfind(cell_path), ns)
+            for cell in root.iterfind(cell_path):
                 cells += 1
                 formula = cell.find(ns + "f")
                 value = cell.find(ns + "v")
@@ -421,9 +476,22 @@ def xlsx_audit(filename: str):
                         except ValueError:
                             derived_ranges = None
                     expression = (formula.text or "").strip()
+                    formula_type = formula.get("t", "normal")
+                    shared_master = None
+                    if formula_type == "shared":
+                        group = formula.get("si", "")
+                        if re.fullmatch(r"[0-9]{1,10}", group):
+                            shared_master = masters.get(int(group))
+                        if not expression:
+                            if shared_master is None:
+                                unresolved_shared_followers += 1
+                            else:
+                                expression = shared_master[2]
                     if expression.upper().startswith(("VLOOKUP(", "HLOOKUP(")):
                         lookup_total += 1
-                        if len(lookups) < 256 and len(expression) <= 512 and formula.get("t", "normal") == "normal":
+                        if len(lookups) < 256 and len(expression) <= 512 and formula_type in ("normal", "shared"):
+                            if formula_type == "shared":
+                                expression = _shared_lookup_at(shared_master, address) if shared_master else ""
                             lookups.append((name, address, expression, _numeric_cell(cell, value)))
                     formulas += 1
                     if value is None:
@@ -458,7 +526,9 @@ def xlsx_audit(filename: str):
             manifest["sheets"].append({**sheet, "cells": cells, "formulas": formulas,
                                        "formulas_without_cached_values": missing,
                                        "formulas_with_empty_string_cache": empty_strings,
-                                       "shared_formula_followers": followers, "error_cells": errors,
+                                       "shared_formula_followers": followers,
+                                       "unresolved_shared_formula_followers": unresolved_shared_followers,
+                                       "error_cells": errors,
                                        "error_count": error_count})
     counts = {"matched": 0, "mismatch": 0, "unverified": lookup_total}
     examples = []

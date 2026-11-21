@@ -17,3 +17,5 @@ counts cover top-level VLOOKUP and HLOOKUP calls. The verifier checks up to
 keeps the inventory and reports all lookups as unverified.
 
 Array-formula and data-table result ranges are formula-derived even when a follower has no formula element. Such cells cannot qualify as literal lookup inputs. Missing, malformed, out-of-grid or inconsistent master ranges, and more than 128 ranges on one sheet, make dependencies from that sheet unverified. Valid disjoint ranges and unrelated sheets retain their literal inputs. Range containment never expands the worksheet grid.
+
+Shared lookup formulas use their worksheet-local master and declared result range. The audit translates relative rows and columns for each saved follower and preserves absolute references. It checks the same literal-value and first-match rules as an ordinary lookup. Unresolved followers appear in each worksheet’s `unresolved_shared_formula_followers` count when a master is missing, ambiguous, or the sheet exceeds 1,024 shared groups.
