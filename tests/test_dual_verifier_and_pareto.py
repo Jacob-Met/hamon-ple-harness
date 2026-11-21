@@ -19,6 +19,24 @@ import hamon_pareto as hp
 
 
 class DualSolverVerifierTests(unittest.TestCase):
+    def test_heat_exchanger_rating_at_equal_and_nearly_equal_inlets(self):
+        spec = {
+            "m_hot_kg_s": 1, "cp_hot_J_kgK": 150, "Th_in_K": 310.0,
+            "m_cold_kg_s": 1, "cp_cold_J_kgK": 270, "Tc_in_K": 310.0,
+            "UA_W_K": 120.0,
+        }
+        for arrangement in ("counterflow", "parallel"):
+            inputs = dict(spec, arrangement=arrangement)
+            equal = dv.solve_heat_exchanger_ntu_dual(inputs)
+            assert equal["dual_verified"] and 0 < equal["effectiveness"] < 1
+            assert equal["Q_duty_W"] == 0
+            assert equal["Th_out_K"] == equal["Tc_out_K"] == 310.0
+            inputs["Th_in_K"] = math.nextafter(310.0, math.inf)
+            near = dv.solve_heat_exchanger_ntu_dual(inputs)
+            assert near["dual_verified"] and near["effectiveness"] == equal["effectiveness"]
+            expected_duty = 150 * equal["effectiveness"] * (inputs["Th_in_K"] - 310.0)
+            assert math.isclose(near["Q_duty_W"], expected_duty, rel_tol=1e-12)
+
     def test_si_7dim_rational_exponents_and_transcendental_guards(self):
         # Rational intermediate exponents: Manning R^(2/3), fire D*^(2/5), spillway H^(3/2)
         q_manning = dv.eval_quantity("(8*m)**(2/3)")
