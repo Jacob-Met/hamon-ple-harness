@@ -19,6 +19,31 @@ import hamon_pareto as hp
 
 
 class DualSolverVerifierTests(unittest.TestCase):
+    def test_prescribed_phasors_and_conflicting_voltages(self):
+        branch = {"n1": "s", "n2": "gnd", "R_ohm": 5}
+        network = {"voltage_sources_to_ground": {"s": [0, 10]}, "resistors": [branch]}
+        result = dv.solve_domain_problem("ac_phasor_rlc_network", dict(network, freq_Hz=60))
+        assert result["dual_verified"]
+        assert result["Vs_V"] == [0, 10]
+        assert result["I_branch_s__GND___A"] == [0, 2]
+        assert result["Vs_mag_V"] == 10 and result["Vs_deg"] == 90
+        for sources in ([{"node": "s", "V": 5}, {"node": " s ", "V": 1}],
+                        [{"node": " s ", "V": 1}, {"node": "s", "V": 5}],
+                        {"ground": [0, 1], "s": 10}):
+            try:
+                dv.solve_nodal_kcl(dict(network, voltage_sources_to_ground=sources))
+            except ValueError as exc:
+                assert "conflicting fixed voltages" in str(exc)
+            else:
+                raise AssertionError("incompatible fixed potentials were accepted")
+        for voltage in ("nan", "inf", [0, "nan"], [0, "inf"]):
+            try:
+                dv.solve_nodal_kcl(dict(network, voltage_sources_to_ground={"s": voltage}))
+            except ValueError as exc:
+                assert "nonfinite fixed voltage" in str(exc)
+            else:
+                raise AssertionError("nonfinite fixed potential was accepted")
+
     def test_beam_off_node_point_load_positions(self):
         # Simply supported 6 m span. Exact force and moment equilibrium fixes
         # the two reactions and the moment at the physical 3 m section.

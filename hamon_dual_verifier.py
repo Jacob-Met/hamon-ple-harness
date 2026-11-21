@@ -937,10 +937,10 @@ def solve_diaphragm_torsion(spec: dict[str, Any]) -> dict[str, Any]:
 def solve_nodal_kcl(spec: dict[str, Any]) -> dict[str, Any]:
     """Dual-solve general DC or complex AC nodal KCL/KVL network (Admittance Y*V = I)."""
     vs_raw = spec.get("voltage_sources_to_ground", {})
-    zero_is_driven = (
-        ("0" in vs_raw) if isinstance(vs_raw, dict)
-        else any(str(vs.get("node", "")).strip() == "0" for vs in (vs_raw or []))
-    )
+    prescribed = (list(vs_raw.items()) if isinstance(vs_raw, dict) else [
+        (vs["node"], vs.get("V", vs.get("V_V", 0.0))) for vs in (vs_raw or [])
+    ])
+    zero_is_driven = any(str(node).strip() == "0" for node, _ in prescribed)
 
     def _norm_node(n: Any) -> str:
         s = str(n).strip()
@@ -956,12 +956,13 @@ def solve_nodal_kcl(spec: dict[str, Any]) -> dict[str, Any]:
         return complex(val)
 
     fixed_v: dict[str, complex] = {"__GND__": 0j}
-    if isinstance(vs_raw, dict):
-        for k, v in vs_raw.items():
-            fixed_v[_norm_node(k)] = _to_c(v)
-    elif isinstance(vs_raw, list):
-        for vs in vs_raw:
-            fixed_v[_norm_node(vs["node"])] = _to_c(vs.get("V", vs.get("V_V", 0.0)))
+    for node, value in prescribed:
+        nd, voltage = _norm_node(node), _to_c(value)
+        if not (math.isfinite(voltage.real) and math.isfinite(voltage.imag)):
+            raise ValueError(f"nonfinite fixed voltage at node {node!r}")
+        if nd in fixed_v and fixed_v[nd] != voltage:
+            raise ValueError(f"conflicting fixed voltages at node {node!r}")
+        fixed_v[nd] = voltage
 
     branches: list[tuple[str, str, complex]] = []
     for r in spec.get("resistors", []):
@@ -986,7 +987,7 @@ def solve_nodal_kcl(spec: dict[str, Any]) -> dict[str, Any]:
         y_c = _to_c(y_item.get("Y", y_item.get("Y_S", 0.0)))
         branches.append((n1, n2, y_c))
 
-    all_nodes: set[str] = set()
+    all_nodes = set(fixed_v)
     for i in range(1, int(spec.get("num_nodes", 0)) + 1):
         all_nodes.add(str(i))
     for n1, n2, _ in branches:
@@ -1023,14 +1024,12 @@ def solve_nodal_kcl(spec: dict[str, Any]) -> dict[str, Any]:
             else:
                 I_rhs[i2] += y_val * fixed_v.get(n1, 0j)
 
-    is_ac = (
-        bool(spec.get("impedances") or spec.get("admittances"))
-        or any(v.imag != 0 for row in Y for v in row)
-        or any(v.imag != 0 for v in I_rhs)
-    )
+    complex_system = any(v.imag != 0 for row in Y for v in row) or any(v.imag != 0 for v in I_rhs)
+    is_ac = (complex_system or bool(spec.get("impedances") or spec.get("admittances"))
+             or any(v.imag != 0 for v in fixed_v.values()))
     V_all: dict[str, complex] = dict(fixed_v)
     if m > 0:
-        if is_ac:
+        if complex_system:
             lin = dual_solve_linear(Y, I_rhs)
         else:
             lin = dual_solve_linear([[v.real for v in row] for row in Y], [v.real for v in I_rhs])
