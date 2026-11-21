@@ -177,5 +177,52 @@ class DualSolverVerifierTests(unittest.TestCase):
             self.assertIn("xlsx_errors", audit["reason"])
 
 
+
+    def test_wave2_dxf_bulge_and_multidiscipline_solvers(self):
+        # Curved stadium bulge area/perimeter + paper-space group 67 exclusion
+        verts = [(0.0, 0.0, 0.0), (30.0, 0.0, 1.0), (30.0, 8.0, 0.0), (0.0, 8.0, 1.0)]
+        area, perim = ct.bulge_area_and_perimeter(verts, closed=True)
+        self.assertAlmostEqual(area, 240.0 + math.pi * 16.0, places=9)
+        self.assertAlmostEqual(perim, 60.0 + 8.0 * math.pi, places=9)
+
+        # Complex symmetric non-Hermitian AC nodal admittance + exact 1e-16 V Decimal guard
+        ac = dv.solve_nodal_kcl({
+            "num_nodes": 3,
+            "admittances": [
+                {"from": 1, "to": 0, "Y": [0.12, -0.08]},
+                {"from": 1, "to": 2, "Y": [0.25, -0.40]},
+                {"from": 2, "to": 3, "Y": [0.05, 0.35]},
+                {"from": 3, "to": 0, "Y": [0.08, -0.15]},
+            ],
+            "current_injections": [{"node": 1, "I": [12.0, -3.5]}, {"node": 3, "I": [-2.0, 4.0]}],
+        })
+        self.assertTrue(ac["dual_verified"])
+        self.assertLess(ac["dual_rel_discrepancy"], 1e-11)
+        self.assertFalse(dv.verify_quantity_inequality("1.0000000000000001*V", "<=", "1*V")["passes"])
+
+        # Eccentric bolt group, 3D MEP clearance, NTU heat exchanger, Bélanger jump, HVAC coil+duct
+        bg = dv.solve_bolt_group_eccentric_dual({
+            "bolts_xy_m": [[-0.1, -0.1], [0.1, -0.1], [-0.1, 0.1], [0.1, 0.1]],
+            "Px_N": 0.0, "Py_N": -120e3, "load_x_m": 0.25, "load_y_m": 0.0, "bolt_phi_Rn_N": 140e3,
+        })
+        self.assertTrue(bg["dual_verified"])
+        mep = dv.solve_mep_routing_clearance_3d({
+            "min_clearance_m": 0.10, "min_slope_ratio": 0.01,
+            "segments": [{"run_id": 1, "p1": [0.0, 0.0, 3.52], "q1": [8.0, 0.0, 3.40], "outer_radius_m": 0.10}],
+            "obstacles_aabb": [{"min": [3.5, -2.0, 2.50], "max": [4.5, 2.0, 3.00]}],
+        })
+        self.assertTrue(mep["dual_verified"] and mep["passes_routing"])
+        hx = dv.solve_heat_exchanger_ntu_dual({
+            "m_hot_kg_s": 2.0, "cp_hot_J_kgK": 4180.0, "Th_in_K": 365.0,
+            "m_cold_kg_s": 2.5, "cp_cold_J_kgK": 4180.0, "Tc_in_K": 295.0,
+            "UA_W_K": 14000.0, "arrangement": "counterflow",
+        })
+        self.assertTrue(hx["dual_verified"])
+        hj = dv.solve_hydraulic_jump_dual({"Q_m3_s": 12.0, "bottom_width_m": 3.5, "side_slope_z": 0.0, "y1_m": 0.45})
+        self.assertTrue(hj["dual_verified"])
+        b_pre = hp.route_task_budget(by_extension={".md": 1}, engineering_file_count=1, presolve_verified=True)
+        self.assertEqual(b_pre["thinking_tier"], "low")
+
+
 if __name__ == "__main__":
     unittest.main()

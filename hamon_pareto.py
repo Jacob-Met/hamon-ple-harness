@@ -1,11 +1,13 @@
-"""Stage 2 Accuracy-vs-Cost Pareto Router & Strict Deliverable Format Verifier.
+"""Stage 2 Accuracy-vs-Cost Pareto Router & Strict Deliverable Semantic/Format Verifier.
 
-Routes per-task reasoning effort (`medium` / `high` / `max`) and delivery reserve
-windows strictly from task-agnostic structural observables (file counts, CAD/IFC/PDF
-modalities, MCP server count, deliverable count) — zero task-ID or filename shortcuts.
+Routes per-task reasoning effort (`low` / `medium` / `high` / `max`) and delivery
+reserve windows strictly from task-agnostic structural observables (file counts,
+CAD/IFC/PDF modalities, MCP server count, deliverable count, and deterministic
+symbolic/CAD pre-solve verification) — zero task-ID or filename shortcuts.
 """
 from __future__ import annotations
 
+import ast
 import csv
 import io
 import json
@@ -26,6 +28,12 @@ TIER_COST_MULTIPLIER = {
     "max": 0.92,  # prompt-cached + deterministic pre-computation savings
 }
 
+_STUB_MARKERS = frozenset({
+    "[tool call]",
+    "<tool_call>",
+    "(pi stopped without a final message)",
+})
+
 
 def route_task_budget(
     *,
@@ -35,6 +43,7 @@ def route_task_budget(
     deliverable_count: int = 0,
     agent_timeout_sec: int | None = None,
     model_api: str = "google-cloud/claude-opus-5-5",
+    presolve_verified: bool = False,
 ) -> dict[str, Any]:
     """Select Pareto-optimal Pi `--thinking` tier and delivery reserve budget."""
     exts = {k.lower(): int(v) for k, v in (by_extension or {}).items() if int(v) > 0}
@@ -63,8 +72,15 @@ def route_task_budget(
         tier = "max"
         reserve_sec = 25 * 60
     elif complexity_points >= 2:
-        tier = "high"
-        reserve_sec = 16 * 60
+        if presolve_verified and not has_3d_bim and complexity_points <= 3 and mcp_server_count == 0:
+            tier = "medium"
+            reserve_sec = 10 * 60
+        else:
+            tier = "high"
+            reserve_sec = 16 * 60
+    elif presolve_verified and not has_3d_bim and mcp_server_count == 0:
+        tier = "low"
+        reserve_sec = 6 * 60
     else:
         tier = "medium"
         reserve_sec = 10 * 60
@@ -81,6 +97,7 @@ def route_task_budget(
         "thinking_tier": tier,
         "delivery_reserve_sec": reserve_sec,
         "complexity_points": complexity_points,
+        "presolve_verified": bool(presolve_verified),
         "estimated_cost_usd": est_cost_usd,
         "cost_reduction_factor": round(14.87 / est_cost_usd, 3),
     }
@@ -107,7 +124,7 @@ def sanitize_scalar_or_json_answer(raw_text: str, expected_format: str = "auto")
 
 
 def audit_local_deliverable(path: str | Path) -> dict[str, Any]:
-    """Deterministic format & calculation hygiene guard on a deliverable file."""
+    """Deterministic format, syntax, STEP/IFC & stub hygiene guard on a deliverable file."""
     p = Path(path)
     if not p.is_file():
         return {"ok": False, "path": str(p), "reason": "missing"}
@@ -127,6 +144,22 @@ def audit_local_deliverable(path: str | Path) -> dict[str, Any]:
                 return {"ok": False, "path": str(p), "reason": "ragged_or_empty_csv"}
         except Exception as exc:
             return {"ok": False, "path": str(p), "reason": f"invalid_csv:{type(exc).__name__}"}
+    elif ext in (".md", ".txt"):
+        txt = p.read_text(encoding="utf-8", errors="replace").strip()
+        if not txt or txt.lower() in _STUB_MARKERS:
+            return {"ok": False, "path": str(p), "reason": "placeholder_or_stub_text"}
+    elif ext == ".py":
+        try:
+            src = p.read_text(encoding="utf-8", errors="strict")
+            tree = ast.parse(src)
+            if not tree.body:
+                return {"ok": False, "path": str(p), "reason": "empty_python_ast"}
+        except Exception as exc:
+            return {"ok": False, "path": str(p), "reason": f"invalid_python:{type(exc).__name__}"}
+    elif ext == ".ifc":
+        head_tail = p.read_text(encoding="utf-8", errors="replace")
+        if "ISO-10303-21;" not in head_tail[:512] or "DATA;" not in head_tail or "END-ISO-10303-21;" not in head_tail[-512:]:
+            return {"ok": False, "path": str(p), "reason": "malformed_ifc_step_structure"}
     elif ext in (".xlsx", ".xlsm"):
         import engineering_toolkit as tk
         audit = tk.xlsx_audit(str(p))
@@ -148,13 +181,13 @@ def audit_local_deliverable(path: str | Path) -> dict[str, Any]:
     return {"ok": True, "path": str(p), "bytes": sz}
 
 
-
 def route_from_intake_prompt(
     engineering_inventory: str,
     *,
     mcp_server_count: int = 0,
     deliverable_count: int = 0,
     model_api: str = "google-cloud/claude-opus-5-5",
+    presolve_verified: bool = False,
 ) -> dict[str, Any] | None:
     """Parse hamon.ple.intake.v1 metadata from intake_for_prompt output if present (zero extra exec calls)."""
     if not engineering_inventory:
@@ -168,11 +201,13 @@ def route_from_intake_prompt(
                 return None
             exts = rec.get("by_extension") if isinstance(rec.get("by_extension"), dict) else {}
             fcount = len(rec.get("files") or []) if isinstance(rec.get("files"), list) else sum(int(v) for v in exts.values())
+            pre_ok = bool(presolve_verified or rec.get("presolve_verified", False))
             return route_task_budget(
                 by_extension=exts,
                 engineering_file_count=fcount,
                 mcp_server_count=mcp_server_count,
                 deliverable_count=deliverable_count,
                 model_api=model_api,
+                presolve_verified=pre_ok,
             )
     return None
