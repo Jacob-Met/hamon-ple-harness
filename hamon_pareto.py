@@ -7,15 +7,12 @@ symbolic/CAD pre-solve verification) — zero task-ID or filename shortcuts.
 """
 from __future__ import annotations
 
-import ast
-import csv
-import io
 import json
 import math
-from pathlib import Path
 import re
 from typing import Any
-import zipfile
+
+from engineering_toolkit import audit_local_deliverable
 
 CAD_MODALITIES = frozenset({".ifc", ".ifczip", ".dxf", ".dwg", ".step", ".stp", ".rvt"})
 DOC_MODALITIES = frozenset({".pdf", ".xlsx", ".xlsm", ".docx"})
@@ -27,13 +24,6 @@ TIER_COST_MULTIPLIER = {
     "high": 0.58,
     "max": 0.92,  # prompt-cached + deterministic pre-computation savings
 }
-
-_STUB_MARKERS = frozenset({
-    "[tool call]",
-    "<tool_call>",
-    "(pi stopped without a final message)",
-})
-
 
 def route_task_budget(
     *,
@@ -125,64 +115,6 @@ def sanitize_scalar_or_json_answer(raw_text: str, expected_format: str = "auto")
             raise ValueError("non-finite number")
         return m.group(0)
     return text
-
-
-def audit_local_deliverable(path: str | Path) -> dict[str, Any]:
-    """Deterministic format, syntax, STEP/IFC & stub hygiene guard on a deliverable file."""
-    p = Path(path)
-    if not p.is_file():
-        return {"ok": False, "path": str(p), "reason": "missing"}
-    sz = p.stat().st_size
-    if sz == 0:
-        return {"ok": False, "path": str(p), "reason": "empty"}
-    ext = p.suffix.lower()
-    if ext == ".json":
-        try:
-            json.loads(p.read_text(encoding="utf-8"))
-        except Exception as exc:
-            return {"ok": False, "path": str(p), "reason": f"invalid_json:{type(exc).__name__}"}
-    elif ext == ".csv":
-        try:
-            rows = list(csv.reader(io.StringIO(p.read_text(encoding="utf-8", errors="strict"))))
-            if not rows or any(len(r) != len(rows[0]) for r in rows):
-                return {"ok": False, "path": str(p), "reason": "ragged_or_empty_csv"}
-        except Exception as exc:
-            return {"ok": False, "path": str(p), "reason": f"invalid_csv:{type(exc).__name__}"}
-    elif ext in (".md", ".txt"):
-        txt = p.read_text(encoding="utf-8", errors="replace").strip()
-        if not txt or txt.lower() in _STUB_MARKERS:
-            return {"ok": False, "path": str(p), "reason": "placeholder_or_stub_text"}
-    elif ext == ".py":
-        try:
-            src = p.read_text(encoding="utf-8", errors="strict")
-            tree = ast.parse(src)
-            if not tree.body:
-                return {"ok": False, "path": str(p), "reason": "empty_python_ast"}
-        except Exception as exc:
-            return {"ok": False, "path": str(p), "reason": f"invalid_python:{type(exc).__name__}"}
-    elif ext in (".ifc", ".step", ".stp"):
-        head_tail = p.read_text(encoding="utf-8", errors="replace")
-        if "ISO-10303-21;" not in head_tail[:512] or "DATA;" not in head_tail or "END-ISO-10303-21;" not in head_tail[-512:]:
-            return {"ok": False, "path": str(p), "reason": "malformed_ifc_step_structure"}
-    elif ext in (".xlsx", ".xlsm"):
-        import engineering_toolkit as tk
-        audit = tk.xlsx_audit(str(p))
-        err_cells = sum(s.get("error_count", 0) for s in audit.get("sheets", []))
-        mismatches = audit.get("lookup_audit", {}).get("counts", {}).get("mismatch", 0)
-        if err_cells > 0 or mismatches > 0:
-            return {
-                "ok": False,
-                "path": str(p),
-                "reason": f"xlsx_errors(error_cells={err_cells},lookup_mismatches={mismatches})",
-            }
-    elif ext in (".zip", ".docx"):
-        try:
-            with zipfile.ZipFile(p, "r") as zf:
-                if not zf.namelist() or zf.testzip() is not None:
-                    return {"ok": False, "path": str(p), "reason": "corrupt_or_empty_zip"}
-        except Exception:
-            return {"ok": False, "path": str(p), "reason": "bad_zip"}
-    return {"ok": True, "path": str(p), "bytes": sz}
 
 
 def route_from_intake_prompt(

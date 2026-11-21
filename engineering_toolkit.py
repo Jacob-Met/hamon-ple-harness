@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import argparse
 import ast
+import csv
 from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, getcontext
+import io
 import json
 import math
 import pathlib
@@ -20,6 +22,7 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 import zipfile
+from typing import Any
 
 getcontext().prec = 28
 ZERO = (0, 0, 0, 0, 0)  # kg, m, s, A, K
@@ -753,6 +756,70 @@ def calc_pack(filename: str):
             "note":"Algebraic verification only. Independently verify the physics, source documents, load cases, assumptions and governing design code."}
 
 
+_STUB_MARKERS = frozenset({
+    "[tool call]",
+    "<tool_call>",
+    "(pi stopped without a final message)",
+})
+
+
+def audit_local_deliverable(path: str | pathlib.Path) -> dict[str, Any]:
+    """Deterministic format, syntax, STEP/IFC & stub hygiene guard on a deliverable file."""
+    p = pathlib.Path(path)
+    if not p.is_file():
+        return {"ok": False, "path": str(p), "reason": "missing"}
+    sz = p.stat().st_size
+    if sz == 0:
+        return {"ok": False, "path": str(p), "reason": "empty"}
+    ext = p.suffix.lower()
+    if ext == ".json":
+        try:
+            json.loads(p.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {"ok": False, "path": str(p), "reason": f"invalid_json:{type(exc).__name__}"}
+    elif ext == ".csv":
+        try:
+            rows = list(csv.reader(io.StringIO(p.read_text(encoding="utf-8", errors="strict"))))
+            if not rows or any(len(r) != len(rows[0]) for r in rows):
+                return {"ok": False, "path": str(p), "reason": "ragged_or_empty_csv"}
+        except Exception as exc:
+            return {"ok": False, "path": str(p), "reason": f"invalid_csv:{type(exc).__name__}"}
+    elif ext in (".md", ".txt"):
+        txt = p.read_text(encoding="utf-8", errors="replace").strip()
+        if not txt or txt.lower() in _STUB_MARKERS:
+            return {"ok": False, "path": str(p), "reason": "placeholder_or_stub_text"}
+    elif ext == ".py":
+        try:
+            src = p.read_text(encoding="utf-8", errors="strict")
+            tree = ast.parse(src)
+            if not tree.body:
+                return {"ok": False, "path": str(p), "reason": "empty_python_ast"}
+        except Exception as exc:
+            return {"ok": False, "path": str(p), "reason": f"invalid_python:{type(exc).__name__}"}
+    elif ext in (".ifc", ".step", ".stp"):
+        head_tail = p.read_text(encoding="utf-8", errors="replace")
+        if "ISO-10303-21;" not in head_tail[:512] or "DATA;" not in head_tail or "END-ISO-10303-21;" not in head_tail[-512:]:
+            return {"ok": False, "path": str(p), "reason": "malformed_ifc_step_structure"}
+    elif ext in (".xlsx", ".xlsm"):
+        audit = xlsx_audit(str(p))
+        err_cells = sum(s.get("error_count", 0) for s in audit.get("sheets", []))
+        mismatches = audit.get("lookup_audit", {}).get("counts", {}).get("mismatch", 0)
+        if err_cells > 0 or mismatches > 0:
+            return {
+                "ok": False,
+                "path": str(p),
+                "reason": f"xlsx_errors(error_cells={err_cells},lookup_mismatches={mismatches})",
+            }
+    elif ext in (".zip", ".docx"):
+        try:
+            with zipfile.ZipFile(p, "r") as zf:
+                if not zf.namelist() or zf.testzip() is not None:
+                    return {"ok": False, "path": str(p), "reason": "corrupt_or_empty_zip"}
+        except Exception:
+            return {"ok": False, "path": str(p), "reason": "bad_zip"}
+    return {"ok": True, "path": str(p), "bytes": sz}
+
+
 def run(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     sub=p.add_subparsers(dest="cmd",required=True)
@@ -844,8 +911,7 @@ def run(argv=None):
             import hamon_cad_takeoff
             out=hamon_cad_takeoff.scan_dxf_takeoff(args.file)
         elif args.cmd=="format-guard":
-            import hamon_pareto
-            out=hamon_pareto.audit_local_deliverable(args.file)
+            out = audit_local_deliverable(args.file)
             if not out.get("ok", False):
                 print(json.dumps(out,ensure_ascii=True,default=str))
                 return 3
