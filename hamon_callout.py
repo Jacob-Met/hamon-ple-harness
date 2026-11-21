@@ -88,6 +88,13 @@ def _label(text):
             "physical_unit":unit}
 
 
+def _adjacent_word_boxes(left, right):
+    height = min(left[3] - left[1], right[3] - right[1])
+    gap = right[0] - left[2]
+    return (-0.5 <= gap <= max(2, 0.5 * height)
+            and abs(left[1] + left[3] - right[1] - right[3]) <= 0.6 * height)
+
+
 def _text_rects(page,frame):
     vx,vy,sx,sy,pw,ph=frame
     words=page.get("words")
@@ -120,9 +127,7 @@ def _text_rects(page,frame):
         if proposed is None:
             continue
         a,b=_box(first.get("page_bbox_pt")),_box(second.get("page_bbox_pt"))
-        ah,bh=a[3]-a[1],b[3]-b[1]
-        if (b[0]<a[2]-0.5 or b[0]-a[2]>max(2,0.5*min(ah,bh))
-                or abs((a[1]+a[3])-(b[1]+b[3]))>min(ah,bh)*0.6):
+        if not _adjacent_word_boxes(a, b):
             continue
         combined=(a[0],min(a[1],b[1]),b[2],max(a[3],b[3]))
         observed.append({
@@ -130,6 +135,24 @@ def _text_rects(page,frame):
             "bbox_pdf_pt":list(combined),
             "bbox_svg":[vx+combined[0]*sx,vy+combined[1]*sy,
                         vx+combined[2]*sx,vy+combined[3]*sy]})
+    # Poppler may split "100 ± 0.1 mm" into four words. A magnitude
+    # following the tolerance sign cannot calibrate the whole dimension line.
+    def follows_tolerance(label):
+        index = label["word_ids"][0]
+        if not index:
+            return False
+        prior = words[index - 1]
+        text = prior.get("text")
+        if not isinstance(text, str) or not text.rstrip().endswith(("±", "+/-")):
+            return False
+        value_word = words[index]
+        left = _box(prior["page_bbox_pt"])
+        right = _box(value_word["page_bbox_pt"])
+        if "source_line_id" in prior and "source_line_id" in value_word:
+            return prior["source_line_id"] == value_word["source_line_id"] and right[0] >= left[2] - 0.5
+        return _adjacent_word_boxes(left, right)
+
+    observed = [label for label in observed if not follows_tolerance(label)]
     observed.sort(key=lambda e:(e["bbox_svg"][1],e["bbox_svg"][0],
                                 e["word_ids"]))
     if len(observed)>128:

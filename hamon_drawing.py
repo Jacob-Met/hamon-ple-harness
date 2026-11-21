@@ -437,6 +437,9 @@ def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None
 def _word_inventory(data,max_words):
     root=ET.fromstring(data)
     words=[];page_box=None
+    lines = (element for element in root.iter() if local(element.tag) == "line")
+    source_lines = {word: index for index, line in enumerate(lines)
+                    for word in line if local(word.tag) == "word"}
     for element in root.iter():
         name=local(element.tag)
         if name=="page" and page_box is None:
@@ -445,7 +448,10 @@ def _word_inventory(data,max_words):
         if name=="word":
             try:b=[float(element.attrib[k]) for k in ("xMin","yMin","xMax","yMax")]
             except (ValueError,KeyError):continue
-            words.append({"text":(element.text or "")[:160],"page_bbox_pt":b})
+            row = {"text":(element.text or "")[:160], "page_bbox_pt":b}
+            if element in source_lines:
+                row["source_line_id"] = source_lines[element]
+            words.append(row)
             if len(words)>=max_words:break
     return words,page_box
 
