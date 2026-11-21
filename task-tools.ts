@@ -140,7 +140,7 @@ export function isLocalTemp(p: string, tmp: string): boolean {
  * coding agent extension API.
  */
 // tslint:disable-next-line:no-default-export
-export default function registerTaskTools(pi: ExtensionAPI) {
+function _origRegisterTaskTools_registerTaskTools(pi: ExtensionAPI) {
 	// pi saves a long command's output to a local temp file and points the model at it; reads of that file stay local.
 	const isLocal = (p: string) => isLocalTemp(p, tmpdir());
 
@@ -194,4 +194,196 @@ export default function registerTaskTools(pi: ExtensionAPI) {
 	pi.on("before_agent_start", (event) => {
 		event.systemPromptOptions.cwd = WORKDIR;
 	});
+}
+
+
+import { spawn as _pleSpawn } from "node:child_process";
+import * as _pleFs from "node:fs";
+import * as _plePath from "node:path";
+import { fileURLToPath as _pleFileURLToPath } from "node:url";
+
+export const PLE_DOMAIN_TOOL_NAMES = [
+  "hamon_ifc_spatial_clash",
+  "hamon_drawing_reader",
+  "check_deliverable_preflight",
+];
+
+const _PLE_HERE_DIR = _plePath.dirname(_pleFileURLToPath(import.meta.url));
+
+async function _pleReadTaskBytes(relPath: string): Promise<Buffer> {
+  const relayUrl = process.env.TASK_RELAY_URL;
+  if (relayUrl) {
+    try {
+      const r1 = await fetch(relayUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ op: "read_file_b64", path: relPath }),
+      });
+      if (r1.ok) {
+        const j1: any = await r1.json();
+        if (j1 && typeof j1.content_b64 === "string") {
+          return Buffer.from(j1.content_b64, "base64");
+        }
+      }
+    } catch {}
+    try {
+      const r2 = await fetch(relayUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ op: "read_file", path: relPath }),
+      });
+      if (r2.ok) {
+        const j2: any = await r2.json();
+        if (j2 && typeof j2.content_b64 === "string") {
+          return Buffer.from(j2.content_b64, "base64");
+        }
+        if (j2 && typeof j2.content === "string") {
+          const wdir = process.env.TASK_WORKDIR;
+          if (wdir && _pleFs.existsSync(_plePath.resolve(wdir, relPath))) {
+            return _pleFs.readFileSync(_plePath.resolve(wdir, relPath));
+          }
+          return Buffer.from(j2.content, "latin1");
+        }
+      }
+    } catch {}
+  }
+  const workdir = process.env.TASK_WORKDIR || ".";
+  const resolved = _plePath.resolve(workdir, relPath);
+  return _pleFs.readFileSync(resolved);
+}
+
+function _pleRunPythonJson(scriptName: string, payload: Record<string, unknown>): Promise<any> {
+  const pyBin =
+    process.env.TASK_HARNESS_PYTHON ||
+    (_pleFs.existsSync("/opt/harness/venv/bin/python") ? "/opt/harness/venv/bin/python" : "python3");
+  const srcDir = process.env.TASK_HARNESS_SRC || _PLE_HERE_DIR;
+  const scriptPath = _plePath.join(srcDir, scriptName);
+  return new Promise((resolve, reject) => {
+    const child = _pleSpawn(pyBin, [scriptPath, "--json-stdin"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`Python tool ${scriptName} exited ${code}: ${stderr || stdout}`));
+        return;
+      }
+      try {
+        const lines = stdout.trim().split("\n");
+        resolve(JSON.parse(lines[lines.length - 1]));
+      } catch (err) {
+        reject(new Error(`Invalid JSON from ${scriptName}: ${stdout}`));
+      }
+    });
+    child.stdin.write(JSON.stringify(payload));
+    child.stdin.end();
+  });
+}
+
+function _registerPleWave3DomainTools(pi: any) {
+  pi.registerTool({
+    name: "hamon_ifc_spatial_clash",
+    label: "IFC4 Spatial Clash & Solid Takeoff",
+    description: "Run deterministic IFC4 solid volume takeoff, AABB broadphase, and cross-discipline spatial clash/clearance analysis.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Workspace-relative path to .ifc model" },
+        required_clearance_m: { type: "number", description: "Minimum required clearance in meters (default 0.05)" },
+        cross_discipline_only: { type: "boolean", description: "Filter to cross-discipline clashes only (default true)" },
+      },
+      required: ["path"],
+    },
+    async execute(_id: string, params: any) {
+      const raw = await _pleReadTaskBytes(String(params.path));
+      const details = await _pleRunPythonJson("hamon_ifc_spatial_clash.py", {
+        mode: "clash",
+        ifc_b64: raw.toString("base64"),
+        required_clearance_m: params.required_clearance_m ?? 0.05,
+        cross_discipline_only: params.cross_discipline_only ?? true,
+      });
+      return {
+        content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
+        details,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "hamon_drawing_reader",
+    label: "Engineering PDF Vector Drawing Reader",
+    description: "Extract calibrated vector linework, scale ratios, title-block metadata, and text callouts from engineering PDF drawings.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Workspace-relative path to .pdf sheet" },
+        page_index: { type: "number", description: "Optional 0-based page index filter" },
+        scale_override: { type: "string", description: "Optional scale string (e.g. '1:50' or '0.25 in = 1 ft') or numeric ratio" },
+      },
+      required: ["path"],
+    },
+    async execute(_id: string, params: any) {
+      const raw = await _pleReadTaskBytes(String(params.path));
+      const details = await _pleRunPythonJson("hamon_drawing_reader.py", {
+        pdf_b64: raw.toString("base64"),
+        page_index: params.page_index ?? null,
+        scale_override: params.scale_override ?? null,
+      });
+      return {
+        content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
+        details,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "check_deliverable_preflight",
+    label: "Deliverable Preflight Gate",
+    description: "Validate output deliverable existence, archive/file integrity, non-empty content, finite numerics, and required task IDs before submission.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Workspace-relative path to deliverable file, directory, or .zip" },
+        expected_task_ids: { type: "array", items: { type: "string" }, description: "Optional required task IDs" },
+      },
+      required: ["path"],
+    },
+    async execute(_id: string, params: any) {
+      const workdir = process.env.TASK_WORKDIR || ".";
+      const candidate = _plePath.resolve(workdir, String(params.path));
+      let targetPath = candidate;
+      let tmpPath: string | null = null;
+      if (!_pleFs.existsSync(candidate)) {
+        const raw = await _pleReadTaskBytes(String(params.path));
+        const ext = _plePath.extname(String(params.path)) || ".bin";
+        tmpPath = _plePath.join(process.env.TMPDIR || "/tmp", `ple-pre-${Date.now()}${ext}`);
+        _pleFs.writeFileSync(tmpPath, raw);
+        targetPath = tmpPath;
+      }
+      try {
+        const details = await _pleRunPythonJson("hamon_ifc_spatial_clash.py", {
+          mode: "preflight",
+          path: targetPath,
+          expected_task_ids: params.expected_task_ids ?? null,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
+          details,
+        };
+      } finally {
+        if (tmpPath && _pleFs.existsSync(tmpPath)) {
+          _pleFs.unlinkSync(tmpPath);
+        }
+      }
+    },
+  });
+}
+
+export default function registerTaskTools(pi: any) {
+  _origRegisterTaskTools_registerTaskTools(pi);
+  _registerPleWave3DomainTools(pi);
 }
