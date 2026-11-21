@@ -296,6 +296,25 @@ class DualSolverVerifierTests(unittest.TestCase):
         self.assertLess(chan["dual_rel_discrepancy"], 1e-9)
         self.assertGreater(chan["normal_depth_m"], 0.1)
 
+    def test_translated_dxf_chords_and_signed_bulge_area(self):
+        from hamon_cad_takeoff import scan_dxf_takeoff, shoelace_area_and_perimeter
+
+        origin = 2**40
+        points = [(origin + x, -origin + y) for x, y in [(0, 0), (4, 0), (4, 3), (0, 3)]]
+        self.assertEqual(shoelace_area_and_perimeter(points, True), (12.0, 14.0))
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "survey.dxf"
+            tags = [(0, "SECTION"), (2, "HEADER"), (9, "$INSUNITS"), (70, 6),
+                    (0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES"),
+                    (0, "LWPOLYLINE"), (8, "SLAB"), (70, 1)]
+            for (x, y), bulge in zip(points, [-1, 0, 0, 0]):
+                tags.extend([(10, x), (20, y), (42, bulge)])
+            tags.extend([(0, "ENDSEC"), (0, "EOF")])
+            path.write_text("".join(f"{k}\n{v}\n" for k, v in tags))
+            result = scan_dxf_takeoff(path)
+        self.assertAlmostEqual(result["closed_area_m2_by_layer"]["SLAB"], 12 - 2 * math.pi)
+        self.assertAlmostEqual(result["polyline_perimeter_m_by_layer"]["SLAB"], 10 + 2 * math.pi)
+
     def test_dxf_spatial_takeoff_and_toolkit_cli(self):
         with tempfile.TemporaryDirectory() as td:
             dxf_file = Path(td) / "plan.dxf"
