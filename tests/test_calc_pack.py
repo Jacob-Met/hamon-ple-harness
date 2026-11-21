@@ -45,6 +45,15 @@ class CalculationPack(unittest.TestCase):
         self.assertEqual(t.D(r["quantities"]["drop"]["value"]),t.D("20"))
         self.assertFalse(r["all_checks_pass"])
         self.assertIn("I: supplied quantity lacks a source",r["warnings"])
+    def test_decimal_limit_keeps_supplied_precision(self):
+        pack = sample()
+        pack["quantities"]["Vshear"]["expr"] = "10000000000000000.1*N"
+        pack["quantities"]["Vallow"]["expr"] = "10000000000000000*N"
+        result = self.audit(pack)
+        shear = result["checks"][1]
+        self.assertFalse(shear["passed"])
+        self.assertEqual(t.D(shear["signed_residual_si"]), t.D("0.1"))
+
     def test_dag_cycle_and_ambiguous_units(self):
         d={"schema":"hamon.engineering.calcpack.v1",
            "quantities":{"a":{"expr":"b+1"},"b":{"expr":"a+1"}},"checks":[]}

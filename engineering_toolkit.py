@@ -131,7 +131,8 @@ def quantity(expression: str, symbols: dict[str,Q] | None = None) -> Q:
         if depth > 35:
             raise ValueError("expression nesting limit")
         if isinstance(node, ast.Constant) and type(node.value) in (int, float):
-            return Q(D(node.value))
+            literal = ast.get_source_segment(expression, node) if type(node.value) is float else node.value
+            return Q(D(literal))
         if isinstance(node, ast.Name):
             if symbols is not None and node.id in symbols:
                 return symbols[node.id]
