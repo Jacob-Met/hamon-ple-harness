@@ -474,10 +474,14 @@ def ifc_narrowphase(filename,class_a,class_b,limit=400,
     opts.set(opts.USE_WORLD_COORDS,True)
     skipped=[]; cache={}
     def elements(types):
+        selected=set()
         result=[]
         for name in types:
             for element in src.by_type(name):
                 uid=str(element.GlobalId)
+                if uid in selected:
+                    continue
+                selected.add(uid)
                 if uid not in cache:
                     if len(cache)>=limit*2:
                         raise ValueError("IFC element scan budget exceeded; chunk class selection")
@@ -488,10 +492,14 @@ def ifc_narrowphase(filename,class_a,class_b,limit=400,
                         skipped.append({"guid":uid,"class":name,
                                         "reason":type(exc).__name__,"detail":str(exc)[:120]})
                         cache[uid]=None
-                if cache[uid] is not None and uid not in {x[0] for x in result}:
+                if cache[uid] is not None:
                     result.append((uid,name,cache[uid]))
-        return result
-    left,right=elements(names(class_a)),elements(names(class_b))
+        return result,selected
+    left,left_ids=elements(names(class_a))
+    right,right_ids=elements(names(class_b))
+    shared=len(left_ids & right_ids)
+    # Remove self-pairs and the second ordering of every pair in the intersection.
+    requested_pairs=len(left_ids)*len(right_ids)-shared*(shared+1)//2
     summary=Counter(); witnesses=[]; examined=set()
     comparisons=0; ambiguous=0; distance_queries=0
     clearance_failures=0; clearance_unknown=0
@@ -514,7 +522,6 @@ def ifc_narrowphase(filename,class_a,class_b,limit=400,
                               "reason":str(exc)[:140]}
             relation=decision["relation"]
             summary[relation]+=1
-            if relation.startswith("unresolved"): ambiguous+=1
             required=clearance_m
             # Without an explicit tolerance, quantify all envelope overlaps
             # where the previous broad phase had only a false-positive box.
@@ -555,6 +562,8 @@ def ifc_narrowphase(filename,class_a,class_b,limit=400,
                     clearance_failures+=1
                 else:
                     decision["clearance_status"]="meets_triangulated_gap"
+            if relation.startswith("unresolved") or decision.get("clearance_status","").startswith("unresolved"):
+                ambiguous+=1
             if len(witnesses)<100 or (required is not None and
                                      decision.get("clearance_status") not in
                                      ("meets_from_aabb_lower_bound","meets_triangulated_gap")):
@@ -567,12 +576,13 @@ def ifc_narrowphase(filename,class_a,class_b,limit=400,
         "kind":"ifc-triangulated-contact-screen",
         "element_a_count":len(left),"element_b_count":len(right),
         "elements_skipped":len(skipped),"skipped_samples":skipped[:30],
+        "requested_pairs":requested_pairs,"unmeasured_pairs":requested_pairs-comparisons,
         "compared_pairs":comparisons,
         "broadphase_overlaps":comparisons-summary["aabb_disjoint"],
         "by_relation":dict(sorted(summary.items())),
         "surface_contact_pairs":summary["surface_contact"],
         "solid_containment_pairs":summary["solid_containment"],
-        "inconclusive_pairs":ambiguous+len(skipped)+clearance_unknown,
+        "inconclusive_pairs":requested_pairs-comparisons+ambiguous,
         "distance_pairs_evaluated":distance_queries,
         "min_clearance_required_mm":min_clearance_mm,
         "clearance_failures":clearance_failures,
