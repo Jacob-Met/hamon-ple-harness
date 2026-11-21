@@ -43,6 +43,7 @@ from typing import Any
 
 import taskbridge
 import engineering_intake
+import symbolic_route
 import delivery_guard
 import delivery_materialize
 import hamon_pareto
@@ -269,8 +270,11 @@ async def solve(session: taskbridge.Session) -> str:
       )
       # One read-only project inventory over the evaluator's task protocol.
       # This is ephemeral task data; never store or log its contents.
-      engineering_inventory = await engineering_intake.intake_for_prompt(session)
+      discovered = {}
+      engineering_inventory = await engineering_intake.intake_for_prompt(session, discovered=discovered)
       engineering_cli_note = await engineering_intake.provision_engineering_cli(session)
+      if discovered and engineering_cli_note:
+        engineering_cli_note = await symbolic_route.prepare(session, discovered, engineering_cli_note)
       delivery_targets = delivery_guard.extract_targets(
           session.instruction, session.workdir
       )
