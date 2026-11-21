@@ -25,6 +25,29 @@ class FakeSession:
 
 
 class IntakeContract(unittest.TestCase):
+    def test_provisioned_format_guard_accepts_and_rejects_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            participant = Path(tmp)
+
+            class Receiver:
+                async def write_file(self, remote_path, data):
+                    return (participant / Path(remote_path).name).write_bytes(data)
+
+            note = asyncio.run(intake.provision_engineering_cli(Receiver()))
+            self.assertIn("format-guard", note)
+            target = participant / "result.json"
+            for data, expected in [('{"count": 4}', 0), ('{"count":', 3)]:
+                with self.subTest(expected=expected):
+                    target.write_text(data)
+                    result = subprocess.run(
+                        [sys.executable, "-E", "-s", "-S",
+                         str(participant / "hamon-engineering-toolkit.py"),
+                         "format-guard", str(target)],
+                        cwd=participant, capture_output=True, text=True,
+                    )
+                    self.assertEqual(result.returncode, expected, result.stdout)
+                    self.assertEqual(json.loads(result.stdout)["ok"], expected == 0)
+
     def test_real_task_container_readonly_discovery(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
