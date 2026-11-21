@@ -69,8 +69,12 @@ def route_task_budget(
         complexity_points += 2
 
     if complexity_points >= 5:
-        tier = "max"
-        reserve_sec = 25 * 60
+        if presolve_verified and complexity_points <= 5 and mcp_server_count == 0 and deliverable_count <= 2:
+            tier = "medium"
+            reserve_sec = 12 * 60
+        else:
+            tier = "max"
+            reserve_sec = 25 * 60
     elif complexity_points >= 2:
         if presolve_verified and not has_3d_bim and complexity_points <= 3 and mcp_server_count == 0:
             tier = "medium"
@@ -156,7 +160,7 @@ def audit_local_deliverable(path: str | Path) -> dict[str, Any]:
                 return {"ok": False, "path": str(p), "reason": "empty_python_ast"}
         except Exception as exc:
             return {"ok": False, "path": str(p), "reason": f"invalid_python:{type(exc).__name__}"}
-    elif ext == ".ifc":
+    elif ext in (".ifc", ".step", ".stp"):
         head_tail = p.read_text(encoding="utf-8", errors="replace")
         if "ISO-10303-21;" not in head_tail[:512] or "DATA;" not in head_tail or "END-ISO-10303-21;" not in head_tail[-512:]:
             return {"ok": False, "path": str(p), "reason": "malformed_ifc_step_structure"}
@@ -216,8 +220,12 @@ def route_from_intake_prompt(
 PLE_DOMAIN_TOOLS = (
     "hamon_ifc_spatial_clash",
     "hamon_drawing_reader",
+    "hamon_conservation_cad_verifier",
     "check_deliverable_preflight",
 )
+
+_WAVE4_EXTS = (".step", ".stp", ".p21", ".cir", ".sp", ".spice", ".net")
+_WAVE4_TERMS = ('step', 'stp', 'brep', 'mass moment', 'inertia', 'stress', 'deflection', 'buckling', 'von mises', 'kcl', 'kvl', 'spice', 'nodal', 'tellegen', 'phasor', 'conservation', 'enthalpy', 'entropy', 'mass balance', 'energy balance', 'species balance', 'head loss', 'colebrook', 'bearing capacity', 'consolidation', 'earthwork', 'seepage', 'dimensional')
 
 
 def select_domain_tools(prompt: str = "", file_paths=()) -> tuple[str, ...]:
@@ -228,18 +236,23 @@ def select_domain_tools(prompt: str = "", file_paths=()) -> tuple[str, ...]:
         selected.append("hamon_ifc_spatial_clash")
     if any(f.endswith(".pdf") for f in f_low) or any(k in p_low for k in ("pdf", "drawing", "sheet", "plan", "scale", "title-block", "vector")):
         selected.append("hamon_drawing_reader")
+    if any(f.endswith(_WAVE4_EXTS) for f in f_low) or any(k in p_low for k in _WAVE4_TERMS):
+        selected.append("hamon_conservation_cad_verifier")
     selected.append("check_deliverable_preflight")
     return tuple(selected)
 
 
 def dispatch_ple_tool(tool_name: str, payload: dict) -> dict:
-    import hamon_drawing_reader as _hdr
-    import hamon_ifc_spatial_clash as _hifc
+    import hamon_conservation_cad_verifier as _ccv
+    import hamon_drawing_reader as _dr
+    import hamon_ifc_spatial_clash as _ifc
 
     if tool_name == "hamon_ifc_spatial_clash":
-        return _hifc.run_router_ifc_clash(payload)
+        return _ifc.run_router_ifc_clash(payload)
     if tool_name == "hamon_drawing_reader":
-        return _hdr.run_router_drawing_reader(payload)
+        return _dr.run_router_drawing_reader(payload)
+    if tool_name == "hamon_conservation_cad_verifier":
+        return _ccv.run_router_conservation_cad_verifier(payload)
     if tool_name == "check_deliverable_preflight":
-        return _hifc.run_router_preflight(payload)
+        return _ifc.run_router_preflight(payload)
     raise ValueError(f"Unknown PLE domain tool: {tool_name}")

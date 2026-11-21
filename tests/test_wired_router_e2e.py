@@ -154,7 +154,7 @@ console.log(JSON.stringify({
             )
             assert proc.returncode == 0, proc.stderr
             out = json.loads(proc.stdout.strip().splitlines()[-1])
-            assert out["domain_names"] == ["hamon_ifc_spatial_clash", "hamon_drawing_reader", "check_deliverable_preflight"]
+            assert out["domain_names"] == ["hamon_ifc_spatial_clash", "hamon_drawing_reader", "hamon_conservation_cad_verifier", "check_deliverable_preflight"]
             assert out["ifc_ok"] is True
             assert out["pdf_ok"] is True
             assert out["pre_ok"] is True
