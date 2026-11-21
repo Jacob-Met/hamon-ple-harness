@@ -9,6 +9,7 @@ clearance verification. Zero task-specific hardcoding.
 from __future__ import annotations
 
 from collections import Counter
+from itertools import pairwise
 import hashlib
 import math
 from pathlib import Path
@@ -147,7 +148,11 @@ def _is_paper_space(groups: list[tuple[int, str]]) -> bool:
 
 
 def scan_dxf_takeoff(filename: str | Path) -> dict[str, Any]:
-    """Extract SI-calibrated model-space quantities (lengths, curved areas, block counts) from ASCII DXF."""
+    """Extract SI-calibrated model-space lengths, areas, and block counts.
+
+    For 3D POLYLINEs the perimeter follows the straight WCS edges. A closed
+    loop contributes its XY plan footprint to the area totals.
+    """
     p = Path(filename)
     if not p.is_file() or p.stat().st_size > 32_000_000:
         raise ValueError("missing or oversized DXF file")
@@ -184,9 +189,17 @@ def scan_dxf_takeoff(filename: str | Path) -> dict[str, Any]:
         verts = st["verts"]
         closed = st["closed"]
         layer = st["layer"]
-        seg_n = len(verts) if closed else max(0, len(verts) - 1)
-        curved_bulge_segments += sum(1 for idx_v in range(seg_n) if abs(verts[idx_v][2]) > 1e-12)
-        area, perim = bulge_area_and_perimeter(verts, closed)
+        spatial = st["spatial_vertices"]
+        if spatial is None:
+            seg_n = len(verts) if closed else max(0, len(verts) - 1)
+            curved_bulge_segments += sum(1 for idx_v in range(seg_n) if abs(verts[idx_v][2]) > 1e-12)
+            area, perim = bulge_area_and_perimeter(verts, closed)
+        else:
+            area = 0.0
+            perim = sum(math.dist(a, b) for a, b in pairwise(spatial))
+            if closed and spatial:
+                perim += math.dist(spatial[-1], spatial[0])
+                area, _ = shoelace_area_and_perimeter([(x, y) for x, y, _ in spatial], True)
         if closed and area > 0.0:
             poly_area_by_layer[layer] = poly_area_by_layer.get(layer, 0.0) + area
         poly_perim_by_layer[layer] = poly_perim_by_layer.get(layer, 0.0) + perim
@@ -198,9 +211,13 @@ def scan_dxf_takeoff(filename: str | Path) -> dict[str, Any]:
             if not (v_flag & (16 | 64)):
                 vx = next((float(v) for c, v in groups if c == 10), None)
                 vy = next((float(v) for c, v in groups if c == 20), None)
-                vb = next((float(v) for c, v in groups if c == 42), 0.0)
                 if vx is not None and vy is not None:
-                    poly_state["verts"].append((vx, vy, vb))
+                    if poly_state["spatial_vertices"] is None:
+                        bulge = next((float(v) for c, v in groups if c == 42), 0.0)
+                        poly_state["verts"].append((vx, vy, bulge))
+                    else:
+                        vz = next((float(v) for c, v in groups if c == 30), 0.0)
+                        poly_state["spatial_vertices"].append((vx, vy, vz))
             return
         if etype == "SEQEND":
             finalize_poly_state()
@@ -216,6 +233,7 @@ def scan_dxf_takeoff(filename: str | Path) -> dict[str, Any]:
                 "closed": bool(flag & 1),
                 "paper": _is_paper_space(groups),
                 "is_mesh": bool(flag & (16 | 64)),
+                "spatial_vertices": [] if flag & 8 else None,
                 "verts": [],
             }
             return
