@@ -1577,17 +1577,20 @@ def solve_bolt_group_eccentric_dual(spec: dict[str, Any]) -> dict[str, Any]:
     xp, yp = float(spec["load_x_m"]), float(spec["load_y_m"])
     phi_rn = float(spec["bolt_phi_Rn_N"])
 
-    # Path B: float64 elastic method
-    xc = sum(x for x, _ in bolts) / n
-    yc = sum(y for _, y in bolts) / n
-    jp = sum((x - xc) ** 2 + (y - yc) ** 2 for x, y in bolts)
-    mz = (xp - xc) * py - (yp - yc) * px
+    # Form lever arms locally to retain precision when survey coordinates are large.
+    x0, y0 = bolts[0]
+    offsets = [(x - x0, y - y0) for x, y in bolts]
+    dx = math.fsum(x for x, _ in offsets) / n
+    dy = math.fsum(y for _, y in offsets) / n
+    arms = [(x - dx, y - dy) for x, y in offsets]
+    jp = math.fsum(x * x + y * y for x, y in arms)
+    mz = ((xp - x0) - dx) * py - ((yp - y0) - dy) * px
     v_bolts = []
     sum_vx = 0.0
     sum_vy = 0.0
-    for x, y in bolts:
-        vx = px / n - mz * (y - yc) / jp
-        vy = py / n + mz * (x - xc) / jp
+    for x, y in arms:
+        vx = px / n - mz * y / jp
+        vy = py / n + mz * x / jp
         sum_vx += vx
         sum_vy += vy
         v_bolts.append(math.hypot(vx, vy))
@@ -1611,8 +1614,8 @@ def solve_bolt_group_eccentric_dual(spec: dict[str, Any]) -> dict[str, Any]:
     if disc > 1e-10 or math.hypot(sum_vx - px, sum_vy - py) > 1e-7 * max(1.0, math.hypot(px, py)):
         raise ValueError("bolt group dual-solver or equilibrium mismatch")
     return {
-        "centroid_x_m": xc,
-        "centroid_y_m": yc,
+        "centroid_x_m": x0 + dx,
+        "centroid_y_m": y0 + dy,
         "polar_J_m2": jp,
         "torsional_moment_Nm": mz,
         "max_bolt_shear_N": v_max_f,
