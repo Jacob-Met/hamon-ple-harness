@@ -79,7 +79,7 @@ def _label(text):
         value=Decimal(raw)
     except InvalidOperation:
         return None
-    if not value.is_finite() or not Decimal("0")<value<Decimal("1e9"):
+    if not value.is_finite() or not Decimal("0")<=value<Decimal("1e9"):
         return None
     unit=_UNIT[match.group("unit").lower()]
     return {"source_label":t,
@@ -93,6 +93,46 @@ def _adjacent_word_boxes(left, right):
     gap = right[0] - left[2]
     return (-0.5 <= gap <= max(2, 0.5 * height)
             and abs(left[1] + left[3] - right[1] - right[3]) <= 0.6 * height)
+
+
+def _join_feet_inches(labels, words):
+    """Treat a neighbouring ft/in pair on one extracted line as one dimension."""
+    labels.sort(key=lambda row: row["word_ids"][0])
+    merged = []
+    index = 0
+    while index < len(labels):
+        first = labels[index]
+        index += 1
+        if index < len(labels):
+            second = labels[index]
+            end = first["word_ids"][-1]
+            start = second["word_ids"][0]
+            line = words[end].get("source_line_id")
+            if ({first["physical_unit"], second["physical_unit"]} == {"ft", "inch"}
+                    and start == end + 1 and line is not None
+                    and all(words[i].get("source_line_id") == line
+                            for i in first["word_ids"] + second["word_ids"])
+                    and _adjacent_word_boxes(first["bbox_pdf_pt"], second["bbox_pdf_pt"])):
+                index += 1
+                feet, inches = Decimal(first["physical_value"]), Decimal(second["physical_value"])
+                if first["physical_unit"] != "ft" or feet != feet.to_integral_value() or inches >= 12:
+                    continue
+                total = feet * 12 + inches
+                if not 0 < total < Decimal("1e9"):
+                    continue
+                ids = first["word_ids"] + second["word_ids"]
+                combined = dict(source_label=" ".join(words[i]["text"] for i in ids),
+                                word_ids=ids, physical_value=str(total), physical_unit="inch",
+                                length=f"{total}*inch")
+                for key in ("bbox_pdf_pt", "bbox_svg"):
+                    a, b = first[key], second[key]
+                    combined[key] = [min(a[0], b[0]), min(a[1], b[1]),
+                                     max(a[2], b[2]), max(a[3], b[3])]
+                merged.append(combined)
+                continue
+        if Decimal(first["physical_value"]) > 0:
+            merged.append(first)
+    return merged
 
 
 def _text_rects(page,frame):
@@ -152,7 +192,8 @@ def _text_rects(page,frame):
             return prior["source_line_id"] == value_word["source_line_id"] and right[0] >= left[2] - 0.5
         return _adjacent_word_boxes(left, right)
 
-    observed = [label for label in observed if not follows_tolerance(label)]
+    observed = [label for label in _join_feet_inches(observed, words)
+                if not follows_tolerance(label)]
     observed.sort(key=lambda e:(e["bbox_svg"][1],e["bbox_svg"][0],
                                 e["word_ids"]))
     if len(observed)>128:
