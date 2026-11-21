@@ -667,13 +667,6 @@ def solve_beam_dual(spec: dict[str, Any]) -> dict[str, Any]:
     n_el = 64
     h_base = L / n_el
     nodes = [i * h_base for i in range(n_el + 1)]
-    # Insert exact point-load nodes while replacing nearby interior grid points to prevent ill-conditioned sliver elements
-    for _, xp in point_loads:
-        if xp <= 1e-11 or abs(xp - L) <= 1e-11:
-            continue
-        nodes = [xn for xn in nodes if xn <= 1e-11 or abs(xn - L) <= 1e-11 or abs(xn - xp) >= 0.2 * h_base]
-        nodes.append(xp)
-    nodes = sorted(set(nodes))
     n_nd = len(nodes)
     ndof = 2 * n_nd
     K = [[0.0] * ndof for _ in range(ndof)]
@@ -696,9 +689,17 @@ def solve_beam_dual(spec: dict[str, Any]) -> dict[str, Any]:
             for j_loc, gj in enumerate(dofs):
                 K[gi][gj] += ke[i_loc][j_loc]
 
+    def hermite(xi: float, length: float) -> tuple[float, float, float, float]:
+        return (1 - 3 * xi**2 + 2 * xi**3, length * xi * (1 - xi)**2,
+                xi**2 * (3 - 2 * xi), length * xi**2 * (xi - 1))
+
     for p_val, xp in point_loads:
-        idx = min(range(n_nd), key=lambda i: abs(nodes[i] - xp))
-        F[2 * idx] -= p_val
+        # A point force does virtual work on all four Hermite element DOFs.
+        e = min(int(xp / h_base), n_el - 1)
+        le = nodes[e + 1] - nodes[e]
+        xi = (xp - nodes[e]) / le
+        for j, weight in enumerate(hermite(xi, le)):
+            F[2 * e + j] -= p_val * weight
 
     if support == "simply_supported":
         fixed = {0, 2 * (n_nd - 1)}
@@ -729,31 +730,30 @@ def solve_beam_dual(spec: dict[str, Any]) -> dict[str, Any]:
     R_B_fem = R_vec[2 * (n_nd - 1)]
     M_B_fem = -R_vec[2 * (n_nd - 1) + 1]
 
-    # Sample internal bending moment M(x) = EI * v''(x) and deflection |v(x)| finely across all elements
-    max_M_fem = max(abs(M_A_fem), abs(M_B_fem))
+    def section_moment(x: float) -> float:
+        return R_A_fem * x - M_A_fem - q_udl * x**2 / 2 - sum(
+            p * (x - xp) for p, xp in point_loads if xp <= x
+        )
+
+    # Moment is continuous and quadratic between point loads. Its extrema
+    # occur at an interval boundary or where the interval shear vanishes.
+    sections = sorted({0.0, L, *(xp for _, xp in point_loads)})
+    max_M_fem = max(abs(section_moment(x)) for x in sections)
+    if q_udl:
+        for left, right in zip(sections, sections[1:]):
+            turning = (R_A_fem - sum(p for p, xp in point_loads if xp <= left)) / q_udl
+            if left < turning < right:
+                max_M_fem = max(max_M_fem, abs(section_moment(turning)))
+    M_mid_fem = abs(section_moment(L / 2))
     max_V_fem = max(abs(R_A_fem), abs(R_B_fem))
     max_delta_fem = 0.0
-    M_mid_fem = 0.0
     for e in range(n_nd - 1):
-        x0, x1 = nodes[e], nodes[e + 1]
-        le = x1 - x0
-        v0, th0, v1, th1 = u[2 * e], u[2 * e + 1], u[2 * (e + 1)], u[2 * (e + 1) + 1]
-        for s_idx in range(9):
-            xi = s_idx / 8.0
-            x_cur = x0 + xi * le
-            n1 = 1 - 3 * xi**2 + 2 * xi**3
-            n2 = le * (xi - 2 * xi**2 + xi**3)
-            n3 = 3 * xi**2 - 2 * xi**3
-            n4 = le * (-xi**2 + xi**3)
-            v_x = n1 * v0 + n2 * th0 + n3 * v1 + n4 * th1
-            max_delta_fem = max(max_delta_fem, abs(v_x))
-            # Exact equilibrium M(x) from left end reactions:
-            m_eq = R_A_fem * x_cur - M_A_fem - 0.5 * q_udl * x_cur**2 - sum(
-                p_v * (x_cur - x_p) for p_v, x_p in point_loads if x_cur >= x_p
-            )
-            max_M_fem = max(max_M_fem, abs(m_eq))
-            if abs(x_cur - 0.5 * L) <= 1e-9:
-                M_mid_fem = abs(m_eq)
+        length = nodes[e + 1] - nodes[e]
+        local_displacement = u[2 * e:2 * e + 4]
+        for sample in range(9):
+            weights = hermite(sample / 8.0, length)
+            deflection = sum(w * v for w, v in zip(weights, local_displacement))
+            max_delta_fem = max(max_delta_fem, abs(deflection))
 
     # --- Path A: Independent Symbolic Boundary-Value Integration (`sympy`) ---
     if HAS_SYMPY:
