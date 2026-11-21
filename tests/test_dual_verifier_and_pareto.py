@@ -19,6 +19,20 @@ import hamon_pareto as hp
 
 
 class DualSolverVerifierTests(unittest.TestCase):
+    def test_weak_and_strong_conjugate_depths(self):
+        for z, q, yc, y2, loss in (
+            (0.0, 6.2631164334239235, 1.0000002333333198, 1.0000004666666757, 2.5407397048240203e-20),
+            (0.0, 751.5737089600726, 24.3288079822936, 169.2063640527367, 7031.542158461464),
+            (1.0, 8.136089147891417, 1.0000045714194907, 1.0000091428509232, 2.9721248377498377e-16),
+        ):
+            result = dv.solve_domain_problem("hydraulic_jump_conjugate", {
+                "Q_m3_s": q, "bottom_width_m": 2.0, "side_slope_z": z, "y1_m": 1.0})
+            assert result["dual_verified"]
+            assert 1.0 < result["critical_depth_m"] < result["conjugate_depth_y2_m"]
+            assert math.isclose(result["critical_depth_m"], yc, rel_tol=2e-11)
+            assert math.isclose(result["conjugate_depth_y2_m"], y2, rel_tol=2e-11)
+            assert math.isclose(result["head_loss_m"], loss, rel_tol=3e-6)
+
     def test_prescribed_phasors_and_conflicting_voltages(self):
         branch = {"n1": "s", "n2": "gnd", "R_ohm": 5}
         network = {"voltage_sources_to_ground": {"s": [0, 10]}, "resistors": [branch]}

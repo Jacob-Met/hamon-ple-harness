@@ -1798,15 +1798,15 @@ def solve_hydraulic_jump_dual(spec: dict[str, Any]) -> dict[str, Any]:
     z = float(spec.get("side_slope_z", 0.0))
     y1 = float(spec["y1_m"])
 
+    if (not all(math.isfinite(v) for v in (Q, b, z, y1))
+            or Q <= 0 or y1 <= 0 or min(b, z) < 0 or max(b, z) == 0):
+        raise ValueError("hydraulic jump requires positive flow, upstream depth and channel area")
+
     def _area(y: float) -> float:
         return (b + z * y) * y
 
     def _top_w(y: float) -> float:
         return b + 2.0 * z * y
-
-    def _spec_force(y: float) -> float:
-        ay = _area(y)
-        return (Q * Q) / (G0_SI * ay) + 0.5 * b * y * y + (z * (y ** 3)) / 3.0
 
     a1 = _area(y1)
     v1 = Q / a1
@@ -1814,37 +1814,53 @@ def solve_hydraulic_jump_dual(spec: dict[str, Any]) -> dict[str, Any]:
     if fr1 <= 1.0:
         raise ValueError("hydraulic jump requires supercritical upstream Froude number Fr1 > 1")
 
-    m1 = _spec_force(y1)
-    y2_belanger = 0.5 * y1 * (math.sqrt(1.0 + 8.0 * fr1 * fr1) - 1.0)
-    # Find critical depth yc where Fr = 1 -> Q^2 * T(y) / (g * A(y)^3) - 1 = 0
-    rt_yc = dual_solve_scalar_root(
-        lambda y: (Q * Q * _top_w(y)) / (G0_SI * (_area(y) ** 3)) - 1.0,
-        None,
-        (y1 * 1.000001, max(20.0 * y1, 50.0)),
-        max(y1 * 1.2, 0.5 * (y1 + y2_belanger)),
-    )
-    yc = rt_yc["root"]
-    rt_y2 = dual_solve_scalar_root(
-        lambda y: _spec_force(y) - m1,
-        None,
-        (yc * 1.0001, max(50.0 * y1, 100.0)),
-        y2_belanger,
-    )
-    y2 = rt_y2["root"]
+    # Use depth ratio r and upstream area fractions to avoid a scale-dependent bracket.
+    w = z * y1 / (b + z * y1)
+    flat = 1.0 - w
+    velocity_head = fr1 * fr1 / (1.0 + w)
+
+    if not math.isfinite(velocity_head):
+        raise ValueError("hydraulic jump velocity head exceeds floating-point range")
+
+    def area_ratio(r: float) -> float:
+        return r * (flat + w * r)
+
+    def critical(r: float) -> float:
+        return area_ratio(r) ** 3 - velocity_head * (flat + 2.0 * w * r)
+
+    def jump(r: float) -> float:
+        # Divide the momentum difference by r-1 analytically. The upstream root
+        # disappears and both terms remain well resolved for a weak jump.
+        pressure = flat * (r + 1.0) / 2.0 + w * (r*r + r + 1.0) / 3.0
+        return pressure - velocity_head * (1.0 + w * r) / area_ratio(r)
+
+    hi = 2.0
+    while jump(hi) < 0.0 or critical(hi) < 0.0:
+        hi *= 2.0
+    bracket = (1.0, hi)
+    rt_yc = dual_solve_scalar_root(critical, None, bracket, 0.5 * (1.0 + hi))
+    rt_y2 = dual_solve_scalar_root(jump, None, bracket, 0.5 * (1.0 + hi))
+    yc = y1 * rt_yc["root"]
+    r = rt_y2["root"]
+    y2 = y1 * r
+    if not y1 < yc < y2:
+        raise ValueError("hydraulic jump depths are numerically indistinguishable")
     disc = rt_y2["dual_rel_discrepancy"]
-    if abs(z) < 1e-12:
+    if z == 0.0:
+        y2_belanger = 0.5 * y1 * (math.sqrt(1.0 + 8.0 * fr1 * fr1) - 1.0)
         disc = max(disc, _rel_diff(y2, y2_belanger))
         if disc > 1e-7:
             raise ValueError("rectangular hydraulic jump Belanger mismatch")
-    a2 = _area(y2)
-    v2 = Q / a2
-    e1 = y1 + (v1 * v1) / (2.0 * G0_SI)
-    e2 = y2 + (v2 * v2) / (2.0 * G0_SI)
+    # E1-E2 with Q^2/g eliminated using conjugate momentum. Factoring the
+    # cubic jump height avoids subtracting two nearly identical specific heads.
+    loss_factor = (3.0 * flat**2 + 5.0 * flat*w*(1.0+r)
+                   + 2.0 * w*w*(1.0+3.0*r+r*r))
+    head_loss = y1 * (r - 1.0)**3 * loss_factor / (12.0 * area_ratio(r))
     return {
         "Froude_1": fr1,
         "critical_depth_m": yc,
         "conjugate_depth_y2_m": y2,
-        "head_loss_m": e1 - e2,
+        "head_loss_m": head_loss,
         "dual_rel_discrepancy": disc,
         "dual_verified": True,
     }
