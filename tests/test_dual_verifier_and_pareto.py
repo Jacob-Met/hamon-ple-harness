@@ -250,6 +250,34 @@ class DualSolverVerifierTests(unittest.TestCase):
             if support != "cantilever":
                 self.assertLess(res["equilibrium_residual_N"], 1e-3)
 
+    def test_rectangular_duct_fittings_use_physical_velocity_pressure(self):
+        spec = {
+            "m_dry_air_kg_s": 1.2, "rho_air_kg_m3": 1.2,
+            "T_in_C": 26.0, "T_out_C": 14.0,
+            "w_in_kg_kg": 0.012, "w_out_kg_kg": 0.008,
+            "duct_width_m": 0.8, "duct_height_m": 0.1,
+        }
+        # 1 m³/s through 0.08 m² gives 12.5 m/s and 93.75 Pa velocity pressure.
+        for length in (0.0, 12.0):
+            for width, height in ((0.8, 0.1), (0.1, 0.8)):
+                case = dict(spec, duct_width_m=width, duct_height_m=height,
+                            duct_length_m=length)
+                straight = dv.solve_domain_problem("hvac_coil_and_duct", case)
+                fitted = dv.solve_domain_problem("hvac_coil_and_duct", dict(case, minor_loss_K=2))
+                self.assertAlmostEqual(fitted["duct_pressure_drop_Pa"] - straight["duct_pressure_drop_Pa"],
+                                       187.5, places=8)
+                self.assertEqual(fitted["Q_total_cooling_W"], straight["Q_total_cooling_W"])
+                self.assertTrue(fitted["dual_verified"])
+
+    def test_rectangular_duct_invalid_reference_section(self):
+        spec = dict(m_dry_air_kg_s=1.2, T_in_C=26, T_out_C=14, w_in_kg_kg=.012,
+                    w_out_kg_kg=.008, duct_width_m=.8, duct_height_m=.1, duct_length_m=0)
+        for key, value in (("duct_width_m", 0), ("duct_height_m", -1),
+                           ("rho_air_kg_m3", 0), ("m_dry_air_kg_s", -1),
+                           ("minor_loss_K", float("nan"))):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                dv.solve_domain_problem("hvac_coil_and_duct", dict(spec, **{key: value}))
+
     def test_colebrook_and_manning_nonlinear_dual_roots(self):
         hyd = dv.solve_pipe_colebrook_dual({
             "Q_m3_s": 0.045, "D_m": 0.15, "L_m": 220.0,

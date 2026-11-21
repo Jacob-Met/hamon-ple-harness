@@ -1803,10 +1803,20 @@ def solve_hvac_coil_and_duct_dual(spec: dict[str, Any]) -> dict[str, Any]:
     m_cond = ma * max(0.0, w1 - w2)
 
     a_m, b_m = float(spec["duct_width_m"]), float(spec["duct_height_m"])
-    # Huebscher equal-friction circular equivalent diameter
+    if not all(math.isfinite(side) and side > 0.0 for side in (a_m, b_m)):
+        raise ValueError("duct dimensions must be finite and positive")
+    # Huebscher's equivalent circular section preserves straight-duct friction.
     d_eq = 1.30 * ((a_m * b_m) ** 0.625) / ((a_m + b_m) ** 0.25)
     rho_a = float(spec.get("rho_air_kg_m3", 1.2))
+    if not math.isfinite(rho_a) or rho_a <= 0.0 or not math.isfinite(ma) or ma < 0.0:
+        raise ValueError("air density must be finite and positive and mass flow finite and nonnegative")
+    loss_k = float(spec.get("minor_loss_K", 0.0))
+    if not math.isfinite(loss_k):
+        raise ValueError("fitting loss coefficient must be finite")
     q_vol = ma / rho_a
+    # Fitting K is referenced to velocity in the physical rectangular duct.
+    duct_velocity = q_vol / (a_m * b_m)
+    fitting_drop = loss_k * 0.5 * rho_a * duct_velocity**2
     hyd = solve_pipe_colebrook_dual({
         "Q_m3_s": q_vol,
         "D_m": d_eq,
@@ -1814,7 +1824,6 @@ def solve_hvac_coil_and_duct_dual(spec: dict[str, Any]) -> dict[str, Any]:
         "roughness_m": float(spec.get("roughness_m", 1.5e-4)),
         "rho_kg_m3": rho_a,
         "mu_Pa_s": float(spec.get("mu_air_Pa_s", 1.81e-5)),
-        "minor_loss_K": float(spec.get("minor_loss_K", 0.0)),
     })
     return {
         "Q_total_cooling_W": q_tot_w,
@@ -1822,7 +1831,7 @@ def solve_hvac_coil_and_duct_dual(spec: dict[str, Any]) -> dict[str, Any]:
         "sensible_heat_ratio": q_sens_w / q_tot_w if q_tot_w > 0 else 1.0,
         "condensate_kg_s": m_cond,
         "huebscher_D_eq_m": d_eq,
-        "duct_pressure_drop_Pa": hyd["pressure_drop_Pa"],
+        "duct_pressure_drop_Pa": hyd["pressure_drop_Pa"] + fitting_drop,
         "dual_rel_discrepancy": hyd["dual_rel_discrepancy"],
         "dual_verified": True,
     }
