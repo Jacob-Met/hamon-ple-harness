@@ -1660,7 +1660,7 @@ def solve_transformer_dual(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def solve_heat_exchanger_ntu_dual(spec: dict[str, Any]) -> dict[str, Any]:
-    """Dual-solve epsilon-NTU heat exchanger rating cross-checked against LMTD conductance recovery."""
+    """Cross-check specified UA by LMTD, or forward effectiveness near saturation and for shells."""
     mh, cph, thi = float(spec["m_hot_kg_s"]), float(spec["cp_hot_J_kgK"]), float(spec["Th_in_K"])
     mc, cpc, tci = float(spec["m_cold_kg_s"]), float(spec["cp_cold_J_kgK"]), float(spec["Tc_in_K"])
     ua = float(spec["UA_W_K"])
@@ -1674,9 +1674,11 @@ def solve_heat_exchanger_ntu_dual(spec: dict[str, Any]) -> dict[str, Any]:
     if cr < 1e-12:
         eps = 1.0 - math.exp(-ntu)
     elif arr == "counterflow":
-        eps = ntu / (1.0 + ntu) if abs(1.0 - cr) < 1e-9 else (
-            (1.0 - math.exp(-ntu * (1.0 - cr))) / (1.0 - cr * math.exp(-ntu * (1.0 - cr)))
-        )
+        if cr == 1.0:
+            eps = ntu / (1.0 + ntu)
+        else:
+            decayed_fraction = -math.expm1(-ntu * (1.0 - cr))
+            eps = decayed_fraction / ((1.0 - cr) + cr * decayed_fraction)
     elif arr == "parallel":
         eps = (1.0 - math.exp(-ntu * (1.0 + cr))) / (1.0 + cr)
     elif arr == "shell_and_tube_1_2":
@@ -1691,7 +1693,7 @@ def solve_heat_exchanger_ntu_dual(spec: dict[str, Any]) -> dict[str, Any]:
     tho = thi - q_w / ch
     tco = tci + q_w / cc
 
-    # Independent cross-check: recover UA via LMTD for counterflow/parallel or Decimal for 1-2 S&T
+    # Independent cross-check: use the LMTD energy balance or Decimal shell effectiveness.
     if arr in ("counterflow", "parallel"):
         # Check the forward rating at unit inlet difference. At equal inlets
         # the physical duty is zero and measured temperatures cannot identify UA.
@@ -1702,9 +1704,28 @@ def solve_heat_exchanger_ntu_dual(spec: dict[str, Any]) -> dict[str, Any]:
         else:
             dt1, dt2 = 1.0, 1.0 - (hot_drop + cold_rise)
         low, high = sorted((dt1, dt2))
-        lmtd = low if low == high else (high - low) / math.log1p((high - low) / low)
-        ua_rec = duty_per_kelvin / lmtd
-        disc = _rel_diff(ua, ua_rec)
+        if low <= math.ulp(1.0) / 1e-8 and ua > 0 and math.isfinite(ntu):
+            # Near saturation, the inverse UA check is sensitive to rounding.
+            # Solve the forward balance independently for a fraction of its maximum duty.
+            eps_max = 1.0 if arr == "counterflow" else 1.0 / (1.0 + cr)
+            left, right = 0.0, 1.0
+            for _ in range(54):
+                fraction = (left + right) / 2.0
+                if fraction == left or fraction == right:
+                    break
+                small = 1.0 - fraction
+                large = 1.0 - cr * fraction if arr == "counterflow" else 1.0
+                spread = large - small
+                mean = small if spread == 0.0 else spread / math.log1p(spread / small)
+                if fraction * eps_max < ntu * mean:
+                    left = fraction
+                else:
+                    right = fraction
+            disc = max(_rel_diff(eps, eps_max * bound) for bound in (left, right))
+        else:
+            lmtd = low if low == high else (high - low) / math.log1p((high - low) / low)
+            ua_rec = duty_per_kelvin / lmtd
+            disc = _rel_diff(ua, ua_rec)
     else:
         with localcontext() as ctx:
             ctx.prec = 45
