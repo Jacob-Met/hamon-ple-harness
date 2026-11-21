@@ -19,6 +19,21 @@ import hamon_pareto as hp
 
 
 class DualSolverVerifierTests(unittest.TestCase):
+    def test_bolt_group_is_translation_invariant(self):
+        for origin in (0, 524288):
+            with self.subTest(origin=origin):
+                result = dv.solve_domain_problem("bolt_group_eccentric_shear", {
+                    "bolts_xy_m": [(origin, origin), (origin + 0.25, origin),
+                                   (origin, origin + 0.125)],
+                    "load_x_m": origin + 0.5, "load_y_m": origin + 0.125,
+                    "Px_N": 300, "Py_N": 2100, "bolt_phi_Rn_N": 12000,
+                })
+                self.assertTrue(result["dual_verified"])
+                self.assertAlmostEqual(result["torsional_moment_Nm"], 850.0)
+                self.assertAlmostEqual(result["max_bolt_shear_N"], 3507.819835738432)
+                self.assertEqual(result["centroid_x_m"], origin + 1 / 12)
+                self.assertEqual(result["centroid_y_m"], origin + 1 / 24)
+
     def test_diaphragm_signed_load_cases_and_envelope(self):
         spec = {"plan_width_m": 10, "shear_force_N": 100,
                 "center_of_mass_x_m": 2.5, "accidental_eccentricity_ratio": 0.1,
