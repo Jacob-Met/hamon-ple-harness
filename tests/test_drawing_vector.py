@@ -6,7 +6,7 @@ import unittest
 import hamon_drawing as d
 
 
-def fixture(path):
+def fixture(path, page_boxes=b""):
     page1=b"q 0.7 w 0 0 0 RG 60 90 340 220 re S Q\nBT /F1 15 Tf 400 90 Td (SCALE 1:50) Tj ET\n"
     page2=b"q 0.8 w 0 0 0 RG 80 100 m 330 100 l 330 310 l S Q\nBT /F1 12 Tf 400 100 Td (SCALE 1:100) Tj ET\n"
     def contents(content):
@@ -15,7 +15,8 @@ def fixture(path):
     objects=[
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " + page_boxes
+        + b" /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>",
         contents(page1),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>",
         contents(page2),
@@ -61,6 +62,20 @@ class DrawingContracts(unittest.TestCase):
             self.assertTrue(any("1:100" in a["text"] for a in second["scale_annotations"]),second)
             self.assertEqual(first["pdf_page_size_pt"],[612,792])
             self.assertEqual(first["viewbox_svg_units"][2:],[612,792])
+
+    def test_word_bounds_use_rotated_cropbox(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "shifted.pdf"
+            fixture(path, b"/CropBox [30 40 570 740] /Rotate 90")
+            page = d.scan_pdf(str(path))["pages"][0]
+            self.assertEqual(page["pdf_page_size_pt"], [700, 540])
+            word = next(w for w in page["words"] if w["text"] == "SCALE")
+            left, top, right, bottom = word["page_bbox_pt"]
+            # Text starts at PDF (400, 90); clockwise 90 maps it to (90-40, 400-30).
+            self.assertLessEqual(left, 50)
+            self.assertGreaterEqual(right, 50)
+            self.assertLessEqual(top, 370)
+            self.assertGreaterEqual(bottom, 370)
 
     def test_invalid_page_and_crop_rejected(self):
         with tempfile.TemporaryDirectory() as td:
