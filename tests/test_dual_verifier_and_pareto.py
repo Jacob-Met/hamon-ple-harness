@@ -19,6 +19,23 @@ import hamon_pareto as hp
 
 
 class DualSolverVerifierTests(unittest.TestCase):
+    def test_diaphragm_signed_load_cases_and_envelope(self):
+        spec = {"plan_width_m": 10, "shear_force_N": 100,
+                "center_of_mass_x_m": 2.5, "accidental_eccentricity_ratio": 0.1,
+                "walls": [{"id": "A", "x_m": 0, "k_rel": 1},
+                          {"id": "B", "x_m": 10, "k_rel": 1}]}
+        result = dv.solve_domain_problem("diaphragm_torsion", spec)
+        for sign, expected in (("negative", (85, 15)), ("positive", (65, 35))):
+            case = result["accidental_load_cases"][sign]["wall_shears_N"]
+            for wid, value in zip(("A", "B"), expected):
+                self.assertAlmostEqual(case[wid], value)
+        self.assertAlmostEqual(result["wall_shear_envelope_N"]["A"], 85)
+        self.assertAlmostEqual(result["wall_shear_envelope_N"]["B"], 35)
+        self.assertAlmostEqual(result["torsional_moment_Nm"], -350)
+        self.assertAlmostEqual(result["wall_A_shear_N"], 85)
+        self.assertAlmostEqual(result["wall_B_shear_N"], 15)
+        self.assertAlmostEqual(result["max_wall_shear_N"], 85)
+
     def test_skew_mep_segment_clearance(self):
         pipe = {"p1": (0, 0, 0), "q1": (10, 0, 0), "outer_radius_m": 0.01}
         duct = {"p1": (0, -0.003, 0.2), "q1": (10, 0.007, 0.2), "outer_radius_m": 0.01}
