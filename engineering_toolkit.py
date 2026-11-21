@@ -286,9 +286,92 @@ def _xlsx_parts(archive):
     return workbook, result
 
 
+_CELL_REF = r"\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}"
+_EXACT_LOOKUP = re.compile(
+    rf"(?P<kind>[VH])LOOKUP\(\s*(?P<key>{_CELL_REF})\s*,\s*"
+    rf"(?:(?P<sheet>'(?:[^']|'')+'|[A-Z_][A-Z0-9_.]*)!)?"
+    rf"(?P<start>{_CELL_REF}):(?P<end>{_CELL_REF})\s*,\s*"
+    r"(?P<index>[1-9][0-9]{0,4})\s*,\s*(?:FALSE|0)\s*\)", re.I | re.ASCII)
+
+
+def _grid_position(address):
+    match = re.fullmatch(r"([A-Z]{1,3})([1-9][0-9]{0,6})", address.replace("$", "").upper())
+    if match is None:
+        raise ValueError("invalid worksheet cell reference")
+    col, row = match.groups()
+    x = 0
+    for char in col:
+        x = 26 * x + ord(char) - 64
+    if x > 16384 or int(row) > 1048576:
+        raise ValueError("cell reference outside worksheet")
+    return x, int(row)
+
+
+def _address(column, row):
+    letters = ""
+    while column:
+        column, remainder = divmod(column - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters + str(row)
+
+
+def _numeric_cell(cell, value):
+    if cell.get("t", "n") != "n" or value is None or not value.text:
+        return None
+    try:
+        number = float(value.text)
+    except (ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _verify_lookup(sheet, formula, cached, literals):
+    match = _EXACT_LOOKUP.fullmatch(formula)
+    if match is None or cached is None:
+        return {"status": "unverified"}
+    table = match["sheet"] or sheet
+    if table.startswith("'"):
+        table = table[1:-1].replace("''", "'")
+    # Require the exact declared sheet name. No external, named, or implicit ranges.
+    if table not in literals or sheet not in literals:
+        return {"status": "unverified"}
+    needle = literals[sheet].get(match["key"].replace("$", "").upper())
+    try:
+        _grid_position(match["key"])
+        x1, y1 = _grid_position(match["start"])
+        x2, y2 = _grid_position(match["end"])
+    except ValueError:
+        return {"status": "unverified"}
+    index = int(match["index"])
+    vertical = match["kind"].upper() == "V"
+    length, width = (y2-y1+1, x2-x1+1) if vertical else (x2-x1+1, y2-y1+1)
+    if needle is None or not 1 <= length <= 2048 or not 1 <= index <= width:
+        return {"status": "unverified"}
+    cells = literals[table]
+    for step in range(length):
+        x, y = (x1, y1+step) if vertical else (x1+step, y1)
+        key = cells.get(_address(x, y))
+        if key is None:
+            # A blank, nonnumeric or derived key could affect first-match semantics.
+            break
+        if key == needle:
+            address = _address(x+index-1, y) if vertical else _address(x, y+index-1)
+            expected = cells.get(address)
+            if expected is not None:
+                return {"status": "matched" if cached == expected else "mismatch",
+                        "source_sheet": table, "source_cell": address,
+                        "expected": expected, "cached": cached}
+            break
+    return {"status": "unverified"}
+
+
 def xlsx_audit(filename: str):
     """Audit declared worksheet cells and formula caches without evaluating a workbook."""
     manifest = {"file": filename, "kind": "xlsx-formula-audit", "sheets": [], "other_sheets": []}
+    literals = {}
+    lookups = []
+    lookup_total = indexed = 0
+    complete_index = True
     with zipfile.ZipFile(filename) as archive:
         workbook, parts = _xlsx_parts(archive)
         manifest["workbook_part"] = workbook
@@ -305,12 +388,43 @@ def xlsx_audit(filename: str):
                 raise ValueError(f"Invalid worksheet namespace or root: {sheet['part']}")
             cells = formulas = missing = empty_strings = followers = error_count = 0
             errors = []
+            name = sheet["name"]
+            if not name or name in literals:
+                complete_index = False
+            sheet_values = literals.setdefault(name, {})
+            derived_ranges = []
             for cell in root.iterfind(f"{ns}sheetData/{ns}row/{ns}c"):
                 cells += 1
                 formula = cell.find(ns + "f")
                 value = cell.find(ns + "v")
                 typ = cell.get("t", "n")
+                address = cell.get("r", "")
+                if complete_index:
+                    indexed += 1
+                    if indexed > 100_000 or address in sheet_values:
+                        complete_index = False
+                    else:
+                        sheet_values[address] = _numeric_cell(cell, value) if formula is None else None
                 if formula is not None:
+                    if formula.get("t") in ("array", "dataTable") and derived_ranges is not None:
+                        area = re.fullmatch(rf"({_CELL_REF})(?::({_CELL_REF}))?",
+                                            formula.get("ref", ""), re.I | re.ASCII)
+                        try:
+                            if area is None or len(derived_ranges) >= 128:
+                                raise ValueError("unbounded formula dependency range")
+                            x1, y1 = _grid_position(area[1])
+                            x2, y2 = _grid_position(area[2] or area[1])
+                            x, y = _grid_position(address)
+                            if not (x1 <= x <= x2 and y1 <= y <= y2):
+                                raise ValueError("formula master outside dependency range")
+                            derived_ranges.append((x1, y1, x2, y2))
+                        except ValueError:
+                            derived_ranges = None
+                    expression = (formula.text or "").strip()
+                    if expression.upper().startswith(("VLOOKUP(", "HLOOKUP(")):
+                        lookup_total += 1
+                        if len(lookups) < 256 and len(expression) <= 512 and formula.get("t", "normal") == "normal":
+                            lookups.append((name, address, expression, _numeric_cell(cell, value)))
                     formulas += 1
                     if value is None:
                         missing += 1
@@ -325,11 +439,37 @@ def xlsx_audit(filename: str):
                     error_count += 1
                     if len(errors) < 50:
                         errors.append({"cell": cell.get("r", ""), "value": value.text if value is not None else ""})
+            # Followers may contain only cached <v>; their master can appear later.
+            # Rectangles never expand into coordinates, even for a whole worksheet.
+            if derived_ranges is None:
+                sheet_values.clear()
+            elif derived_ranges and complete_index:
+                for address, numeric in sheet_values.items():
+                    if numeric is None:
+                        continue
+                    try:
+                        x, y = _grid_position(address)
+                    except ValueError:
+                        sheet_values.clear()
+                        break
+                    if any(x1 <= x <= x2 and y1 <= y <= y2
+                           for x1, y1, x2, y2 in derived_ranges):
+                        sheet_values[address] = None
             manifest["sheets"].append({**sheet, "cells": cells, "formulas": formulas,
                                        "formulas_without_cached_values": missing,
                                        "formulas_with_empty_string_cache": empty_strings,
                                        "shared_formula_followers": followers, "error_cells": errors,
                                        "error_count": error_count})
+    counts = {"matched": 0, "mismatch": 0, "unverified": lookup_total}
+    examples = []
+    if complete_index:
+        for name, address, expression, cached in lookups:
+            result = _verify_lookup(name, expression, cached, literals)
+            if result["status"] != "unverified":
+                counts["unverified"] -= 1
+                counts[result["status"]] += 1
+            examples.append({"sheet": name, "cell": address, **result})
+    manifest["lookup_audit"] = {"counts": counts, "examples": examples}
     manifest["note"] = "Formula results are not evaluated; cached results can be stale."
     return manifest
 
