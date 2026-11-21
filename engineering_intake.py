@@ -299,7 +299,7 @@ async def provision_engineering_cli(session: Any) -> str:
         " xmin ymin xmax ymax in the pdf-vector SVG frame and --dpi 300."
         " The JSON binds source/page/image hashes and exact pixel-to-SVG mapping;"
         " preserve it when citing evidence. The rotated CropBox is shared by"
-        " vectors and windows; native PDF word boxes remain a separate frame."
+        " vector geometry, raster windows and native PDF word boxes."
         " Maximum 4 million pixels/8 MB; choose a smaller region or lower dpi"
         " if refused. Output must be a new PNG path. No OCR or physical scale"
         " is inferred; confirm a dimension visually before using it."

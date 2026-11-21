@@ -61,9 +61,7 @@ def _page_map(page):
     if min(pw,ph,vw,vh)<=0 or max(pw,ph,vw,vh)>100000:
         raise ValueError("PDF/SVG coordinate frame dimensions outside bounds")
     sx,sy=vw/pw,vh/ph
-    # Both Poppler backends use the same unrotated page rectangle. Strongly
-    # reject incompatible aspect (e.g. one tool reads a differently cropped
-    # or rotated page); no text↔SVG association under an unverified transform.
+    # Both native inventories cover the rotated CropBox. Reject incompatible extents.
     if abs(sx/sy-1)>0.005 or not 0.1<=sx<=10:
         raise ValueError("PDF/SVG page aspect or coordinate frames mismatch")
     return vx,vy,sx,sy,pw,ph

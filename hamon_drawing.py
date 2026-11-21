@@ -472,18 +472,22 @@ def _scales(words):
     return found[:80]
 
 
-def _page_count(path):
+def _page_geometry(path, first, last):
     pdfinfo = shutil.which("pdfinfo")
     if not pdfinfo:
         raise RuntimeError("pdfinfo required (Poppler)")
-    info = subprocess.run([pdfinfo, str(path)], capture_output=True,
+    info = subprocess.run([pdfinfo, "-f", str(first), "-l", str(last), str(path)], capture_output=True,
                           timeout=10, check=False)
     if info.returncode != 0:
+        if b"Wrong page range" in info.stderr:
+            raise ValueError("page range outside PDF")
         raise ValueError("pdfinfo failed: encrypted/invalid PDF")
     match = re.search(rb"^Pages:\s*(\d+)\s*$", info.stdout, re.M)
     if not match:
         raise ValueError("PDF has no readable page count")
-    return int(match.group(1))
+    rotations = {int(page): int(angle) % 360 for page, angle in re.findall(
+        rb"^Page\s+(\d+) rot:\s*(-?\d+)\s*$", info.stdout, re.M)}
+    return int(match.group(1)), rotations
 
 
 def _page_svg(path, page, directory):
@@ -491,7 +495,7 @@ def _page_svg(path, page, directory):
 
     Cairo's default vector printing may shrink/center fractional page sizes.
     Explicit no-fit settings keep the SVG coordinates aligned with a CropBox
-    raster at dpi/72. PDF word boxes retain their separate coordinate frame.
+    raster at dpi/72. Native word boxes use the same rotated CropBox.
     """
     renderer = shutil.which("pdftocairo")
     if not renderer:
@@ -595,19 +599,27 @@ def scan_pdf(filename,first=1,last=None,limit_paths=2000,
         if (len(region)!=4 or any(not math.isfinite(v) for v in region) or
             region[0]>=region[2] or region[1]>=region[3]):
             raise ValueError("region requires finite SVG xMin yMin xMax yMax")
-    total=_page_count(path)
     end=last if last is not None else first
-    if end>total or end-first+1>20:
+    if end-first+1>20:
+        raise ValueError("page range exceeds 20-sheet bound")
+    total, rotations = _page_geometry(path, first, end)
+    if end>total:
         raise ValueError("page range outside PDF or exceeds 20-sheet bound")
     pages=[]
     with tempfile.TemporaryDirectory(prefix="hamon-pdf-") as tmp:
         for page in range(first,end+1):
             text=subprocess.run([pdftotext,"-f",str(page),"-l",str(page),
-                                 "-bbox-layout",str(path),"-"],
+                                 "-cropbox","-bbox-layout",str(path),"-"],
                                 capture_output=True,timeout=20,check=False)
             if text.returncode!=0 or len(text.stdout)>8_000_000:
                 raise ValueError(f"page {page}: PDF word extraction failed/budget exceeded")
             words,box=_word_inventory(text.stdout,limit_words)
+            # Poppler rotates the glyph boxes but reports the unrotated CropBox size.
+            rotation = rotations.get(page)
+            if rotation not in (0, 90, 180, 270):
+                raise ValueError(f"page {page}: missing or invalid PDF rotation")
+            if rotation in (90, 270):
+                box = box[::-1]
             inventory=_svg_inventory(_page_svg(path,page,tmp),limit_paths,region,selected_vector_ids)
             pages.append({"page":page,"pdf_page_size_pt":box,
                           "svg_coordinate_frame":_SVG_FRAME,
@@ -618,7 +630,7 @@ def scan_pdf(filename,first=1,last=None,limit_paths=2000,
             "file":str(path),"document_pages":total,
             "first_page":first,"last_page":end,"pages":pages,
             "physical_drawing_scale_verified":False,
-            "warning":"Native PDF word boxes and SVG vector centerlines use separate page coordinate frames; SVG uses the rotated CropBox without paper fitting. Printed scale text is annotation only. SVG M/L/H/V/C/S/Q/T/Z curve centerline bboxes are exact under affine transforms; unsupported arc paths remain unlocalized, crop is exploratory, and no OCR, plotted geometric calibration, or code compliance is inferred."}
+            "warning":"Native PDF word boxes and SVG vector centerlines use the rotated CropBox without paper fitting. Printed scale text is annotation only. SVG M/L/H/V/C/S/Q/T/Z curve centerline bboxes are exact under affine transforms; unsupported arc paths remain unlocalized, crop is exploratory, and no OCR, plotted geometric calibration, or code compliance is inferred."}
 
 
 def render_window(filename, output, page=1, region=None, dpi=120, limit_paths=128):
@@ -664,7 +676,7 @@ def render_window(filename, output, page=1, region=None, dpi=120, limit_paths=12
                     raise ValueError("PDF exceeds 50 MB task-container inspection bound")
                 digest.update(chunk)
                 copied.write(chunk)
-        total = _page_count(snapshot)
+        total, _ = _page_geometry(snapshot, page, page)
         if page > total:
             raise ValueError("page range outside PDF")
         svg = _page_svg(snapshot, page, root)
@@ -756,5 +768,5 @@ def render_window(filename, output, page=1, region=None, dpi=120, limit_paths=12
         },
         "vector_inventory": inventory, "ocr_performed": False,
         "physical_drawing_scale_verified": False,
-        "warning": "Read the emitted PNG to inspect the actual marks. Pixel-to-SVG mapping is page geometry, not physical calibration. Native word boxes use a separate frame; no dimension label, OCR result, engineering measurement or code approval is inferred.",
+        "warning": "Read the emitted PNG to inspect the actual marks. Pixel-to-SVG mapping is page geometry, not physical calibration. This raster window does not establish a dimension label, OCR result, engineering measurement or code approval.",
     }
