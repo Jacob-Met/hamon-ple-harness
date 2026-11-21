@@ -15,3 +15,5 @@ the match, or a formula-derived dependency yields `unverified`. Lookup
 counts cover top-level VLOOKUP and HLOOKUP calls. The verifier checks up to
 256 formulas and 2,048 key cells per formula. Above 100,000 workbook cells it
 keeps the inventory and reports all lookups as unverified.
+
+Array-formula and data-table result ranges are formula-derived even when a follower has no formula element. Such cells cannot qualify as literal lookup inputs. Missing, malformed, out-of-grid or inconsistent master ranges, and more than 128 ranges on one sheet, make dependencies from that sheet unverified. Valid disjoint ranges and unrelated sheets retain their literal inputs. Range containment never expands the worksheet grid.

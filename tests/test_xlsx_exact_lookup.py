@@ -70,3 +70,63 @@ class LookupTests(unittest.TestCase):
             self.assertEqual(output['B2']['expected'], 0)
             self.assertEqual(output['B4']['source_cell'], 'B2')
             self.assertEqual(output['B4']['source_sheet'], 'Ratings 2026')
+
+    def test_formula_range_followers_are_not_literals(self):
+        cases = [('needle', 1, 'A1', 'A1:A2', 'unverified'),
+                 ('prior-key', 2, 'A1', 'A1:A2', 'unverified'),
+                 ('returned', 2, 'B2', 'B2:B3', 'unverified'),
+                 ('disjoint', 2, 'D2', 'D2:D3', 'matched'),
+                 ('missing', 2, 'D2', None, 'unverified'),
+                 ('malformed', 2, 'D2', 'not-a-range', 'unverified'),
+                 ('reversed', 2, 'D2', 'D3:D2', 'unverified'),
+                 ('whole-grid', 2, 'A1', 'A1:XFD1048576', 'unverified')]
+        for mode in ('array', 'dataTable'):
+            for label, sheet, master, area, expected in cases:
+                with self.subTest(mode=mode, case=label), tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / 'range.xlsx'
+                    package(path)
+                    with ZipFile(path) as z:
+                        parts = {name: z.read(name) for name in z.namelist()}
+                    parts['xl/worksheets/1.xml'] = worksheet([
+                        [('A', None, 1)], [('A', None, 2),
+                        ('B', "VLOOKUP(A2,'Ratings 2026'!A2:B4,2,FALSE)", 20)]])
+                    parts['xl/worksheets/2.xml'] = worksheet([
+                        [('A', None, 1)],
+                        [('A', None, 1), ('B', None, 10), ('D', None, 2)],
+                        [('A', None, 2), ('B', None, 20), ('D', None, 3)],
+                        [('A', None, 3), ('B', None, 30)]])
+                    member = f'xl/worksheets/{sheet}.xml'
+                    root = ET.fromstring(parts[member])
+                    cell = next(c for c in root.iter(f'{{{MAIN}}}c') if c.get('r') == master)
+                    attrs = {'t': mode, **({'ref': area} if area is not None else {})}
+                    ET.SubElement(cell, f'{{{MAIN}}}f', attrs).text = 'ROW(A1:A2)'
+                    # The master is deliberately serialized after its followers.
+                    data = root.find(f'{{{MAIN}}}sheetData')
+                    data[:] = reversed(list(data))
+                    parts[member] = ET.tostring(root)
+                    with ZipFile(path, 'w') as z:
+                        for name, content in parts.items():
+                            z.writestr(name, content)
+                    report = xlsx_audit(str(path))
+                    self.assertEqual(report['lookup_audit']['examples'][0]['status'], expected)
+
+    def test_lookup_endpoints_respect_worksheet_bounds(self):
+        for kind, endpoint, expected in [('VLOOKUP', 'XFE4', 'unverified'),
+                                         ('VLOOKUP', 'XFD4', 'matched'),
+                                         ('HLOOKUP', 'C1048577', 'unverified'),
+                                         ('HLOOKUP', 'C1048576', 'matched')]:
+            with self.subTest(kind=kind, endpoint=endpoint), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'bounds.xlsx'
+                package(path)
+                with ZipFile(path) as z:
+                    parts = {name: z.read(name) for name in z.namelist()}
+                root = ET.fromstring(parts['xl/worksheets/1.xml'])
+                address, key = ('B1', 'A1') if kind == 'VLOOKUP' else ('B3', 'A3')
+                cell = next(c for c in root.iter(f'{{{MAIN}}}c') if c.get('r') == address)
+                cell.find(f'{{{MAIN}}}f').text = f"{kind}({key},'Ratings 2026'!A1:{endpoint},2,FALSE)"
+                parts['xl/worksheets/1.xml'] = ET.tostring(root)
+                with ZipFile(path, 'w') as z:
+                    for name, content in parts.items():
+                        z.writestr(name, content)
+                examples = xlsx_audit(str(path))['lookup_audit']['examples']
+                self.assertEqual(next(x for x in examples if x['cell'] == address)['status'], expected)
