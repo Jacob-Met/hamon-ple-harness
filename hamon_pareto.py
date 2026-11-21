@@ -207,3 +207,9 @@ from hamon_wave6_physics_verifiers import (
     solve_reactor_kinetics,
     solve_transmission_line_rlc,
 )
+
+from hamon_wave7_engineering_verifiers import (
+    WAVE7_DOMAINS,
+    dispatch_wave7_verifier,
+    infer_wave7_domain,
+)

@@ -709,6 +709,31 @@ def dispatch_wave6_verifier(domain_or_spec: Any, params: Optional[Mapping[str, A
     return {"domain": domain, "verified": False, "error": f"unrecognized_wave6_domain:{domain_or_spec}"}
 
 
+from hamon_wave7_engineering_verifiers import WAVE7_DOMAINS, infer_wave7_domain
+
+WAVE1_5_CERTIFIED_FAST_PATH_DOMAINS = frozenset(
+    {
+        "dxf_takeoff",
+        "dxf_curved_takeoff",
+        "mep_routing_clearance_3d",
+        "step_brep_mass_inertia",
+        "geotech_bearing_earthwork",
+        "thermo_hx_pinch_conservation",
+        "spice_ac_kcl_tellegen",
+        "pde",
+        "convective_fin_1d",
+        "control",
+        "transfer_function",
+        "state_space",
+        "psychrometrics",
+        "cooling_coil",
+        "fem",
+        "truss_2d",
+        "euler_bernoulli_beam_1d",
+    }
+) | frozenset(WAVE7_DOMAINS)
+
+
 def prune_deterministic_fast_path(
     tier: str,
     est_cost_usd: float,
@@ -720,13 +745,21 @@ def prune_deterministic_fast_path(
     light_cost_usd: float = 1.9331,
 ) -> Dict[str, Any]:
     norm_domain = (domain or "").strip().lower()
+    domain_ok = (
+        not norm_domain
+        or norm_domain in DETERMINISTIC_FAST_PATH_DOMAINS
+        or norm_domain in WAVE1_5_CERTIFIED_FAST_PATH_DOMAINS
+        or infer_wave6_domain(norm_domain) is not None
+        or infer_wave7_domain(norm_domain) is not None
+    )
     eligible = (
         bool(presolve_verified)
-        and residual < 1e-6
+        and math.isfinite(float(residual))
+        and abs(float(residual)) < 1e-6
         and not has_unparsed_visual
-        and (not norm_domain or norm_domain in DETERMINISTIC_FAST_PATH_DOMAINS or infer_wave6_domain(norm_domain) is not None)
+        and domain_ok
     )
-    if eligible and tier in ("medium", "heavy", "frontier"):
+    if eligible and tier in ("low", "medium", "high", "heavy", "frontier"):
         pruned_cost = min(float(est_cost_usd), float(light_cost_usd))
         return {
             "tier": "light",
