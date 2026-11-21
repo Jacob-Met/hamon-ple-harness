@@ -361,6 +361,8 @@ class DualSolverVerifierTests(unittest.TestCase):
                 "0", "CIRCLE", "8", "CORES", "10", "1000", "20", "1000", "40", "500",
                 "0", "INSERT", "8", "COLS", "2", "W14X90", "10", "0", "20", "0",
                 "0", "INSERT", "8", "COLS", "2", "W14X90", "10", "6000", "20", "0",
+                "0", "INSERT", "8", "COLS", "2", "PLATE", "10", "0", "20", "0",
+                "70", "3", "71", "2", "44", "1000", "45", "400",
                 "0", "ENDSEC", "0", "EOF",
             ]
             dxf_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -373,6 +375,10 @@ class DualSolverVerifierTests(unittest.TestCase):
             self.assertAlmostEqual(out["closed_area_m2_by_layer"]["SLAB"], 24.0, places=6)
             self.assertAlmostEqual(out["closed_area_m2_by_layer"]["CORES"], math.pi * 0.25, places=6)
             self.assertEqual(out["insert_count_by_block"]["W14X90"], 2)
+            self.assertEqual(out["entity_counts"]["INSERT"], 3)
+            self.assertEqual(out["insert_count_by_block"]["PLATE"], 6)
+            self.assertEqual(out["insert_count_by_layer"]["COLS"], 8)
+            self.assertEqual(out["total_insert_blocks"], 8)
 
             spec_file = Path(td) / "dv.json"
             spec_file.write_text(json.dumps({
