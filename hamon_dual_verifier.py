@@ -909,27 +909,51 @@ def solve_truss_2d(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def solve_diaphragm_torsion(spec: dict[str, Any]) -> dict[str, Any]:
-    """Rigid diaphragm in-plane shear + accidental eccentricity torsion distribution."""
-    B = float(spec["plan_width_m"])
-    V = float(spec["shear_force_N"])
-    x_cm = float(spec["center_of_mass_x_m"])
-    e_ratio = float(spec.get("accidental_eccentricity_ratio", 0.05))
-    walls = spec["walls"]
-    # Dual check: SymPy rational weighted centroid vs float
-    k_sum = sum(float(w["k_rel"]) for w in walls)
-    x_cr = sum(float(w["k_rel"]) * float(w["x_m"]) for w in walls) / k_sum
-    J_p = sum(float(w["k_rel"]) * (float(w["x_m"]) - x_cr) ** 2 for w in walls)
-    M_t = V * (abs(x_cm - x_cr) + e_ratio * B)
-    shears = {}
-    for w in walls:
-        ki, xi = float(w["k_rel"]), float(w["x_m"])
-        vi = V * (ki / k_sum) + M_t * ki * abs(xi - x_cr) / J_p
-        shears[w["id"]] = vi
+    """Distribute signed shear for both accidental load positions on a rigid diaphragm.
+
+    The primary wall forces and moment belong to the case with the largest
+    absolute wall demand. The per-wall magnitude envelope can combine cases.
+    """
+    width = float(spec["plan_width_m"])
+    shear = float(spec["shear_force_N"])
+    mass_x = float(spec["center_of_mass_x_m"])
+    ratio = float(spec.get("accidental_eccentricity_ratio", 0.05))
+    walls = [(w["id"], float(w["x_m"]), float(w["k_rel"])) for w in spec["walls"]]
+    if not walls or len({wid for wid, _, _ in walls}) != len(walls):
+        raise ValueError("diaphragm requires distinct wall IDs")
+    if width < 0 or ratio < 0 or any(k < 0 for _, _, k in walls):
+        raise ValueError("width, eccentricity ratio and wall stiffness must be nonnegative")
+    total_k = math.fsum(k for _, _, k in walls)
+    if total_k <= 0:
+        raise ValueError("diaphragm requires positive total wall stiffness")
+    origin = walls[0][1]
+    center = math.fsum(k * (x - origin) for _, x, k in walls) / total_k
+    arms = [(wid, (x - origin) - center, k) for wid, x, k in walls]
+    rotational_k = math.fsum(k * arm**2 for _, arm, k in arms)
+    cases = {}
+    for label, sign in (("positive", 1), ("negative", -1)):
+        moment = shear * ((mass_x - origin) - center + sign * ratio * width)
+        if rotational_k == 0 and moment != 0:
+            raise ValueError("wall layout cannot resist the diaphragm moment")
+        twist = moment / rotational_k if rotational_k else 0.0
+        forces = {wid: k * (shear / total_k + twist * arm) for wid, arm, k in arms}
+        moments = [forces[wid] * arm for wid, arm, _ in arms]
+        for terms, applied in ((forces.values(), shear), (moments, moment)):
+            if not math.isclose(math.fsum(terms), applied, rel_tol=0.0,
+                                abs_tol=1e-10 * max(1.0, math.fsum(abs(v) for v in terms))):
+                raise ValueError("diaphragm wall reactions violate equilibrium")
+        cases[label] = {"torsional_moment_Nm": moment, "wall_shears_N": forces}
+    peaks = {label: max(abs(v) for v in case["wall_shears_N"].values())
+             for label, case in cases.items()}
+    governing = max(peaks, key=peaks.get)
     return {
-        "x_cr_m": x_cr,
-        "torsional_moment_Nm": M_t,
-        "wall_shears_N": shears,
-        "max_wall_shear_N": max(shears.values()),
+        "x_cr_m": origin + center,
+        **cases[governing],
+        "governing_accidental_case": governing,
+        "accidental_load_cases": cases,
+        "wall_shear_envelope_N": {wid: max(abs(case["wall_shears_N"][wid]) for case in cases.values())
+                                  for wid, _, _ in walls},
+        "max_wall_shear_N": peaks[governing],
         "dual_verified": True,
     }
 
