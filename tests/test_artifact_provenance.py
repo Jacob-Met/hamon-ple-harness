@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from ship import check_artifact_provenance as p
 
@@ -57,6 +58,35 @@ class ProvenanceGateTests(unittest.TestCase):
             (root/"artifacts"/"manifest.json").write_text("{}")
             with self.assertRaisesRegex(ValueError,"lacks a harness.files"):
                 p.evaluate(root)
+
+    def test_official_layout_acceptance_and_source_freshness(self):
+        tmp, root = self.make_project()
+        with tmp:
+            (root / "kit").mkdir()
+            (root / "kit" / "__main__.py").touch()
+            (root / "eval").mkdir()
+            (root / "eval" / "dev_set.yaml").touch()
+            provenance = {"manifest": "ok", "dev_set": "same", "harness": "same", "edited": []}
+            review = {"format": 1, "accepted": True, "unreadable": False,
+                      "provenance": provenance, "tasks": []}
+            def check(expected):
+                call = p.subprocess.CompletedProcess([], 0, json.dumps(review), "")
+                with patch.object(p.subprocess, "run", return_value=call):
+                    self.assertEqual(p.evaluate_official(root, root)["status"], expected)
+            check("fresh")
+            provenance["harness"] = "docs-only"
+            check("fresh")
+            provenance["dev_set"] = "other"
+            check("stale")
+            provenance["dev_set"] = "same"
+            provenance["harness"] = "changed"
+            check("stale")
+            provenance["harness"] = "same"
+            provenance["edited"] = ["fixture"]
+            check("stale")
+            provenance["edited"] = []
+            review["tasks"] = [{"id": "fixture", "status": "ok", "warnings": ["not in manifest.json"]}]
+            check("stale")
 
     def test_real_repository_requires_a_new_evaluation(self):
         root=Path(__file__).resolve().parents[1]

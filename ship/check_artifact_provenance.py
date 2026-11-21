@@ -15,6 +15,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 # Each file below ships in the evaluator's serve image or is loaded/invoked by
@@ -81,13 +82,67 @@ def evaluate(root: Path) -> dict:
             "note":"Fresh source hashes are necessary, not sufficient: dev-run provenance, organizer eligibility and real scores must be verified separately."}
 
 
+def evaluate_official(root: Path, kit_root: Path) -> dict:
+    """Run the organizer's working-tree review and qualify its provenance."""
+    if not (kit_root / "kit" / "__main__.py").is_file():
+        raise ValueError("organizer checkout lacks kit/__main__.py")
+    if not (kit_root / "eval" / "dev_set.yaml").is_file():
+        raise ValueError("organizer checkout lacks eval/dev_set.yaml")
+    result = subprocess.run(
+        [sys.executable, "-m", "kit", "artifacts", "--json", str(root.resolve())],
+        cwd=kit_root, text=True, capture_output=True, check=False,
+    )
+    try:
+        report = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"organizer kit produced no JSON review (exit {result.returncode}); "
+            "run this checker with the organizer kit's Python environment"
+        ) from exc
+    if not isinstance(report, dict) or report.get("format") != 1:
+        raise ValueError("unsupported organizer artifact review format")
+    accepted = report.get("accepted")
+    if not isinstance(accepted, bool) or result.returncode != (0 if accepted else 1):
+        raise ValueError("organizer exit code and acceptance field disagree")
+    if report.get("unreadable") is not False:
+        raise ValueError("organizer could not review this entry")
+    provenance = report.get("provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError("organizer review lacks provenance")
+    tasks = report.get("tasks")
+    if not isinstance(tasks, list):
+        raise ValueError("organizer review lacks task results")
+    unrecorded = [
+        task["id"] for task in tasks
+        if task.get("status") == "ok" and "not in manifest.json" in task.get("warnings", [])
+    ]
+    # The organizer explicitly accepts docs-only drift as the same runtime.
+    # Missing or empty tasks are reported by the kit, independently of source.
+    fresh = (accepted and provenance.get("manifest") == "ok"
+             and provenance.get("dev_set") == "same"
+             and provenance.get("harness") in ("same", "docs-only")
+             and provenance.get("edited") == [] and not unrecorded)
+    return {
+        "schema": "hamon.ple.official-provenance.v1",
+        "status": "fresh" if fresh else "stale",
+        "kit_exit": result.returncode,
+        "unrecorded_usable_tasks": unrecorded,
+        "kit_review": report,
+    }
+
+
 def main(argv=None):
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument("submission_dir",type=Path)
+    ap.add_argument("--kit-root", type=Path,
+                    help="Run the public organizer kit to verify the full harness, dev-set and task exports.")
     args=ap.parse_args(argv)
     try:
-        report=evaluate(args.submission_dir)
-    except ValueError as exc:
+        if args.kit_root is None:
+            report=evaluate(args.submission_dir)
+        else:
+            report=evaluate_official(args.submission_dir, args.kit_root)
+    except (OSError, ValueError) as exc:
         print(json.dumps({"schema":"hamon.ple.provenance.v1","status":"invalid",
                           "reason":str(exc)}))
         return 2

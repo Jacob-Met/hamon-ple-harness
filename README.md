@@ -17,6 +17,21 @@ An Apache-2.0 harness derived from Google's Pi / Claude Opus 5.5 sample for the 
 
 `artifacts/` currently holds an inherited template run. **Do not present it as a fresh score for this changed harness.** Regenerate it only from the exact submitted source using authorized dev tasks and an approved model endpoint. The source provenance checker explicitly flags the inherited manifest as stale.
 
+For a source-custody receipt from the public organizer kit, run the following
+from the benchmark checkout. This reads the entry and its exports on disk. It
+runs the original artifact review, returns the per-task results, and also checks
+the complete Git source tree, dev-set revision and per-task export provenance.
+
+```bash
+uv run python ../your-repo/ship/check_artifact_provenance.py ../your-repo --kit-root .
+```
+
+An accepted artifact layout can still have stale source, changed task files or
+an empty task. The checker exits 0 for verified provenance (including the kit's
+documentation-only changes), 3 for stale or unverified artifacts, and 2 when
+the kit could not provide a review. Scoring still requires the authorized
+dev-task files and appropriate model and judge access.
+
 ## Engineering task commands
 
 Inside the isolated task container, Pi can run `python3 /tmp/hamon-engineering-toolkit.py` with `pdf-vector`, `pdf-dimension-links`, `pdf-auto-measure`, `pdf-measure`, `ifc-narrowphase`, `calc-pack`, `quantity`, `check` and `xlsx-audit`. The tools produce qualified evidence rather than assuming source labels, collision envelopes or engineering code compliance. See the [anchored PDF guide](docs/pdf_measurement.md) for the new source-verified dimension graph: it requires a real PDF word box and two separate crossing endpoint strokes before using an automatically associated reference, then validates four independent directions against the physical affine tensor. Missing/ambiguous evidence fails closed; neither visual proximity nor a passing metric is building-code approval.
