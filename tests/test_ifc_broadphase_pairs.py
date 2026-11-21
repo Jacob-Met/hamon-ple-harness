@@ -3,11 +3,14 @@ from pathlib import Path
 import tempfile
 import unittest
 
-import ifcopenshell.api.context
-import ifcopenshell.api.geometry
-import ifcopenshell.api.project
-import ifcopenshell.api.root
-import ifcopenshell.api.unit
+try:
+    import ifcopenshell.api.context
+    import ifcopenshell.api.geometry
+    import ifcopenshell.api.project
+    import ifcopenshell.api.root
+    import ifcopenshell.api.unit
+except ModuleNotFoundError as _exc:
+    raise unittest.SkipTest(f'optional dependency unavailable: {_exc}')
 
 from engineering_toolkit import ifc_broadphase
 

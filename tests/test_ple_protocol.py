@@ -13,8 +13,11 @@ import unittest
 from unittest import mock
 import zipfile
 
-from websockets.asyncio.client import connect
-from websockets.asyncio.server import serve
+try:
+    from websockets.asyncio.client import connect
+    from websockets.asyncio.server import serve
+except ModuleNotFoundError as _exc:
+    raise unittest.SkipTest(f'optional dependency unavailable: {_exc}')
 
 import harness
 import taskbridge

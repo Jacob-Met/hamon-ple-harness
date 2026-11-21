@@ -18,7 +18,7 @@ import math
 from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
-from scipy import integrate, linalg, optimize
+from _scipy_compat import HAS_SCIPY, integrate, linalg, optimize
 
 SIGMA_SB = 5.670374419e-8
 FARADAY_C_MOL = 96485.33212
