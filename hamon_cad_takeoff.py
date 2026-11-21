@@ -68,12 +68,13 @@ def shoelace_area_and_perimeter(pts: list[tuple[float, float]], closed: bool) ->
         perim += math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1])
     if not closed or len(pts) < 3:
         return 0.0, perim
+    origin_x, origin_y = pts[0]
     twice_a = 0.0
     n = len(pts)
     for i in range(n):
         x1, y1 = pts[i]
         x2, y2 = pts[(i + 1) % n]
-        twice_a += x1 * y2 - x2 * y1
+        twice_a += (x1 - origin_x) * (y2 - origin_y) - (x2 - origin_x) * (y1 - origin_y)
     return 0.5 * abs(twice_a), perim
 
 
@@ -85,13 +86,17 @@ def bulge_area_and_perimeter(verts_xyb: list[tuple[float, float, float]], closed
     has_bulge = any(abs(v[2]) > 1e-12 for v in verts_xyb)
     seg_count = n if closed else (n - 1)
     perim = 0.0
+    origin_x, origin_y, _ = verts_xyb[0]
     signed_area = 0.0
     for k in range(seg_count):
         x1, y1, bulge = verts_xyb[k]
         x2, y2, _ = verts_xyb[(k + 1) % n]
         chord = math.hypot(x2 - x1, y2 - y1)
         if closed:
-            signed_area += 0.5 * (x1 * y2 - x2 * y1)
+            # Local coordinates preserve the chord area at large survey offsets.
+            signed_area += 0.5 * (
+                (x1 - origin_x) * (y2 - origin_y) - (x2 - origin_x) * (y1 - origin_y)
+            )
         if chord > 1e-15 and abs(bulge) > 1e-12:
             theta = 4.0 * math.atan(bulge)
             radius = chord * (1.0 + bulge * bulge) / (4.0 * abs(bulge))
