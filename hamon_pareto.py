@@ -264,3 +264,14 @@ from hamon_pde_control_psychro_fem import (
     presolve_wave5_prompt,
     verify_wave5_engineering,
 )
+
+from hamon_wave6_physics_verifiers import (
+    WAVE6_DOMAINS,
+    dispatch_wave6_verifier,
+    infer_wave6_domain,
+    prune_deterministic_fast_path,
+    solve_compressible_gas_acoustics,
+    solve_mohr_vessel_buckling,
+    solve_reactor_kinetics,
+    solve_transmission_line_rlc,
+)
