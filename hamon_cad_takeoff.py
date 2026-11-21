@@ -55,6 +55,54 @@ def shoelace_area_and_perimeter(pts: list[tuple[float, float]], closed: bool) ->
     return 0.5 * abs(twice_a), perim
 
 
+def _lwpolyline_measurements(groups: list[tuple[int, str]], closed: bool) -> tuple[float, float]:
+    # A bulge belongs to the segment leaving its vertex, including the closing segment.
+    vertices: list[tuple[float, float, float]] = []
+    vertex: dict[int, float] = {}
+    for code, value in groups:
+        if code == 10:
+            if 10 in vertex and 20 in vertex:
+                vertices.append((vertex[10], vertex[20], vertex.get(42, 0.0)))
+            vertex = {10: float(value)}
+        elif code in (20, 42) and 10 in vertex:
+            vertex[code] = float(value)
+    if 10 in vertex and 20 in vertex:
+        vertices.append((vertex[10], vertex[20], vertex.get(42, 0.0)))
+    if not any(b for _, _, b in vertices):
+        return shoelace_area_and_perimeter([(x, y) for x, y, _ in vertices], closed)
+    if len(vertices) < 2:
+        return 0.0, 0.0
+
+    # Center the polygon sum at its first vertex; large drawing offsets need not
+    # enter the signed-area calculation. Arc segments add signed circular areas.
+    ox, oy, _ = vertices[0]
+    areas, lengths = [], []
+    for i in range(len(vertices) if closed else len(vertices) - 1):
+        x, y, bulge = vertices[i]
+        u, v, _ = vertices[(i + 1) % len(vertices)]
+        chord = math.hypot(u - x, v - y)
+        if closed:
+            areas.append(((x - ox) * (v - oy) - (y - oy) * (u - ox)) / 2)
+        if bulge == 0.0 or chord == 0.0:
+            lengths.append(chord)
+            continue
+        if not math.isfinite(bulge):
+            raise ValueError("nonfinite LWPOLYLINE bulge")
+        abs_bulge = abs(bulge)
+        quarter_angle = math.atan(abs_bulge)
+        arc = chord * (quarter_angle / abs_bulge + quarter_angle * abs_bulge)
+        lengths.append(arc)
+        if closed:
+            sweep = 4 * math.atan(bulge)
+            # (sweep - sin(sweep)) / sweep**2 loses precision for small sweeps.
+            if abs(sweep) < 0.01:
+                factor = sweep * (1 / 6 - sweep**2 / 120 + sweep**4 / 5040)
+            else:
+                factor = (sweep - math.sin(sweep)) / sweep**2
+            areas.append(0.5 * arc * (arc * factor))
+    return abs(math.fsum(areas)), math.fsum(lengths)
+
+
 def scan_dxf_takeoff(filename: str | Path) -> dict[str, Any]:
     """Extract SI-calibrated spatial quantities (lengths, areas, block counts) from ASCII DXF."""
     p = Path(filename)
@@ -87,15 +135,7 @@ def scan_dxf_takeoff(filename: str | Path) -> dict[str, Any]:
         elif etype == "LWPOLYLINE":
             flag = int(next((v for c, v in groups if c == 70), "0"))
             closed = bool(flag & 1)
-            verts: list[tuple[float, float]] = []
-            cur_x: float | None = None
-            for c, v in groups:
-                if c == 10:
-                    cur_x = float(v)
-                elif c == 20 and cur_x is not None:
-                    verts.append((cur_x, float(v)))
-                    cur_x = None
-            area, perim = shoelace_area_and_perimeter(verts, closed)
+            area, perim = _lwpolyline_measurements(groups, closed)
             if closed and area > 0:
                 poly_area_by_layer[layer] = poly_area_by_layer.get(layer, 0.0) + area
             poly_perim_by_layer[layer] = poly_perim_by_layer.get(layer, 0.0) + perim
