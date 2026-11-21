@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -411,4 +412,23 @@ function _registerPleWave3DomainTools(pi: any) {
 export default function registerTaskTools(pi: any) {
   _origRegisterTaskTools_registerTaskTools(pi);
   _registerPleWave3DomainTools(pi);
+}
+
+
+export function runWave5EngineeringVerifier(spec: Record<string, unknown>, cwd: string = process.cwd()): Record<string, unknown> {
+  const scriptPath = path.resolve(cwd, "hamon_pde_control_psychro_fem.py");
+  const child = spawnSync("python3", [scriptPath, "--json", JSON.stringify(spec)], {
+    cwd,
+    encoding: "utf-8",
+    timeout: 15000,
+  });
+  const stdout = (child.stdout || "").trim();
+  if (!stdout) {
+    return { passed: false, error: (child.stderr || "empty verifier output").trim(), status: child.status };
+  }
+  try {
+    return JSON.parse(stdout) as Record<string, unknown>;
+  } catch {
+    return { passed: false, error: stdout, status: child.status };
+  }
 }

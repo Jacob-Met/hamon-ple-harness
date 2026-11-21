@@ -256,3 +256,11 @@ def dispatch_ple_tool(tool_name: str, payload: dict) -> dict:
     if tool_name == "check_deliverable_preflight":
         return _ifc.run_router_preflight(payload)
     raise ValueError(f"Unknown PLE domain tool: {tool_name}")
+
+
+# --- Wave-5 PDE / Control / Psychrometrics / Structural FEM Verifier Hook ---
+from hamon_pde_control_psychro_fem import (
+    detect_wave5_domain,
+    presolve_wave5_prompt,
+    verify_wave5_engineering,
+)
