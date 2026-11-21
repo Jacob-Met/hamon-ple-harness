@@ -728,6 +728,12 @@ def run(argv=None):
     n.add_argument("--limit",type=int,default=400)
     n.add_argument("--triangle-budget",type=int,default=250000)
     n.add_argument("--min-clearance-mm",type=float,default=None)
+    dvf=sub.add_parser("dual-verify",help="Symbolic + 7-dim SI + numerical dual-solver engineering verifier")
+    dvf.add_argument("file")
+    dxt=sub.add_parser("dxf-takeoff",help="SI-calibrated DXF LINE/LWPOLYLINE/CIRCLE/ARC/INSERT spatial takeoff")
+    dxt.add_argument("file")
+    fmg=sub.add_parser("format-guard",help="Audit local deliverable JSON/CSV/XLSX/ZIP format and formula caches")
+    fmg.add_argument("file")
     args=p.parse_args(argv)
     try:
         if args.cmd=="calc-pack": out=calc_pack(args.file)
@@ -761,6 +767,18 @@ def run(argv=None):
             import hamon_geometry
             out=hamon_geometry.ifc_narrowphase(
                 args.file,args.a,args.b,args.limit,args.triangle_budget,args.min_clearance_mm)
+        elif args.cmd=="dual-verify":
+            import hamon_dual_verifier
+            out=hamon_dual_verifier.run_dual_verify_file(args.file)
+        elif args.cmd=="dxf-takeoff":
+            import hamon_cad_takeoff
+            out=hamon_cad_takeoff.scan_dxf_takeoff(args.file)
+        elif args.cmd=="format-guard":
+            import hamon_pareto
+            out=hamon_pareto.audit_local_deliverable(args.file)
+            if not out.get("ok", False):
+                print(json.dumps(out,ensure_ascii=True,default=str))
+                return 3
         else: raise ValueError("unsupported command")
         print(json.dumps({"ok":True,**out},ensure_ascii=True,default=str))
         return 3 if args.cmd=="calc-pack" and not out["all_checks_pass"] else 0

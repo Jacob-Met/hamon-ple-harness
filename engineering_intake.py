@@ -253,6 +253,9 @@ async def provision_engineering_cli(session: Any) -> str:
     affine_bytes = pathlib.Path(__file__).with_name("hamon_affine_metric.py").read_bytes()
     callout_bytes = pathlib.Path(__file__).with_name("hamon_callout.py").read_bytes()
     dxf_bytes = pathlib.Path(__file__).with_name("hamon_dxf.py").read_bytes()
+    dual_bytes = pathlib.Path(__file__).with_name("hamon_dual_verifier.py").read_bytes()
+    takeoff_bytes = pathlib.Path(__file__).with_name("hamon_cad_takeoff.py").read_bytes()
+    pareto_bytes = pathlib.Path(__file__).with_name("hamon_pareto.py").read_bytes()
     source = pathlib.Path(__file__).with_name("engineering_toolkit.py").read_bytes()
     target = "/tmp/hamon-engineering-toolkit.py"
     try:
@@ -279,6 +282,18 @@ async def provision_engineering_cli(session: Any) -> str:
         dxf_size = await asyncio.wait_for(
             session.write_file("/tmp/hamon_dxf.py", dxf_bytes), timeout=12)
         if dxf_size != len(dxf_bytes):
+            return ""
+        dual_size = await asyncio.wait_for(
+            session.write_file("/tmp/hamon_dual_verifier.py", dual_bytes), timeout=12)
+        if dual_size != len(dual_bytes):
+            return ""
+        takeoff_size = await asyncio.wait_for(
+            session.write_file("/tmp/hamon_cad_takeoff.py", takeoff_bytes), timeout=12)
+        if takeoff_size != len(takeoff_bytes):
+            return ""
+        pareto_size = await asyncio.wait_for(
+            session.write_file("/tmp/hamon_pareto.py", pareto_bytes), timeout=12)
+        if pareto_size != len(pareto_bytes):
             return ""
         reported_size = await asyncio.wait_for(
             session.write_file(target, source), timeout=12)
@@ -350,6 +365,15 @@ async def provision_engineering_cli(session: Any) -> str:
         " use --min-clearance-mm N for evidence-based surface gaps, including"
         " nearby AABB-disjoint solids. Triangulated clearances are not BRep"
         " precision, designed openings, code clearance or BIM unit signoff."
+        "\n  python3 /tmp/hamon-engineering-toolkit.py dual-verify spec.json"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py dxf-takeoff SOURCE.dxf"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py format-guard OUTPUT_FILE"
+        "\nDUAL-VERIFY: cross-checks symbolic/exact algebra against independent numerical"
+        " solvers (SI rational exponents & transcendental guards via mode:si-eval,"
+        " complex/real KCL/KVL & FEM systems via mode:linear-system, nonlinear roots"
+        " via mode:scalar-root, and equilibrium/beam/hydraulics/geotech checks via mode:domain)."
+        " DXF-TAKEOFF computes INSUNITS-calibrated lengths, Shoelace closed polygon areas,"
+        " and INSERT block BOM counts. Always run format-guard on deliverables before finishing."
         "\n  python3 /tmp/hamon-engineering-toolkit.py calc-pack design_checks.json"
         "\nCALC-PACK: supply quantities with dimensional expressions, sources,"
         " and named limit checks in a JSON dependency graph. It recomputes"

@@ -13,6 +13,9 @@ on:
       - "hamon_scale.py"
       - "hamon_affine_metric.py"
       - "hamon_callout.py"
+      - "hamon_dual_verifier.py"
+      - "hamon_cad_takeoff.py"
+      - "hamon_pareto.py"
       - "harness.py"
       - "ship/check_artifact_provenance.py"
       - "ship/audit_ple_delivery.py"
@@ -34,7 +37,7 @@ jobs:
       - name: System PDF vector tools for real two-sheet drawing contract
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends poppler-utils
       - run: python -m unittest discover -s tests -v
-      - run: python -m compileall -q engineering_intake.py engineering_toolkit.py hamon_drawing.py hamon_dxf.py hamon_scale.py hamon_affine_metric.py hamon_callout.py harness.py taskbridge.py delivery_guard.py delivery_materialize.py ship/check_artifact_provenance.py ship/audit_ple_delivery.py
+      - run: python -m compileall -q engineering_intake.py engineering_toolkit.py hamon_drawing.py hamon_dxf.py hamon_scale.py hamon_affine_metric.py hamon_callout.py hamon_dual_verifier.py hamon_cad_takeoff.py hamon_pareto.py harness.py taskbridge.py delivery_guard.py delivery_materialize.py ship/check_artifact_provenance.py ship/audit_ple_delivery.py
       - name: Historical public PLE output contract replay (not scored)
         run: python ship/audit_ple_delivery.py
       - name: Exact pinned organizer PLE kit, static validation only
