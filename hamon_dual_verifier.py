@@ -1331,7 +1331,7 @@ def _seg_seg_dist_3d_dual(
     p2: tuple[float, float, float],
     q2: tuple[float, float, float],
 ) -> tuple[float, float]:
-    """Dual-solve 3D segment-to-segment distance via KKT active-set vs alternating projection."""
+    """Dual-solve 3D segment-to-segment distance via KKT active-set vs projected convex minimization."""
     d1 = (q1[0] - p1[0], q1[1] - p1[1], q1[2] - p1[2])
     d2 = (q2[0] - p2[0], q2[1] - p2[1], q2[2] - p2[2])
     r = (p1[0] - p2[0], p1[1] - p2[1], p1[2] - p2[2])
@@ -1349,33 +1349,43 @@ def _seg_seg_dist_3d_dual(
 
     # Path A: Exact active-set KKT enumeration over interior + 4 edges + 4 vertices
     cands = [(0.0, 0.0), (0.0, 1.0), (1.0, 0.0), (1.0, 1.0)]
-    if e > 1e-18:
+    if e > 0.0:
         cands.append((0.0, min(1.0, max(0.0, f / e))))
         cands.append((1.0, min(1.0, max(0.0, (b + f) / e))))
-    if a > 1e-18:
+    if a > 0.0:
         cands.append((min(1.0, max(0.0, -c / a)), 0.0))
         cands.append((min(1.0, max(0.0, (b - c) / a)), 1.0))
-    den = a * e - b * b
-    if den > 1e-18:
-        si = (b * f - c * e) / den
-        ti = (a * f - b * c) / den
+    def cross(u, v):
+        return (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0])
+
+    normal = cross(d1, d2)
+    den = sum(x * x for x in normal)
+    if den > 0.0:
+        # Cross products avoid subtracting nearly equal squared dot products.
+        si = sum(x * y for x, y in zip(cross(d2, r), normal)) / den
+        ti = sum(x * y for x, y in zip(cross(d1, r), normal)) / den
         if 0.0 <= si <= 1.0 and 0.0 <= ti <= 1.0:
             cands.append((si, ti))
-    dist_a = math.sqrt(max(0.0, min(_dsq(s, t) for s, t in cands)))
+    dist_a = math.sqrt(min(_dsq(s, t) for s, t in cands))
 
-    # Path B: Multi-start damped alternating projection + coordinate polish
-    best_b_sq = _dsq(0.5, 0.5)
-    for s0, t0 in ((0.0, 0.0), (1.0, 1.0), (0.25, 0.75), (0.5, 0.5)):
-        s_cur, t_cur = s0, t0
-        for _ in range(120):
-            s_next = min(1.0, max(0.0, (b * t_cur - c) / a)) if a > 1e-18 else 0.0
-            t_next = min(1.0, max(0.0, (b * s_next + f) / e)) if e > 1e-18 else 0.0
-            if abs(s_next - s_cur) < 1e-14 and abs(t_next - t_cur) < 1e-14:
-                s_cur, t_cur = s_next, t_next
-                break
-            s_cur, t_cur = s_next, t_next
-        best_b_sq = min(best_b_sq, _dsq(s_cur, t_cur))
-    dist_b = math.sqrt(max(0.0, best_b_sq))
+    # Path B: squared distance to a convex segment is convex along the other
+    # segment. Project onto the second segment and minimize over the first.
+    def projected(s):
+        t = min(1.0, max(0.0, (f + s * b) / e)) if e else 0.0
+        return _dsq(s, t)
+
+    lo, hi = 0.0, 1.0
+    for _ in range(110):
+        pad = (hi - lo) / 3.0
+        left, right = lo + pad, hi - pad
+        if left <= lo or right >= hi:
+            break
+        if projected(left) < projected(right):
+            hi = right
+        else:
+            lo = left
+    dist_b = math.sqrt(min(projected(s) for s in (0.0, lo, (lo + hi) / 2.0, hi, 1.0)))
     return dist_a, _rel_diff(dist_a, dist_b) if max(dist_a, dist_b) > 1e-12 else abs(dist_a - dist_b)
 
 

@@ -19,6 +19,21 @@ import hamon_pareto as hp
 
 
 class DualSolverVerifierTests(unittest.TestCase):
+    def test_skew_mep_segment_clearance(self):
+        pipe = {"p1": (0, 0, 0), "q1": (10, 0, 0), "outer_radius_m": 0.01}
+        duct = {"p1": (0, -0.003, 0.2), "q1": (10, 0.007, 0.2), "outer_radius_m": 0.01}
+        for peer in (duct, dict(duct, p1=duct["q1"], q1=duct["p1"])):
+            result = dv.solve_domain_problem("mep_routing_clearance_3d",
+                                             {"segments": [pipe, peer], "min_clearance_m": 0.15})
+            assert result["dual_verified"] and result["passes_routing"]
+            assert abs(result["min_net_clearance_m"] - 0.18) < 1e-12
+
+        crossing = [{"p1": (0, 0, 0), "q1": (16384, 0, 0)},
+                    {"p1": (8208.384, -1, 0), "q1": (8208.384, 1, 0)}]
+        result = dv.solve_domain_problem("mep_routing_clearance_3d",
+                                         {"segments": crossing, "min_clearance_m": 0.01})
+        assert result["min_net_clearance_m"] == 0 and result["violation_count"] == 1
+
     def test_mep_run_joint_interleaving(self):
         def segment(run, p, q):
             return {"run_id": run, "p1": p, "q1": q, "outer_radius_m": 0.05}
