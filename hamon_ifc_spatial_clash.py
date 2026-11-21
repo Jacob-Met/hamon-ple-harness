@@ -146,7 +146,9 @@ def _parse_step_args(arg_str: str) -> List[Any]:
             elif ch == ",":
                 tok = "".join(cur).strip()
                 cur.clear()
-                items.append(_coerce_step_atom(tok))
+                # A nested or typed value was already appended at its closing parenthesis.
+                if tok:
+                    items.append(_coerce_step_atom(tok))
                 idx += 1
             else:
                 cur.append(ch)
@@ -554,6 +556,41 @@ def _apply_transform(verts: np.ndarray, mat: np.ndarray) -> np.ndarray:
     return (mat @ hom.T).T[:, :3]
 
 
+def _mapped_operator_3d(entities, ref, unit_scale):
+    """Read inherited IFC operator attributes in STEP order and construct its orthogonal basis."""
+    if not isinstance(ref, tuple) or ref[0] != "ref" or ref[1] not in entities:
+        return None
+    operator, args = entities[ref[1]]
+    if operator not in ("IFCCARTESIANTRANSFORMATIONOPERATOR3D",
+                        "IFCCARTESIANTRANSFORMATIONOPERATOR3DNONUNIFORM") or len(args) < 5:
+        return None
+    axis1, axis2, origin, uniform_scale, axis3 = args[:5]
+    z = _vec3_from_ref(entities, axis3, (0, 0, 1))
+    norm = np.linalg.norm(z)
+    if norm <= 1e-12:
+        return None
+    z /= norm
+    default_x = (0, 1, 0) if abs(z[0]) > 1 - 1e-12 else (1, 0, 0)
+    x = _vec3_from_ref(entities, axis1, default_x)
+    x -= np.dot(x, z) * z
+    norm = np.linalg.norm(x)
+    if norm <= 1e-12:
+        return None
+    x /= norm
+    y = np.cross(z, x)
+    if np.dot(y, _vec3_from_ref(entities, axis2, (0, 1, 0))) < 0:
+        y = -y
+    scales = [float(uniform_scale) if uniform_scale is not None else 1.0] * 3
+    if operator == "IFCCARTESIANTRANSFORMATIONOPERATOR3DNONUNIFORM":
+        for i, value in enumerate(args[5:7], start=1):
+            if value is not None:
+                scales[i] = float(value)
+    matrix = np.eye(4)
+    matrix[:3, :3] = np.column_stack((x, y, z)) * scales
+    matrix[:3, 3] = _vec3_from_ref(entities, origin, (0, 0, 0)) * unit_scale
+    return matrix
+
+
 def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, unit_scale: float) -> List[Tuple[np.ndarray, np.ndarray]]:
     if not (isinstance(iref, tuple) and iref[0] == "ref" and iref[1] in entities):
         return []
@@ -571,19 +608,9 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
 
     if itype == "IFCMAPPEDITEM" and len(args) >= 2:
         sref, tref = args[0], args[1]
-        map_mat = np.eye(4, dtype=np.float64)
-        if isinstance(tref, tuple) and tref[0] == "ref" and tref[1] in entities:
-            _, targs = entities[tref[1]]
-            if len(targs) >= 4:
-                origin = _vec3_from_ref(entities, targs[3], (0.0, 0.0, 0.0)) * unit_scale
-                ax1 = _vec3_from_ref(entities, targs[0], (1.0, 0.0, 0.0))
-                ax2 = _vec3_from_ref(entities, targs[1], (0.0, 1.0, 0.0))
-                ax3 = _vec3_from_ref(entities, targs[2], (0.0, 0.0, 1.0))
-                sc = float(targs[4]) if len(targs) > 4 and isinstance(targs[4], (int, float)) else 1.0
-                map_mat[:3, 0] = ax1 * sc
-                map_mat[:3, 1] = ax2 * sc
-                map_mat[:3, 2] = ax3 * sc
-                map_mat[:3, 3] = origin
+        map_mat = _mapped_operator_3d(entities, tref, unit_scale)
+        if map_mat is None:
+            return []
         out_items: List[Tuple[np.ndarray, np.ndarray]] = []
         if isinstance(sref, tuple) and sref[0] == "ref" and sref[1] in entities:
             _, sargs = entities[sref[1]]
@@ -595,7 +622,7 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
                     if len(rargs) >= 4 and isinstance(rargs[3], list):
                         for sub in rargs[3]:
                             for (vv, ff) in _extract_solid_item(entities, sub, unit_scale):
-                                out_items.append((_apply_transform(vv, map_mat @ np.linalg.inv(orig_mat)), ff))
+                                out_items.append((_apply_transform(vv, map_mat @ orig_mat), ff))
         return out_items
 
     if itype == "IFCTRIANGULATEDFACESET" and len(args) >= 4:
