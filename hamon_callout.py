@@ -2,7 +2,8 @@
 
 Unlike nearby-text heuristics, a certified association requires:
   - an exact native text word box and a compatible page coordinate frame;
-  - a REAL SVG straight stroke, never an across-M phantom edge;
+  - a real SVG stroke, or two observed collinear nonhorizontal strokes
+    bracketing a native label; a text gap is never claimed as an SVG edge;
   - two distinct source strokes intersecting its opposite endpoints,
     with non-collinear endpoint/tick/extension geometry;
   - no equal-plausibility competing line or competing label assignment.
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 import hashlib
+from itertools import chain
 import json
 import math
 from pathlib import Path
@@ -316,6 +318,12 @@ def _endpoint_witnesses(stroke,strokes,box_height,witness_grid):
             if abs(ux*vy-uy*vx)<0.45:
                 continue
             d=_point_segment_distance(p,s["a"],s["b"])
+            if "fragments" in stroke:
+                # T-junctions can be ordinary object outlines. Require a
+                # short source tick to cross the outside endpoint itself.
+                _, crossing_position = _perpendicular_to(p, s["a"], s["b"])
+                if d > 0.75 or not 0.15 <= crossing_position <= 0.85:
+                    continue
             if d<=eps:
                 options.append((d,abs(s["length"]-10)/max(10,s["length"]),
                                 s["id"],s))
@@ -341,6 +349,86 @@ def _geom_key(stroke):
     return tuple(sorted((tuple(round(q,4) for q in p) for p in ends)))
 
 
+
+def _interrupted_axes(label, strokes):
+    """Return witnessed-span proposals, never an SVG edge across a move."""
+    x0, y0, x1, y1 = label["bbox_svg"]
+    height = y1 - y0
+    middle = ((x0 + x1) / 2, (y0 + y1) / 2)
+    near = []
+    for stroke in strokes:
+        if stroke["length"] < max(16, 1.3 * height):
+            continue
+        a, b = stroke["a"], stroke["b"]
+        if abs(b[1] - a[1]) < 0.20 * stroke["length"]:
+            continue
+        perp, fraction = _perpendicular_to(middle, a, b)
+        if perp > max(1.25, 0.18 * height) or 0 <= fraction <= 1:
+            continue
+        # A label-facing endpoint must finish just outside the native word
+        # rectangle. The other endpoint points away from that rectangle.
+        if fraction < 0:
+            inner, outer = a, b
+            inner_ref, outer_ref = stroke["from"], stroke["to"]
+        else:
+            inner, outer = b, a
+            inner_ref, outer_ref = stroke["to"], stroke["from"]
+        dx = max(x0 - inner[0], 0, inner[0] - x1)
+        dy = max(y0 - inner[1], 0, inner[1] - y1)
+        if not 0.25 <= math.hypot(dx, dy) <= max(5, 0.85 * height):
+            continue
+        near.append((stroke, inner, outer, inner_ref, outer_ref))
+        if len(near) > 12:
+            return []
+    if len(near) < 2:
+        return []
+
+    # Any crossing through a proposed interior endpoint can terminate an
+    # independent dimension or leader. This includes long extension lines,
+    # which the short outer-witness grid intentionally does not index.
+    clean = []
+    for segment, inner, outer, inner_ref, outer_ref in near:
+        ux = (outer[0] - inner[0]) / segment["length"]
+        uy = (outer[1] - inner[1]) / segment["length"]
+        crossing = False
+        for other in strokes:
+            if other is segment:
+                continue
+            a, b = other["a"], other["b"]
+            cross = abs(ux * (b[1] - a[1]) - uy * (b[0] - a[0])) / other["length"]
+            if cross > 0.15 and _point_segment_distance(inner, a, b) <= 2.3:
+                crossing = True
+                break
+        if not crossing:
+            clean.append((segment, inner, outer, inner_ref, outer_ref))
+    axes = []
+    for i, left in enumerate(clean):
+        for right in clean[i + 1:]:
+            s, left_tip, a, left_ref, a_ref = left
+            t, right_tip, b, right_ref, b_ref = right
+            # Both fragments point inwards along the same source axis,
+            # with the label strictly between the observed interior ends.
+            tolerance = max(0.25, 0.03 * height)
+            if any(_perpendicular_to(p, a, b)[0] > tolerance
+                   for p in (left_tip, right_tip)):
+                continue
+            _, left_part = _perpendicular_to(left_tip, a, b)
+            _, right_part = _perpendicular_to(right_tip, a, b)
+            _, text_part = _perpendicular_to(middle, a, b)
+            if not 0 < left_part < text_part < right_part < 1:
+                continue
+            axes.append({
+                "id": s["id"] + "+" + t["id"],
+                "from": a_ref, "to": b_ref, "a": a, "b": b,
+                "length": math.dist(a, b),
+                "fragments": [
+                    {"outer": a_ref, "inner": left_ref},
+                    {"outer": b_ref, "inner": right_ref},
+                ],
+            })
+    return axes
+
+
 def associate_page(page):
     """Finite, source-backed, deliberately fail-closed annotation graph."""
     frame=_page_map(page)
@@ -356,7 +444,7 @@ def associate_page(page):
         middle=((x0+x1)/2,(y0+y1)/2)
         candidates=[]
         unique=set()
-        for stroke in strokes:
+        for stroke in chain(strokes, _interrupted_axes(label, strokes)):
             if stroke["length"]<max(20,1.15*width):
                 continue
             perp,t=_perpendicular_to(middle,stroke["a"],stroke["b"])
@@ -398,6 +486,12 @@ def associate_page(page):
              "geometry_evidence":"both_endpoint_cross_strokes",
              "association_margin":(
                  candidates[1][0]-leading[0] if len(candidates)>1 else None)}
+        if "fragments" in line:
+            row["source_fragments"] = line["fragments"]
+            row["geometry_evidence"] = "two_collinear_fragments_bracketing_text_with_outer_witnesses"
+            row["source_vector_ids"] = list(dict.fromkeys(
+                [part["outer"]["vector"] for part in line["fragments"]]
+                + [w["vector"] for w in links]))
         matches.append(row)
         claimed.setdefault(key,[]).append(row)
     # Even if each text has a unique local best, two different labels
@@ -426,6 +520,21 @@ def associate_page(page):
 
 def _stroke_for_match(match,strokes):
     a,b=match["from"],match["to"]
+    if "source_fragments" in match:
+        endpoints = []
+        for fragment in match["source_fragments"]:
+            outer, inner = fragment["outer"], fragment["inner"]
+            for stroke in strokes:
+                if (stroke["from"], stroke["to"]) == (outer, inner):
+                    endpoints.append(stroke["a"])
+                    break
+                if (stroke["from"], stroke["to"]) == (inner, outer):
+                    endpoints.append(stroke["b"])
+                    break
+            else:
+                raise ValueError("Interrupted dimension fragment absent from original source")
+        p, q = endpoints
+        return {"a": p, "b": q, "from": a, "to": b, "length": math.dist(p, q)}
     for s in strokes:
         if s["from"]==a and s["to"]==b:
             return s
@@ -481,6 +590,7 @@ def auto_measure_page(page,targets,quantity,metre,calibration_model="affine_spd"
         "bbox_pdf_pt":m["bbox_pdf_pt"],
         "from":m["from"],"to":m["to"],
         "endpoint_witnesses":m["endpoint_witnesses"],
+        **({"source_fragments": m["source_fragments"]} if "source_fragments" in m else {}),
     } for m in source if m["source_label"] in {
         r["source_label"] for r in refs}]
     result["annotation_rejected"]=links["rejected"]
