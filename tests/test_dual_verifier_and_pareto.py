@@ -296,6 +296,22 @@ class DualSolverVerifierTests(unittest.TestCase):
         self.assertLess(chan["dual_rel_discrepancy"], 1e-9)
         self.assertGreater(chan["normal_depth_m"], 0.1)
 
+    def test_classic_3d_polyline_uses_spatial_edges_and_plan_area(self):
+        from hamon_cad_takeoff import scan_dxf_takeoff
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "survey.dxf"
+            tags = [(0, "SECTION"), (2, "HEADER"), (9, "$INSUNITS"), (70, 6),
+                    (0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES"),
+                    (0, "POLYLINE"), (8, "SURVEY"), (70, 9)]
+            for x, y, z in [(0, 0, 0), (3, 0, 4), (0, 4, 0)]:
+                tags.extend([(0, "VERTEX"), (70, 32), (10, x), (20, y), (30, z)])
+            tags.extend([(0, "SEQEND"), (0, "ENDSEC"), (0, "EOF")])
+            path.write_text("".join(f"{k}\n{v}\n" for k, v in tags))
+            result = scan_dxf_takeoff(path)
+        self.assertAlmostEqual(result["polyline_perimeter_m_by_layer"]["SURVEY"], 9 + math.sqrt(41))
+        self.assertEqual(result["closed_area_m2_by_layer"]["SURVEY"], 6.0)
+
     def test_translated_dxf_chords_and_signed_bulge_area(self):
         from hamon_cad_takeoff import scan_dxf_takeoff, shoelace_area_and_perimeter
 
