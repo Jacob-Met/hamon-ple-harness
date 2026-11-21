@@ -204,7 +204,7 @@ def _xlsx_xml(archive, name, limit):
         part = archive.getinfo(name)
     except KeyError as exc:
         raise ValueError(f"Missing OOXML part: {name}") from exc
-    if part.file_size > limit:
+    if limit is not None and part.file_size > limit:
         raise ValueError(f"OOXML part exceeds {limit} bytes: {name}")
     return ET.fromstring(archive.read(part))
 
@@ -231,8 +231,8 @@ def _xlsx_target(source, target):
     return "/".join(segments)
 
 
-def _xlsx_relationships(archive, name):
-    root = _xlsx_xml(archive, name, 2_000_000)
+def _xlsx_relationships(archive, name, limit=2_000_000):
+    root = _xlsx_xml(archive, name, limit)
     if root.tag != _PACKAGE_RELS + "Relationships":
         raise ValueError(f"Invalid OOXML relationship part: {name}")
     result = {}
@@ -763,6 +763,76 @@ _STUB_MARKERS = frozenset({
 })
 
 
+_CONTENT_TYPES_NS = "{http://schemas.openxmlformats.org/package/2006/content-types}"
+_WORD_DOCUMENT_TYPES = {
+    "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}document",
+    "{http://purl.oclc.org/ooxml/wordprocessingml/main}document",
+}
+_WORD_MAIN_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+_RELATIONSHIPS_TYPE = "application/vnd.openxmlformats-package.relationships+xml"
+
+
+def _opc_content_type(types, name):
+    """Resolve an OPC part's declared MIME type, giving an override precedence."""
+    part = "/" + name.lower()
+    extension = name.rsplit("/", 1)[-1].rsplit(".", 1)[-1].lower()
+    for element, attr, match in (("Override", "PartName", part),
+                                 ("Default", "Extension", extension)):
+        entries = [entry for entry in types.findall(_CONTENT_TYPES_NS + element)
+                   if entry.get(attr, "").lower() == match]
+        if len(entries) > 1:
+            raise ValueError("ambiguous_content_type")
+        if entries:
+            return entries[0].get("ContentType", "").lower()
+    return ""
+
+
+def _check_docx(archive):
+    """Check the package relationship, content type and actual Word main part."""
+    members = {}
+    for item in archive.infolist():
+        if item.is_dir():
+            continue
+        key = item.filename.lower()
+        if key in members:
+            raise ValueError("duplicate_part")
+        members[key] = item.filename
+    if "[content_types].xml" not in members or "_rels/.rels" not in members:
+        raise ValueError("missing_package_metadata")
+    types = _xlsx_xml(archive, members["[content_types].xml"], None)
+    if types.tag != _CONTENT_TYPES_NS + "Types":
+        raise ValueError("invalid_content_types_root")
+    if _opc_content_type(types, "_rels/.rels") != _RELATIONSHIPS_TYPE:
+        raise ValueError("incorrect_relationships_content_type")
+    office = {ns + "/officeDocument" for ns in _DOCUMENT_RELS}
+    relationships = _xlsx_relationships(archive, members["_rels/.rels"], limit=None)
+    starts = [rel for rel in relationships.values() if rel.get("Type") in office]
+    if len(starts) != 1 or starts[0].get("TargetMode", "Internal") != "Internal":
+        raise ValueError("expected_internal_main_relationship")
+    name = _xlsx_target("", starts[0].get("Target", ""))
+    main = members.get(name.lower())
+    if main is None:
+        raise ValueError("missing_main_part")
+    if _opc_content_type(types, main) != _WORD_MAIN_TYPE:
+        raise ValueError("incorrect_word_main_content_type")
+
+    # Read through EOF to catch malformed trailing XML without materializing the tree.
+    class RootTag:
+        tag = None
+
+        def start(self, tag, attrs):
+            if self.tag is None:
+                self.tag = tag
+
+        def close(self):
+            return self.tag
+
+    with archive.open(main) as stream:
+        root_tag = ET.parse(stream, parser=ET.XMLParser(target=RootTag())).getroot()
+    if root_tag not in _WORD_DOCUMENT_TYPES:
+        raise ValueError("incorrect_word_document_root")
+
+
 def audit_local_deliverable(path: str | pathlib.Path) -> dict[str, Any]:
     """Deterministic format, syntax, STEP/IFC & stub hygiene guard on a deliverable file."""
     p = pathlib.Path(path)
@@ -815,6 +885,11 @@ def audit_local_deliverable(path: str | pathlib.Path) -> dict[str, Any]:
             with zipfile.ZipFile(p, "r") as zf:
                 if not zf.namelist() or zf.testzip() is not None:
                     return {"ok": False, "path": str(p), "reason": "corrupt_or_empty_zip"}
+                if ext == ".docx":
+                    try:
+                        _check_docx(zf)
+                    except (ValueError, ET.ParseError) as exc:
+                        return {"ok": False, "path": str(p), "reason": f"invalid_docx:{exc}"}
         except Exception:
             return {"ok": False, "path": str(p), "reason": "bad_zip"}
     return {"ok": True, "path": str(p), "bytes": sz}
