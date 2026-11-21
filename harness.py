@@ -45,6 +45,7 @@ import taskbridge
 import engineering_intake
 import delivery_guard
 import delivery_materialize
+import hamon_pareto
 
 HERE = pathlib.Path(__file__).resolve().parent
 # npm ci, from package-lock.json
@@ -295,6 +296,18 @@ async def solve(session: taskbridge.Session) -> str:
       name, model = await asyncio.to_thread(
           configure, agent_dir, relay, session, env
       )
+      pareto_plan = hamon_pareto.route_from_intake_prompt(
+          engineering_inventory,
+          mcp_server_count=len(getattr(session, "mcp_servers", None) or []),
+          deliverable_count=len(delivery_targets),
+          model_api=model,
+      )
+      thinking_level = pareto_plan["thinking_tier"] if pareto_plan else THINKING
+      reserve_window = (
+          pareto_plan["delivery_reserve_sec"]
+          if (checked_delivery and pareto_plan)
+          else (DELIVERY_RESERVE_SEC if checked_delivery else STOP_BEFORE_SEC)
+      )
       argv = [
           PI,
           "--print",
@@ -312,7 +325,7 @@ async def solve(session: taskbridge.Session) -> str:
           "--model",
           model,
           "--thinking",
-          THINKING,
+          thinking_level,
           "--append-system-prompt",
           NOTE.format(workdir=session.workdir) + engineering_inventory + engineering_cli_note + delivery_note,
       ]
@@ -324,7 +337,7 @@ async def solve(session: taskbridge.Session) -> str:
           cwd=str(work),
           on_line=run.on_line,
           stdin=session.instruction.encode(),
-          stop_before_sec=DELIVERY_RESERVE_SEC if checked_delivery else STOP_BEFORE_SEC,
+          stop_before_sec=reserve_window,
           log_prefix="pi: ",
       )
       if delivery_targets and before_delivery is not None:
