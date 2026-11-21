@@ -1686,16 +1686,24 @@ def solve_heat_exchanger_ntu_dual(spec: dict[str, Any]) -> dict[str, Any]:
     else:
         raise ValueError(f"unsupported HX arrangement: {arr}")
 
-    q_w = eps * c_min * (thi - tci)
+    duty_per_kelvin = eps * c_min
+    q_w = duty_per_kelvin * (thi - tci)
     tho = thi - q_w / ch
     tco = tci + q_w / cc
 
     # Independent cross-check: recover UA via LMTD for counterflow/parallel or Decimal for 1-2 S&T
     if arr in ("counterflow", "parallel"):
-        dt1 = (thi - tco) if arr == "counterflow" else (thi - tci)
-        dt2 = (tho - tci) if arr == "counterflow" else (tho - tco)
-        lmtd = dt1 if abs(dt1 - dt2) < 1e-12 else (dt1 - dt2) / math.log(dt1 / dt2)
-        ua_rec = q_w / lmtd
+        # Check the forward rating at unit inlet difference. At equal inlets
+        # the physical duty is zero and measured temperatures cannot identify UA.
+        hot_drop = duty_per_kelvin / ch
+        cold_rise = duty_per_kelvin / cc
+        if arr == "counterflow":
+            dt1, dt2 = 1.0 - cold_rise, 1.0 - hot_drop
+        else:
+            dt1, dt2 = 1.0, 1.0 - (hot_drop + cold_rise)
+        low, high = sorted((dt1, dt2))
+        lmtd = low if low == high else (high - low) / math.log1p((high - low) / low)
+        ua_rec = duty_per_kelvin / lmtd
         disc = _rel_diff(ua, ua_rec)
     else:
         with localcontext() as ctx:
