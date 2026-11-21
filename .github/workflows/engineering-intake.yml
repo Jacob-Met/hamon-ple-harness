@@ -48,14 +48,6 @@ jobs:
           git -C "$RUNNER_TEMP/ple-upstream" checkout -q --detach 8320f0402fdca9f42476607f72bcfd5271cd50c9
           echo "Official kit commit: $(git -C "$RUNNER_TEMP/ple-upstream" rev-parse HEAD)"
           PYTHONPATH="$RUNNER_TEMP/ple-upstream" python -m kit validate .
-          PYTHONPATH="$RUNNER_TEMP/ple-upstream" python -m kit artifacts . --json > "$RUNNER_TEMP/ple-artifacts-review.json"
-          python - "$RUNNER_TEMP/ple-artifacts-review.json" <<'PY'
-          import json, pathlib, sys
-          result=json.loads(pathlib.Path(sys.argv[1]).read_text())
-          print(json.dumps({"artifact_review_keys":sorted(result.keys()),
-                            "organizer_static_only":True,
-                            "not_a_scored_dev_run":True}))
-          PY
       - name: Independent outlined-font CAD sources (not scored PLE)
         run: |
           set -euo pipefail
@@ -65,14 +57,25 @@ jobs:
           python ship/verify_pdf_window_corpus.py "$RUNNER_TEMP/cad-sample-tests" --output-dir "$RUNNER_TEMP/pdf-window-corpus"
       - name: Source provenance gate (does not conflate static acceptance with a new model score)
         run: |
-          set +e
-          python ship/check_artifact_provenance.py .
-          rc=$?
-          if [ "$rc" -eq 2 ]; then
-            echo "::error::PLE artifact source manifest malformed"
+          set -euo pipefail
+          report="$RUNNER_TEMP/ple-artifacts-review.json"
+          rc=0
+          python ship/check_artifact_provenance.py . --kit-root "$RUNNER_TEMP/ple-upstream" > "$report" || rc=$?
+          if [[ "$rc" != 0 && "$rc" != 3 ]]; then
+            cat "$report"
+            echo "::error::The organizer could not verify artifact provenance."
             exit 1
           fi
-          if [ "$rc" -eq 3 ]; then
-            echo "::warning::Inherited organizer artifacts diverge from current HAMON source. Regenerate only after licensed dev data + genuine model run."
+          python - "$report" <<'PYTHON'
+          import json, sys
+          with open(sys.argv[1]) as file:
+              result = json.load(file)
+          review = result["kit_review"]
+          print(json.dumps({"provenance": review["provenance"], "counts": review["counts"],
+                            "warnings": review["warnings"], "problems": review["problems"]}))
+          if not review["accepted"]:
+              sys.exit("The organizer refused the artifact layout.")
+          PYTHON
+          if [[ "$rc" == 3 ]]; then
+            echo "::warning::Artifact provenance differs from this checkout or dev set. A new score requires a genuine authorized run."
           fi
-          exit 0
