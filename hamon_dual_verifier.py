@@ -1549,12 +1549,14 @@ def solve_continuous_beam_2span_dual(spec: dict[str, Any]) -> dict[str, Any]:
     if disc > 1e-5:
         raise ValueError(f"2-span continuous beam Three-Moment vs FEM discrepancy {disc:.3e}")
 
-    # Maximum sagging moments in spans 1 and 2
-    x_sag1 = min(L1, max(0.0, R_A_ana / q1)) if q1 > 1e-12 else 0.0
-    M_sag1 = R_A_ana * x_sag1 - 0.5 * q1 * x_sag1**2
-    x_sag2 = min(L2, max(0.0, R_C_ana / q2)) if q2 > 1e-12 else 0.0
-    M_sag2 = R_C_ana * x_sag2 - 0.5 * q2 * x_sag2**2
-    M_max = max(M_B_hog_ana, abs(M_sag1), abs(M_sag2))
+    # The outer pins have zero moment. Check the middle support and every
+    # interior zero-shear section, including hogging under an upward load.
+    M_max = M_B_hog_ana
+    for span, reaction, load in ((L1, R_A_ana, q1), (L2, R_C_ana, q2)):
+        if load:
+            x = reaction / load
+            if 0.0 < x < span:
+                M_max = max(M_max, abs(0.5 * reaction * x))
     return {
         "R_A_N": R_A_ana,
         "R_B_N": R_B_ana,
