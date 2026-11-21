@@ -86,6 +86,34 @@ class DimensionAssociationContracts(unittest.TestCase):
         self.assertFalse(out["physical_scale_verified"])
         self.assertEqual(out["annotation_binding"],"two_endpoint_source_witness")
 
+    def test_tolerance_bound_cannot_supply_dimension_scale(self):
+        page = page_fixture()
+        page["words"] = [
+            {"text": "100mm", "page_bbox_pt": [144, 84, 178, 96]},
+            {"text": "±", "page_bbox_pt": [181, 84, 187, 96]},
+            {"text": "0.1mm", "page_bbox_pt": [190, 84, 218, 96]},
+        ]
+        matches = hamon_callout.associate_page(page)["matches"]
+        self.assertEqual([(m["physical_value"], m["word_ids"]) for m in matches], [("100", [0])])
+        page["words"] = page["words"][2:]
+        self.assertEqual(hamon_callout.associate_page(page)["matches"][0]["physical_value"], "0.1")
+
+    def test_tolerance_respects_native_line_membership(self):
+        def words(line_break):
+            xml = ('<page width="612" height="792"><line>'
+                   '<word xMin="151" yMin="84" xMax="158" yMax="96">±</word>'
+                   + ('</line><line>' if line_break else '')
+                   + '<word xMin="168" yMin="84" xMax="203" yMax="96">0.1mm</word>'
+                   '</line></page>')
+            return hamon_drawing._word_inventory(xml, 10)[0]
+
+        page = page_fixture()
+        page["words"] = words(False)
+        self.assertEqual(hamon_callout.associate_page(page)["matches"], [])
+        page["words"] = words(True)
+        page["words"][1]["page_bbox_pt"][0] = 160
+        self.assertEqual(hamon_callout.associate_page(page)["matches"][0]["physical_value"], "0.1")
+
     def test_nearby_unmarked_geometry_cannot_steal_dimension(self):
         p=page_fixture()
         out=hamon_callout.associate_page(p)
