@@ -76,6 +76,9 @@ def scan_dxf_takeoff(filename: str | Path) -> dict[str, Any]:
     entity_counts: Counter[str] = Counter()
 
     def flush_entity(etype: str, groups: list[tuple[int, str]]) -> None:
+        # Common group 67 marks paper space with 1. Absent and 0 mean model space.
+        if any(code == 67 and int(value) == 1 for code, value in groups):
+            return
         entity_counts[etype] += 1
         layer = next((v for c, v in groups if c == 8), "0")
         if etype == "LINE":
