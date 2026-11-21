@@ -86,6 +86,22 @@ class DimensionAssociationContracts(unittest.TestCase):
         self.assertFalse(out["physical_scale_verified"])
         self.assertEqual(out["annotation_binding"],"two_endpoint_source_witness")
 
+    def test_architectural_dimension_uses_both_components(self):
+        page = page_fixture()
+        page["words"] = [
+            {"text": "5ft", "page_bbox_pt": [94, 84, 104, 96], "source_line_id": 0},
+            {"text": "3in", "page_bbox_pt": [107, 84, 120, 96], "source_line_id": 0},
+        ]
+        matches = hamon_callout.associate_page(page)["matches"]
+        self.assertEqual([(m["length"], m["word_ids"]) for m in matches],
+                         [("63*inch", [0, 1])])
+        self.assertEqual(matches[0]["source_label"], "5ft 3in")
+        self.assertEqual(len(matches[0]["endpoint_witnesses"]), 2)
+        page["words"][0]["source_line_id"] = 1
+        separate = hamon_callout.associate_page(page)["matches"]
+        self.assertEqual([(m["length"], m["word_ids"]) for m in separate],
+                         [("3*inch", [1])])
+
     def test_tolerance_bound_cannot_supply_dimension_scale(self):
         page = page_fixture()
         page["words"] = [
