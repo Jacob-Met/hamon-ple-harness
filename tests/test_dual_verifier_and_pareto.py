@@ -303,6 +303,16 @@ class DualSolverVerifierTests(unittest.TestCase):
         self.assertLess(chan["dual_rel_discrepancy"], 1e-9)
         self.assertGreater(chan["normal_depth_m"], 0.1)
 
+    def test_manning_normal_depth_exceeds_fifty_metres(self):
+        # At y=54 m, this rectangle has area 5832 m² and hydraulic radius 27 m.
+        result = dv.solve_domain_problem("manning_channel", {
+            "Q_m3_s": 52488.0, "bottom_width_m": 108.0, "side_slope_z": 0.0,
+            "manning_n": 0.02, "slope_S": 0.0004,
+        })
+        self.assertTrue(result["dual_verified"])
+        self.assertAlmostEqual(result["normal_depth_m"], 54.0, places=8)
+        self.assertAlmostEqual(result["velocity_m_s"], 9.0, places=8)
+
     def test_classic_3d_polyline_uses_spatial_edges_and_plan_area(self):
         from hamon_cad_takeoff import scan_dxf_takeoff
 

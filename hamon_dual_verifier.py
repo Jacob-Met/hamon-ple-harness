@@ -1136,6 +1136,10 @@ def solve_manning_channel_dual(spec: dict[str, Any]) -> dict[str, Any]:
     n = float(spec["manning_n"])
     S = float(spec["slope_S"])
 
+    if not (all(math.isfinite(v) for v in (Q, b, z, n, S))
+            and Q > 0 and n > 0 and S > 0 and b >= 0 and z >= 0 and (b > 0 or z > 0)):
+        raise ValueError("Manning depth requires positive flow, slope, roughness and channel width")
+
     def residual(y: float) -> float:
         area = (b + z * y) * y
         wp = b + 2.0 * y * math.sqrt(1.0 + z * z)
@@ -1151,8 +1155,24 @@ def solve_manning_channel_dual(spec: dict[str, Any]) -> dict[str, Any]:
 
     # Wide-channel initial guess
     y0 = max(0.05, ((Q * n) / (max(b, 0.5) * math.sqrt(S))) ** 0.6)
-    rt = dual_solve_scalar_root(residual, sp_pair, (1e-5, 50.0), y0)
-    y_n = rt["root"]
+    # The Manning discharge increases with depth for rectangular, triangular,
+    # and trapezoidal channels. Extend the bracket when the root lies outside.
+    lo, hi = 1e-5, 50.0
+    if residual(lo) > 0 or residual(hi) < 0:
+        while residual(lo) > 0:
+            hi, lo = lo, lo / 2
+        while residual(hi) < 0:
+            lo, hi = hi, 2 * hi
+        # Solve for depth relative to the new upper bound, so the independent
+        # solvers' step sizes still resolve roots on very small length scales.
+        if sp_pair is not None:
+            sp_pair = (expr_s.subs(y_s, y_s * hi) / Q, y_s)
+        rt = dual_solve_scalar_root(lambda t: residual(t * hi) / Q, sp_pair,
+                                    (lo / hi, 1.0), (1.0 + lo / hi) / 2)
+        y_n = rt["root"] * hi
+    else:
+        rt = dual_solve_scalar_root(residual, sp_pair, (lo, hi), y0)
+        y_n = rt["root"]
     area_n = (b + z * y_n) * y_n
     top_w = b + 2.0 * z * y_n
     vel = Q / area_n
