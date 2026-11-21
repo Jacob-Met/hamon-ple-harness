@@ -211,3 +211,35 @@ def route_from_intake_prompt(
                 presolve_verified=pre_ok,
             )
     return None
+
+
+PLE_DOMAIN_TOOLS = (
+    "hamon_ifc_spatial_clash",
+    "hamon_drawing_reader",
+    "check_deliverable_preflight",
+)
+
+
+def select_domain_tools(prompt: str = "", file_paths=()) -> tuple[str, ...]:
+    p_low = (prompt or "").lower()
+    f_low = [str(f).lower() for f in (file_paths or ())]
+    selected = []
+    if any(f.endswith(".ifc") for f in f_low) or any(k in p_low for k in ("ifc", "bim", "clash", "clearance", "takeoff", "solid")):
+        selected.append("hamon_ifc_spatial_clash")
+    if any(f.endswith(".pdf") for f in f_low) or any(k in p_low for k in ("pdf", "drawing", "sheet", "plan", "scale", "title-block", "vector")):
+        selected.append("hamon_drawing_reader")
+    selected.append("check_deliverable_preflight")
+    return tuple(selected)
+
+
+def dispatch_ple_tool(tool_name: str, payload: dict) -> dict:
+    import hamon_drawing_reader as _hdr
+    import hamon_ifc_spatial_clash as _hifc
+
+    if tool_name == "hamon_ifc_spatial_clash":
+        return _hifc.run_router_ifc_clash(payload)
+    if tool_name == "hamon_drawing_reader":
+        return _hdr.run_router_drawing_reader(payload)
+    if tool_name == "check_deliverable_preflight":
+        return _hifc.run_router_preflight(payload)
+    raise ValueError(f"Unknown PLE domain tool: {tool_name}")

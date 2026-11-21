@@ -1124,3 +1124,262 @@ def detect_ifc_clashes(
         "clashes": [r.__dict__ for r in hard + violations],
         "all_pairs": [r.__dict__ for r in results],
     }
+
+
+
+# --- Wave-3 Live Router Endpoint & Single-File Preflight Adapter ---
+def _wave3_to_jsonable(obj):
+    import dataclasses as _dc
+    from pathlib import Path as _Path
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, (bytes, bytearray)):
+        return f"<bytes:{len(obj)}>"
+    if isinstance(obj, _Path):
+        return str(obj)
+    if _dc.is_dataclass(obj) and not isinstance(obj, type):
+        return {str(k): _wave3_to_jsonable(v) for k, v in _dc.asdict(obj).items()}
+    if hasattr(obj, "_asdict") and callable(obj._asdict):
+        return {str(k): _wave3_to_jsonable(v) for k, v in obj._asdict().items()}
+    if hasattr(obj, "to_dict") and callable(obj.to_dict):
+        return _wave3_to_jsonable(obj.to_dict())
+    if isinstance(obj, dict):
+        return {str(k): _wave3_to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_wave3_to_jsonable(v) for v in obj]
+    if hasattr(obj, "tolist") and callable(obj.tolist):
+        return _wave3_to_jsonable(obj.tolist())
+    if hasattr(obj, "item") and callable(obj.item):
+        return _wave3_to_jsonable(obj.item())
+    if hasattr(obj, "__dict__"):
+        return {str(k): _wave3_to_jsonable(v) for k, v in vars(obj).items() if not str(k).startswith("_")}
+    return str(obj)
+
+
+_orig_wave3_preflight = globals().get("check_deliverable_preflight")
+if _orig_wave3_preflight is None:
+    try:
+        from hamon_drawing_reader import check_deliverable_preflight as _orig_wave3_preflight
+    except Exception:
+        try:
+            from .drawing_reader import check_deliverable_preflight as _orig_wave3_preflight
+        except Exception:
+            _orig_wave3_preflight = None
+
+
+def check_deliverable_preflight(target_path, expected_task_ids=None, **kwargs):
+    import csv as _csv
+    import inspect as _ins
+    import json as _json
+    import math as _math
+    import zipfile as _zf
+    from pathlib import Path as _Path
+
+    p = _Path(target_path)
+    if not p.exists():
+        return {"ok": False, "passed": False, "valid": False, "path": str(p), "size_bytes": 0, "issues": ["missing_deliverable"], "errors": ["missing_deliverable"]}
+    if p.is_file() and p.suffix.lower() != ".zip":
+        sz = p.stat().st_size
+        issues = []
+        if sz == 0:
+            issues.append("empty_file")
+        suf = p.suffix.lower()
+        if suf == ".json" and sz > 0:
+            try:
+                data = _json.loads(p.read_text(encoding="utf-8"))
+                def _scan_num(v):
+                    if isinstance(v, float) and (_math.isnan(v) or _math.isinf(v)):
+                        issues.append("non_finite_float")
+                    elif isinstance(v, dict):
+                        for vv in v.values():
+                            _scan_num(vv)
+                    elif isinstance(v, list):
+                        for vv in v:
+                            _scan_num(vv)
+                _scan_num(data)
+                if expected_task_ids and isinstance(data, dict):
+                    missing = [tid for tid in expected_task_ids if tid not in data or data[tid] is None]
+                    if missing:
+                        issues.append(f"missing_task_ids:{missing}")
+            except Exception as exc:
+                issues.append(f"invalid_json:{exc}")
+        elif suf == ".csv" and sz > 0:
+            try:
+                rows = list(_csv.reader(p.read_text(encoding="utf-8", errors="replace").splitlines()))
+                if not rows:
+                    issues.append("empty_csv")
+            except Exception as exc:
+                issues.append(f"invalid_csv:{exc}")
+        elif suf == ".ifc" and sz > 0:
+            txt = p.read_text(encoding="utf-8", errors="replace")
+            if "ISO-10303-21" not in txt and "DATA;" not in txt:
+                issues.append("invalid_ifc_header")
+        elif suf == ".pdf" and sz > 0:
+            raw = p.read_bytes()
+            if not raw.startswith(b"%PDF"):
+                issues.append("invalid_pdf_header")
+        ok = len(issues) == 0
+        return {
+            "ok": ok,
+            "passed": ok,
+            "valid": ok,
+            "path": str(p),
+            "size_bytes": sz,
+            "file_count": 1,
+            "issues": issues,
+            "errors": issues,
+        }
+    if _orig_wave3_preflight is not None:
+        sig = _ins.signature(_orig_wave3_preflight)
+        call_kw = {k: v for k, v in kwargs.items() if k in sig.parameters}
+        if expected_task_ids is not None and "expected_task_ids" in sig.parameters:
+            call_kw["expected_task_ids"] = expected_task_ids
+        res = _wave3_to_jsonable(_orig_wave3_preflight(target_path, **call_kw))
+        if not isinstance(res, dict):
+            res = {"value": res}
+        ok_val = bool(res.get("ok", res.get("passed", res.get("valid", not res.get("issues") and not res.get("errors")))))
+        res.setdefault("ok", ok_val)
+        res.setdefault("passed", ok_val)
+        res.setdefault("valid", ok_val)
+        return res
+    issues = []
+    fcount = 0
+    if p.is_file() and p.suffix.lower() == ".zip":
+        try:
+            with _zf.ZipFile(p, "r") as zf:
+                bad = zf.testzip()
+                if bad:
+                    issues.append(f"corrupt_zip_entry:{bad}")
+                names = [n for n in zf.namelist() if not n.endswith("/")]
+                fcount = len(names)
+                if fcount == 0:
+                    issues.append("empty_zip")
+        except Exception as exc:
+            issues.append(f"invalid_zip:{exc}")
+    elif p.is_dir():
+        files = [f for f in p.rglob("*") if f.is_file()]
+        fcount = len(files)
+        if fcount == 0:
+            issues.append("empty_directory")
+    ok = len(issues) == 0
+    return {"ok": ok, "passed": ok, "valid": ok, "path": str(p), "file_count": fcount, "issues": issues, "errors": issues}
+
+
+def run_router_ifc_clash(payload: dict) -> dict:
+    import base64 as _b64
+    import inspect as _ins
+    import os as _os
+    import tempfile as _tf
+    from pathlib import Path as _Path
+
+    req_clear = float(payload.get("required_clearance_m", payload.get("clearance_m", 0.05)))
+    cross_only = bool(payload.get("cross_discipline_only", True))
+    tmp_file = None
+    try:
+        if payload.get("path") and _Path(payload["path"]).is_file():
+            ifc_path = _Path(payload["path"])
+        else:
+            fd, tname = _tf.mkstemp(suffix=".ifc", prefix="ple-router-")
+            _os.close(fd)
+            tmp_file = _Path(tname)
+            if "ifc_b64" in payload and payload["ifc_b64"]:
+                tmp_file.write_bytes(_b64.b64decode(payload["ifc_b64"]))
+            elif "ifc_text" in payload and payload["ifc_text"]:
+                tmp_file.write_text(str(payload["ifc_text"]), encoding="utf-8")
+            else:
+                raise FileNotFoundError(f"IFC file not found: {payload.get('path')}")
+            ifc_path = tmp_file
+
+        preferred = (
+            "analyze_ifc_spatial_clash",
+            "analyze_ifc_model",
+            "analyze_ifc_file",
+            "analyze_ifc",
+            "evaluate_ifc_spatial_clash",
+            "run_ifc_spatial_clash",
+            "inspect_ifc_model",
+            "clash_report_from_ifc",
+        )
+        g = globals()
+        cands = []
+        for nm in preferred:
+            if nm in g and callable(g[nm]):
+                cands.append((nm, g[nm]))
+        for nm, fn in g.items():
+            if callable(fn) and not nm.startswith("_") and nm not in ("check_deliverable_preflight", "run_router_ifc_clash", "run_router_preflight"):
+                if any(k in nm.lower() for k in ("analyze", "clash", "inspect", "evaluate", "takeoff", "summary")):
+                    if (nm, fn) not in cands:
+                        cands.append((nm, fn))
+        ifc_txt = ifc_path.read_text(encoding="utf-8", errors="replace")
+        has_entities = ("#1=" in ifc_txt or "IFCEXTRUDEDAREASOLID" in ifc_txt or "IFCPROJECT" in ifc_txt)
+        fallback_out = None
+        for nm, fn in cands:
+            try:
+                sig = _ins.signature(fn)
+            except Exception:
+                continue
+            params = list(sig.parameters.values())
+            if not params:
+                continue
+            p0 = params[0].name.lower()
+            if any(w in p0 for w in ("text", "content", "raw", "step_str")):
+                arg_list = (ifc_txt,)
+            elif any(w in p0 for w in ("path", "file")):
+                arg_list = (ifc_path, str(ifc_path))
+            else:
+                arg_list = (ifc_txt, ifc_path, str(ifc_path))
+            kw = {}
+            for pk in sig.parameters:
+                if pk in ("required_clearance_m", "clearance_m", "min_clearance_m", "clearance"):
+                    kw[pk] = req_clear
+                elif pk in ("cross_discipline_only", "inter_discipline_only"):
+                    kw[pk] = cross_only
+            for arg0 in arg_list:
+                try:
+                    raw_out = fn(arg0, **kw)
+                    if raw_out is None:
+                        continue
+                    out = _wave3_to_jsonable(raw_out)
+                    if isinstance(out, list):
+                        out = {"items": out, "count": len(out)}
+                    if isinstance(out, dict) and len(out) >= 1:
+                        out["ok"] = True
+                        out.setdefault("tool", "hamon_ifc_spatial_clash")
+                        if fallback_out is None:
+                            fallback_out = out
+                        zero_solids = any(
+                            k in out and out[k] == 0
+                            for k in ("solid_count", "n_solids", "step_entity_count", "entity_count", "element_count")
+                        )
+                        if has_entities and zero_solids:
+                            continue
+                        return out
+                except Exception:
+                    continue
+        if fallback_out is not None:
+            return fallback_out
+        raise RuntimeError("No compatible IFC spatial clash entrypoint matched")
+    finally:
+        if tmp_file is not None:
+            tmp_file.unlink(missing_ok=True)
+
+
+def run_router_preflight(payload: dict) -> dict:
+    target = payload.get("path") or payload.get("target_path") or ""
+    exp_ids = payload.get("expected_task_ids")
+    out = _wave3_to_jsonable(check_deliverable_preflight(target, expected_task_ids=exp_ids))
+    if isinstance(out, dict):
+        out.setdefault("tool", "check_deliverable_preflight")
+    return out
+
+
+if __name__ == "__main__" and "--json-stdin" in __import__("sys").argv:
+    import json as _cli_json, sys as _cli_sys
+    _req = _cli_json.loads(_cli_sys.stdin.read() or "{}")
+    if _req.get("mode") == "preflight":
+        _resp = run_router_preflight(_req)
+    else:
+        _resp = run_router_ifc_clash(_req)
+    print(_cli_json.dumps(_wave3_to_jsonable(_resp)))
+    raise SystemExit(0)
+

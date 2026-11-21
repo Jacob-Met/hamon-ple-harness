@@ -667,3 +667,160 @@ def _validate_scalar_json_text(
             sanitize_scalar_value(val)
         except ValueError as exc:
             errors.append(f"Task {k} in {label}: {exc}")
+
+
+
+# --- Wave-3 Live Router Endpoint & Vector PDF Spec Adapter ---
+def _wave3_pdf_to_jsonable(obj):
+    import dataclasses as _dc
+    from pathlib import Path as _Path
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, (bytes, bytearray)):
+        return f"<bytes:{len(obj)}>"
+    if isinstance(obj, _Path):
+        return str(obj)
+    if _dc.is_dataclass(obj) and not isinstance(obj, type):
+        return {str(k): _wave3_pdf_to_jsonable(v) for k, v in _dc.asdict(obj).items()}
+    if hasattr(obj, "_asdict") and callable(obj._asdict):
+        return {str(k): _wave3_pdf_to_jsonable(v) for k, v in obj._asdict().items()}
+    if hasattr(obj, "to_dict") and callable(obj.to_dict):
+        return _wave3_pdf_to_jsonable(obj.to_dict())
+    if isinstance(obj, dict):
+        return {str(k): _wave3_pdf_to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_wave3_pdf_to_jsonable(v) for v in obj]
+    if hasattr(obj, "tolist") and callable(obj.tolist):
+        return _wave3_pdf_to_jsonable(obj.tolist())
+    if hasattr(obj, "item") and callable(obj.item):
+        return _wave3_pdf_to_jsonable(obj.item())
+    if hasattr(obj, "__dict__"):
+        return {str(k): _wave3_pdf_to_jsonable(v) for k, v in vars(obj).items() if not str(k).startswith("_")}
+    return str(obj)
+
+
+if "build_minimal_vector_pdf" in globals():
+    _orig_build_minimal_vector_pdf = build_minimal_vector_pdf
+
+    def _pdf_esc(txt: str) -> str:
+        return str(txt).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+    def build_minimal_vector_pdf(pages, *args, **kwargs):
+        try:
+            return _orig_build_minimal_vector_pdf(pages, *args, **kwargs)
+        except Exception:
+            norm_pages = []
+            for pg in pages:
+                if isinstance(pg, dict) and "content_stream" not in pg:
+                    ops = []
+                    for seg in pg.get("segments", ()):
+                        if isinstance(seg, dict):
+                            x0, y0, x1, y1 = seg["x0"], seg["y0"], seg["x1"], seg["y1"]
+                        else:
+                            x0, y0, x1, y1 = seg[:4]
+                        ops.append(f"{float(x0):.4f} {float(y0):.4f} m {float(x1):.4f} {float(y1):.4f} l S")
+                    for tx in pg.get("texts", ()):
+                        if isinstance(tx, dict):
+                            x, y, s = tx["x"], tx["y"], tx["text"]
+                            fs = float(tx.get("font_size", 10.0))
+                        else:
+                            x, y, s = tx[0], tx[1], tx[2]
+                            fs = float(tx[3]) if len(tx) > 3 else 10.0
+                        ops.append(f"BT /F1 {fs:.2f} Tf {float(x):.4f} {float(y):.4f} Td ({_pdf_esc(s)}) Tj ET")
+                    pg = {
+                        "width_pt": pg.get("width_pt", 612.0),
+                        "height_pt": pg.get("height_pt", 792.0),
+                        "content_stream": "\n".join(ops),
+                    }
+                norm_pages.append(pg)
+            return _orig_build_minimal_vector_pdf(norm_pages, *args, **kwargs)
+
+
+def run_router_drawing_reader(payload: dict) -> dict:
+    import base64 as _b64
+    import inspect as _ins
+    import os as _os
+    import tempfile as _tf
+    from pathlib import Path as _Path
+
+    tmp_file = None
+    try:
+        if payload.get("path") and _Path(payload["path"]).is_file():
+            pdf_path = _Path(payload["path"])
+        else:
+            fd, tname = _tf.mkstemp(suffix=".pdf", prefix="ple-pdf-")
+            _os.close(fd)
+            tmp_file = _Path(tname)
+            if "pdf_b64" in payload and payload["pdf_b64"]:
+                tmp_file.write_bytes(_b64.b64decode(payload["pdf_b64"]))
+            elif "pdf_bytes" in payload and isinstance(payload["pdf_bytes"], (bytes, bytearray)):
+                tmp_file.write_bytes(bytes(payload["pdf_bytes"]))
+            else:
+                raise FileNotFoundError(f"PDF file not found: {payload.get('path')}")
+            pdf_path = tmp_file
+
+        preferred = (
+            "read_engineering_drawing",
+            "analyze_drawing_pdf",
+            "read_drawing_pdf",
+            "analyze_engineering_drawing",
+            "extract_drawing_takeoff",
+            "parse_drawing_pdf",
+            "read_vector_pdf",
+            "inspect_drawing_pdf",
+            "analyze_pdf",
+            "extract_pdf_pages",
+            "parse_pdf_sheets",
+        )
+        g = globals()
+        cands = []
+        for nm in preferred:
+            if nm in g and callable(g[nm]):
+                cands.append((nm, g[nm]))
+        for nm, fn in g.items():
+            if callable(fn) and not nm.startswith("_") and nm not in ("build_minimal_vector_pdf", "run_router_drawing_reader"):
+                if any(k in nm.lower() for k in ("read", "analyze", "extract", "parse", "takeoff", "inspect", "sheet")):
+                    if (nm, fn) not in cands:
+                        cands.append((nm, fn))
+        pdf_bytes = pdf_path.read_bytes()
+        for nm, fn in cands:
+            try:
+                sig = _ins.signature(fn)
+            except Exception:
+                continue
+            params = list(sig.parameters.values())
+            if not params:
+                continue
+            kw = {}
+            for pk in sig.parameters:
+                if pk in ("scale_override", "scale", "override_scale") and payload.get("scale_override") is not None:
+                    kw[pk] = payload["scale_override"]
+                elif pk in ("page_index", "page") and payload.get("page_index") is not None:
+                    kw[pk] = int(payload["page_index"])
+            for arg0 in (pdf_path, str(pdf_path), pdf_bytes):
+                try:
+                    raw_out = fn(arg0, **kw)
+                    if raw_out is None:
+                        continue
+                    out = _wave3_pdf_to_jsonable(raw_out)
+                    if isinstance(out, list):
+                        out = {"pages": out, "page_count": len(out)}
+                    if isinstance(out, dict) and len(out) >= 1:
+                        out["ok"] = True
+                        out.setdefault("tool", "hamon_drawing_reader")
+                        return out
+                except Exception:
+                    continue
+        raise RuntimeError("No compatible PDF drawing reader entrypoint matched")
+    finally:
+        if tmp_file is not None:
+            tmp_file.unlink(missing_ok=True)
+
+
+if __name__ == "__main__" and "--json-stdin" in __import__("sys").argv:
+    import json as _cli_json, sys as _cli_sys
+    _req = _cli_json.loads(_cli_sys.stdin.read() or "{}")
+    _resp = run_router_drawing_reader(_req)
+    print(_cli_json.dumps(_wave3_pdf_to_jsonable(_resp)))
+    raise SystemExit(0)
+

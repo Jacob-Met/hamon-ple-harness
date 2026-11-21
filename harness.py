@@ -395,3 +395,8 @@ async def solve(session: taskbridge.Session) -> str:
         f" {done.stderr[-2000:]}"
     )
   return session.final_message or "(pi stopped without a final message)"
+
+
+def resolve_wired_domain_tools(prompt: str = "", file_paths=()) -> list[str]:
+    from hamon_pareto import select_domain_tools
+    return list(select_domain_tools(prompt=prompt, file_paths=file_paths))
