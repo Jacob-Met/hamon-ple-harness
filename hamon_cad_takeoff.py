@@ -31,7 +31,7 @@ INSUNITS_TO_METERS: dict[int, float] = {
     14: 0.1,         # decimeters
 }
 
-# 16-point Gauss-Legendre nodes and weights on [-1, 1] for exact elliptical arc integration
+# 16-point Gauss-Legendre nodes and weights on [-1, 1] for elliptical arc quadrature
 _GL16_X = (
     -0.9894009349916499, -0.9445750230732326, -0.8656312023878318, -0.7554044083550030,
     -0.6178762444026438, -0.4580167776572274, -0.2816035507792589, -0.0950125098376374,
@@ -124,14 +124,31 @@ def _ellipse_area_and_arc(
     elif du < 0.0:
         du += 2.0 * math.pi
     is_closed = abs(du - 2.0 * math.pi) <= 1e-6
-    half = 0.5 * du
-    mid = u0 + half
-    arc = 0.0
-    for gx, gw in zip(_GL16_X, _GL16_W):
-        u = mid + half * gx
-        s, c = math.sin(u), math.cos(u)
-        arc += gw * math.sqrt(a * a * s * s + b * b * c * c)
-    arc *= half
+    def panel(lo: float, hi: float) -> float:
+        half = (hi - lo) / 2
+        mid = lo + half
+        total = 0.0
+        for node, weight in zip(_GL16_X, _GL16_W):
+            t = mid + half * node
+            total += weight * math.hypot(math.sin(t), ratio * math.cos(t))
+        return half * total
+
+    def refine(lo: float, hi: float, coarse: float, depth: int) -> float:
+        mid = (lo + hi) / 2
+        left, right = panel(lo, mid), panel(mid, hi)
+        if depth == 20 or abs(left + right - coarse) <= 2e-13 * (hi - lo):
+            return left + right
+        return refine(lo, mid, left, depth + 1) + refine(mid, hi, right, depth + 1)
+
+    # Split at quadrant boundaries so an eccentric ellipse's speed minima
+    # occur at panel ends, including on arcs that wrap across zero.
+    quarter = math.pi / 2
+    end = u0 + du
+    first = math.floor(u0 / quarter) + 1
+    # A DXF elliptic arc covers at most one revolution. Bound the partition
+    # count even if a malformed drawing supplies out-of-range parameters.
+    cuts = [u0] + [i * quarter for i in range(first, first + 4) if u0 < i * quarter < end] + [end]
+    arc = a * math.fsum(refine(lo, hi, panel(lo, hi), 0) for lo, hi in pairwise(cuts))
     area = math.pi * a * b if is_closed else 0.0
     return area, arc, is_closed
 
