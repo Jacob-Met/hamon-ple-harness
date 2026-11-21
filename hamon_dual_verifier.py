@@ -739,13 +739,18 @@ def solve_beam_dual(spec: dict[str, Any]) -> dict[str, Any]:
     # occur at an interval boundary or where the interval shear vanishes.
     sections = sorted({0.0, L, *(xp for _, xp in point_loads)})
     max_M_fem = max(abs(section_moment(x)) for x in sections)
-    if q_udl:
-        for left, right in zip(sections, sections[1:]):
-            turning = (R_A_fem - sum(p for p, xp in point_loads if xp <= left)) / q_udl
+    max_V_fem = 0.0
+    for left, right in zip(sections, sections[1:]):
+        shear_intercept = R_A_fem - sum(p for p, xp in point_loads if xp <= left)
+        # Use the interior one-sided limits on this interval. A load applied
+        # directly to a support contributes to its reaction, not an exterior cut.
+        max_V_fem = max(max_V_fem, abs(shear_intercept - q_udl * left),
+                        abs(shear_intercept - q_udl * right))
+        if q_udl:
+            turning = shear_intercept / q_udl
             if left < turning < right:
                 max_M_fem = max(max_M_fem, abs(section_moment(turning)))
     M_mid_fem = abs(section_moment(L / 2))
-    max_V_fem = max(abs(R_A_fem), abs(R_B_fem))
     max_delta_fem = 0.0
     for e in range(n_nd - 1):
         length = nodes[e + 1] - nodes[e]

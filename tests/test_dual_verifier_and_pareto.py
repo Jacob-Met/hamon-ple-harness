@@ -36,6 +36,16 @@ class DualSolverVerifierTests(unittest.TestCase):
             for key, expected in [("R_A_N", left), ("R_B_N", right), ("M_mid_Nm", mid)]:
                 assert math.isclose(result[key], expected, rel_tol=1e-6)
 
+        # The largest internal shear lies between signed point loads. A load
+        # applied directly to a simple support has zero interior shear by itself.
+        for loads, peak in [([(1000, 4), (-1000, 6)], 800), ([(100, 0), (250, 10)], 0)]:
+            result = dv.solve_beam_dual({
+                "span": "10*m",
+                "point_loads": [{"P": f"{p}*N", "x": f"{x}*m"} for p, x in loads],
+            })
+            assert result["dual_verified"]
+            assert math.isclose(result["V_max_N"], peak, rel_tol=1e-6, abs_tol=1e-6)
+
     def test_heat_exchanger_saturated_forward_rating(self):
         base = dict(m_hot_kg_s=1, cp_hot_J_kgK=150, Th_in_K=345,
                     m_cold_kg_s=1, cp_cold_J_kgK=270, Tc_in_K=302)
