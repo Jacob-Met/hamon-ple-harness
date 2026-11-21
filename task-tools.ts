@@ -205,6 +205,7 @@ import { fileURLToPath as _pleFileURLToPath } from "node:url";
 export const PLE_DOMAIN_TOOL_NAMES = [
   "hamon_ifc_spatial_clash",
   "hamon_drawing_reader",
+  "hamon_conservation_cad_verifier",
   "check_deliverable_preflight",
 ];
 
@@ -337,6 +338,30 @@ function _registerPleWave3DomainTools(pi: any) {
         content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
         details,
       };
+    },
+  });
+
+  pi.registerTool({
+    name: "hamon_conservation_cad_verifier",
+    label: "Deterministic CAD/STEP, Dimensional & Conservation Verifier",
+    description: "Verify 3D STEP/CAD solid mass/centroid/inertia, structural stress/deflection/buckling, SPICE nodal KCL/KVL/Tellegen complex power, civil/geotech cut-fill/bearing/consolidation, thermal-fluid/chemical mass-species-energy-entropy balances, and 7-dimension SI homogeneity.",
+    parameters: {
+      type: "object",
+      properties: {
+        mode: { type: "string" },
+        path: { type: "string" },
+        spec: { type: "object" },
+      },
+    },
+    async execute(_id: string, params: any) {
+      const payload: Record<string, unknown> = { mode: params?.mode ?? "auto", spec: params?.spec ?? {} };
+      if (params?.path) {
+        const raw = await _pleReadTaskBytes(String(params.path));
+        payload.file_b64 = raw.toString("base64");
+        payload.filename = _plePath.basename(String(params.path));
+      }
+      const details = await _pleRunPythonJson("hamon_conservation_cad_verifier.py", payload);
+      return { content: [{ type: "text", text: JSON.stringify(details, null, 2) }], details };
     },
   });
 
