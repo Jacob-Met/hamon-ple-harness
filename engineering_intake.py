@@ -205,7 +205,8 @@ def parse_probe(output: str) -> dict[str, Any]:
     return record
 
 
-async def intake_for_prompt(session: Any, *, deadline_seconds: int = 19) -> str:
+async def intake_for_prompt(session: Any, *, deadline_seconds: int = 19,
+                            discovered: dict | None = None) -> str:
     """Return untrusted task-file metadata for the Pi system prompt, or empty.
 
     Any probe failure is explicit in a local error category but never blocks the
@@ -223,6 +224,8 @@ async def intake_for_prompt(session: Any, *, deadline_seconds: int = 19) -> str:
         record = parse_probe(result.get("output") or "")
     except (asyncio.TimeoutError, OSError, RuntimeError, ValueError, KeyError):
         return ""
+    if discovered is not None:
+        discovered.update(record)
     # Never let untrusted filenames override original agent directions.
     summary = json.dumps(record, ensure_ascii=True, separators=(",",":"))
     if len(summary) > 10000:
