@@ -19,6 +19,13 @@ import hamon_pareto as hp
 
 
 class DualSolverVerifierTests(unittest.TestCase):
+    def test_two_span_uplift_absolute_moment(self):
+        result = dv.solve_continuous_beam_2span_dual({
+            "span1": "8*m", "span2": "8*m", "udl1": "-32*N/m", "udl2": "0*N/m",
+        })
+        self.assertAlmostEqual(result["M_B_hogging_Nm"], 128.0)
+        self.assertAlmostEqual(result["M_max_Nm"], 196.0)
+
     def test_bolt_group_is_translation_invariant(self):
         for origin in (0, 524288):
             with self.subTest(origin=origin):
