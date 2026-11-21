@@ -1866,6 +1866,23 @@ def solve_hydraulic_jump_dual(spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_mep_endpoint_joint(p1, q1, p2, q2) -> bool:
+    """A single shared centerline endpoint, excluding points and backtracking overlap."""
+    if p1 == q1 or p2 == q2:
+        return False
+    shared = next((p for p in (p1, q1) if p == p2 or p == q2), None)
+    if shared is None:
+        return False
+    end1 = q1 if shared == p1 else p1
+    end2 = q2 if shared == p2 else p2
+    # From the joint, collinear rays in the same direction overlap for positive
+    # length. Use the supplied binary coordinates exactly for this topology test.
+    a = [Fraction(x) - Fraction(o) for x, o in zip(end1, shared)]
+    b = [Fraction(x) - Fraction(o) for x, o in zip(end2, shared)]
+    k = next(i for i in range(3) if a[i])
+    return a[k] * b[k] <= 0 or any(a[k] * b[i] != b[k] * a[i] for i in range(3))
+
+
 def solve_mep_routing_clearance_3d(spec: dict[str, Any]) -> dict[str, Any]:
     """Dual-solve 3D MEP pipe/duct/cable-tray segment routing vs structural AABBs and peer runs."""
     segs = spec["segments"]
@@ -1898,13 +1915,15 @@ def solve_mep_routing_clearance_3d(spec: dict[str, Any]) -> dict[str, Any]:
         p1 = tuple(float(x) for x in segs[i]["p1"])  # type: ignore[assignment]
         q1 = tuple(float(x) for x in segs[i]["q1"])  # type: ignore[assignment]
         r1 = float(segs[i].get("outer_radius_m", 0.0))
-        run_i = segs[i].get("run_id", i)
+        run_i = segs[i].get("run_id")
+        next_in_run = True
         for j in range(i + 1, n_s):
-            run_j = segs[j].get("run_id", j)
-            if run_i == run_j and abs(i - j) == 1:
-                continue
             p2 = tuple(float(x) for x in segs[j]["p1"])  # type: ignore[assignment]
             q2 = tuple(float(x) for x in segs[j]["q1"])  # type: ignore[assignment]
+            if next_in_run and run_i is not None and run_i == segs[j].get("run_id"):
+                next_in_run = False
+                if _is_mep_endpoint_joint(p1, q1, p2, q2):
+                    continue
             r2 = float(segs[j].get("outer_radius_m", 0.0))
             d_cc, disc = _seg_seg_dist_3d_dual(p1, q1, p2, q2)
             max_disc = max(max_disc, disc)

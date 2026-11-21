@@ -19,6 +19,22 @@ import hamon_pareto as hp
 
 
 class DualSolverVerifierTests(unittest.TestCase):
+    def test_mep_run_joint_interleaving(self):
+        def segment(run, p, q):
+            return {"run_id": run, "p1": p, "q1": q, "outer_radius_m": 0.05}
+
+        a = segment("pipe", [0, 0, 0], [2, 0, 0])
+        elbow = segment("pipe", [2, 0, 0], [2, 1, 0])
+        crossing = segment("pipe", [1, -1, 0], [1, 1, 0])
+        backtrack = segment("pipe", [2, 0, 0], [1, 0, 0])
+        far = segment("other", [9, 9, 2], [9, 9, 3])
+        for peer, expected in ((elbow, 0), (crossing, 1), (backtrack, 1)):
+            for segments in ([a, peer, far], [a, far, peer]):
+                result = dv.solve_domain_problem("mep_routing_clearance_3d",
+                                                 {"segments": segments, "min_clearance_m": 0.1})
+                assert result["violation_count"] == expected
+                assert result["passes_routing"] == (expected == 0)
+
     def test_weak_and_strong_conjugate_depths(self):
         for z, q, yc, y2, loss in (
             (0.0, 6.2631164334239235, 1.0000002333333198, 1.0000004666666757, 2.5407397048240203e-20),
