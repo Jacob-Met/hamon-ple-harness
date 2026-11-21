@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import math
-import pytest
+try:
+    import pytest
+except ModuleNotFoundError:
+    pytest = None  # type: ignore[assignment]
 
 from hamon_wave6_physics_verifiers import prune_deterministic_fast_path
 from hamon_wave7_engineering_verifiers import (
@@ -72,3 +75,38 @@ def test_wave1_to_7_fast_path_pruning_guards():
     assert p_w5["fast_path_pruned"] is True and p_w5["tier"] == "light"
     p_bad = prune_deterministic_fast_path("low", 3.2715, presolve_verified=True, domain="convective_fin_1d", residual=1e-3)
     assert p_bad["fast_path_pruned"] is False and p_bad["tier"] == "low"
+
+
+import unittest
+import _scipy_compat as _sc
+import hamon_wave7_engineering_verifiers as _w7_mod
+
+
+def test_wave7_pure_python_scipy_fallback_parity():
+    orig_i, orig_l, orig_o = _w7_mod.integrate, _w7_mod.linalg, _w7_mod.optimize
+    try:
+        from types import SimpleNamespace
+        _w7_mod.integrate = SimpleNamespace(quad=_sc.quad_fallback, solve_ivp=_sc.solve_ivp_fallback)
+        _w7_mod.optimize = SimpleNamespace(brentq=_sc.brentq_fallback)
+        _w7_mod.linalg = SimpleNamespace(
+            lu_factor=_sc.lu_factor_fallback,
+            lu_solve=_sc.lu_solve_fallback,
+            eigh=_sc.eigh_fallback,
+        )
+        test_thermo_cycles_brayton_rankine_otto_diesel_vcr()
+        test_exchangers_ntu_lmtd_duality_and_radiation_enclosure()
+        rb = solve_lagrangian_orbital({"subkind": "euler_rigid_body", "I": [2.0, 3.0, 5.0], "omega0": [1.0, 0.4, -0.7], "t_final": 1.5})
+        assert rb["verified"] is True and rb["residual"] < 1e-9
+        eig = solve_lagrangian_orbital({"subkind": "lagrangian_modes", "M": [[2.0, 0.2], [0.2, 1.5]], "K": [[12.0, -3.0], [-3.0, 8.0]]})
+        assert eig["verified"] is True and eig["residual"] < 1e-11
+    finally:
+        _w7_mod.integrate, _w7_mod.linalg, _w7_mod.optimize = orig_i, orig_l, orig_o
+
+
+class Wave7EngineeringVerifiersUnittest(unittest.TestCase):
+    pass
+
+
+for _name, _fn in list(globals().items()):
+    if _name.startswith("test_") and callable(_fn):
+        setattr(Wave7EngineeringVerifiersUnittest, _name, staticmethod(_fn))

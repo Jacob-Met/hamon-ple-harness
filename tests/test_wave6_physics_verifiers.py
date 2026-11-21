@@ -158,3 +158,33 @@ def test_dispatcher_and_fast_path_cost_pruner():
     )
     assert unpruned["fast_path_pruned"] is False
     assert unpruned["tier"] == "medium"
+
+
+import unittest
+import _scipy_compat as _sc
+import hamon_wave6_physics_verifiers as _w6_mod
+
+
+def test_wave6_pure_python_scipy_fallback_parity():
+    orig_i, orig_o = _w6_mod.integrate, _w6_mod.optimize
+    try:
+        from types import SimpleNamespace
+        _w6_mod.integrate = SimpleNamespace(quad=_sc.quad_fallback, solve_ivp=_sc.solve_ivp_fallback)
+        _w6_mod.optimize = SimpleNamespace(brentq=_sc.brentq_fallback)
+        test_compressible_isentropic_area_mach_inversion_sub_and_supersonic()
+        test_fanno_and_rayleigh_duct_flows()
+        rlc = solve_transmission_line_rlc({"subkind": "rlc_transient", "R": 40.0, "L": 0.1, "C": 25e-6, "V_source": 12.0, "V0": 0.0, "I0": 0.0, "t": 0.004})
+        assert rlc["verified"] is True and rlc["residual"] < 1e-9
+        pfr = solve_reactor_kinetics({"reactor_type": "pfr", "order": 2, "k": 0.15, "C_A0": 2.0, "v0": 0.05, "volume": 1.2})
+        assert pfr["verified"] is True and pfr["residual"] < 1e-10
+    finally:
+        _w6_mod.integrate, _w6_mod.optimize = orig_i, orig_o
+
+
+class Wave6PhysicsVerifiersUnittest(unittest.TestCase):
+    pass
+
+
+for _name, _fn in list(globals().items()):
+    if _name.startswith("test_") and callable(_fn):
+        setattr(Wave6PhysicsVerifiersUnittest, _name, staticmethod(_fn))

@@ -15,7 +15,7 @@ import math
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 import numpy as np
-from scipy import integrate, optimize
+from _scipy_compat import HAS_SCIPY, integrate, optimize
 import sympy as sp
 
 WAVE6_DOMAINS: Tuple[str, ...] = (
