@@ -314,8 +314,13 @@ def scan_dxf_takeoff(filename: str | Path) -> dict[str, Any]:
                 line_len_by_layer[layer] = line_len_by_layer.get(layer, 0.0) + e_arc
         elif etype == "INSERT":
             bname = next((v for c, v in groups if c == 2), "UNNAMED")
-            insert_by_layer[layer] += 1
-            insert_by_block[bname] += 1
+            columns = int(next((v for c, v in groups if c == 70), "1"))
+            rows = int(next((v for c, v in groups if c == 71), "1"))
+            if columns < 1 or rows < 1:
+                raise ValueError("DXF INSERT row and column counts must be positive")
+            placements = columns * rows
+            insert_by_layer[layer] += placements
+            insert_by_block[bname] += placements
 
     cur_ent: str | None = None
     cur_groups: list[tuple[int, str]] = []
