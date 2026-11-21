@@ -19,6 +19,22 @@ import hamon_pareto as hp
 
 
 class DualSolverVerifierTests(unittest.TestCase):
+    def test_heat_exchanger_saturated_forward_rating(self):
+        base = dict(m_hot_kg_s=1, cp_hot_J_kgK=150, Th_in_K=345,
+                    m_cold_kg_s=1, cp_cold_J_kgK=270, Tc_in_K=302)
+        # Independent boundary-value solutions for a known conductance.
+        cases = [
+            ("parallel", 270, 12000, 4146.428571428571, 317.35714285714283, 317.35714285714283),
+            ("counterflow", 270, 12000, 6449.999999999999, 302.0, 325.8888888888889),
+            ("counterflow", 150.000000075, 12000, 6370.3703719433015, 302.53086418704464, 344.46913579172076),
+        ]
+        for flow, cold_capacity, ua, duty, hot, cold in cases:
+            result = dv.solve_domain_problem("heat_exchanger_ntu", dict(
+                base, arrangement=flow, cp_cold_J_kgK=cold_capacity, UA_W_K=ua))
+            assert result["dual_verified"]
+            for key, expected in [("Q_duty_W", duty), ("Th_out_K", hot), ("Tc_out_K", cold)]:
+                assert math.isclose(result[key], expected, rel_tol=2e-12)
+
     def test_heat_exchanger_rating_at_equal_and_nearly_equal_inlets(self):
         spec = {
             "m_hot_kg_s": 1, "cp_hot_J_kgK": 150, "Th_in_K": 310.0,
