@@ -195,6 +195,27 @@ CLAIM_TOLERANCE_CASES = [
 ]
 
 
+FIN_TINY_DRIVE = 2.0**-45
+FIN_MATCHED_ROBIN = {
+    "mode": "convective_fin_1d", "tip_bc": "convective", "k_w_mk": 1,
+    "area_m2": 1, "perimeter_m": 4, "h_w_m2k": 1, "h_tip_w_m2k": 2,
+    "length_m": 1, "t_inf_c": 0,
+}
+# Matched tip: q=2*drive and q_max_ref=6*drive. Infinite fin: q=drive/2,
+# which rounds to zero at the smallest positive binary64 drive.
+FIN_NORMALIZATION_CASES = [
+    ("fin-positive-tiny", {**FIN_MATCHED_ROBIN, "t_base_c": FIN_TINY_DRIVE},
+     2*FIN_TINY_DRIVE, 6*FIN_TINY_DRIVE, 0.5, 2),
+    ("fin-negative-tiny", {**FIN_MATCHED_ROBIN, "t_base_c": -FIN_TINY_DRIVE},
+     -2*FIN_TINY_DRIVE, -6*FIN_TINY_DRIVE, 0.5, 2),
+    ("fin-zero-drive", {**FIN_MATCHED_ROBIN, "t_base_c": 0}, 0, 0, None, None),
+    ("fin-heat-rounds-zero", {
+        "mode": "convective_fin_1d", "tip_bc": "infinite", "k_w_mk": 0.25,
+        "area_m2": 1, "perimeter_m": 1, "h_w_m2k": 1, "length_m": 1,
+        "t_base_c": 2.0**-1074, "t_inf_c": 0}, 0, 2.0**-1074, 0.5, 0.5),
+]
+
+
 @pytest.fixture(scope="module")
 def routed(tmp_path_factory):
     workdir = tmp_path_factory.mktemp("registered-engineering")
@@ -291,6 +312,15 @@ def routed(tmp_path_factory):
                           "spec": {**spec, "claimed_field": field, "claimed_value": value, "rtol": 0, "atol": 0}})
     for case, system, claim, _, _ in CLAIM_TOLERANCE_CASES:
         calls.append({"id": case, "mode": "control", "spec": {**system, **claim}})
+    for case, system, _, _, eta, epsilon in FIN_NORMALIZATION_CASES:
+        calls.append({"id": case, "mode": "pde", "spec": system})
+        claims = [("fin_efficiency", eta), ("fin_effectiveness", epsilon)]
+        if case == "fin-positive-tiny":
+            claims.append(("fin_normalization", 0))
+        for field, value in claims:
+            calls.append({"id": f"{case}-{field}", "mode": "pde", "spec": {
+                **system, "claimed_field": field, "claimed_value": 0 if value is None else value,
+                "atol": 0, "rtol": 0}})
     source = r"""
 import registerTaskTools, { PLE_DOMAIN_TOOL_NAMES } from './task-tools.ts';
 const tools = new Map();
@@ -786,6 +816,41 @@ def test_registered_scalar_claim_tolerance(routed, case, system, claim, actual, 
         assert check["within_tolerance"] is True and result["closed_loop_hurwitz_stable"] is None
 
 
+@pytest.mark.parametrize("case,system,q,q_max,eta,epsilon", FIN_NORMALIZATION_CASES,
+                         ids=[row[0] for row in FIN_NORMALIZATION_CASES])
+def test_registered_passive_fin_normalization(routed, case, system, q, q_max, eta, epsilon):
+    reply = routed[case]
+    assert reply["completed"], reply
+    result = reply["details"]
+    assert result["passed"] is True and result["domain"] == "pde"
+    assert result["mode"] == system["mode"]
+    assert result["q_fin_w"] == q and result["q_max_ref_w"] == q_max
+    assert (result["fin_efficiency"], result["fin_effectiveness"]) == (eta, epsilon)
+    status = "undefined_zero_base_drive" if eta is None else "finite"
+    assert result["fin_normalization"] == {
+        "method": "passive_unit_drive", "efficiency_reference": "lateral_h_P_L",
+        "effectiveness_reference": "bare_base_h_A", "length_reference": "provided_length_m",
+        "zero_drive_policy": "undefined_heat_rate_ratio",
+        "efficiency_float_status": status, "effectiveness_float_status": status,
+    }
+    fields = ["fin_efficiency", "fin_effectiveness"]
+    if case == "fin-positive-tiny":
+        fields.append("fin_normalization")
+    for field in fields:
+        claimed = routed[f"{case}-{field}"]
+        assert claimed["completed"], claimed
+        checked = claimed["details"]
+        if field == "fin_normalization" or eta is None:
+            assert checked["passed"] is False and "claim_check" not in checked
+            assert isinstance(checked.get("reason"), str) and checked["reason"].strip()
+        else:
+            assert checked["passed"] is True
+            comparison = checked["claim_check"]
+            assert comparison["field"] == field
+            assert comparison["actual"] == comparison["claimed"] == result[field]
+            assert comparison["within_tolerance"] is True
+
+
 class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -850,3 +915,8 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
         for args in CLAIM_TOLERANCE_CASES:
             with self.subTest(case=args[0]):
                 test_registered_scalar_claim_tolerance(self.routed_data, *args)
+
+    def test_registered_passive_fin_normalization(self):
+        for args in FIN_NORMALIZATION_CASES:
+            with self.subTest(case=args[0]):
+                test_registered_passive_fin_normalization(self.routed_data, *args)
