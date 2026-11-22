@@ -1829,13 +1829,18 @@ def _truss_member_qr(members, free, prescribed, external):
     n = len(free)
     if len(members) < n:
         return None
+    # A common translation produces no member extension. Use a translated
+    # displacement origin so a moving support need not be recovered by cancellation.
+    origin = [next((u for d, u in sorted(prescribed.items()) if d % 2 == axis), 0.0)
+              for axis in range(2)]
     column_for = {d: j for j, d in enumerate(free)}
     columns = [[0.0] * len(members) for _ in free]
     offset, roots = [], []
     for i, (_, _, modulus, area, length, _, _, alpha, delta_t, dofs, direction) in enumerate(members):
         root = math.sqrt(modulus * area / length)
         roots.append(root)
-        known = math.fsum(b * prescribed.get(d, 0.0) for b, d in zip(direction, dofs))
+        known = math.fsum(b * (prescribed[d] - origin[d % 2])
+                          for b, d in zip(direction, dofs) if d in prescribed)
         offset.append(root * (known - alpha * delta_t * length))
         for b, d in zip(direction, dofs):
             if d in column_for:
@@ -1888,14 +1893,30 @@ def _truss_member_qr(members, free, prescribed, external):
     for j in range(n):
         prior = math.fsum(upper[k][j] * y[k] for k in range(j))
         y.append((load[order[j]] - prior) / upper[j][j])
-    reduced = [value - dot(q, offset) for value, q in zip(y, basis)]
+    projected_offset = [dot(q, offset) for q in basis]
+    reduced = [value - known for value, known in zip(y, projected_offset)]
     z = [0.0] * n
     motion = [0.0] * n
     for j in reversed(range(n)):
         tail = math.fsum(upper[j][k] * z[k] for k in range(j + 1, n))
         z[j] = (reduced[j] - tail) / upper[j][j]
-        motion[order[j]] = z[j] / norms[order[j]]
-    weighted_forces = [start + dot(row, reduced) for start, row in zip(offset, zip(*basis))]
+        motion[order[j]] = origin[free[order[j]] % 2] + z[j] / norms[order[j]]
+    # Statically determinate members have no self-stress space. Prescribed
+    # translation and free thermal expansion cannot produce a residual force
+    # through an inexact subtraction of two equal projected offsets.
+    weighted_forces = []
+    for known, row in zip(offset, zip(*basis)):
+        self_stress = 0.0
+        if len(members) > n:
+            products = [a * b for a, b in zip(row, projected_offset)]
+            remainder = math.fsum([known] + [-v for v in products])
+            # With compatible prescribed strains the projection must vanish.
+            # Discard only cancellation at the roundoff scale of this member's
+            # own dot product. Resolvable redundant self-stress is physical.
+            magnitude = abs(known) + math.fsum(abs(v) for v in products)
+            if abs(remainder) > 8.0 * math.ulp(magnitude):
+                self_stress = remainder
+        weighted_forces.append(dot(row, y) + self_stress)
     forces = [root * value for root, value in zip(roots, weighted_forces)]
     if not all(math.isfinite(v) for v in motion + forces):
         return None
@@ -1905,16 +1926,20 @@ def _truss_member_qr(members, free, prescribed, external):
     values = dict(prescribed)
     values.update(zip(free, motion))
     internal = {d: [] for d in free}
-    strain_errors = []
     for member, root, weighted, force in zip(members, roots, weighted_forces, forces):
         _, _, _, _, length, _, _, alpha, delta_t, dofs, direction = member
-        extension = math.fsum(b * values[d] for b, d in zip(direction, dofs))
-        strain_errors.append(root * (extension - alpha * delta_t * length) - weighted)
+        extension = math.fsum(direction[j + 2] * (values[dofs[j + 2]] - values[dofs[j]])
+                              for j in range(2))
+        thermal = root * alpha * delta_t * length
+        measured = root * extension
+        # Check total extension = elastic + thermal separately for every member.
+        # A large self-stress in another member cannot mask an inaccurate force.
+        scale = max(abs(measured), abs(weighted), abs(thermal))
+        if abs(math.fsum((measured, -weighted, -thermal))) > 1e-7 * scale:
+            return None
         for b, d in zip(direction, dofs):
             if d in internal:
                 internal[d].append(b * force)
-    if math.hypot(*strain_errors) > 1e-7 * math.hypot(*weighted_forces):
-        return None
     for d, terms in internal.items():
         scale = abs(external[d]) + math.fsum(abs(term) for term in terms)
         if abs(math.fsum(terms) - external[d]) > 1e-7 * scale:
