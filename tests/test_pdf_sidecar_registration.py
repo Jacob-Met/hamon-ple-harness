@@ -17,3 +17,15 @@ def test_repeated_complete_placements_are_unknown():
 def test_partial_sheets_preserve_missing_locus():
     source=axes()
     assert len(_register_axes(source[:-1],source))==len(source)-1
+
+def test_declared_clockwise_rotation_preserves_native_and_display_frames():
+    native = axes()
+    display = []
+    for original in native:
+        axis = 1 - original["axis"]
+        points = sorted(((300-y, 20+x) for x,y in original["points"]), key=lambda p: p[axis])
+        display.append(dict(original, axis=axis, points=points))
+    joined = _register_axes(display, native, 90)
+    assert [(j["pdf"], j["native"]) for j in joined] == list(zip(display, native))
+    assert not _register_axes(display, native)
+    assert not _register_axes(display, native + native, 90)
