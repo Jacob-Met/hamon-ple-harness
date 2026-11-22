@@ -871,7 +871,16 @@ def verify_civil_geotech_balance(spec: Dict[str, Any]) -> Dict[str, Any]:
         q_ult = c_p * nc + sig_d * nq + 0.5 * gam_z * B * ng
         out.update({"q_ult_Pa": q_ult, "q_allow_Pa": q_ult / fs})
         if "Cc" in spec and "H_clay_m" in spec:
-            out["primary_consolidation_settlement_m"] = (float(spec["Cc"]) * float(spec["H_clay_m"]) / (1.0 + float(spec["e0"]))) * math.log10((float(spec["sigma_v0_eff_Pa"]) + float(spec["delta_sigma_v_Pa"])) / float(spec["sigma_v0_eff_Pa"]))
+            from hamon_consolidation import primary_settlement
+            try:
+                initial = float(spec["sigma_v0_eff_Pa"])
+                pc = float(spec.get("sigma_preconsolidation_Pa", initial))
+                cr = float(spec["Cr"]) if "Cr" in spec or pc > initial else 0.0
+                out.update(primary_settlement(float(spec["H_clay_m"]), float(spec["e0"]),
+                                              float(spec["Cc"]), initial, float(spec["delta_sigma_v_Pa"]), pc, cr))
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                out.update(ok=False, reason=str(exc))
+                ok = False
     if "channel_B_m" in spec and "y1_m" in spec and "y2_m" in spec:
         g = 9.80665
         b_c, q_f, y1, y2 = float(spec["channel_B_m"]), float(spec["Q_m3_s"]), float(spec["y1_m"]), float(spec["y2_m"])
