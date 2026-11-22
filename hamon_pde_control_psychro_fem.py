@@ -249,6 +249,19 @@ def _check_claimed(result: Dict[str, Any], spec: Dict[str, Any]) -> None:
         result.update(passed=False, reason=f"Claimed {field} exceeds its tolerance in the exact comparison")
 
 
+def _heat_sine_phase(numerator, denominator):
+    """Evaluate sin(pi*numerator/denominator) after exact quadrant reduction."""
+    phase = numerator % (2 * denominator)
+    if phase == 0 or phase == denominator:
+        return 0.0
+    sign = -1.0 if phase > denominator else 1.0
+    half_cycle = phase % denominator
+    reduced = min(half_cycle, denominator - half_cycle)
+    if 2 * reduced == denominator:
+        return sign
+    return sign * math.sin(math.pi * (reduced / denominator))
+
+
 def _transient_heat_modes(alpha, length, time, position, modes):
     """Diagonalize the finite-difference CN step on the rod's Dirichlet sine basis."""
     harmonics = []
@@ -290,25 +303,26 @@ def _transient_heat_modes(alpha, length, time, position, modes):
     else:
         return {"passed": False, "reason": "Could not certify the requested heat modes"}
 
-    location = position / length * cells
-    left = min(int(location), cells - 1)
-    fraction = location - left
+    if position == 0 or position == length:
+        u_numeric = u_exact = 0.0
+    else:
+        coordinate = Fraction(position) / Fraction(length)
+        p, q = coordinate.numerator, coordinate.denominator
+        left, remainder = divmod(p * cells, q)
+        left_weight = (q - remainder) / q
+        right_weight = remainder / q
 
-    def node_value(n, j):
-        # Dirichlet endpoints and integral periods are exactly zero.
-        phase = (n * j) % (2 * cells)
-        if phase == 0 or phase == cells:
-            return 0.0
-        return math.sin(math.pi * phase / cells)
+        def interpolated_mode(n):
+            left_value = _heat_sine_phase(n * left, cells)
+            if remainder == 0:
+                return left_value
+            right_value = _heat_sine_phase(n * (left + 1), cells)
+            return left_weight * left_value + right_weight * right_value
 
-    u_numeric = math.fsum(
-        amplitude * decay * ((1 - fraction) * node_value(n, left) + fraction * node_value(n, left + 1))
-        for (n, amplitude), decay in zip(harmonics, numerical_decay)
-    )
-    u_exact = 0.0 if position == 0 or position == length else math.fsum(
-        amplitude * decay * math.sin(math.pi * math.remainder(n * position / length, 2.0))
-        for (n, amplitude), decay in zip(harmonics, exact_decay)
-    )
+        u_numeric = math.fsum(amplitude * decay * interpolated_mode(n)
+                              for (n, amplitude), decay in zip(harmonics, numerical_decay))
+        u_exact = math.fsum(amplitude * decay * _heat_sine_phase(n * p, q)
+                            for (n, amplitude), decay in zip(harmonics, exact_decay))
     query_error = abs(u_numeric - u_exact)
     return {
         "passed": max(error_bound, query_error) <= tolerance,
