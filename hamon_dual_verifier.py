@@ -2083,44 +2083,128 @@ def solve_mep_routing_clearance_3d(spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def solve_pile_group_dual(spec: dict[str, Any]) -> dict[str, Any]:
-    """Dual-solve geotechnical pile group capacity (Converse-Labarre individual efficiency vs block shear)."""
-    nr, nc = int(spec["n_rows"]), int(spec["n_cols"])
-    d_m, s_m, L_m = float(spec["pile_D_m"]), float(spec["spacing_m"]), float(spec["length_m"])
-    cu_pa = float(spec["cu_Pa"])
-    alpha = float(spec.get("adhesion_alpha", 0.75))
-    nc_tip = float(spec.get("Nc_tip", 9.0))
-    fs = float(spec.get("FS", 2.5))
-    p_load = float(spec["applied_load_N"])
+def _pile_count(value, name):
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer")
+    try:
+        parsed = Decimal(str(value))
+        if not parsed.is_finite() or parsed < 1 or parsed != parsed.to_integral_value():
+            raise ValueError
+        if not math.isfinite(float(parsed)):
+            raise ValueError
+        return int(parsed)
+    except (ArithmeticError, ValueError):
+        raise ValueError(f"{name} must be a positive integer") from None
 
-    a_tip = 0.25 * math.pi * d_m * d_m
-    perim_1 = math.pi * d_m
-    q_ult_1 = nc_tip * cu_pa * a_tip + alpha * cu_pa * perim_1 * L_m
-    n_tot = nr * nc
-    theta_deg = math.degrees(math.atan(d_m / s_m))
-    eta_g = 1.0 - (theta_deg / 90.0) * (((nr - 1) * nc + (nc - 1) * nr) / n_tot)
-    q_eff_group = eta_g * n_tot * q_ult_1
 
-    bg = (nc - 1) * s_m + d_m
-    lg = (nr - 1) * s_m + d_m
-    q_block = nc_tip * cu_pa * (bg * lg) + cu_pa * 2.0 * (bg + lg) * L_m
-
-    # Decimal cross-check
+def _pile_decimal_capacities(nr, nc, diameter, spacing, length, cu, alpha, tip, fs):
+    """Independently integrate unit toe/shaft resistance and count neighboring pile pairs."""
     with localcontext() as ctx:
-        ctx.prec = 40
-        q_gov_f = min(q_eff_group, q_block)
-        q_allow = q_gov_f / fs
-        q_allow_d = Decimal(repr(q_gov_f)) / Decimal(repr(fs))
-        disc = _rel_diff(q_allow, float(q_allow_d))
+        ctx.prec = 55
+        d, s, length, cu, alpha, tip, fs = (
+            Decimal(str(x)) for x in (diameter, spacing, length, cu, alpha, tip, fs)
+        )
+        pi = Decimal("3.14159265358979323846264338327950288419716939937510582097494")
+        n = nr * nc
+        pairs = (nr - 1) * nc + (nc - 1) * nr
+        effective_count = Decimal(n)
+        if pairs and d == s:
+            # At tangency atan(1) = pi/4, leaving only boundary piles.
+            effective_count = Decimal(nr + nc) / 2
+        elif pairs:
+            # In the permitted domain angle <= pi/4. The half-angle expansion
+            # converges uniformly, including the touching-pile limit.
+            x = d / s
+            half_tangent = x / (1 + (1 + x * x).sqrt())
+            power = half_tangent
+            half_angle = power
+            k = 1
+            while power:
+                power *= -(half_tangent * half_tangent)
+                updated = half_angle + power / (2 * k + 1)
+                if updated == half_angle:
+                    break
+                half_angle = updated
+                k += 1
+            effective_count -= Decimal(pairs) * 4 * half_angle / pi
+        radius = d / 2
+        toe = cu * tip
+        shaft = cu * alpha
+        single = pi * radius * (toe * radius + 2 * shaft * length)
+        individual = effective_count * single
+        width = (nc - 1) * s + d
+        depth = (nr - 1) * s + d
+        block = toe * width * depth + cu * length * 2 * (width + depth)
+        return (single, effective_count / n, individual, block, min(individual, block) / fs)
+
+
+def solve_pile_group_dual(spec: dict[str, Any]) -> dict[str, Any]:
+    """Rate axial compression in a rectangular group of distinct circular piles in uniform clay."""
+    nr = _pile_count(spec["n_rows"], "n_rows")
+    nc = _pile_count(spec["n_cols"], "n_cols")
+
+    def number(key, default=None):
+        value = spec[key] if default is None else spec.get(key, default)
+        if isinstance(value, bool):
+            raise ValueError(f"{key} must be finite")
+        try:
+            result = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(f"{key} must be a finite number") from None
+        if not math.isfinite(result):
+            raise ValueError(f"{key} must be finite")
+        return result
+
+    d_m, s_m, length = (number(key) for key in ("pile_D_m", "spacing_m", "length_m"))
+    cu, alpha, tip = number("cu_Pa"), number("adhesion_alpha", 0.75), number("Nc_tip", 9.0)
+    fs, load = number("FS", 2.5), number("applied_load_N")
+    if min(d_m, length, s_m, fs) <= 0:
+        raise ValueError("Pile diameter, length, center spacing and factor of safety must be positive")
+    if min(cu, alpha, tip) < 0:
+        raise ValueError("Undrained strength, adhesion factor and toe factor must be nonnegative")
+    if load < 0:
+        raise ValueError("applied_load_N is compressive demand; uplift resistance is unsupported")
+    n = nr * nc
+    if n > 1 and s_m < d_m:
+        raise ValueError("Pile center spacing is smaller than diameter; distinct shafts overlap")
+
+    eta = 1.0
+    if n > 1:
+        ratio = d_m / s_m
+        # 1 - 4*atan(d/s)/pi is small near contact. Evaluate the difference
+        # of the angles directly, then add the row and column boundary terms.
+        complementary = math.atan(((s_m - d_m) / s_m) / (1.0 + ratio))
+        eta = (4 * complementary + 2 * math.atan(ratio) * (1 / nr + 1 / nc)) / math.pi
+    area = math.pi * (d_m / 2) ** 2
+    single = tip * cu * area + alpha * cu * math.pi * d_m * length
+    individual = eta * n * single
+    width = (nc - 1) * s_m + d_m
+    depth = (nr - 1) * s_m + d_m
+    block = tip * cu * width * depth + cu * 2 * (width + depth) * length
+    allowable = min(individual, block) / fs
+    primary = (single, eta, individual, block, allowable)
+    reference = _pile_decimal_capacities(nr, nc, d_m, s_m, length, cu, alpha, tip, fs)
+    errors = []
+    for actual, expected in zip(primary, reference):
+        if not math.isfinite(actual) or not expected.is_finite() or (actual <= 0) != (expected <= 0):
+            raise ValueError("Pile-group capacities exceed resolved numerical range")
+        expected_float = float(expected)
+        if not math.isfinite(expected_float):
+            raise ValueError("Pile-group capacities exceed finite numerical range")
+        scale = max(abs(actual), abs(expected_float))
+        errors.append(abs(actual - expected_float) / scale if scale else 0.0)
+    discrepancy = max(errors)
+    if discrepancy > 1e-10:
+        raise ValueError(f"Independent pile-group capacity mismatch: {discrepancy:.3e}")
     return {
-        "Q_single_ult_N": q_ult_1,
-        "group_efficiency_eta": eta_g,
-        "Q_group_individual_N": q_eff_group,
-        "Q_group_block_N": q_block,
-        "Q_allowable_N": q_allow,
-        "governing_mode": "block_failure" if q_block < q_eff_group else "individual_efficiency",
-        "passes_pile_group": p_load <= q_allow,
-        "dual_rel_discrepancy": disc,
+        "Q_single_ult_N": single,
+        "group_efficiency_eta": eta,
+        "Q_group_individual_N": individual,
+        "Q_group_block_N": block,
+        "Q_allowable_N": allowable,
+        "governing_mode": "block_failure" if block < individual else "individual_efficiency",
+        "passes_pile_group": load <= allowable,
+        "dual_rel_discrepancy": discrepancy,
         "dual_verified": True,
     }
 
