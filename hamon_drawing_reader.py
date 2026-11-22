@@ -224,9 +224,10 @@ def _tokenize_content_stream(stream_text: str) -> List[Any]:
     return tokens
 
 
-def _interpret_pdf_stream(stream_text: str, page_index: int) -> Tuple[List[PdfTextSpan], List[PdfVectorSegment]]:
+def _interpret_pdf_stream(
+    stream_text: str, page_index: int, ctm: Tuple[float, ...],
+) -> Tuple[List[PdfTextSpan], List[PdfVectorSegment]]:
     tokens = _tokenize_content_stream(stream_text)
-    ctm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
     stack: List[Tuple[float, float, float, float, float, float]] = []
     tm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
     tlm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
@@ -373,52 +374,86 @@ def read_vector_pdf(pdf_bytes: bytes) -> List[PdfSheetPage]:
                 return zlib.decompress(raw.strip(b"\r\n"))
         return raw
 
-    def parse_box(body: bytes, inherited_box: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
-        bm = re.search(rb"/MediaBox\s*\[\s*([-+0-9.]+)\s+([-+0-9.]+)\s+([-+0-9.]+)\s+([-+0-9.]+)\s*\]", body)
-        if bm:
-            return tuple(float(bm.group(k)) for k in range(1, 5))  # type: ignore[return-value]
-        return inherited_box
+    number = rb"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+    rectangle = rb"\[\s*" + rb"\s+".join([number] * 4) + rb"\s*\]"
+    reference = rb"(\d+)\s+\d+\s+R\b"
 
-    ordered_page_ids: List[int] = []
-    inherited_boxes: Dict[int, Tuple[float, float, float, float]] = {}
+    def attribute(header, key, direct):
+        match = re.search(rb"/" + key + rb"\s*(?:" + reference + rb"|(" + direct + rb"))", header)
+        if match is None:
+            return None
+        if match.group(1) is None:
+            return match.group(2)
+        value = objs.get(int(match.group(1)), b"").strip()
+        if not re.fullmatch(direct, value):
+            raise ValueError(f"Invalid indirect PDF {key.decode()}")
+        return value
 
-    def walk_pages(oid: int, cur_box: Tuple[float, float, float, float], visited: set) -> None:
+    def page_attributes(header, parent):
+        attrs = parent.copy()
+        for key in (b"MediaBox", b"CropBox"):
+            raw = attribute(header, key, rectangle)
+            if raw is not None:
+                x0, y0, x1, y1 = map(float, re.findall(number, raw))
+                attrs[key] = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+        rotation = attribute(header, b"Rotate", rb"[-+]?\d+")
+        if rotation is not None:
+            attrs[b"Rotate"] = int(rotation) % 360
+        return attrs
+
+    defaults = {b"MediaBox": (0.0, 0.0, 612.0, 792.0), b"Rotate": 0}
+    ordered_pages = []
+
+    def walk_pages(oid: int, parent, visited: set) -> None:
         if oid in visited or oid not in objs:
             return
         visited.add(oid)
-        body = objs[oid]
-        hdr_only = body.split(b"stream", 1)[0]
-        box = parse_box(hdr_only, cur_box)
-        if re.search(rb"/Type\s*/Pages\b", hdr_only):
-            km = re.search(rb"/Kids\s*\[(.*?)\]", hdr_only, flags=re.DOTALL)
-            if km:
-                for rm in re.finditer(rb"(\d+)\s+\d+\s+R", km.group(1)):
-                    walk_pages(int(rm.group(1)), box, visited)
-        elif re.search(rb"/Type\s*/Page\b", hdr_only):
-            ordered_page_ids.append(oid)
-            inherited_boxes[oid] = box
+        header = objs[oid].split(b"stream", 1)[0]
+        attrs = page_attributes(header, parent)
+        if re.search(rb"/Type\s*/Pages\b", header):
+            kids = re.search(rb"/Kids\s*\[(.*?)\]", header, flags=re.DOTALL)
+            if kids:
+                for ref in re.finditer(reference, kids.group(1)):
+                    walk_pages(int(ref.group(1)), attrs, visited)
+        elif re.search(rb"/Type\s*/Page\b", header):
+            ordered_pages.append((oid, attrs))
 
     for oid, body in sorted(objs.items()):
         hdr = body.split(b"stream", 1)[0]
         if re.search(rb"/Type\s*/Catalog\b", hdr):
             pm = re.search(rb"/Pages\s+(\d+)\s+\d+\s+R", hdr)
             if pm:
-                walk_pages(int(pm.group(1)), (0.0, 0.0, 612.0, 792.0), set())
+                walk_pages(int(pm.group(1)), defaults, set())
                 break
 
-    if not ordered_page_ids:
+    if not ordered_pages:
         for oid, body in sorted(objs.items()):
             hdr = body.split(b"stream", 1)[0]
             if re.search(rb"/Type\s*/Page\b", hdr):
-                ordered_page_ids.append(oid)
-                inherited_boxes[oid] = parse_box(hdr, (0.0, 0.0, 612.0, 792.0))
+                ordered_pages.append((oid, page_attributes(hdr, defaults)))
 
     sheets: List[PdfSheetPage] = []
-    for p_idx, oid in enumerate(ordered_page_ids):
+    for p_idx, (oid, attrs) in enumerate(ordered_pages):
         body = objs[oid]
         hdr = body.split(b"stream", 1)[0]
-        x0, y0, x1, y1 = inherited_boxes.get(oid, (0.0, 0.0, 612.0, 792.0))
-        width_pt, height_pt = abs(x1 - x0), abs(y1 - y0)
+        media = attrs[b"MediaBox"]
+        crop = attrs.get(b"CropBox", media)
+        x0, y0 = max(media[0], crop[0]), max(media[1], crop[1])
+        x1, y1 = min(media[2], crop[2]), min(media[3], crop[3])
+        rotation = attrs[b"Rotate"]
+        if x0 >= x1 or y0 >= y1 or rotation not in (0, 90, 180, 270):
+            raise ValueError("Invalid PDF display box or page rotation")
+        width_pt, height_pt = x1 - x0, y1 - y0
+        if rotation in (90, 270):
+            width_pt, height_pt = height_pt, width_pt
+        # Display coordinates keep the reader's lower-left origin. Install this
+        # as the initial CTM so content, text and path matrices compose normally.
+        page_ctm = {
+            0: (1, 0, 0, 1, -x0, -y0),
+            90: (0, -1, 1, 0, -y0, x1),
+            180: (-1, 0, 0, -1, x1, y1),
+            270: (0, 1, -1, 0, y1, -x0),
+        }[rotation]
 
         content_ids: List[int] = []
         cm_arr = re.search(rb"/Contents\s*\[(.*?)\]", hdr, flags=re.DOTALL)
@@ -427,10 +462,16 @@ def read_vector_pdf(pdf_bytes: bytes) -> List[PdfSheetPage]:
         else:
             cm_single = re.search(rb"/Contents\s+(\d+)\s+\d+\s+R", hdr)
             if cm_single:
-                content_ids = [int(cm_single.group(1))]
+                cid = int(cm_single.group(1))
+                # A Contents reference can point to the array of streams itself.
+                target = objs.get(cid, b"").strip()
+                if target.startswith(b"[") and target.endswith(b"]"):
+                    content_ids = [int(ref.group(1)) for ref in re.finditer(reference, target)]
+                else:
+                    content_ids = [cid]
 
         combined = b"\n".join(extract_stream(objs[cid]) for cid in content_ids if cid in objs)
-        texts, segs = _interpret_pdf_stream(combined.decode("latin-1", errors="replace"), p_idx)
+        texts, segs = _interpret_pdf_stream(combined.decode("latin-1", errors="replace"), p_idx, page_ctm)
 
         detected_scale: Optional[float] = None
         tb_texts = [t for t in texts if t.x_pt >= 0.55 * width_pt and t.y_pt <= 0.35 * height_pt]
@@ -460,6 +501,7 @@ def query_sheet_region(
     norm_bbox: Tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0),
     scale_override: Optional[float] = None,
 ) -> Dict[str, Any]:
+    """Query normalized coordinates measured from the displayed CropBox's lower-left."""
     u0, v0, u1, v1 = norm_bbox
     bx0, by0 = u0 * sheet.width_pt, v0 * sheet.height_pt
     bx1, by1 = u1 * sheet.width_pt, v1 * sheet.height_pt
