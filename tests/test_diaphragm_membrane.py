@@ -69,6 +69,29 @@ class DiaphragmTests(unittest.TestCase):
         assert not cases[1]["bar_capacity_checks"][0]["passes"]
 
 
+    def test_tied_wall_stations_retain_both_physical_values(self):
+        spec = strip()
+        spec["panels"][0]["G_N_m"] /= 100
+        spec["loads"] = [{"node": 5, "force_N": [0., 25.]}]
+        spec["stations"] = [
+            {"edge_nodes": edge, "fraction": fraction, **rule}
+            for edge, fraction, rule in (
+                ([0, 3], 1/3, {}), ([0, 3], 1/3, {"tie_rule": "first_from_start"}),
+                ([3, 0], 2/3, {"tie_rule": "first_from_start"}),
+                ([0, 3], 1/3, {"tie_rule": "max_abs"}))]
+        result = run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": spec})
+        unknown, first, reversed_wall, envelope = result["stations"]
+        self.assertEqual(unknown["panels"], [0, 1])
+        self.assertIsNone(unknown["magnitude_N_m"])
+        expected = list(map(abs, result["panel_center_shear_N_m"][:2]))
+        assert_allclose(unknown["signed_shear_N_m"], [50/3, -25/3], atol=1e-11)
+        self.assertEqual(first["magnitude_N_m"], expected[0])
+        self.assertEqual(reversed_wall["magnitude_N_m"], expected[1])
+        self.assertEqual(envelope["magnitude_N_m"], max(expected))
+        spec["stations"] = [{"edge_nodes": [1, 5], "fraction": .5}]
+        result = run_router_conservation_cad_verifier({"spec": {"calculation": "diaphragm_membrane", **spec}})
+        self.assertFalse(result["ok"])
+
     def test_invalid_mesh_cannot_verify(self):
         for fault in ("inverted", "duplicate", "singular", "nan", "disconnected", "hanging", "overlap"):
             with self.subTest(fault=fault):

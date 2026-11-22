@@ -57,6 +57,65 @@ def _check_rectangles(rectangles):
         active.append((left, right, bottom, top))
 
 
+def _recover_stations(requests, cells, xy, shears):
+    """Recover center values of cells incident on the requested exterior wall segment."""
+    if not requests:
+        return []
+    edge_owners = {}
+    for cell, item in enumerate(cells):
+        ids = item["nodes"]
+        for a, b in zip(ids, ids[1:] + ids[:1]):
+            edge_owners.setdefault(tuple(sorted((a, b))), []).append(cell)
+    exterior = [(xy[a], xy[b], owners[0]) for (a, b), owners in edge_owners.items()
+                if len(owners) == 1]
+    results = []
+    for station in requests:
+        ids = station["edge_nodes"]
+        if len(ids) != 2 or any(type(i) is not int or not 0 <= i < len(xy) for i in ids):
+            raise ValueError("station requires two valid wall endpoint indices")
+        a, b = xy[ids[0]], xy[ids[1]]
+        tangent = b - a
+        if np.count_nonzero(tangent) != 1:
+            raise ValueError("station wall must follow a horizontal or vertical exterior edge")
+        ax = int(tangent[1] != 0)
+        length = abs(tangent[ax])
+        direction = np.sign(tangent[ax])
+        fraction = float(station["fraction"])
+        if not 0 <= fraction <= 1:
+            raise ValueError("station fraction must be within [0,1]")
+        faces = []
+        for p, q, cell in exterior:
+            if p[1-ax] != a[1-ax] or q[1-ax] != a[1-ax]:
+                continue
+            start, end = sorted(((p[ax]-a[ax])*direction, (q[ax]-a[ax])*direction))
+            if start >= 0 and end <= length:
+                faces.append((start, end, cell))
+        faces.sort()
+        if (not faces or faces[0][0] != 0 or faces[-1][1] != length
+                or any(left[1] != right[0] for left, right in zip(faces, faces[1:]))):
+            raise ValueError("station wall does not follow a continuous set of exterior faces")
+        distances = []
+        for _, _, cell in faces:
+            sw, _, ne, _ = cells[cell]["nodes"]
+            rel_center = ((xy[sw] - a) + (xy[ne] - a)) / 2
+            distances.append(np.linalg.norm(rel_center - fraction * tangent))
+        nearest = min(distances)
+        tolerance = 32 * np.finfo(float).eps * max(length, nearest)
+        tied = [face[2] for face, d in zip(faces, distances) if d <= nearest + tolerance]
+        signed = [float(shears[i]) for i in tied]
+        rule = station.get("tie_rule")
+        if rule == "first_from_start" or (rule is None and len(tied) == 1):
+            magnitude = abs(signed[0])
+        elif rule == "max_abs":
+            magnitude = max(map(abs, signed))
+        elif rule is None:
+            magnitude = None
+        else:
+            raise ValueError("tie_rule must be first_from_start or max_abs")
+        results.append({"panels": tied, "signed_shear_N_m": signed, "magnitude_N_m": magnitude})
+    return results
+
+
 def solve_diaphragm(spec):
     xy = np.asarray(spec["nodes_m"], dtype=float)
     if xy.ndim != 2 or xy.shape[1] != 2 or not np.isfinite(xy).all() or len(xy) < 4:
@@ -179,7 +238,8 @@ def solve_diaphragm(spec):
             demand = abs(tension) * _positive(bar.get("demand_factor", 1.0))
             ratio = demand / (tension_limit if tension >= 0 else compression_limit)
             member_checks.append({"bar": i, "ratio": float(ratio), "passes": bool(ratio <= 1)})
-    return {"bar_capacity_checks": member_checks,
+    stations = _recover_stations(spec.get("stations", []), spec["panels"], xy, panel_shears)
+    return {"stations": stations, "bar_capacity_checks": member_checks,
             "displacements_m": u.reshape((-1, 2)).tolist(),
             "panel_center_shear_N_m": list(map(float, panel_shears)),
             "bar_tension_N": list(map(float, bar_forces)),
