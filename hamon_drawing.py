@@ -364,7 +364,7 @@ def _shape_points(tag,attr):
     return None
 
 
-def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None):
+def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None,stroke_widths=False):
     if selected_vector_ids is not None:
         if (not isinstance(selected_vector_ids,set) or len(selected_vector_ids)>2048
                 or any(not isinstance(i,str) or not re.fullmatch(r"v[1-9][0-9]*",i)
@@ -434,6 +434,14 @@ def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None
                 if node.attrib.get("stroke"):row["stroke"]=node.attrib["stroke"][:80]
                 if node.attrib.get("stroke-width"):
                     row["stroke_width"]=node.attrib["stroke-width"][:40]
+                    if stroke_widths and matrix is not None and re.fullmatch(_NUMBER,row["stroke_width"]):
+                        # A circular pen becomes an ellipse under an affine transform.
+                        # Its maximum diameter is the largest singular value times the pen width.
+                        a,b,c,d = matrix[:4]
+                        trace = a*a+b*b+c*c+d*d
+                        discriminant = max(0, trace*trace-4*(a*d-b*c)**2)
+                        row["svg_pen_diameter"] = float(row["stroke_width"])*math.sqrt((trace+math.sqrt(discriminant))/2)
+
                 out.append(row)
         stack.extend((child,matrix) for child in reversed(list(node)))
     return {"flat_opaque_marker_page":flat,"viewbox_svg_units":dims,"vector_primitives":stats["vector_primitives"],
@@ -1020,7 +1028,7 @@ def _resolve_ruled_captions(result, pages, target, source, directory):
 
 def _detail_symbol_inventory(source, page, directory, stroke_vectors=None):
     try:
-        inventory = _svg_inventory(_page_svg(source, page, directory), 30000)
+        inventory = _svg_inventory(_page_svg(source, page, directory), 30000, stroke_widths=stroke_vectors is not None)
     except (OSError, ValueError, subprocess.TimeoutExpired, ET.ParseError):
         return [], []
     if inventory["vector_limit_hit"] or inventory["unlocalized_vectors"]:
@@ -1546,6 +1554,70 @@ _SIMPLEX_PRINTABLE = (
 )
 
 
+def _visible_complete_label(source, page, region, glyphs, vectors):
+    """Every predicted edge must be visibly inked outside the ring's own stroke."""
+    identifiers = {identifier for _, identifier in glyphs}
+    ring = region["ring"]["box"]
+    cx, cy = (ring[0]+ring[2])/2, (ring[1]+ring[3])/2
+    radius = (ring[2]-ring[0])/2
+    scale = 8
+    raster = _caption_raster(source, page, ring, scale)
+    if raster is None:
+        return False
+    _, size, _, pixels = raster.split(b"\n", 3)
+    width, height = map(int, size.split())
+    left, top = math.floor(ring[0]*scale), math.floor(ring[1]*scale)
+    dark_pixels = {(i % width, i // width) for i, pixel in enumerate(pixels) if pixel <= 150}
+    def distance(pixel):
+        ix, iy = pixel
+        return math.hypot((left+ix+.5)/scale-cx, (top+iy+.5)/scale-cy)
+    # Ring-connected ink cannot prove a glyph stroke. Follow it into the circle
+    # as well, so thick outlines, joins and protrusions cannot serve as witnesses.
+    rim = {pixel for pixel in dark_pixels if distance(pixel) >= radius-.25}
+    frontier = list(rim)
+    while frontier:
+        ix, iy = frontier.pop()
+        for dx in (-1,0,1):
+            for dy in (-1,0,1):
+                neighbor = (ix+dx, iy+dy)
+                if neighbor in dark_pixels and neighbor not in rim:
+                    rim.add(neighbor)
+                    frontier.append(neighbor)
+    interior = dark_pixels - rim
+    expected_paint = set()
+    for v in vectors:
+        if v["id"] not in identifiers:
+            continue
+        pen = v.get("svg_pen_diameter")
+        if pen is None or not 0 < pen <= .2*radius:
+            return False
+        reach = pen*scale/2+1
+        step = math.ceil(reach)
+        footprint = [(dx,dy) for dx in range(-step,step+1) for dy in range(-step,step+1)
+                     if math.hypot(dx,dy) <= reach]
+        centerline = set()
+        points = v["svg_points"]
+        for i, j in v["svg_segment_vertex_pairs"]:
+            a, b = points[i], points[j]
+            if a == b:
+                continue
+            steps = max(1, math.ceil(math.dist(a,b)*scale*2))
+            for n in range(steps+1):
+                x = a[0]+(b[0]-a[0])*n/steps
+                y = a[1]+(b[1]-a[1])*n/steps
+                if math.hypot(x-cx,y-cy) >= radius:
+                    return False
+                ix, iy = math.floor(x*scale)-left, math.floor(y*scale)-top
+                if min(ix,iy) < 1 or ix >= width-1 or iy >= height-1:
+                    return False
+                if not any((ix+dx,iy+dy) in interior
+                           for dx in (-1,0,1) for dy in (-1,0,1)):
+                    return False
+                centerline.add((ix,iy))
+        expected_paint.update((ix+dx,iy+dy) for ix,iy in centerline for dx,dy in footprint)
+    return bool(interior) and len(interior & expected_paint) >= .95*len(interior)
+
+
 def _simplex_strokes():
     """Decode the reference face independent of any destination sheet or OCR output."""
     symbols = []
@@ -1681,6 +1753,14 @@ def _resolve_rendered_stacked(result, target, source, directory):
             continue
         strokes = _detail_strokes(region,stroke_vectors,ink)
         detail = _recognize_stroke_label(strokes,alphabet)
+        if detail and not _visible_complete_label(source, target_page, region, strokes, stroke_vectors):
+            if evidence and evidence["detail"] != detail:
+                for value in {detail, evidence["detail"]}:
+                    unconfirmed.setdefault(value, []).append(dict(region, detail=value, page=target_page))
+                continue
+            # An independent two-view OCR result retains its own provenance.
+            # The external font supplies no positive evidence for this site.
+            detail = None
         if detail and evidence and evidence["detail"] != detail:
             for value in (detail,evidence["detail"]):
                 unconfirmed.setdefault(value,[]).append(dict(region,detail=value,page=target_page))

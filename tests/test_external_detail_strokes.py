@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import hamon_drawing as drawing
 
@@ -31,6 +32,32 @@ class ExternalDetailStrokeTests(unittest.TestCase):
         second = (.1, 0., 1., 1.)
         self.assertFalse(drawing._same_stroke_graph([first, first], [first, second], 1.))
         self.assertTrue(drawing._same_stroke_graph([first, (1., 1., .1, 0.)], [first, second], 1.))
+
+    def test_complete_stroke_requires_visible_ink_separate_from_the_border(self):
+        scale = 8
+        size = 10 * scale
+        region = {"ring": {"box": (0, 0, 10, 10)}}
+        glyphs = [((), "glyph")]
+        vector = {"id": "glyph", "svg_pen_diameter": .3,
+                  "svg_points": [(2, 5), (5, 5), (7, 3)],
+                  "svg_segment_vertex_pairs": [(0, 1), (1, 2)]}
+        printed = {(x, 40) for x in range(16, 41)}
+        printed.update((40 + i, 40 - i) for i in range(17))
+        border = {(1, y) for y in range(29, 52)}
+
+        def visible(ink):
+            pixels = bytearray([255]) * (size * size)
+            for x, y in ink | border:
+                pixels[y * size + x] = 0
+            image = f"P5\n{size} {size}\n255\n".encode() + pixels
+            with patch.object(drawing, "_caption_raster", return_value=image):
+                return drawing._visible_complete_label(None, 1, region, glyphs, [vector])
+
+        self.assertTrue(visible(printed))
+        erased = {(40 + i, 40 - i) for i in range(6, 13)}
+        self.assertFalse(visible(printed - erased))
+        connected_to_border = {(x, 40) for x in range(1, 17)}
+        self.assertFalse(visible(printed | connected_to_border))
 
     def test_other_printable_glyph_vetoes_complete_token(self):
         glyphs = self.glyphs("9B", [1., 1.])
