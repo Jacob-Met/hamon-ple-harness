@@ -532,39 +532,44 @@ def solve_transmission_line_rlc(params: Mapping[str, Any]) -> Dict[str, Any]:
         xl = float(params.get("X_L", 0.0))
         stub_type = str(params.get("stub_type", "short")).strip().lower()
         branch = int(params.get("branch", 0))
-        if rl <= 0.0:
-            raise ValueError("Smith stub matching requires R_L > 0")
+        if not (math.isfinite(z0) and z0 > 0.0 and math.isfinite(rl) and rl > 0.0 and math.isfinite(xl)):
+            raise ValueError("Smith stub matching requires finite R_L > 0, Z0 > 0 and finite X_L")
 
-        if abs(rl - z0) < 1e-14:
-            t_candidates = [-xl / (2.0 * z0)]
-        else:
-            rad = math.sqrt(rl * ((z0 - rl) ** 2 + xl * xl) / z0)
-            t_candidates = [(xl + rad) / (rl - z0), (xl - rad) / (rl - z0)]
-
+        # At either intersection with the unit-conductance circle, y = 1 + jb.
+        # Equating its reflection magnitude with the load gives b² = |z - 1|²/Re(z).
+        # Reflection phase is a full-circle coordinate even at a quarter wavelength.
+        z_load = complex(rl / z0, xl / z0)
+        delta = complex((rl - z0) / z0, xl / z0)
+        b_abs = abs(delta) / math.sqrt(z_load.real)
+        gamma_load = delta / (z_load + 1)
+        phase_load = math.atan2(gamma_load.imag, gamma_load.real)
         sols = []
-        for t_val in t_candidates:
-            d_lam = (math.atan(t_val) / (2.0 * math.pi)) % 0.5
-            b_line = (rl * rl * t_val - (z0 - xl * t_val) * (xl + z0 * t_val)) / (
-                z0 * (rl * rl + (xl + z0 * t_val) ** 2)
-            )
-            b_stub = -b_line
-            if stub_type.startswith("short"):
-                if abs(b_stub) < 1e-15:
-                    l_lam = 0.25
-                else:
-                    l_lam = (math.atan(-1.0 / (b_stub * z0)) / (2.0 * math.pi)) % 0.5
-                y_stub = -1j / (z0 * math.tan(2.0 * math.pi * l_lam)) if abs(l_lam - 0.25) > 1e-14 else 0.0j
+        for b in ((b_abs, -b_abs) if b_abs else (0.0,)):
+            if b:
+                gamma_match = -1j * b / (2.0 + 1j * b)
+                phase_match = math.atan2(gamma_match.imag, gamma_match.real)
+                d_lam = ((phase_load - phase_match) / (4.0 * math.pi)) % 0.5
+                if d_lam == 0.5:
+                    d_lam = 0.0
             else:
-                l_lam = (math.atan(b_stub * z0) / (2.0 * math.pi)) % 0.5
-                y_stub = 1j * math.tan(2.0 * math.pi * l_lam) / z0
+                # Every line length works for an already matched load.
+                d_lam = 0.0
 
-            zl_c = complex(rl, xl)
-            beta_d = 2.0 * math.pi * d_lam
-            z_d = z0 * (zl_c + 1j * z0 * math.tan(beta_d)) / (z0 + 1j * zl_c * math.tan(beta_d))
-            y_tot = (1.0 / z_d) + y_stub
-            z_tot = 1.0 / y_tot
-            res = abs(z_tot - z0) / z0
-            sols.append((d_lam, l_lam, float(res)))
+            if stub_type.startswith("short"):
+                stub_angle = math.atan2(1.0, b)
+                y_stub = -1j * math.cos(stub_angle) / math.sin(stub_angle)
+            else:
+                stub_angle = math.atan(-b) % math.pi
+                if stub_angle == math.pi:
+                    stub_angle = 0.0
+                y_stub = 1j * math.sin(stub_angle) / math.cos(stub_angle)
+            l_lam = stub_angle / (2.0 * math.pi)
+            # Independently recover the terminal impedance using the line ABCD matrix.
+            angle = 2.0 * math.pi * d_lam
+            cs, sn = math.cos(angle), math.sin(angle)
+            y_line = (cs + 1j * z_load * sn) / (z_load * cs + 1j * sn)
+            residual = abs(1.0 / (y_line + y_stub) - 1.0)
+            sols.append((d_lam, l_lam, float(residual)))
 
         sols.sort(key=lambda s: s[0])
         chosen = sols[min(branch, len(sols) - 1)]
