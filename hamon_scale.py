@@ -63,6 +63,8 @@ def _source_text(words, label):
     # unit to appear in one PDF word or in two words on the same source line.
     tokenize = re.compile(r"\d+|[^\W\d_]+|[^\s]").findall
     wanted = tokenize(label.casefold())
+    starts = []
+    offset = 0
     for _, line in groupby(words, key=lambda word: word.get("source_line_id")):
         tokens = []
         boundaries = {0}
@@ -72,7 +74,10 @@ def _source_text(words, label):
         for start in boundaries:
             end = start + len(wanted)
             if wanted and end in boundaries and tokens[start:end] == wanted:
-                return tuple(wanted)
+                starts.append(offset + start)
+        offset += len(tokens)
+    if starts:
+        return tuple(wanted), min(starts) + len(wanted), max(starts)
     raise ValueError(f"dimension source_label {label!r} not found in PDF page words")
 
 
@@ -125,7 +130,7 @@ def calibrate_inventory(page, spec, quantity, metre):
     metre_value = metre.val
     direction_vectors = []
     observations = []
-    source_labels = set()
+    source_labels = {}
     for i, reference in enumerate(references):
         a, b = _segment(reference, vectors)
         width = _distance(a, b)
@@ -139,10 +144,14 @@ def calibrate_inventory(page, spec, quantity, metre):
                 or physical.val <= 0:
             raise ValueError(f"reference {i}: positive physical length required")
         label = reference.get("source_label")
-        label_key = _source_text(page["words"], label)
-        if label_key in source_labels:
+        label_key, earliest_end, latest_start = _source_text(page["words"], label)
+        # Two labels can use separate printed words exactly when an occurrence
+        # of either label can end before the other starts (adjacency is valid).
+        forced_overlap = any(earliest_end > start and end > latest_start
+                             for end, start in source_labels.values())
+        if label_key in source_labels or forced_overlap:
             raise ValueError("independent source_label required per reference")
-        source_labels.add(label_key)
+        source_labels[label_key] = earliest_end, latest_start
         length_m = float(physical.val / metre_value)
         direction_vectors.append(((b[0] - a[0]) / width,
                                   (b[1] - a[1]) / width))
