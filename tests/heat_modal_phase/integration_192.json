@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "state": "frozen_before_combined_numerical_execution",
+  "reason": "Other owner's test-only PR192 landed while the original heat comparison ran.",
+  "original_base": "25b9d37a17939843e25c50d98f55f1012f82be88",
+  "original_candidate": "1a20a0cea31242b385ee9c58d26af91e074ecd36",
+  "original_candidate_tree": "2672f80923d2e79b8b7e080763f8e9e49118412c",
+  "original_stock_log_sha256": "de8577d3f9408aa409e41d226aa19a454826b7918591b8b78c78350ac5334978",
+  "original_candidate_log_sha256": "0860ac42895dea305808455a5a24980cfd88b6adb768d8d46b6b078bdbb7af30",
+  "incoming_main": "133d15fc603ece695b8890596de618fed81f4cea",
+  "incoming_tree": "7d1caff4abf1687a7ebf3497c0194893a000a338",
+  "incoming_pr": 192,
+  "incoming_owner_credit": "Other owner's additional near-parallel truss compatibility, thermal self-stress and mechanism regressions.",
+  "incoming_files": [
+    {
+      "path": "tests/test_truss_member_compatibility.py",
+      "blob": "097ef549b2641f35a5d3e6c512d73dc523c0de71"
+    }
+  ],
+  "preserved_own_blobs": {
+    "tests/test_heat_modal_phase.py": "21286b7d2cabd7c5b13a6a6e6b4fde352168003d",
+    "tests/test_registered_engineering_verifiers.py": "1e59a5227042a86f22a9664f0240159df6fd3a88",
+    "hamon_pde_control_psychro_fem.py": "c9cdef9a6deb1b670eafdf6b4709d9f99a34f58e",
+    "tests/heat_modal_phase/README.md": "60ad699ba98be9fd72a33ced87684f54abb607dc",
+    "tests/heat_modal_phase/protocol.json": "64db8b0557df0de11c62a3d821468d04450ddba2"
+  },
+  "source_composition": "Normal merge of the pinned incoming main. Retain its sole new test blob exactly and all five original heat solver/receiver/protocol/docs blobs exactly. Add only this separate integration protocol.",
+  "requirements": [
+    "All sixteen HEAT_PHASE_CASE records and HEAT_PHASE_TOTAL equal the original candidate.",
+    "Eight stock/candidate whole-response controls and all original non-spatial projections remain qualified by the preserved pair.",
+    "All269 inherited direct rows and eleven totals, plus separate beam integration record, equal the original candidate.",
+    "All five heat Pi contracts and prior registered contracts pass.",
+    "All six incoming truss compatibility methods and every maintained gate pass.",
+    "Preserve complete first combined log, actual checkout composition and exact landed tree."
+  ],
+  "record_changes_allowed": [],
+  "operation": "Close stock193 without merging, normal-merge incoming main into candidate194, add this protocol, then run maintained combined CI. No stock replay, oracle/source changes or force push.",
+  "scope_limit": "Coexistence with incoming regression tests only; no new production behavior, model score or timing assertion."
+}
