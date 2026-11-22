@@ -1,0 +1,289 @@
+{
+  "course": "truss_member_factors",
+  "version": 1,
+  "state": "frozen_before_first_numerical_execution",
+  "base_commit": "c9ab834a4b3d089fb47f90b0a21aac60e105ab25",
+  "base_tree": "b38950ec8719742abb064cdb8267352e0d7a9543",
+  "scope_sha256": "7f8d63a1b9a65c08811a6775821298cd3b5fb090cd5a42927b92049c1011ab49",
+  "independent_plans": {
+    "design": "b0ce4ea3cbb491d1697c6335834288fd8ec35a9e24376350a58fc5f65177ade7",
+    "direct": "c230b2014d70789604b5e8f32514fcf83dfc760ab454370d254c1af3b883be7b",
+    "registered": "b289415cb78e336cff8d0be24fa646de5ed7026cb898a092233703ef871fe224",
+    "pre_review_direct_retained_unexecuted": "492858fac23b10d2f7c12f6849c75322a8e46c2c0d98d059c0dd86fe3001e197"
+  },
+  "sources": {
+    "baseline_solver_sha256": "d6454765c1b756b3bc8fcb7bca0efc4b8f7d8cd9039310f757e7627be7c7864c",
+    "candidate_solver_sha256": "0500b68692ad6ba6050234af4f15419f32a87cec898937fd9d54c1c68f6c53b1",
+    "candidate_patch_sha256": "fd8feb129da75f23ef2870fed0483d45a177165e3711350219634abcfc4f1fc9",
+    "direct_receiver_sha256": "88d98228a686d51a1b49f2c22fc005de108916ae9ce5d43065c9d5d2c63112fd",
+    "registered_receiver_sha256": "b3b776ff8701c69cf1db8c9baad7e34b5285c5cebe44c90b9170e01fd37b2940",
+    "registered_patch_sha256": "ab4fd7d08595e0f183a67cbe47dd023b79bfe865995419f119ba57d3e73b62c2"
+  },
+  "mechanism": {
+    "scope": "verify_fem_structure/truss_2d only; private truss helpers",
+    "represented_inputs": "Exact dyadic values of accepted finite binary64 inputs; exact differences of accepted coordinates",
+    "length": "Existing binary64 subtraction and math.hypot result, represented exactly; L>1e-12; no exact irrational geometry claim",
+    "factorization": "Kff=Rf^T W Rf, raw member rows (-dx,-dy,dx,dy), W=EA/L^3>0",
+    "rank": "Exact free geometry rank; ker(Kff)=ker(Rf); deficient rank refuses both compatible and incompatible mechanism loads",
+    "solve": "Exact full-rank positive Gram elimination; no rank epsilon, regularization or pseudoinverse",
+    "rhs": "f_f + Rf^T W(alpha*dT*L^2 - Rp*up)",
+    "recovery": "Complete member force, stress, reactions and energy before any displacement wire rounding",
+    "checks": [
+      "exact free equilibrium",
+      "separate exact global force and moment",
+      "2U = u dot (applied + reactions) - sum(N*alpha*dT*L)"
+    ],
+    "external_work": "0.5 applied dot displacement, including with thermal strain or imposed displacement"
+  },
+  "wire": {
+    "numeric_fields_preserved": true,
+    "rounding": "Each required final scalar once; retain representable signed subnormals",
+    "equilibrium_residual_basis": "represented_member_factors_before_float_rounding",
+    "range_condition": "A required nonzero exact result rounds to zero or overflows",
+    "range_refusal_only_fields": [
+      "passed",
+      "domain",
+      "mode",
+      "response_status",
+      "range_field",
+      "range_index",
+      "reason"
+    ],
+    "response_status": "outside_float_range",
+    "range_index": "[] scalar, [member] member value, [node,component] nodal Cartesian value",
+    "field_order": [
+      "displacements_xy_m",
+      "axial_forces_N",
+      "axial_stresses_Pa",
+      "reactions_xy_N",
+      "strain_energy_J",
+      "external_work_J",
+      "equilibrium_residual_N"
+    ],
+    "no_partial_solution": true,
+    "range_distinct_from_mechanism": true
+  },
+  "direct": {
+    "route": "run_router_conservation_cad_verifier(mode=fem)",
+    "ordinary_requests": 16,
+    "claimed_requests": 32,
+    "total_calls": 48,
+    "expected_ordinary": {
+      "approved": 12,
+      "refused": 4,
+      "complete_contracts": 16
+    },
+    "expected_claims": {
+      "approved": 12,
+      "refused": 20,
+      "complete_contracts": 32
+    },
+    "oracle": "Independent rational closed forms; no assembled stiffness oracle or producer helper",
+    "ordered_cases": [
+      "pythagorean/pure-weak",
+      "pythagorean/pure-strong",
+      "pythagorean/mixed",
+      "pythagorean/reversed-endpoints",
+      "pythagorean/reversed-members",
+      "mechanism/compatible",
+      "mechanism/incompatible",
+      "thermal/free-expansion",
+      "displacement/fully-prescribed",
+      "ordinary/equal-stiffness",
+      "irrational/rounded-length",
+      "beam/cantilever",
+      "wire/minimum-subnormal-force-energy",
+      "wire/overflowed-EA",
+      "wire/energy-underflow",
+      "wire/displacement-overflow"
+    ],
+    "primary_geometry": {
+      "nodes": [
+        [
+          -3,
+          -4
+        ],
+        [
+          -4,
+          3
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "area": 1,
+      "strong_E": 1,
+      "weak_E": "2^-60",
+      "directions": [
+        [
+          3,
+          4
+        ],
+        [
+          4,
+          -3
+        ]
+      ],
+      "length": 5,
+      "mixed_coefficients": {
+        "a": "2^-70",
+        "b": "2^-69"
+      },
+      "mixed_load": "(11,-2)*2^-70",
+      "mechanical_formula": "u=5(a*v+/E+ + b*v-/E-), N=(5a,5b), anchor reactions=(-a*v+,-b*v-), U=125/2*(a^2/E+ + b^2/E-)"
+    },
+    "rounded_length_control": {
+      "length_hex": "0x1.6a09e667f3bcdp+0",
+      "directions": [
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          -1
+        ]
+      ],
+      "weak_load": "b*(1,-1), b=2^-70",
+      "formula": "u=b*Lhat^3/(2E-)*(1,-1), N-=b*Lhat, U=b^2*Lhat^3/(2E-)"
+    },
+    "range_controls": [
+      {
+        "L": "2^10",
+        "E": "2^-1065",
+        "A": 1,
+        "F": "2^-1074",
+        "expected": "u=2; N=stress=U=external_work=2^-1074"
+      },
+      {
+        "L": 1,
+        "E": "2^1023",
+        "A": "2^1023",
+        "F": "2^972",
+        "expected": "u=2^-1074,N=2^972,stress=2^-51,U=external_work=2^-103"
+      },
+      {
+        "L": 1,
+        "E": 1,
+        "A": 1,
+        "F": "2^-1074",
+        "expected_refusal_field": "strain_energy_J",
+        "expected_refusal_index": []
+      },
+      {
+        "L": 1,
+        "E": "2^-1022",
+        "A": 1,
+        "F": "2^100",
+        "expected_refusal_field": "displacements_xy_m",
+        "expected_refusal_index": [
+          1,
+          0
+        ]
+      }
+    ],
+    "comparisons": {
+      "ordinary_nonzero": "max(16 ULPs of rounded reference,2^-42*abs(reference))",
+      "ordinary_zero": "2^-42 times corresponding physical scale; no unit floor",
+      "pure_strong_transverse": "abs(4ux-3uy)<=2^-42*5*max(abs(expected displacement components))",
+      "true_zero_energy": "exact",
+      "subnormal_and_EA_overflow_rows": "exact all fields; zero scalar claim tolerance",
+      "ordinary_scalar_claims": "rtol0; atol capped at one quarter of true/false separation; zero on exact range rows and zero-energy row",
+      "false_scalar": "twice truthful nonzero;1 if truthful zero",
+      "refusal_claims": "0 and1 at zero tolerances; preserve physical/range refusal before claim_check"
+    },
+    "reporting": "All48 calls before aggregate assertion. Preserve raw decisions and independently classify solver/strict-JSON errors, physical checks, metadata and claim-contract failures. Log each unclaimed full-response digest."
+  },
+  "registered": {
+    "route": "actual registered TypeScript/Python Pi tool",
+    "requests": 5,
+    "unclaimed": {
+      "approved": 2,
+      "refused": 1
+    },
+    "claims": {
+      "approved": 1,
+      "refused": 1
+    },
+    "overall": {
+      "approved": 3,
+      "refused": 2
+    },
+    "cases": [
+      "truss-strong",
+      "truss-weak",
+      "truss-weak-energy",
+      "truss-weak-zero",
+      "truss-one-bar-mechanism"
+    ],
+    "scale": "s=2^-12,epsilon=2^-60",
+    "energy": "125*2^-85",
+    "claim_tolerances": {
+      "atol": 0,
+      "rtol": 0
+    },
+    "physical_tolerances": "relative1e-12,atol0; mathematically zero components exact",
+    "preserve_existing_batch_and_beam": true
+  },
+  "preserved": {
+    "solver": "All bytes outside truss helpers/route; beam/shared solver/shared claims/other domains unchanged",
+    "registered": "Purely additive five calls and their pytest/unittest checks; all inherited fixtures unchanged",
+    "full_response_control": "beam/cantilever unclaimed SHA256 equal stock/candidate",
+    "inherited_case_counts": {
+      "DEW_DOMAIN_CASE": 17,
+      "WET_DOMAIN_CASE": 32,
+      "BODE_RANGE_CASE": 11,
+      "DC_RANGE_CASE": 14,
+      "SCALAR_TOLERANCE_CASE": 29,
+      "LYAPUNOV_CASE": 32,
+      "TRANSFER_HURWITZ_CASE": 20,
+      "PASSIVE_NORM_CASE": 32,
+      "CONTROL_RANK_CASE": 49,
+      "CONTROL_DIAGNOSTIC_CASE": 17
+    },
+    "inherited_total_count": 10,
+    "all_inherited_records_and_totals_equal": true
+  },
+  "source_review": {
+    "candidate": [
+      "root",
+      "p2"
+    ],
+    "direct": [
+      "root",
+      "p1",
+      "p3"
+    ],
+    "registered": [
+      "root",
+      "p1"
+    ],
+    "candidate_unread_by_independent_receiver_authors_until_source_frozen": true,
+    "no_numerical_execution_before_preregistration": true
+  },
+  "execution": {
+    "method": "Identical-receiver stock/candidate maintained PR CI; pair differs only in solver",
+    "first_originals": "Retain both complete original logs once with hashes and actual checkout compositions",
+    "gates": [
+      "unittest discovery",
+      "registered pytest/TypeScript/Python",
+      "compile",
+      "historical public output contract",
+      "exact pinned static kit",
+      "CAD/PDF",
+      "provenance"
+    ],
+    "merge": "Close stock comparator first; qualify intervening main composition explicitly; prove actual landed tree equals qualified CI tree"
+  },
+  "limitations": [
+    "Represented linear model, not exact irrational geometry or nonlinear/buckling physics",
+    "Extreme range controls qualify arithmetic, not physically realizable materials",
+    "No uniform size/runtime guarantee or timing comparison",
+    "No model/contest score or hosted submission claim"
+  ],
+  "primary_references": [
+    "https://people.duke.edu/~hpgavin/cee421/truss-method.pdf",
+    "https://people.duke.edu/~hpgavin/StructuralDynamics/StructuralElements.pdf"
+  ]
+}

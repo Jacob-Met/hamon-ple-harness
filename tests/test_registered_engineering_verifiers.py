@@ -248,6 +248,18 @@ DEW_POINT_CASES = [
 ]
 
 
+TRUSS_LOAD_SCALE = 2.0**-12
+TRUSS_WEAK_MODULUS = 2.0**-60
+TRUSS_WEAK_ENERGY = 125 * 2.0**-85
+TRUSS_CASES = [
+    ("truss-strong", "strong", None, True),
+    ("truss-weak", "weak", None, True),
+    ("truss-weak-energy", "weak", TRUSS_WEAK_ENERGY, True),
+    ("truss-weak-zero", "weak", 0, False),
+    ("truss-one-bar-mechanism", "mechanism", None, False),
+]
+
+
 @pytest.fixture(scope="module")
 def routed(tmp_path_factory):
     workdir = tmp_path_factory.mktemp("registered-engineering")
@@ -361,6 +373,19 @@ def routed(tmp_path_factory):
             value, atol = claim
             spec.update(claimed_field="t_dp_c", claimed_value=value, atol=atol, rtol=0)
         calls.append({"id": case, "mode": "psychrometrics", "spec": spec})
+    for case, direction, claim, _ in TRUSS_CASES:
+        scale = TRUSS_LOAD_SCALE
+        weak = TRUSS_WEAK_MODULUS
+        load = (3*scale, 4*scale) if direction == "strong" else (4*scale*weak, -3*scale*weak)
+        members = [{"i": 0, "j": 2, "E_pa": 1, "A_m2": 1}]
+        if direction != "mechanism":
+            members.append({"i": 1, "j": 2, "E_pa": weak, "A_m2": 1})
+        spec = {"mode": "truss_2d", "nodes": [[-3, -4], [-4, 3], [0, 0]], "elements": members,
+                "supports": [{"node": node, "fix_x": True, "fix_y": True} for node in (0, 1)],
+                "loads": [{"node": 2, "fx_N": load[0], "fy_N": load[1]}]}
+        if claim is not None:
+            spec.update(claimed_field="strain_energy_J", claimed_value=claim, atol=0, rtol=0)
+        calls.append({"id": case, "mode": "fem", "spec": spec})
     source = r"""
 import registerTaskTools, { PLE_DOMAIN_TOOL_NAMES } from './task-tools.ts';
 const tools = new Map();
@@ -956,6 +981,52 @@ def test_registered_dew_point_domain(routed, case, inputs, claim, status, passed
         assert comparison["actual"] == state["t_dp_c"] and comparison["within_tolerance"] is passed
 
 
+@pytest.mark.parametrize("case,direction,claim,passed", TRUSS_CASES, ids=[row[0] for row in TRUSS_CASES])
+def test_registered_truss_factor_loss(routed, case, direction, claim, passed):
+    reply = routed[case]
+    assert reply["completed"], reply
+    result = reply["details"]
+    assert result["domain"] == "fem" and result["mode"] == "truss_2d"
+    assert result["passed"] is passed, result
+    if not passed:
+        assert isinstance(result.get("reason"), str) and result["reason"].strip()
+    if direction == "mechanism":
+        reason = result["reason"].lower()
+        assert "mechanism" in reason or "singular" in reason
+        assert "displacements_xy_m" not in result and "claim_check" not in result
+        return
+
+    # With orthogonal length-five members the radial stiffnesses are E_i/5.
+    # A pure load extends only the loaded member. Energy equals half F dot u.
+    scale = TRUSS_LOAD_SCALE
+    if direction == "strong":
+        displacement = [15*scale, 20*scale]
+        forces = [5*scale, 0]
+        energy = 125 * scale**2 / 2
+    else:
+        displacement = [20*scale, -15*scale]
+        forces = [0, 5*scale*TRUSS_WEAK_MODULUS]
+        energy = TRUSS_WEAK_ENERGY
+    motion = result["displacements_xy_m"]
+    assert len(motion) == 3 and all(len(node) == 2 for node in motion)
+    assert len(result["axial_forces_N"]) == 2
+    quantities = list(zip(motion[0] + motion[1] + motion[2], [0, 0, 0, 0, *displacement]))
+    quantities.extend(zip(result["axial_forces_N"], forces))
+    quantities.extend([(result["strain_energy_J"], energy), (result["external_work_J"], energy),
+                       (result["equilibrium_residual_N"], 0)])
+    for actual, expected in quantities:
+        assert type(actual) in (int, float) and math.isfinite(actual)
+        assert math.isclose(actual, expected, rel_tol=1e-12, abs_tol=0)
+    if claim is None:
+        assert "claim_check" not in result
+    else:
+        comparison = result["claim_check"]
+        assert comparison["field"] == "strain_energy_J"
+        assert comparison["claimed"] == claim
+        assert comparison["actual"] == result["strain_energy_J"] == TRUSS_WEAK_ENERGY
+        assert comparison["within_tolerance"] is passed
+
+
 class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1035,3 +1106,8 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
         for args in DEW_POINT_CASES:
             with self.subTest(case=args[0]):
                 test_registered_dew_point_domain(self.routed_data, *args)
+
+    def test_registered_truss_factor_loss(self):
+        for args in TRUSS_CASES:
+            with self.subTest(case=args[0]):
+                test_registered_truss_factor_loss(self.routed_data, *args)
