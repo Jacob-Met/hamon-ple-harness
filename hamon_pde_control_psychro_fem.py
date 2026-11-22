@@ -1824,6 +1824,104 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
     return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": f"Unknown psychrometric mode: {mode}"}
 
 
+def _truss_member_qr(members, free, prescribed, external):
+    """Recover displacements and axial forces from member compatibility if K loses rank."""
+    n = len(free)
+    if len(members) < n:
+        return None
+    column_for = {d: j for j, d in enumerate(free)}
+    columns = [[0.0] * len(members) for _ in free]
+    offset, roots = [], []
+    for i, (_, _, modulus, area, length, _, _, alpha, delta_t, dofs, direction) in enumerate(members):
+        root = math.sqrt(modulus * area / length)
+        roots.append(root)
+        known = math.fsum(b * prescribed.get(d, 0.0) for b, d in zip(direction, dofs))
+        offset.append(root * (known - alpha * delta_t * length))
+        for b, d in zip(direction, dofs):
+            if d in column_for:
+                columns[column_for[d]][i] = root * b
+
+    # C contains sqrt(EA/L) times the directional extensions of the free
+    # coordinates. Normalize each column, as in the energy-scaled stiffness solve.
+    norms = [math.hypot(*col) for col in columns]
+    if any(value == 0.0 or not math.isfinite(value) for value in norms):
+        return None
+    columns = [[value / norm for value in col] for col, norm in zip(columns, norms)]
+    load = [external[d] / norm for d, norm in zip(free, norms)]
+    order = list(range(n))
+
+    def dot(a, b):
+        return math.fsum(x * y for x, y in zip(a, b))
+
+    # Column-pivoted, reorthogonalized QR on the normalized member columns.
+    # Track R separately: CᵀC has already lost these small physical directions.
+    basis = []
+    upper = [[0.0] * n for _ in range(n)]
+    for j in range(n):
+        pivot = max(range(j, n), key=lambda k: math.hypot(*columns[k]))
+        columns[j], columns[pivot] = columns[pivot], columns[j]
+        order[j], order[pivot] = order[pivot], order[j]
+        for k in range(j):
+            upper[k][j], upper[k][pivot] = upper[k][pivot], upper[k][j]
+        col = columns[j]
+        # A second orthogonalization removes residual projection roundoff
+        # before testing the same 1e-11 dimensionless rank criterion.
+        for k, q in enumerate(basis):
+            correction = dot(q, col)
+            upper[k][j] += correction
+            col = [a - correction * b for a, b in zip(col, q)]
+        norm = math.hypot(*col)
+        if norm <= 1e-11:
+            return None
+        upper[j][j] = norm
+        q = [value / norm for value in col]
+        basis.append(q)
+        for k in range(j + 1, n):
+            projection = dot(q, columns[k])
+            upper[j][k] = projection
+            columns[k] = [a - projection * b for a, b in zip(columns[k], q)]
+
+    # Equilibrium fixes Qᵀ weighted_force = y via Rᵀy = applied load.
+    # Compatibility then gives Rz = y - Qᵀoffset. The remaining force
+    # component is the projection of prescribed/thermal offset outside Q.
+    y = []
+    for j in range(n):
+        prior = math.fsum(upper[k][j] * y[k] for k in range(j))
+        y.append((load[order[j]] - prior) / upper[j][j])
+    reduced = [value - dot(q, offset) for value, q in zip(y, basis)]
+    z = [0.0] * n
+    motion = [0.0] * n
+    for j in reversed(range(n)):
+        tail = math.fsum(upper[j][k] * z[k] for k in range(j + 1, n))
+        z[j] = (reduced[j] - tail) / upper[j][j]
+        motion[order[j]] = z[j] / norms[order[j]]
+    weighted_forces = [start + dot(row, reduced) for start, row in zip(offset, zip(*basis))]
+    forces = [root * value for root, value in zip(roots, weighted_forces)]
+    if not all(math.isfinite(v) for v in motion + forces):
+        return None
+
+    # Verify statics and the constitutive relation in original member
+    # coordinates before using the recovered forces for stresses and reactions.
+    values = dict(prescribed)
+    values.update(zip(free, motion))
+    internal = {d: [] for d in free}
+    strain_errors = []
+    for member, root, weighted, force in zip(members, roots, weighted_forces, forces):
+        _, _, _, _, length, _, _, alpha, delta_t, dofs, direction = member
+        extension = math.fsum(b * values[d] for b, d in zip(direction, dofs))
+        strain_errors.append(root * (extension - alpha * delta_t * length) - weighted)
+        for b, d in zip(direction, dofs):
+            if d in internal:
+                internal[d].append(b * force)
+    if math.hypot(*strain_errors) > 1e-7 * math.hypot(*weighted_forces):
+        return None
+    for d, terms in internal.items():
+        scale = abs(external[d]) + math.fsum(abs(term) for term in terms)
+        if abs(math.fsum(terms) - external[d]) > 1e-7 * scale:
+            return None
+    return motion, forces
+
+
 def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "truss_2d")).strip().lower()
 
@@ -1876,6 +1974,7 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
                 prescribed[2 * nd + 1] = float(sup.get("uy_m", 0.0))
 
         free_dofs = [d for d in range(ndof) if d not in prescribed]
+        recovered_forces = None
         if not free_dofs:
             u_full = [prescribed.get(d, 0.0) for d in range(ndof)]
         else:
@@ -1888,28 +1987,41 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
                 rhs_f.append(val)
             u_free = _solve_free_stiffness(k_ff, rhs_f)
             if u_free is None:
-                return {"passed": False, "domain": "fem", "mode": mode, "reason": "Free truss stiffness is singular or numerically unresolved (check mechanisms and supports)"}
+                recovered = _truss_member_qr(elem_meta, free_dofs, prescribed, f_ext)
+                if recovered is None:
+                    return {"passed": False, "domain": "fem", "mode": mode, "reason": "Free truss stiffness is singular or numerically unresolved (check mechanisms and supports)"}
+                u_free, recovered_forces = recovered
             u_full = [0.0] * ndof
             for d, u_val in prescribed.items():
                 u_full[d] = u_val
             for idx, d in enumerate(free_dofs):
                 u_full[d] = u_free[idx]
 
-        reactions = [
-            sum(k_glob[i][j] * u_full[j] for j in range(ndof)) - f_ext[i] - f_th[i]
-            for i in range(ndof)
-        ]
+        if recovered_forces is None:
+            reactions = [
+                sum(k_glob[i][j] * u_full[j] for j in range(ndof)) - f_ext[i] - f_th[i]
+                for i in range(ndof)
+            ]
+        else:
+            # Assemble recovered physical member forces, not the rounded K.
+            nodal_forces = [[-load] for load in f_ext]
+            for member, force in zip(elem_meta, recovered_forces):
+                dofs, direction = member[-2:]
+                for d, b in zip(dofs, direction):
+                    nodal_forces[d].append(b * force)
+            reactions = [math.fsum(terms) for terms in nodal_forces]
 
         axial_forces: List[float] = []
         axial_stresses: List[float] = []
         strain_energy = 0.0
         has_thermal_or_settlement = any(abs(v) > 0.0 for v in prescribed.values())
-        for (_, _, e_mod, area, length, _, _, alpha, dt_k, dofs, b_vec) in elem_meta:
+        for member_index, (_, _, e_mod, area, length, _, _, alpha, dt_k, dofs, b_vec) in enumerate(elem_meta):
             ext_m = sum(b_vec[idx] * u_full[dofs[idx]] for idx in range(4))
             mech_ext = ext_m - alpha * dt_k * length
             if abs(dt_k) > 0.0 and abs(alpha) > 0.0:
                 has_thermal_or_settlement = True
-            n_force = (e_mod * area / length) * mech_ext
+            n_force = ((e_mod * area / length) * mech_ext if recovered_forces is None
+                       else recovered_forces[member_index])
             axial_forces.append(n_force)
             axial_stresses.append(n_force / area)
             strain_energy += 0.5 * (n_force ** 2) * length / (e_mod * area)
