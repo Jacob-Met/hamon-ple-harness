@@ -364,7 +364,7 @@ function _registerPleWave3DomainTools(pi: any) {
       // Inspect files and directories in their original task filesystem. Copying
       // or re-zipping directories would change the existing symlink checks.
       const result = await relay("exec", {
-        command: `python3 -c ${quote(source)} ${quote(payload)}`,
+        command: `python3 -I -c ${quote(source)} ${quote(payload)}`,
         timeout_sec: 120,
       });
       if (result.truncated || result.timed_out || result.exit_code !== 0) {

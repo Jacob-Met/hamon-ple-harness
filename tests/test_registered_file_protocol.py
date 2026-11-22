@@ -67,6 +67,8 @@ async def exercise(tool_module="./task-tools.ts"):
         for name in ("good", "bad", "missing", "change"):
             (local / (name + ".json")).write_text('{"a":99,"b":99}')
         (local / "drawing ü.pdf").write_bytes(b"wrong local PDF")
+        # Task modules must not replace standard-library imports in preflight.
+        (task / "csv.py").write_text("raise ImportError('task csv.py must not load')")
         for name in ("denied", "truncated", "invalid64", "mismatch"):
             (local / (name + ".sp")).write_bytes(data["circuit.sp"])
         for name in ("good_dir", "bad_dir", "link_dir"):
