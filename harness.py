@@ -45,6 +45,7 @@ from typing import Any
 import taskbridge
 import engineering_intake
 import delivery_guard
+import archive_contract
 import delivery_materialize
 import hamon_pareto
 
@@ -240,6 +241,7 @@ class Run:
     self.observed_results: dict[str, bytes] = {}
     self.invalid_tail = False
     self.history: bytes | None = None
+    self.archive_watch = None
 
   async def on_event(self, event: dict[str, Any]) -> None:
     """Processes a parsed JSON event from Pi, updating final message and usage.
@@ -247,6 +249,8 @@ class Run:
     Args:
       event: Decoded JSON event dictionary from Pi's stdout stream.
     """
+    if self.archive_watch:
+      await self.archive_watch.observe(self.session, event)
     kind, message = event.get("type"), event.get("message") or {}
     if kind == "session":
       self.history = message_digest(event)
@@ -358,6 +362,7 @@ async def solve(session: taskbridge.Session) -> str:
       )
       before_delivery = await delivery_guard.snapshot(session, delivery_targets)
       checked_delivery = bool(delivery_targets) and before_delivery is not None
+      archive_plan = await archive_contract.provision(session, delivery_targets) if checked_delivery else None
       session_dir = pathlib.Path(scratch) / "delivery-session"
       session_args = ["--session-dir", str(session_dir)]
       # A generator written during this task can deterministically finish an
@@ -373,6 +378,9 @@ async def solve(session: taskbridge.Session) -> str:
             " file integrity and required format. Input examples are NOT outputs."
           if delivery_targets else ""
       )
+      first_request = session.instruction
+      if archive_plan:
+        first_request += archive_contract.first_instruction(*archive_plan)
       name, model = await asyncio.to_thread(
           configure, agent_dir, relay, session, env
       )
@@ -410,16 +418,19 @@ async def solve(session: taskbridge.Session) -> str:
           NOTE.format(workdir=session.workdir) + engineering_inventory + engineering_cli_note + delivery_note,
       ]
       run = Run(session, model)
+      if archive_plan:
+        run.archive_watch = archive_contract.FirstPublication(archive_plan)
       done = await taskbridge.run_process(
           argv,
           session,
           env=env,
           cwd=str(work),
           on_line=run.on_line,
-          stdin=session.instruction.encode(),
+          stdin=first_request.encode(),
           stop_before_sec=reserve_window,
           log_prefix="pi: ",
       )
+      run.archive_watch = None
       tool_session = None
       if run.tool_turn is not None and not run.invalid_tail:
         tool_session = acknowledged_tool_session(
@@ -428,6 +439,34 @@ async def solve(session: taskbridge.Session) -> str:
       if delivery_targets and before_delivery is not None:
         after_delivery = await delivery_guard.snapshot(session, delivery_targets)
         issues = delivery_guard.compare(before_delivery, after_delivery)
+        if issues and archive_plan:
+          # A completed staging directory can be committed even if Pi ended after
+          # an unacknowledged tool request. Independently re-read the graded path.
+          if await archive_contract.run_command(session, archive_plan[1]):
+            published = await delivery_guard.snapshot(session, delivery_targets)
+            if published:
+              after_delivery = published
+              issues = delivery_guard.compare(before_delivery, published)
+        refinement_time = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC) if archive_plan else 0
+        if (archive_plan and not issues and can_continue and run.tool_turn is None
+            and all(row.get("state") != "unknown" for row in before_delivery.values())
+            and after_delivery and all(row.get("state") == "ready" for row in after_delivery.values())
+            and (refinement_time is None or refinement_time >= MIN_DELIVERY_RUN_SEC)
+            and await archive_contract.run_command(session, archive_plan[1] + " --verify")):
+          stage, command = archive_plan
+          await session.log("delivery_gate: complete archive precedes optional refinement")
+          resume = any(session_dir.glob("*.jsonl"))
+          refine = (
+              "A complete archive is on disk. Improve the engineering solution if justified. "
+              f"Work only on staged members in {stage}; preserve the graded archive while computing. "
+              "After validating an improvement, atomically publish it with:\n" + command +
+              "\nIf there is no validated improvement, leave the complete version in place.")
+          if not resume:
+            refine = session.instruction + "\n\n" + refine
+          await taskbridge.run_process(
+              [*argv, "--continue"] if resume else argv, session, env=env, cwd=str(work),
+              on_line=run.on_line, stdin=refine.encode(), stop_before_sec=STOP_BEFORE_SEC,
+              log_prefix="pi-archive-refine: ")
         if issues:
           await session.log("delivery_gate: incomplete=" + str(len(issues)))
           # A cheap task-native deterministic pass precedes another model call.
@@ -457,6 +496,8 @@ async def solve(session: taskbridge.Session) -> str:
             # actual calculation history if Pi persisted it before the cutoff.
             resume = any(session_dir.glob("*.jsonl"))
             instruction = delivery_guard.repair_instruction(issues)
+            if archive_plan:
+              instruction += archive_contract.first_instruction(*archive_plan)
             if not resume:
               instruction = session.instruction + instruction
             await taskbridge.run_process(
