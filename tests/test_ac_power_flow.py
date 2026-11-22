@@ -119,3 +119,25 @@ def test_auto_and_legacy_public_routes_accept_the_ac_case():
     spec = generator_case()
     assert run_router_conservation_cad_verifier({"spec":spec})["conservation_verified"]
     assert run_dual_verify_spec({"mode":"domain","kind":"ac_power_flow","spec":spec})["dual_verified"]
+
+
+@pytest.mark.parametrize("reactance", [.001, .01, .1])
+@pytest.mark.parametrize("direction", [-1,1])
+def test_proposed_and_native_generator_reactive_limits(reactance, direction):
+    g = {"id":"G", "type":"PV", "p_injection_pu":0, "vm_pu":1,
+         "q_min_injection_pu":-1 if direction>0 else 0,
+         "q_max_injection_pu":0 if direction>0 else 1}
+    s = {"buses":[{"id":"S", "type":"slack", "vm_pu":1},g],
+         "lines":[{"id":"line","from":"S","to":"G","r_pu":0,"x_pu":reactance}]}
+    s["proposed_voltages"] = {k:{"vm_pu":1, "va_deg":0} for k in ("S","G")}
+    assert verify_ac_power_flow(s)["conservation_verified"]
+    s["proposed_voltages"]["G"]["vm_pu"] += direction*5e-7
+    bad = verify_ac_power_flow(s)
+    assert not bad["conservation_verified"]
+    assert bad["proposed_pv_limits_consistent"] is False
+    del s["proposed_voltages"]
+    g["vm_pu"] += direction*5e-11
+    limited = verify_ac_power_flow(s)
+    assert limited["conservation_verified"], limited
+    assert limited["clamped_pv_q_pu"] == {"G":0}
+    assert limited["voltages"]["G"]["vm_pu"] == pytest.approx(1,abs=1e-13)
