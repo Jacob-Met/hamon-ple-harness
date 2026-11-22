@@ -159,6 +159,79 @@ def _check_claimed(result: Dict[str, Any], spec: Dict[str, Any]) -> None:
             result["reason"] = f"Claimed {field}={claimed} deviates from verified {actual:.6g} (err={err:.4g} > {limit:.4g})"
 
 
+def _transient_heat_modes(alpha, length, time, position, modes):
+    """Diagonalize the finite-difference CN step on the rod's Dirichlet sine basis."""
+    harmonics = []
+    for mode in modes:
+        raw_mode = mode["n"]
+        n = int(raw_mode)
+        amplitude = float(mode["amplitude"])
+        if isinstance(raw_mode, bool) or float(raw_mode) != n or not math.isfinite(amplitude):
+            return {"passed": False, "reason": "Heat modes require integer harmonics and finite amplitudes"}
+        harmonics.append((n, amplitude))
+    tolerance = max(1e-4, 3e-3 * max(abs(amplitude) for _, amplitude in harmonics))
+    cells = max(120, 2 * max(abs(n) for n, _ in harmonics))
+    minimum_steps = 120
+    scaled_time = alpha * time / length ** 2
+    exact_decay = [math.exp(-scaled_time * (n * math.pi) ** 2) for n, _ in harmonics]
+    for _ in range(16):
+        angles = [math.pi * n / cells for n, _ in harmonics]
+        # These are the eigenvalues of the centered second difference, not those
+        # of the continuous Laplacian. Each CN time step applies its Cayley factor.
+        rates = [scaled_time * (2 * cells * math.sin(angle / 2)) ** 2 for angle in angles]
+        steps = max(minimum_steps, math.ceil(max(rates)))
+        ratios = [rate / (2 * steps) for rate in rates]
+        numerical_decay = [
+            math.exp(steps * (math.log1p(-ratio) - math.log1p(ratio)))
+            for ratio in ratios
+        ]
+        # Linear interpolation on a cell of width dx incurs at most
+        # dx² max|u''|/8. Add the modal damping differences, even at nodes
+        # where different harmonics cancel. The sum bounds the whole rod.
+        error_bound = math.fsum(
+            abs(amplitude) * (abs(numeric - exact) + exact * angle ** 2 / 8)
+            for (_, amplitude), numeric, exact, angle in
+            zip(harmonics, numerical_decay, exact_decay, angles)
+        )
+        if error_bound <= tolerance:
+            break
+        cells *= 2
+        minimum_steps *= 2
+    else:
+        return {"passed": False, "reason": "Could not certify the requested heat modes"}
+
+    location = position / length * cells
+    left = min(int(location), cells - 1)
+    fraction = location - left
+
+    def node_value(n, j):
+        # Dirichlet endpoints and integral periods are exactly zero.
+        phase = (n * j) % (2 * cells)
+        if phase == 0 or phase == cells:
+            return 0.0
+        return math.sin(math.pi * phase / cells)
+
+    u_numeric = math.fsum(
+        amplitude * decay * ((1 - fraction) * node_value(n, left) + fraction * node_value(n, left + 1))
+        for (n, amplitude), decay in zip(harmonics, numerical_decay)
+    )
+    u_exact = 0.0 if position == 0 or position == length else math.fsum(
+        amplitude * decay * math.sin(math.pi * math.remainder(n * position / length, 2.0))
+        for (n, amplitude), decay in zip(harmonics, exact_decay)
+    )
+    query_error = abs(u_numeric - u_exact)
+    return {
+        "passed": max(error_bound, query_error) <= tolerance,
+        "u_exact": u_exact,
+        "u_crank_nicolson": u_numeric,
+        "linf_error": max(error_bound, query_error),
+        "error_measure": "whole-domain upper bound",
+        "query_abs_error": query_error,
+        "spatial_cells": cells,
+        "time_steps": steps if time else 0,
+    }
+
+
 def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "convective_fin_1d")).strip().lower()
 
@@ -270,66 +343,17 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         t_eval = float(spec["t_eval_s"])
         x_eval = float(spec.get("x_eval_m", 0.5 * length))
         modes = spec.get("modes") or [{"n": 1, "amplitude": 100.0}]
-        if alpha <= 0.0 or length <= 0.0 or t_eval < 0.0 or not (0.0 <= x_eval <= length):
+        if (not all(map(math.isfinite, (alpha, length, t_eval, x_eval))) or alpha <= 0.0
+                or length <= 0.0 or t_eval < 0.0 or not 0.0 <= x_eval <= length):
             return {"passed": False, "domain": "pde", "mode": mode, "reason": "Invalid 1D transient heat parameters"}
 
-        u_exact_eval = 0.0
-        for m_item in modes:
-            n_harm = int(m_item["n"])
-            amp = float(m_item["amplitude"])
-            lam = n_harm * math.pi / length
-            u_exact_eval += amp * math.sin(lam * x_eval) * math.exp(-alpha * (lam ** 2) * t_eval)
-
-        nx = 120
-        dx = length / nx
-        nt = max(120, int(math.ceil(alpha * t_eval / (0.25 * dx * dx))) if t_eval > 0 else 1)
-        nt = min(nt, 600)
-        dt = t_eval / nt if t_eval > 0 else 0.0
-        r = 0.5 * alpha * dt / (dx * dx)
-
-        u = [0.0] * (nx + 1)
-        for i in range(1, nx):
-            xi = i * dx
-            u[i] = sum(float(m_item["amplitude"]) * math.sin(int(m_item["n"]) * math.pi * xi / length) for m_item in modes)
-
-        if t_eval > 0.0:
-            n_int = nx - 1
-            low = [-r] * n_int
-            dg = [1.0 + 2.0 * r] * n_int
-            up = [-r] * n_int
-            low[0] = 0.0
-            up[-1] = 0.0
-            for _ in range(nt):
-                rhs = [r * u[i] + (1.0 - 2.0 * r) * u[i + 1] + r * u[i + 2] for i in range(n_int)]
-                u_int = _thomas_solve(low, dg, up, rhs)
-                for i in range(n_int):
-                    u[i + 1] = u_int[i]
-
-        max_err = 0.0
-        for i in range(nx + 1):
-            xi = i * dx
-            u_ex = sum(
-                float(m_item["amplitude"]) * math.sin(int(m_item["n"]) * math.pi * xi / length)
-                * math.exp(-alpha * ((int(m_item["n"]) * math.pi / length) ** 2) * t_eval)
-                for m_item in modes
-            )
-            max_err = max(max_err, abs(u[i] - u_ex))
-
-        pos = x_eval / dx
-        idx0 = min(int(math.floor(pos)), nx - 1)
-        frac = pos - idx0
-        u_cn_eval = (1.0 - frac) * u[idx0] + frac * u[idx0 + 1]
-        scale = max((abs(float(m_item["amplitude"])) for m_item in modes), default=1.0)
-        passed = max_err <= max(1e-4, 3e-3 * scale)
-        res = {
-            "passed": passed,
-            "domain": "pde",
-            "mode": mode,
-            "u_exact": u_exact_eval,
-            "u_crank_nicolson": u_cn_eval,
-            "linf_error": max_err,
-        }
-        _check_claimed(res, spec)
+        res = {"domain": "pde", "mode": mode}
+        try:
+            res.update(_transient_heat_modes(alpha, length, t_eval, x_eval, modes))
+        except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError):
+            return {**res, "passed": False, "reason": "Invalid heat modes or unrepresentable diffusion scale"}
+        if "u_exact" in res:
+            _check_claimed(res, spec)
         return res
 
     if mode == "laplace_2d_rect":
