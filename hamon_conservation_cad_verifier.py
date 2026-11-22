@@ -858,24 +858,33 @@ def verify_thermal_fluid_chemical_balance(spec: Dict[str, Any]) -> Dict[str, Any
     all_ok = True
     if "inlets" in spec or "outlets" in spec:
         ins, outs = spec.get("inlets") or [], spec.get("outlets") or []
-        mi, mo = sum(float(s.get("mdot_kg_s", 0.0)) for s in ins), sum(float(s.get("mdot_kg_s", 0.0)) for s in outs)
-        m_ok = bool(ins or outs) and abs(mi - mo) <= rtol * max(mi, mo, 1e-12)
-        out["mass_balance_ok"] = m_ok
-        all_ok = all_ok and m_ok
-        ai: Dict[str, float] = {}; ao: Dict[str, float] = {}
-        has_sp = False
-        for s in ins:
-            if "ndot_mol_s" in s and "formula" in s:
-                has_sp = True
-                for el, cnt in parse_chemical_formula(str(s["formula"])).items(): ai[el] = ai.get(el, 0.0) + float(s["ndot_mol_s"]) * cnt
-        for s in outs:
-            if "ndot_mol_s" in s and "formula" in s:
-                has_sp = True
-                for el, cnt in parse_chemical_formula(str(s["formula"])).items(): ao[el] = ao.get(el, 0.0) + float(s["ndot_mol_s"]) * cnt
-        if has_sp:
-            sp_err = max((abs(ai.get(e, 0.0) - ao.get(e, 0.0)) / max(ai.get(e, 0.0), ao.get(e, 0.0), 1e-12) for e in set(ai) | set(ao)), default=0.0)
-            out["species_balance_ok"] = sp_err <= rtol
-            all_ok = all_ok and (sp_err <= rtol)
+        streams = ins + outs
+        has_species = any("ndot_mol_s" in s or "formula" in s for s in streams)
+        if not has_species or any("mdot_kg_s" in s for s in streams):
+            mass_ok = bool(streams) and all("mdot_kg_s" in s for s in streams)
+            if mass_ok:
+                mi, mo = (sum(float(s["mdot_kg_s"]) for s in side) for side in (ins, outs))
+                mass_ok = math.isfinite(mi) and math.isfinite(mo) and abs(mi - mo) <= rtol * max(mi, mo, 1e-12)
+            out["mass_balance_ok"] = mass_ok
+            all_ok = mass_ok
+        if has_species:
+            species_ok = all("ndot_mol_s" in s and s.get("formula") for s in streams)
+            if species_ok:
+                ai, ao = {}, {}
+                for side, totals in ((ins, ai), (outs, ao)):
+                    for stream in side:
+                        elements = parse_chemical_formula(str(stream["formula"]))
+                        if not elements:
+                            species_ok = False
+                        for element, count in elements.items():
+                            totals[element] = totals.get(element, 0.0) + float(stream["ndot_mol_s"]) * count
+                species_ok = species_ok and all(
+                    math.isfinite(ai.get(e, 0.0)) and math.isfinite(ao.get(e, 0.0))
+                    and abs(ai.get(e, 0.0) - ao.get(e, 0.0)) / max(ai.get(e, 0.0), ao.get(e, 0.0), 1e-12) <= rtol
+                    for e in ai.keys() | ao.keys()
+                )
+            out["species_balance_ok"] = species_ok
+            all_ok = all_ok and species_ok
     if any(key in spec for key in (*_HX_INPUTS, "UA_W_K")):
         hx = _heat_exchanger_balance(spec, rtol)
         out.update(hx)
@@ -890,7 +899,7 @@ def verify_thermal_fluid_chemical_balance(spec: Dict[str, Any]) -> Dict[str, Any
         hf = (f_dw * (lp / dp) + float(spec.get("K_minor", 0.0))) * (vel * vel) / (2.0 * g)
         hp = float(spec.get("delta_z_m", 0.0)) + float(spec.get("delta_P_Pa", 0.0)) / (rho * g) + hf
         out.update({"darcy_f": f_dw, "colebrook_dual_rel_error": f_err, "head_loss_m": hf, "required_shaft_power_W": rho * g * qv * hp / float(spec.get("pump_efficiency", 0.78))})
-    checked = any(key in out for key in ("mass_balance_ok", "hx_balance_ok", "darcy_f"))
+    checked = any(key in out for key in ("mass_balance_ok", "species_balance_ok", "hx_balance_ok", "darcy_f"))
     out["conservation_verified"] = bool(checked and all_ok)
     return out
 
