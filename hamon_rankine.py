@@ -8,6 +8,88 @@ def _finite(value, name):
     return float(value)
 
 
+def verify_at_rest_plane_stress(spec):
+    """Calculate stress at a horizontal plane using a prescribed Jaky coefficient.
+
+    The dry/saturated unit weights belong to the materials above the plane.
+    The friction angle belongs to the material in which stress is requested.
+    Water pressure is hydrostatic. Omitting the water table means dry overburden.
+    """
+    result = {"tool": "hamon_conservation_cad_verifier", "mode": "civil_geotech",
+              "calculation": "at_rest_plane_stress", "ok": False,
+              "conservation_verified": False}
+    allowed = {"mode", "calculation", "coefficient_model", "receiving_phi_deg",
+               "overburden_layers", "water_table_depth_m", "gamma_water_N_m3",
+               "surcharge_Pa", "proposed_horizontal_effective_stress_Pa"}
+    try:
+        if spec.keys() - allowed or spec.get("coefficient_model") != "jaky":
+            raise ValueError("Specify the Jaky at-rest model and supported plane inputs")
+        phi = _finite(spec["receiving_phi_deg"], "receiving_phi_deg")
+        if not 0 <= phi < 90:
+            raise ValueError("Require 0 <= receiving_phi_deg < 90")
+        water = (_finite(spec["water_table_depth_m"], "water_table_depth_m")
+                 if "water_table_depth_m" in spec else math.inf)
+        gw = _finite(spec.get("gamma_water_N_m3", 9810.), "gamma_water_N_m3")
+        surcharge = _finite(spec.get("surcharge_Pa", 0.), "surcharge_Pa")
+        if water < 0 or gw <= 0 or surcharge < 0:
+            raise ValueError("Invalid water table, water unit weight or surcharge")
+        layers = spec["overburden_layers"]
+        if not isinstance(layers, list) or not layers:
+            raise ValueError("Provide overburden layers from the surface to the plane")
+
+        depth = 0.
+        effective = [surcharge]
+        total = [surcharge]
+        layer_keys = {"thickness_m", "gamma_above_water_N_m3", "gamma_saturated_N_m3"}
+        for layer in layers:
+            if not isinstance(layer, dict) or layer.keys() - layer_keys:
+                raise ValueError("Unsupported overburden layer fields")
+            h = _finite(layer["thickness_m"], "thickness_m")
+            if h <= 0 or not math.isfinite(depth + h) or depth + h <= depth:
+                raise ValueError("Layer must have positive resolvable thickness")
+            dry = min(h, max(0., water - depth))
+            submerged = h - dry
+            if dry:
+                gamma = _finite(layer["gamma_above_water_N_m3"], "gamma_above_water_N_m3")
+                if gamma <= 0:
+                    raise ValueError("Dry unit weight must be positive")
+                effective.append(dry * gamma)
+                total.append(dry * gamma)
+            if submerged:
+                gamma = _finite(layer["gamma_saturated_N_m3"], "gamma_saturated_N_m3")
+                if gamma <= gw:
+                    raise ValueError("Saturated soil must have positive submerged unit weight")
+                effective.append(submerged * (gamma - gw))
+                total.append(submerged * gamma)
+            depth += h
+
+        vertical = math.fsum(effective)
+        vertical_total = math.fsum(total)
+        pore = gw * max(0., depth - water)
+        # 1 - sin(phi), in a form that retains precision near 90 degrees.
+        k0 = 2. * math.sin(math.radians((90. - phi) / 2.)) ** 2
+        horizontal = k0 * vertical
+        horizontal_total = horizontal + pore
+        if not all(math.isfinite(x) for x in (vertical, vertical_total, pore,
+                                                horizontal, horizontal_total)):
+            raise ValueError("Stress exceeds finite numerical range")
+        # The reconstruction sums total loads first and removes pore pressure at
+        # the plane. Its rounding scale is total stress when subtraction cancels.
+        residual = abs(vertical - (vertical_total - pore))
+        verified = residual <= 1.e-12 * vertical_total
+        if "proposed_horizontal_effective_stress_Pa" in spec:
+            claim = _finite(spec["proposed_horizontal_effective_stress_Pa"], "proposed stress")
+            verified = verified and math.isclose(horizontal, claim, rel_tol=1.e-6)
+        result.update(ok=True, conservation_verified=verified, coefficient_model="jaky",
+                      coefficient=k0, depth_m=depth, pore_pressure_Pa=pore,
+                      vertical_total_stress_Pa=vertical_total, vertical_effective_stress_Pa=vertical,
+                      horizontal_total_stress_Pa=horizontal_total,
+                      horizontal_effective_stress_Pa=horizontal, effective_balance_residual_Pa=residual)
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        result["reason"] = str(exc)
+    return result
+
+
 def _coefficients(angle_deg, passive):
     if not 0 <= angle_deg < 90:
         raise ValueError("Require 0 <= phi_deg < 90")
