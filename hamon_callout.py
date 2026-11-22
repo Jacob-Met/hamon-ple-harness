@@ -714,8 +714,20 @@ def _sidecar_axes(rows):
     return answer
 
 
-def _register_axes(pdf,native):
+def _register_axes(pdf,native,rotation=0):
     if not pdf or not native or len(pdf)*len(native)>1600:return []
+    original_native = native
+    if rotation:
+        # Poppler displays a positive PDF /Rotate clockwise in y-down coordinates.
+        # Registration already solves translation, including the CropBox-origin shift.
+        turns = {90: lambda x, y: (-y, x), 180: lambda x, y: (-x, -y),
+                 270: lambda x, y: (y, -x)}
+        rotated = []
+        for row in native:
+            axis = row["axis"] ^ (rotation in (90, 270))
+            points = sorted((turns[rotation](*p) for p in row["points"]), key=lambda p: p[axis])
+            rotated.append(dict(row, axis=axis, points=points))
+        native = rotated
     candidates=defaultdict(list)
     for i,p in enumerate(pdf):
         for j,n in enumerate(native):
@@ -737,7 +749,7 @@ def _register_axes(pdf,native):
     best=max(candidates,key=len)
     # Distinct, near-equally supported placements may not borrow one another's assignments.
     if any(len(other)>=len(best)-1 and not set(other)<=set(best) for other in candidates):return []
-    return [dict(pdf=pdf[k],native=native[h]) for k,h in best]
+    return [dict(pdf=pdf[k],native=original_native[h]) for k,h in best]
 
 def associate_sidecar(pdf_file, dxf_file, page_number=1):
     """Signed source geometry correspondence. PDF literal values remain unknown."""
@@ -759,7 +771,7 @@ def associate_sidecar(pdf_file, dxf_file, page_number=1):
     eligible = page.get("flat_opaque_marker_page") and not page.get("embedded_images") and not page["words"]
     axes = _marker_axes(page) if eligible else []
     native = _sidecar_axes(dxf["dimensions"]) if dxf["declared_unit"] and not dxf["dimension_limit_hit"] else []
-    joins = _register_axes(axes, native)
+    joins = _register_axes(axes, native, page["page_rotation_degrees"])
     return {"kind":"pdf-native-sidecar-axis-correspondence-v1","page":page_number,
             "pdf_sha256":hashlib.sha256(raw).hexdigest(),"dxf_sha256":dxf["source_sha256"],
             "status":"registered" if joins else "unknown","native_unit":dxf["declared_unit"],

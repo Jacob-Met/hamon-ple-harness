@@ -641,7 +641,7 @@ def scan_pdf(filename,first=1,last=None,limit_paths=2000,
             if rotation in (90, 270):
                 box = box[::-1]
             inventory=_svg_inventory(_page_svg(path,page,tmp),limit_paths,region,selected_vector_ids)
-            pages.append({"page":page,"pdf_page_size_pt":box,
+            pages.append({"page":page,"pdf_page_size_pt":box,"page_rotation_degrees":rotation,
                           "svg_coordinate_frame":_SVG_FRAME,
                           "word_boxes_reported":len(words),
                           "words":words,"scale_annotations":_scales(words),
