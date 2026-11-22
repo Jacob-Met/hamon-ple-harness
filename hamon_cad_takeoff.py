@@ -9,6 +9,8 @@ clearance verification. Zero task-specific hardcoding.
 from __future__ import annotations
 
 from collections import Counter
+from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from itertools import pairwise
 import hashlib
 import math
@@ -169,6 +171,69 @@ def _is_paper_space(groups: list[tuple[int, str]]) -> bool:
     return False
 
 
+def _measure_3dface(groups: list[tuple[int, str]]) -> tuple[float, float] | None:
+    """Measure a complete simple planar WCS face. The invisible-edge mask is display only."""
+    codes = {10 + i + j for i in range(4) for j in (0, 10, 20)}
+    values: dict[int, Fraction] = {}
+    try:
+        for code, text in groups:
+            if code not in codes:
+                continue
+            value = Decimal(text)
+            if (code in values or not value.is_finite()
+                    or (value and not -324 <= value.adjusted() <= 308)):
+                return None
+            values[code] = Fraction(value) if value else Fraction(0)
+        points = [tuple(values[10 + i + j] for j in (0, 10, 20)) for i in range(4)]
+    except (KeyError, InvalidOperation, ValueError):
+        return None
+    if points[2] == points[3]:
+        points.pop()
+    if len(set(points)) != len(points):
+        return None
+
+    def subtract(p, q):
+        return tuple(x - y for x, y in zip(p, q))
+
+    def cross(a, b):
+        return (a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0])
+
+    a, b, c = points[:3]
+    n = cross(subtract(b, a), subtract(c, a))
+    if len(points) == 4:
+        d = points[3]
+        ad = subtract(d, a)
+        if sum(x*y for x, y in zip(n, ad)):
+            return None  # Two diagonals can assign different surface areas to a warped face.
+        second = cross(subtract(c, a), ad)
+        axis_normal = n if any(n) else second
+        if not any(axis_normal):
+            return None
+        axis = max(range(3), key=lambda i: abs(axis_normal[i]))
+        flat = [tuple(x for i, x in enumerate(p) if i != axis) for p in points]
+
+        def intersects(p, q, r, s):
+            def turn(u, v, w):
+                return (v[0] - u[0]) * (w[1] - u[1]) - (v[1] - u[1]) * (w[0] - u[0])
+            if any(max(p[i], q[i]) < min(r[i], s[i]) or
+                   max(r[i], s[i]) < min(p[i], q[i]) for i in range(2)):
+                return False
+            return turn(p, q, r) * turn(p, q, s) <= 0 and turn(r, s, p) * turn(r, s, q) <= 0
+
+        if intersects(*flat) or intersects(flat[1], flat[2], flat[3], flat[0]):
+            return None
+        n = tuple(x + y for x, y in zip(n, second))
+    if not any(n):
+        return None
+    try:
+        area = math.hypot(*(float(component / 2) for component in n))
+        boundary = math.fsum(math.hypot(*(float(v) for v in subtract(p, q)))
+                             for p, q in pairwise(points + points[:1]))
+    except OverflowError:
+        return None
+    return (area, boundary) if 0 < area < math.inf and 0 < boundary < math.inf else None
+
+
 def scan_dxf_takeoff(filename: str | Path) -> dict[str, Any]:
     """Extract SI-calibrated model-space lengths, areas, and block counts.
 
@@ -189,6 +254,10 @@ def scan_dxf_takeoff(filename: str | Path) -> dict[str, Any]:
     line_len_by_layer: dict[str, float] = {}
     poly_area_by_layer: dict[str, float] = {}
     poly_perim_by_layer: dict[str, float] = {}
+    face_area: dict[str, float] = {}
+    face_boundary: dict[str, float] = {}
+    face_measured: Counter[str] = Counter()
+    face_unmeasured: Counter[str] = Counter()
     insert_by_layer: Counter[str] = Counter()
     insert_by_block: Counter[str] = Counter()
     entity_counts: Counter[str] = Counter()
@@ -272,6 +341,15 @@ def scan_dxf_takeoff(filename: str | Path) -> dict[str, Any]:
                 dz = pts.get(31, 0.0) - pts.get(30, 0.0)
                 seg = math.sqrt((pts[11] - pts[10]) ** 2 + (pts[21] - pts[20]) ** 2 + dz * dz)
                 line_len_by_layer[layer] = line_len_by_layer.get(layer, 0.0) + seg
+        elif etype == "3DFACE":
+            measure = _measure_3dface(groups)
+            if measure is None:
+                face_unmeasured[layer] += 1
+            else:
+                area, boundary = measure
+                face_measured[layer] += 1
+                face_area[layer] = face_area.get(layer, 0.0) + area
+                face_boundary[layer] = face_boundary.get(layer, 0.0) + boundary
         elif etype == "LWPOLYLINE":
             flag = int(next((v for c, v in groups if c == 70), "0"))
             closed = bool(flag & 1)
@@ -384,6 +462,14 @@ def scan_dxf_takeoff(filename: str | Path) -> dict[str, Any]:
         "line_length_m_by_layer": {k: v * scale_m for k, v in line_len_by_layer.items()} if scale_m else None,
         "closed_area_m2_by_layer": {k: v * (scale_m**2) for k, v in poly_area_by_layer.items()} if scale_m else None,
         "polyline_perimeter_m_by_layer": {k: v * scale_m for k, v in poly_perim_by_layer.items()} if scale_m else None,
+        "face3d": {
+            "measured_by_layer": dict(face_measured),
+            "unmeasured_by_layer": dict(face_unmeasured),
+            "area_drawing2_by_layer": face_area,
+            "boundary_drawing_by_layer": face_boundary,
+            "area_m2_by_layer": {k: v * scale_m**2 for k, v in face_area.items()} if scale_m else None,
+            "boundary_m_by_layer": {k: v * scale_m for k, v in face_boundary.items()} if scale_m else None,
+        },
         "insert_count_by_layer": dict(insert_by_layer),
         "insert_count_by_block": dict(insert_by_block),
         "total_insert_blocks": sum(insert_by_block.values()),
