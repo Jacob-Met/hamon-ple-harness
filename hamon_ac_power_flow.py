@@ -31,7 +31,25 @@ def names(rows, label):
     return ids
 
 
-def network(spec):
+def _slack_components(adjacency, slack):
+    """Unknown-voltage groups coupled after the prescribed slack is removed."""
+    remaining = set(range(len(adjacency))) - {slack}
+    components = []
+    while remaining:
+        first = min(remaining)
+        remaining.remove(first)
+        component = {first}
+        stack = [first]
+        while stack:
+            neighbors = adjacency[stack.pop()] & remaining
+            remaining.difference_update(neighbors)
+            component.update(neighbors)
+            stack.extend(neighbors)
+        components.append(component)
+    return components
+
+
+def network(spec, *, _search_budget=None):
     buses, branches = spec["buses"], spec["lines"]
     ids = names(buses, "buses")
     line_ids = names(branches, "lines")
@@ -270,8 +288,55 @@ def network(spec):
                 chosen.append((idx, bound))
         return tuple(sorted(chosen)), seed
 
+    def independent_component_pivot():
+        components = _slack_components(adjacency, slack)
+        if len(components) < 2 or all(len(group) == 1 for group in components):
+            return None
+        # Components without bounded regulators have no regime to choose.
+        # Leave them to the original global solve instead of spending the
+        # search allowance repeatedly solving their PQ/unbounded-PV states.
+        components = [group for group in components if any(idx in limits for idx in group)]
+        if not components:
+            return None
+        if _search_budget[0] <= len(components):
+            return None
+        chosen = {}
+        seed = initial.copy()
+        # Reserve one attempt to recheck the composed state on the original
+        # network. Local searches share, rather than multiply, its total budget.
+        _search_budget[0] -= 1
+        try:
+            for component in components:
+                if _search_budget[0] <= 0:
+                    return None
+                positions = component | {slack}
+                members = {ids[idx] for idx in positions}
+                # Deliberately omit proposed_voltages: local solutions are a
+                # seed, while the original whole-network claim is checked below.
+                part = {
+                    "buses": [bus for idx, bus in enumerate(buses) if idx in positions],
+                    "lines": [line for line in branches
+                              if line["from"] in members and line["to"] in members],
+                }
+                result = network(part, _search_budget=_search_budget)
+                if not result.get("conservation_verified"):
+                    return None
+                for idx in component:
+                    value = result["voltages"][ids[idx]]
+                    seed[idx] = cmath.rect(value["vm_pu"], math.radians(value["va_deg"]))
+                chosen.update((index[name], bound)
+                              for name, bound in result["clamped_pv_q_pu"].items())
+        except (ValueError, FloatingPointError, OverflowError, np.linalg.LinAlgError):
+            return None
+        finally:
+            _search_budget[0] += 1
+        return tuple(sorted(chosen.items())), seed
+
     pending = deque([((), initial)])
     failed_pivots = OrderedDict()
+    component_trial = None
+    component_attempted = False
+    component_due = False
     seen = set()
     last_solved = None
     first_error = None
@@ -280,15 +345,34 @@ def network(spec):
     # Four bounded regulators have at most 3**4 possible states. For larger
     # networks keep the fallback work proportional to the number of regulators.
     regime_budget = max(81, 4 * len(limits) + 1)
-    while (pending or failed_pivots) and len(seen) < regime_budget:
+    if _search_budget is None:
+        _search_budget = [regime_budget]
+    starting_budget = _search_budget[0]
+    attempts = 0
+    while ((component_due or component_trial is not None or pending or failed_pivots)
+           and attempts < regime_budget and _search_budget[0] > 0):
+        # Preserve cheap ordinary spoke/joint-bound recovery before spending
+        # attempts on independent local searches.
+        if component_due and not pending and (attempts >= 3 or not failed_pivots):
+            component_due = False
+            component_trial = independent_component_pivot()
+            continue
+        # A locally certified composite may retry the same regime once with a
+        # different, independently solved seed. It still spends a global attempt.
+        composite = component_trial is not None
         # Exhaust pivots justified by a solved state's violations first.
-        if pending:
+        if composite:
+            state, seed = component_trial
+            component_trial = None
+        elif pending:
             state, seed = pending.popleft()
         else:
             state, seed = failed_pivots.popitem(last=False)
-        if state in seen:
+        if state in seen and not composite:
             continue
         seen.add(state)
+        attempts += 1
+        _search_budget[0] -= 1
         limited, pq = apply_regime(state)
         voltage = seed.copy()
         regulating = np.flatnonzero(bus_types == "PV")
@@ -302,6 +386,9 @@ def network(spec):
             # though a reactive limit admits a physical PQ solution. No Q
             # mismatch exists to select a bound in this failed regime.
             if not state:
+                if not component_attempted:
+                    component_attempted = True
+                    component_due = True
                 try:
                     spoke_state, spoke_seed = independent_spoke_pivot()
                 except (FloatingPointError, OverflowError, np.linalg.LinAlgError):
@@ -352,13 +439,13 @@ def network(spec):
             pending.appendleft(children[0])
             pending.extend(children[1:])
     else:
-        untried = any(key not in seen for key, _ in pending) or any(
+        untried = component_due or component_trial is not None or any(key not in seen for key, _ in pending) or any(
             key not in seen for key in failed_pivots
         )
         if untried:
             return {"ok": False, "calculation": "ac_power_flow",
                     "conservation_verified": False, "regime_search_budget_exhausted": True,
-                    "regimes_tried": len(seen),
+                    "regimes_tried": starting_budget - _search_budget[0],
                     "reason": "AC regulator search budget exhausted; feasibility undetermined"}
         if last_solved is None:
             raise first_error or ValueError("No converged AC regulator state")

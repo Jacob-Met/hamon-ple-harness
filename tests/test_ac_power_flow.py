@@ -8,6 +8,83 @@ import pytest
 from hamon_ac_power_flow import verify_ac_power_flow
 
 
+def coupled_generator_groups(angle=0):
+    buses = [{"id": "S", "type": "slack", "vm_pu": 1, "va_deg": angle,
+              "shunt_g_pu": 0.02, "shunt_b_pu": 0.03}]
+    lines = []
+    proposed = {"S": {"vm_pu": 1, "va_deg": angle}}
+    for i in range(5):
+        name = f"G{i}"
+        high = i < 3
+        buses.append({"id": name, "type": "PV", "p_injection_pu": 6 if high else 0,
+                      "vm_pu": 1 if high else 2, "q_min_injection_pu": 0 if high else -1,
+                      "q_max_injection_pu": 3 if high else 0})
+        lines.append({"id": name, "from": "S", "to": name, "r_pu": 1, "x_pu": 0})
+        proposed[name] = {"vm_pu": 3 if high else 1, "va_deg": angle}
+    for a, b in ((0, 1), (1, 2), (3, 4)):
+        lines.append({"id": f"tie{a}{b}", "from": f"G{a}", "to": f"G{b}",
+                      "r_pu": 100, "x_pu": 0})
+    return {"buses": buses, "lines": lines, "proposed_voltages": proposed}
+
+
+@pytest.mark.parametrize("angle,reverse", [(0, False), (17, False), (17, True)])
+def test_independent_generator_groups_share_one_fixed_slack(angle, reverse):
+    # Internal ties carry zero at the exact solution, but prevent a single-bus
+    # shortcut. The two coupled groups require different joint Q-limit choices.
+    spec = coupled_generator_groups(angle)
+    if reverse:
+        spec["buses"].reverse()
+        spec["lines"].reverse()
+    answer = verify_ac_power_flow(spec)
+    assert answer["conservation_verified"], answer
+    assert answer["clamped_pv_q_pu"] == {f"G{i}": 0 for i in range(5)}
+    # Recompute on the original network: duplicating the slack shunt in local
+    # bookkeeping must never duplicate its reported physical power.
+    assert answer["bus_injections"]["S"] == pytest.approx({"p_pu": -5.98, "q_pu": -0.03})
+    for name, expected in spec["proposed_voltages"].items():
+        assert answer["voltages"][name] == pytest.approx(expected, abs=1e-10)
+    spec["proposed_voltages"]["G3"]["va_deg"] += 0.1
+    assert not verify_ac_power_flow(spec)["conservation_verified"]
+
+
+def test_weak_cross_tie_prevents_independent_component_search():
+    from hamon_ac_power_flow import _slack_components
+
+    # Every physical branch couples unknowns, even if it is weak or currently
+    # carries zero current. A cross-tie joins the two previously independent groups.
+    adjacency = [{1, 2, 3, 4, 5}, {0, 2}, {0, 1, 3}, {0, 2}, {0, 5}, {0, 4}]
+    assert _slack_components(adjacency, 0) == [{1, 2, 3}, {4, 5}]
+    adjacency[3].add(4)
+    adjacency[4].add(3)
+    assert _slack_components(adjacency, 0) == [{1, 2, 3, 4, 5}]
+    spec = coupled_generator_groups()
+    spec["lines"].append({"id": "cross", "from": "G2", "to": "G3", "r_pu": 100, "x_pu": 0})
+    # The old phasors now add +0.06/-0.02 pu at the cross-tie terminals,
+    # so their original 6/0 pu targets must not be certified.
+    answer = verify_ac_power_flow(spec)
+    assert not answer["conservation_verified"], answer
+
+
+def test_pq_branches_cannot_exhaust_regulator_search_allowance():
+    # Many already-flat PQ branches must not consume the attempts needed for
+    # the three bounded regulators. Their all-lower state solves exactly.
+    buses = [{"id": "S", "type": "slack", "vm_pu": 1}]
+    lines = []
+    for i in range(3):
+        name = f"G{i}"
+        buses.append({"id": name, "type": "PV", "p_injection_pu": 1.2, "vm_pu": 1,
+                      "q_min_injection_pu": 1.44, "q_max_injection_pu": 3})
+        lines.append({"id": name, "from": "S", "to": name, "r_pu": 0, "x_pu": 1})
+    lines.append({"id": "tie", "from": "G0", "to": "G1", "r_pu": 100, "x_pu": 0})
+    for i in range(77):
+        name = f"L{i}"
+        buses.append({"id": name, "type": "PQ", "p_injection_pu": 0, "q_injection_pu": 0})
+        lines.append({"id": name, "from": "S", "to": name, "r_pu": 0, "x_pu": 1})
+    answer = verify_ac_power_flow({"buses": buses, "lines": lines})
+    assert answer["conservation_verified"], answer
+    assert answer["clamped_pv_q_pu"] == {f"G{i}": 1.44 for i in range(3)}
+
+
 def generator_case():
     return {
         "calculation": "ac_power_flow",
