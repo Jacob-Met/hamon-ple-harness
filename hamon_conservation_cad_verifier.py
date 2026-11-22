@@ -791,6 +791,67 @@ def _colebrook_dual_friction(re_num: float, rel_rough: float) -> Tuple[float, fl
     return f_n, abs(f_n - f_b) / f_n
 
 
+_HX_INPUTS = ("Th_in_K", "Th_out_K", "Tc_in_K", "Tc_out_K", "Ch_W_K", "Cc_W_K")
+_HX_OBSERVATIONS = ("Q_W", "UA_W_K")
+
+
+def _heat_exchanger_balance(spec: Dict[str, Any], rtol: float) -> Dict[str, Any]:
+    """Check independent observations against both stream balances in SI units."""
+    missing = [key for key in _HX_INPUTS if key not in spec]
+    if missing:
+        return {"hx_balance_ok": False, "hx_error": "missing_inputs", "hx_missing": missing}
+    try:
+        quantities = {key: float(spec[key]) for key in (*_HX_INPUTS, *_HX_OBSERVATIONS) if key in spec}
+    except (TypeError, ValueError, OverflowError):
+        return {"hx_balance_ok": False, "hx_error": "non_numeric_input"}
+    if not all(math.isfinite(v) for v in quantities.values()) or not math.isfinite(rtol) or rtol < 0:
+        return {"hx_balance_ok": False, "hx_error": "invalid_input_or_tolerance"}
+    if any(quantities[key] <= 0 for key in _HX_INPUTS):
+        return {"hx_balance_ok": False, "hx_error": "non_positive_temperature_or_capacity"}
+
+    thi, tho, tci, tco, ch, cc = (quantities[key] for key in _HX_INPUTS)
+    arrangement = str(spec.get("arrangement", "counterflow")).lower()
+    if arrangement in ("counterflow", "countercurrent", "counter-current"):
+        dt1, dt2 = thi - tco, tho - tci
+    elif arrangement in ("parallel", "parallelflow", "parallel_flow", "coflow", "co-current", "cocurrent"):
+        dt1, dt2 = thi - tci, tho - tco
+    else:
+        return {"hx_balance_ok": False, "hx_error": "unknown_arrangement"}
+    no_cross = dt1 > 0.0 and dt2 > 0.0 and thi >= tho and tco >= tci
+    lmtd = 0.0
+    if no_cross:
+        hi, lo = max(dt1, dt2), min(dt1, dt2)
+        delta = hi - lo
+        if delta == 0:
+            lmtd = hi
+        elif delta <= lo:
+            lmtd = delta / math.log1p(delta / lo)
+        else:
+            lmtd = delta / (math.log(hi) - math.log(lo))
+    qh, qc = ch * (thi - tho), cc * (tco - tci)
+    entropy = cc * (math.log(tco) - math.log(tci)) + ch * (math.log(tho) - math.log(thi))
+    duties = {"hot_stream": qh, "cold_stream": qc}
+    if "Q_W" in quantities:
+        duties["Q_W"] = quantities["Q_W"]
+    if "UA_W_K" in quantities:
+        duties["UA_times_lmtd"] = quantities["UA_W_K"] * lmtd
+    if not all(math.isfinite(q) for q in duties.values()) or not math.isfinite(entropy):
+        return {"hx_balance_ok": False, "hx_error": "non_finite_derived_quantity"}
+
+    def agrees(a: float, b: float) -> bool:
+        return abs(a - b) <= rtol * max(abs(a), abs(b), 1e-12)
+
+    checks = {key: q >= 0 and agrees(q, qh) and agrees(q, qc) for key, q in duties.items()}
+    if quantities.get("UA_W_K", 0.0) < 0:
+        checks["UA_times_lmtd"] = False
+    return {
+        "Q_hot_W": qh, "Q_cold_W": qc, "lmtd_K": lmtd,
+        "hx_no_temperature_crossover": no_cross, "hx_entropy_generation_W_K": entropy,
+        "hx_duties_W": duties, "hx_duty_checks": checks,
+        "hx_balance_ok": no_cross and entropy >= -1e-9 and all(checks.values()),
+    }
+
+
 def verify_thermal_fluid_chemical_balance(spec: Dict[str, Any]) -> Dict[str, Any]:
     rtol = float(spec.get("rtol", 1e-4))
     out: Dict[str, Any] = {"ok": True, "tool": "hamon_conservation_cad_verifier", "mode": "thermal_fluid"}
@@ -798,7 +859,7 @@ def verify_thermal_fluid_chemical_balance(spec: Dict[str, Any]) -> Dict[str, Any
     if "inlets" in spec or "outlets" in spec:
         ins, outs = spec.get("inlets") or [], spec.get("outlets") or []
         mi, mo = sum(float(s.get("mdot_kg_s", 0.0)) for s in ins), sum(float(s.get("mdot_kg_s", 0.0)) for s in outs)
-        m_ok = abs(mi - mo) <= rtol * max(mi, mo, 1e-12)
+        m_ok = bool(ins or outs) and abs(mi - mo) <= rtol * max(mi, mo, 1e-12)
         out["mass_balance_ok"] = m_ok
         all_ok = all_ok and m_ok
         ai: Dict[str, float] = {}; ao: Dict[str, float] = {}
@@ -815,18 +876,10 @@ def verify_thermal_fluid_chemical_balance(spec: Dict[str, Any]) -> Dict[str, Any
             sp_err = max((abs(ai.get(e, 0.0) - ao.get(e, 0.0)) / max(ai.get(e, 0.0), ao.get(e, 0.0), 1e-12) for e in set(ai) | set(ao)), default=0.0)
             out["species_balance_ok"] = sp_err <= rtol
             all_ok = all_ok and (sp_err <= rtol)
-    if "Th_in_K" in spec and "Tc_in_K" in spec:
-        thi, tho, tci, tco = float(spec["Th_in_K"]), float(spec["Th_out_K"]), float(spec["Tc_in_K"]), float(spec["Tc_out_K"])
-        ch, cc = float(spec["Ch_W_K"]), float(spec["Cc_W_K"])
-        qh, qc = ch * (thi - tho), cc * (tco - tci)
-        dt1, dt2 = (thi - tco, tho - tci) if str(spec.get("arrangement", "counterflow")).lower() == "counterflow" else (thi - tci, tho - tco)
-        no_x = dt1 > 0.0 and dt2 > 0.0 and thi >= tho and tco >= tci
-        lmtd = (dt1 - dt2) / math.log(dt1 / dt2) if (no_x and abs(dt1 - dt2) > 1e-9) else (dt1 if no_x else 0.0)
-        s_gen = cc * math.log(tco / tci) + ch * math.log(tho / thi)
-        q_err = abs(qh - qc) / max(abs(qh), abs(qc), 1e-12)
-        hx_ok = (q_err <= rtol) and no_x and (s_gen >= -1e-9)
-        out.update({"Q_hot_W": qh, "Q_cold_W": qc, "lmtd_K": lmtd, "hx_no_temperature_crossover": no_x, "hx_entropy_generation_W_K": s_gen})
-        all_ok = all_ok and hx_ok
+    if any(key in spec for key in (*_HX_INPUTS, "UA_W_K")):
+        hx = _heat_exchanger_balance(spec, rtol)
+        out.update(hx)
+        all_ok = all_ok and hx["hx_balance_ok"]
     if "pipe_D_m" in spec and "pipe_L_m" in spec:
         g = 9.80665
         dp, lp, qv = float(spec["pipe_D_m"]), float(spec["pipe_L_m"]), float(spec["Q_m3_s"])
@@ -837,7 +890,8 @@ def verify_thermal_fluid_chemical_balance(spec: Dict[str, Any]) -> Dict[str, Any
         hf = (f_dw * (lp / dp) + float(spec.get("K_minor", 0.0))) * (vel * vel) / (2.0 * g)
         hp = float(spec.get("delta_z_m", 0.0)) + float(spec.get("delta_P_Pa", 0.0)) / (rho * g) + hf
         out.update({"darcy_f": f_dw, "colebrook_dual_rel_error": f_err, "head_loss_m": hf, "required_shaft_power_W": rho * g * qv * hp / float(spec.get("pump_efficiency", 0.78))})
-    out["conservation_verified"] = bool(all_ok)
+    checked = any(key in out for key in ("mass_balance_ok", "hx_balance_ok", "darcy_f"))
+    out["conservation_verified"] = bool(checked and all_ok)
     return out
 
 
@@ -854,7 +908,7 @@ def run_router_conservation_cad_verifier(payload: Dict[str, Any]) -> Dict[str, A
         elif "lhs" in spec and "rhs" in spec: mode = "dimensional"
         elif "span_m" in spec and "E_Pa" in spec: mode = "structural"
         elif any(k in spec for k in ("cut_bank_m3", "footing_B_m", "channel_B_m")): mode = "civil_geotech"
-        elif any(k in spec for k in ("inlets", "outlets", "Th_in_K", "pipe_D_m")): mode = "thermal_fluid"
+        elif any(k in spec for k in ("inlets", "outlets", "pipe_D_m", *_HX_INPUTS, "UA_W_K")): mode = "thermal_fluid"
         elif spec.get("file_b64"):
             mode = "step_cad" if "ISO-10303-21" in base64.b64decode(spec["file_b64"])[:512].decode("utf-8", errors="replace") else "circuit"
         else:
