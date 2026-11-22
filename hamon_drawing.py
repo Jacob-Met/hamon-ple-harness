@@ -1072,7 +1072,7 @@ def _detail_symbol_inventory(source, page, directory, stroke_vectors=None):
         if v.get("stroke") in (None, "none") or not v["bbox_exact_for_centerline"]:
             continue
         a, b, c, d = v["svg_bbox"]
-        if stroke_vectors is not None and 0 < c-a < 80 and 0 < d-b < 80:
+        if stroke_vectors is not None and 0 <= c-a < 80 and 0 <= d-b < 80 and (c > a or d > b):
             stroke_vectors.append(v)
         if 5 <= c-a <= 80 and abs(c-a-(d-b)) < .03*(c-a) and _round_marker(v):
             markers.append({"id": v["id"], "box": [a,b,c,d]})
@@ -1133,13 +1133,14 @@ def _ruled_detail_regions(markers, horizontal):
     return regions
 
 
-def _caption_raster(source, page, box, scale, erase_ring=False, pixel_limit=2500000):
+def _caption_raster(source, page, box, scale, erase_ring=False, pixel_limit=2500000, *, hide_annotations=False):
     a,b,c,d=box
     left,top=math.floor(a*scale),math.floor(b*scale)
     width,height=math.ceil(c*scale)-left, math.ceil(d*scale)-top
     if min(left,top)<0 or min(width,height)<1 or width*height>pixel_limit:
         return None
-    call=subprocess.run(["pdftoppm","-cropbox","-r",str(72*scale),"-f",str(page),"-l",str(page),
+    annotation_flags = ["-hide-annotations"] if hide_annotations else []
+    call=subprocess.run(["pdftoppm",*annotation_flags,"-cropbox","-r",str(72*scale),"-f",str(page),"-l",str(page),
                          "-singlefile","-x",str(left),"-y",str(top),"-W",str(width),"-H",str(height),
                          "-gray",str(source)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=30)
     if call.returncode:
@@ -1311,7 +1312,7 @@ def _printed_source_tokens(ink, marker, ref):
     return evidence
 
 
-def _read_caption_words(pgm, psm, digits=False):
+def _read_caption_words(pgm, psm, digits=False, *, boxes=False):
     if pgm is None:
         return []
     cmd=["tesseract","stdin","stdout","--psm",str(psm)]
@@ -1323,7 +1324,10 @@ def _read_caption_words(pgm, psm, digits=False):
         for line in call.stdout.decode(errors="replace").splitlines()[1:]:
             columns=line.split("\t",11)
             if len(columns)==12 and columns[0]=="5" and columns[11].strip():
-                words.append((columns[11].strip(),float(columns[10])))
+                word = (columns[11].strip(), float(columns[10]))
+                if boxes:
+                    word += (tuple(int(v) for v in columns[6:10]),)
+                words.append(word)
     return words
 
 
@@ -1737,6 +1741,605 @@ def _recognize_stroke_label(glyphs, alphabet):
     return None
 
 
+def _caption_face():
+    """Retain each glyph's vertical position in the published face's 21-unit cap height."""
+    shapes = {}
+    for index, record in enumerate(_SIMPLEX_PRINTABLE):
+        runs = [[(ord(x)-82, ord(y)-82) for x, y in zip(run[::2], run[1::2])]
+                for run in record[2:].split()]
+        edges = [(a, b) for run in runs for a, b in zip(run, run[1:]) if a != b]
+        if not edges:
+            continue
+        left = min(x for edge in edges for x, _ in edge)
+        shapes[chr(index+32)] = tuple(((a[0]-left)/21, (a[1]+12)/21,
+                                       (b[0]-left)/21, (b[1]+12)/21)
+                                      for a,b in edges)
+    return shapes
+
+
+def _caption_line_geometry(region, vectors):
+    """Separate the baseline immediately above the caption rule from dimension notes."""
+    if not vectors or "caption_box" not in region:
+        return None
+    a, b, c, d = region["caption_box"]
+    diameter = region["ring"]["box"][2]-region["ring"]["box"][0]
+    visible = []
+    bands = {}
+    for vector in vectors:
+        box = vector["svg_bbox"]
+        if box[0] < a or box[2] > c or box[1] < b or box[3] > d+.12*diameter:
+            continue
+        pairs = vector.get("svg_segment_vertex_pairs")
+        pts = vector.get("svg_points")
+        if not pairs or not pts:
+            continue
+        edges = [(pts[i], pts[j]) for i,j in pairs if pts[i] != pts[j]]
+        if not edges:
+            continue
+        visible.append((vector, edges))
+        height = box[3]-box[1]
+        if .14*diameter <= height <= .52*diameter and 0 < box[2]-box[0] < 1.7*height:
+            band = round(box[1], 1), round(box[3], 1)
+            bands[band] = bands.get(band, 0)+1
+    if not bands:
+        return None
+    (top, bottom), votes = max(bands.items(), key=lambda item:item[1])
+    if votes < 3 or sum(count==votes for count in bands.values())>1:
+        return None
+    cap = bottom-top
+    objects = []
+    for vector,edges in visible:
+        x0,y0,x1,y1 = vector["svg_bbox"]
+        if y1 < top-.25*cap or y0 > bottom+.38*cap:
+            continue
+        if y0 < top-.28*cap or y1 > bottom+.38*cap or x1-x0 > 2.2*cap:
+            continue
+        pen = vector.get("svg_pen_diameter")
+        if pen is None or not 0 < pen < .2*cap:
+            return None
+        objects.append((vector,edges))
+    if not 3 <= len(objects) <= 180:
+        return None
+    # A character may consist of multiple touching or horizontally overlapping primitives.
+    groups = []
+    for vector,edges in sorted(objects,key=lambda item:item[0]["svg_bbox"][0]):
+        lo,_,hi,_ = vector["svg_bbox"]
+        if not groups or lo > groups[-1][0]+.01:
+            groups.append([hi,[],[]])
+        groups[-1][0] = max(groups[-1][0],hi)
+        groups[-1][1].extend(edges)
+        groups[-1][2].append(vector["id"])
+    return top,bottom,objects,groups
+
+
+def _caption_graph_options(groups, face, top, cap, stretch):
+    """Exhaust the published alphabet and preserve competitors, including raised commas."""
+    options = {}
+    for i in range(len(groups)):
+        combo = []
+        for n in range(1,min(4,len(groups)-i)+1):
+            combo.extend(groups[i+n-1][1])
+            left = min(x for edge in combo for x,_ in edge)
+            observed = tuple(((u[0]-left)/cap,(u[1]-top)/cap,
+                              (v[0]-left)/cap,(v[1]-top)/cap) for u,v in combo)
+            choices = {ch for ch,prototype in face.items()
+                       if len(prototype)==len(observed) and _same_stroke_graph(observed,prototype,stretch)}
+            if n==1 and len(observed)==len(face[","]):
+                upper = min(min(y,w) for _,y,_,w in observed)
+                lower = max(max(y,w) for _,y,_,w in observed)
+                comma_top = min(min(y,w) for _,y,_,w in face[","])
+                shifted = tuple((x,y-upper+comma_top,z,w-upper+comma_top) for x,y,z,w in observed)
+                if -.28 <= upper <= .12 and lower < .5 and _same_stroke_graph(shifted,face[","],stretch):
+                    choices.add("’")
+            if choices:
+                options[i,n] = choices
+    for i in range(len(groups)-1):
+        if "’" not in options.get((i,1),()) or "’" not in options.get((i+1,1),()):
+            continue
+        first = groups[i][1];second = groups[i+1][1]
+        left = min(x for edge in second for x,_ in edge)
+        right = max(x for edge in first for x,_ in edge)
+        y0 = min(y for edge in first for _,y in edge)
+        y1 = min(y for edge in second for _,y in edge)
+        if .02*cap < left-right < .5*cap and abs(y0-y1) <= .04*cap:
+            options.setdefault((i,2),set()).add("”")
+    return options
+
+
+def _caption_token_route(text, groups, options, cap):
+    """Every physical group must belong to exactly one glyph of the independently read line."""
+    tokens=text.split()
+    chars = [(char, i) for i,token in enumerate(tokens) for char in token]
+    frontier = [(0, [])]
+    for k,(ch,word) in enumerate(chars):
+        next_paths = []
+        for gi,path in frontier:
+            for count in range(1,5):
+                choices=options.get((gi,count),())
+                if ch not in choices:
+                    continue
+                # Multiple printed forms such as I/l need matching evidence from the two
+                # word reads. Ambiguous numeric values, unit styles, or punctuation veto.
+                if len(choices)>1 and not set(choices)<=set("Il"):
+                    continue
+                if gi and path:
+                    right=groups[gi-1][0]
+                    left=min(x for edge in groups[gi][1] for x,_ in edge)
+                    gap=(left-right)/cap
+                    if (word != chars[k-1][1] and gap < .42) or (word == chars[k-1][1] and gap > .85):
+                        continue
+                next_paths.append((gi+count,[*path,(ch,gi,count,sorted(choices))]))
+        frontier=next_paths
+        if not frontier or len(frontier)>48:
+            return None
+    complete=[p for i,p in frontier if i==len(groups)]
+    return complete[0] if len(complete)==1 else None
+
+
+def _caption_edge_ink(source, page, region, bounds, objects):
+    """Confirm painted strokes at native geometry, excluding the long caption rule."""
+    scale = 8
+    max_pen = max(v["svg_pen_diameter"] for v,_ in objects)
+    pad = max_pen+1/scale
+    # Use the complete title span. An added printed mark past the nominated
+    # first or last glyph also needs its own physical drawing operation.
+    start, _, end, _ = region["caption_box"]
+    crop = [min(bounds[0]-pad,start+pad),bounds[1]-pad,
+            max(bounds[2]+pad,end-pad),bounds[3]+pad]
+    raw = _caption_raster(source,page,crop,scale)
+    if raw is None:
+        return None
+    _, shape, _, pixels = raw.split(b"\n",3)
+    width,height = map(int,shape.split())
+    left,top = math.floor(crop[0]*scale),math.floor(crop[1]*scale)
+    actual = {(i%width,i//width) for i,pixel in enumerate(pixels) if pixel<=150}
+    diameter = region["ring"]["box"][2]-region["ring"]["box"][0]
+    rule_y = region["caption_box"][3]+.045*diameter
+    rule_rows = {y for y in range(height)
+                 if abs((y+top+.5)/scale-rule_y)<=max_pen+1/scale
+                 and sum((x,y) in actual for x in range(width)) >= .8*width}
+    actual_text = {(x,y) for x,y in actual if y not in rule_rows}
+    expected = set()
+    covered_edges = 0
+    occluded_operations = set()
+    for vector,edges in objects:
+        reach = vector["svg_pen_diameter"]*scale/2+1
+        size = math.ceil(reach)
+        footprint = [(dx,dy) for dx in range(-size,size+1) for dy in range(-size,size+1)
+                     if math.hypot(dx,dy)<=reach]
+        for a,b in edges:
+            per_edge = 0
+            count = max(1,math.ceil(math.dist(a,b)*scale*2))
+            for k in range(count+1):
+                x=math.floor((a[0]+(b[0]-a[0])*k/count)*scale)-left
+                y=math.floor((a[1]+(b[1]-a[1])*k/count)*scale)-top
+                if not any((x+dx,y+dy) in actual for dx in (-1,0,1) for dy in (-1,0,1)):
+                    return None
+                direct=any((x+dx,y+dy) in actual_text for dx in (-1,0,1) for dy in (-1,0,1))
+                if y in rule_rows:
+                    occluded_operations.add(vector["id"])
+                if not direct:
+                    if y not in rule_rows:
+                        return None
+                else:
+                    per_edge+=1
+                expected.update((x+dx,y+dy) for dx,dy in footprint)
+            # A rule cannot supply an otherwise hidden edge.
+            if per_edge<.70*(count+1):
+                return None
+            covered_edges+=1
+    # The true transformed nib has a one-pixel envelope for sampling.
+    # A foreign mark can occupy arbitrarily little of a long caption.
+    if not actual_text or actual_text.difference(expected):
+        return None
+    return {"visible_edges":covered_edges,"rule_rows_excluded":len(rule_rows),
+            "ink_agreement":len(actual_text & expected)/len(actual_text),
+            "rule_intersection_operations":sorted(occluded_operations),
+            "rule_raster_y":[top+y for y in sorted(rule_rows)]}
+
+
+def _rule_hides_competitor(route, groups, face, cap, top, stretch, hidden_ids, hidden_rows):
+    """Compare glyph centerlines after removing rows owned by the printed rule."""
+    scale = 8
+    radius = max(1, math.ceil(.028*cap*scale))
+    offsets = [(dx,dy) for dx in range(-radius,radius+1)
+               for dy in range(-radius,radius+1) if math.hypot(dx,dy)<=radius]
+    def samples(edges):
+        result=set()
+        for a,b in edges:
+            count=max(1,math.ceil(math.dist(a,b)*scale*2))
+            for k in range(count+1):
+                x=math.floor((a[0]+(b[0]-a[0])*k/count)*scale)
+                y=math.floor((a[1]+(b[1]-a[1])*k/count)*scale)
+                if y not in hidden_rows:
+                    result.add((x,y))
+        return result
+    for char,start,count,competitors in route:
+        span=groups[start:start+count]
+        if not any(key in hidden_ids for _,_,ids in span for key in ids):
+            continue
+        edges=[edge for _,word_edges,_ in span for edge in word_edges]
+        actual=samples(edges)
+        if not actual:
+            return True
+        support={(x+dx,y+dy) for x,y in actual for dx,dy in offsets}
+        lo=min(x for edge in edges for x,y in edge)
+        hi=max(x for edge in edges for x,y in edge)
+        for rival,shape in face.items():
+            if rival==char:
+                continue
+            width=max(max(x,z) for x,y,z,w in shape)*cap*stretch
+            for origin in {lo,hi-width,(hi+lo-width)/2}:
+                alternative=[((origin+x*cap*stretch,top+y*cap),(origin+z*cap*stretch,top+w*cap))
+                             for x,y,z,w in shape]
+                alt=samples(alternative)
+                if not alt or not alt<=support:
+                    continue
+                alt_support={(x+dx,y+dy) for x,y in alt for dx,dy in offsets}
+                if actual<=alt_support:
+                    return True
+    return False
+
+
+def _quantitative_caption(model, caption):
+    """A printed number or numeric transcription makes the whole quantitative title mandatory."""
+    if re.search(r"\d", caption):
+        return True
+    if model is None:
+        return False
+    top,bottom,_,groups=model
+    cap=bottom-top
+    face=_caption_face()
+    for _,edges,_ in groups:
+        left=min(x for edge in edges for x,y in edge)
+        obs=tuple(((a[0]-left)/cap,(a[1]-top)/cap,
+                   (b[0]-left)/cap,(b[1]-top)/cap) for a,b in edges)
+        width=max(max(x,z) for x,y,z,w in obs)
+        for digit in "0123456789":
+            shape=face[digit]
+            if len(shape)!=len(obs):
+                continue
+            expected=max(max(x,z) for x,y,z,w in shape)
+            stretch=width/expected
+            if .65<=stretch<=1.5 and _same_stroke_graph(obs,shape,stretch):
+                if not any(ch.isalpha() and len(alt)==len(obs) and
+                           _same_stroke_graph(obs,alt,stretch) for ch,alt in face.items()):
+                    return True
+    return False
+
+
+def _caption_token_views(source, page, box, groups, cap):
+    """Locate words on two line views; verify any disputed token in its own physical crop."""
+    rows=[]
+    for scale in (4,6):
+        raster=_caption_raster(source,page,box,scale)
+        if raster is None:
+            return None
+        obs=_read_caption_words(raster,7,boxes=True)
+        if not 2<=len(obs)<=24:
+            return None
+        left=math.floor(box[0]*scale)
+        rows.append([(token,conf,(left+x)/scale,(left+x+w)/scale) for token,conf,(x,y,w,h) in obs])
+    if len(rows[0])!=len(rows[1]):
+        return None
+    records=[]
+    for first,second in zip(*rows):
+        if min(first[3],second[3]) <= max(first[2],second[2]):
+            return None
+        if first[0]==second[0] and min(first[1],second[1])>=80:
+            records.append((first[0],[first[1],second[1]],"line"))
+            continue
+        left=min(first[2],second[2]);right=max(first[3],second[3])
+        spans=[]
+        for _,edges,_ in groups:
+            pts=[p for edge in edges for p in edge]
+            x0=min(x for x,y in pts);x1=max(x for x,y in pts)
+            if left-.06*cap <= (x0+x1)/2 <= right+.06*cap:
+                if x0<left-.22*cap or x1>right+.22*cap:
+                    return None
+                spans.extend(pts)
+        if not spans:
+            return None
+        gap=.26*cap
+        small=[min(x for x,y in spans)-gap,min(y for x,y in spans)-gap,
+               max(x for x,y in spans)+gap,max(y for x,y in spans)+gap]
+        confirmations=[]
+        for scale,mode in ((4,7),(6,8)):
+            read=_read_caption_words(_caption_raster(source,page,small,scale),mode)
+            if len(read)!=1 or read[0][1]<80:
+                return None
+            confirmations.append(read[0])
+        if (confirmations[0][0]!=confirmations[1][0] or
+                any(conf>=80 and token!=confirmations[0][0] for token,conf,*_ in (first,second))):
+            return None
+        records.append((confirmations[0][0],[q[1]for q in confirmations],"word"))
+    return records
+
+
+def _external_caption_metrics():
+    """The two characters preceding each stroke stream are its Hershey bearings."""
+    metrics = {}
+    for index, record in enumerate(_SIMPLEX_PRINTABLE):
+        left_bearing, right_bearing = (ord(code) - 82 for code in record[:2])
+        xs = [ord(x) - 82 for run in record[2:].split() for x in run[::2]]
+        metrics[chr(index + 32)] = (right_bearing - left_bearing,
+                                    min(xs) - left_bearing if xs else 0)
+    return metrics
+
+
+def _shared_tracking_partitions(residuals, space, intervals=None):
+    """Intersect every observed displacement with one common tracking interval."""
+    # A quarter of an external en-space keeps neighboring space-count models
+    # separated. Each measured advance also includes the common tracking, twice
+    # when an additional space glyph appears between two printed characters.
+    tolerance = space / 4
+    paths = [(-tolerance, tolerance, ())]
+    for delta in residuals:
+        updated = []
+        for lower, upper, cuts in paths:
+            for extra_space in (False, True):
+                count = 1 + int(extra_space)
+                offset = space if extra_space else 0
+                lo = max(lower, (delta - offset - tolerance) / count)
+                hi = min(upper, (delta - offset + tolerance) / count)
+                if hi > lo:
+                    updated.append((lo, hi, cuts + (extra_space,)))
+        paths = updated
+        if len(paths) > 64:
+            return None
+        if not paths:
+            return set()
+    if intervals is not None:
+        intervals.update((cuts, (lo, hi)) for lo, hi, cuts in paths)
+    return {cuts for _, _, cuts in paths}
+
+
+def _font_spaced_words(groups, cap, top, proof=None):
+    """Only one word partition may fit the complete alphabet and line metrics."""
+    face = _caption_face()
+    metrics = _external_caption_metrics()
+    # The OCR-independent scale is measured by fitting actual full stroke
+    # graphs with a nonzero horizontal extent to the published alphabet.
+    scales = set()
+    group_boxes = []
+    for _, edges, _ in groups:
+        points = [p for edge in edges for p in edge]
+        left = min(x for x, _ in points)
+        right = max(x for x, _ in points)
+        group_boxes.append((left, min(y for _, y in points),
+                            right, max(y for _, y in points)))
+        observed = tuple(((a[0] - left) / cap, (a[1] - top) / cap,
+                          (b[0] - left) / cap, (b[1] - top) / cap) for a, b in edges)
+        for shape in face.values():
+            if len(shape) != len(edges):
+                continue
+            width = max(max(x, z) for x, _, z, _ in shape)
+            if width <= .12:
+                continue
+            stretch = round((right - left) / (cap * width), 2)
+            if .65 <= stretch <= 1.5 and _same_stroke_graph(observed, shape, stretch):
+                scales.add(stretch)
+    partitions = set()
+    compatible_metrics = set()
+    for stretch in scales:
+        unit = cap * stretch / 21
+        options = _caption_graph_options(groups, face, top, cap, stretch)
+        # Keep every compatible glyph/advance sequence. Equivalent I/l glyphs
+        # have identical metrics and therefore do not multiply layout paths.
+        paths = [(0, ())]
+        while paths:
+            advanced = []
+            for index, path in paths:
+                if index == len(groups):
+                    residuals = [(b[0] - a[0]) / unit - (a[2] + b[3] - a[3])
+                                 for a, b in zip(path, path[1:])]
+                    intervals = {}
+                    fits = _shared_tracking_partitions(residuals, metrics[" "][0], intervals)
+                    if fits is None:
+                        return None
+                    for cuts in fits:
+                        starts = tuple(path[k + 1][1] for k, cut in enumerate(cuts) if cut)
+                        partitions.add(starts)
+                        compatible_metrics.add((stretch, *intervals[cuts]))
+                    if len(partitions) > 1:
+                        return None
+                    continue
+                for count in range(1, min(4, len(groups) - index) + 1):
+                    choices = options.get((index, count), ())
+                    dimensions = set()
+                    for ch in choices:
+                        if ch in metrics:
+                            dimensions.add(metrics[ch])
+                        elif ch == "’":
+                            dimensions.add(metrics[","])
+                        elif ch == "”" and count == 2:
+                            advance, bearing = metrics[","]
+                            offset = (group_boxes[index + 1][0] - group_boxes[index][0]) / unit
+                            dimensions.add((advance + offset, bearing))
+                    for advance, bearing in dimensions:
+                        entry = (group_boxes[index][0], index, advance, bearing)
+                        advanced.append((index + count, path + (entry,)))
+            if len(advanced) > 128:
+                return None
+            paths = advanced
+    if len(partitions) != 1:
+        return None
+    stops = (0, *next(iter(partitions)), len(groups))
+    if not 2 <= len(stops) - 1 <= 24:
+        return None
+    words = []
+    for start, end in zip(stops, stops[1:]):
+        boxes = group_boxes[start:end]
+        words.append([min(b[0] for b in boxes), min(b[1] for b in boxes),
+                      max(b[2] for b in boxes), max(b[3] for b in boxes)])
+    if proof is not None:
+        proof.update(external_face="Hershey Simplex", space_advance=metrics[" "][0],
+                     unit="Hershey font coordinate", word_starts=list(stops[:-1]),
+                     word_boxes=words, compatible_tracking=[
+                         {"horizontal_scale": scale, "min_tracking": lo, "max_tracking": hi}
+                         for scale, lo, hi in sorted(compatible_metrics)])
+    return words
+
+
+def _annotation_preserves_ink(annotated, underlying):
+    """Only light was added if both dark masks retain their physical strokes."""
+    if not annotated or not underlying:
+        return False
+    left = annotated.split(b"\n", 3)
+    right = underlying.split(b"\n", 3)
+    if left[:3] != right[:3] or len(left[3]) != len(right[3]):
+        return False
+    width, height = map(int, left[1].split())
+    # Removing annotations must visibly change light background, not just a
+    # letter's anti-aliased boundary. A dark correction remains authoritative.
+    changed_background = sum(a < b - 12 and a > 150 and b >= 245
+                             for a, b in zip(left[3], right[3]))
+    if changed_background < max(4, width):
+        return False
+    for observed, other in ((left[3], right[3]), (right[3], left[3])):
+        for i, value in enumerate(observed):
+            if value > 150 or other[i] <= 150:
+                continue
+            # Only anti-aliased boundary samples may cross the ink threshold.
+            if value < 100 or other[i] > 200:
+                return False
+            x, y = i % width, i // width
+            if not any(other[yy*width+xx] <= 150
+                       for yy in range(max(0, y-1), min(height, y+2))
+                       for xx in range(max(0, x-1), min(width, x+2))):
+                return False
+    return True
+
+
+def _physically_spaced_tokens(source, page, line_box, groups, cap, top, layout):
+    """Use a uniquely fitted tracking-and-space layout to isolate each word."""
+    words = _font_spaced_words(groups, cap, top, layout)
+    if not words:
+        return None
+    # A confident complete word from either original line view can veto the
+    # proposed spelling. A box spanning multiple separated words has no such
+    # authority over individual letters or the physical whitespace.
+    checks = [[] for _ in words]
+    for scale in (4, 6):
+        image = _caption_raster(source, page, line_box, scale)
+        if image is None:
+            return None
+        line_left = math.floor(line_box[0] * scale)
+        for token, confidence, (x, _, width, _) in _read_caption_words(image, 7, boxes=True):
+            if confidence < 80:
+                continue
+            start = (line_left + x) / scale
+            end = (line_left + x + width) / scale
+            hits = [index for index, (left, _, right, _) in enumerate(words)
+                    if min(end, right) > max(start, left)]
+            if len(hits) == 1:
+                checks[hits[0]].append((scale, token, confidence))
+
+    result = []
+    padding = .26 * cap
+    for (left, top, right, bottom), confident in zip(words, checks):
+        if len(confident) == 2 and {record[0] for record in confident} == {4, 6}:
+            if confident[0][1] != confident[1][1]:
+                return None
+            result.append((confident[0][1], [record[2] for record in confident], "line"))
+            continue
+        box = [left - padding, top - padding, right + padding, bottom + padding]
+        reads = []
+        strong = []
+        annotated_views = []
+        raw_observations = []
+        for scale, mode in ((4, 7), (6, 8)):
+            image = _caption_raster(source, page, box, scale)
+            if image is None:
+                return None
+            annotated_views.append((scale, mode, image))
+            raw = _read_caption_words(image, mode)
+            raw_observations.append({"scale": scale, "psm": mode, "words": raw})
+            if len(raw) == 1 and raw[0][1] >= 80:
+                strong.append(raw[0][0])
+            # The exact same dark-ink classification is subsequently verified
+            # against every native pen stroke and every pixel in the title span.
+            header, shape, maximum, pixels = image.split(b"\n", 3)
+            binary = pixels.translate(bytes([0] * 151 + [255] * 105))
+            read = _read_caption_words(b"\n".join((header, shape, maximum, binary)), mode)
+            if len(read) != 1 or read[0][1] < 80:
+                return None
+            reads.append(read[0])
+        token = reads[0][0]
+        if reads[1][0] != token or any(record[1] != token for record in confident):
+            return None
+        method = "external_font_spacing"
+        if any(word != token for word in strong):
+            control_observations = []
+            for scale, mode, annotated in annotated_views:
+                underlying = _caption_raster(source, page, box, scale, hide_annotations=True)
+                if not _annotation_preserves_ink(annotated, underlying):
+                    return None
+                read = _read_caption_words(underlying, mode)
+                if len(read) != 1 or read[0][0] != token or read[0][1] < 80:
+                    return None
+                control_observations.append({"scale": scale, "psm": mode, "words": read})
+            layout.setdefault("annotation_controls", []).append({
+                "word": token, "annotated_reads": raw_observations,
+                "without_annotations": control_observations,
+                "dark_ink_reads": reads, "annotated_and_underlying_ink_match": True,
+            })
+            method = "external_font_spacing_and_annotation_control"
+        result.append((token, [read[1] for read in reads], method))
+    return result
+
+
+def _complete_caption_title(source, page, region, model):
+    if not model:
+        return None
+    top,bottom,objects,groups=model
+    cap=bottom-top
+    bounds=[min(v["svg_bbox"][0] for v,_ in objects),min(v["svg_bbox"][1] for v,_ in objects),
+            max(v["svg_bbox"][2] for v,_ in objects),max(v["svg_bbox"][3] for v,_ in objects)]
+    crop_box=[bounds[0]-.26*cap,bounds[1]-.32*cap,bounds[2]+.26*cap,bounds[3]+.32*cap]
+    layout = {}
+    readings=_caption_token_views(source,page,crop_box,groups,cap)
+    if not readings:
+        readings = _physically_spaced_tokens(source, page, crop_box, groups, cap, top, layout)
+    if not readings:
+        return None
+    text=" ".join(word for word,_,_ in readings)
+    if len(text)>150:
+        return None
+    face=_caption_face()
+    # Estimate common horizontal stretch from all presumptive glyph widths; the
+    # winning scale has to explain the entire string and its component partition.
+    scales={}
+    for _,edges,_ in groups:
+        xmin=min(x for edge in edges for x,y in edge);xmax=max(x for edge in edges for x,y in edge)
+        actual=(xmax-xmin)/cap
+        for char in set(text):
+            proto=face.get(char,())
+            if not proto or len(proto)!=len(edges):
+                continue
+            expected=max(max(x,z) for x,y,z,w in proto)
+            if expected<=.12:
+                continue
+            ratio=round(actual/expected,2)
+            if .65<=ratio<=1.5:
+                scales[ratio]=scales.get(ratio,0)+1
+    if not scales:
+        return None
+    best=max(scales,key=scales.get)
+    options=_caption_graph_options(groups,face,top,cap,best)
+    route=_caption_token_route(text,groups,options,cap)
+    if route is None:
+        return None
+    physical=_caption_edge_ink(source,page,region,bounds,objects)
+    if not physical or _rule_hides_competitor(route,groups,face,cap,top,best,
+                                              set(physical["rule_intersection_operations"]),
+                                              set(physical["rule_raster_y"])):
+        return None
+    return {"caption":text,"complete_caption_glyphs":route,"caption_text_stretch":best,"caption_ink":physical,
+            "caption_token_observations":readings, **({"caption_spacing_evidence": layout} if layout else {}),
+            "caption_vector_operations":[v["id"]for v,_ in objects]}
+
+
 def _resolve_rendered_stacked(result, target, source, directory):
     refs=[r for r in result["references"] if r["target_sheet"]==target
           and r["reference_form"]=="stacked_text_candidate" and r.get("target_detail")
@@ -1806,6 +2409,19 @@ def _resolve_rendered_stacked(result, target, source, directory):
                 evidence = _qualify_detail_title(source,target_page,region,label,True)
             except (OSError,ValueError,subprocess.TimeoutExpired):
                 evidence = label
+        if evidence:
+            model = _caption_line_geometry(region, stroke_vectors)
+            must_verify = _quantitative_caption(model, evidence.get("caption", ""))
+            if must_verify or "caption" not in evidence:
+                try:
+                    extra = _complete_caption_title(source, target_page, region, model)
+                except (OSError, ValueError, subprocess.TimeoutExpired):
+                    extra = None
+                if extra:
+                    evidence = dict(evidence, **extra)
+                elif must_verify:
+                    # A partial OCR title cannot override a quantitative mismatch.
+                    evidence.pop("caption", None)
         if evidence:
             pool = identified if "caption" in evidence else unconfirmed
             pool.setdefault(evidence["detail"], []).append(evidence)
