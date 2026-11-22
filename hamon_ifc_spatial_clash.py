@@ -696,6 +696,151 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
     return []
 
 
+class UnresolvedOpening(ValueError):
+    """The tessellation does not establish the net host geometry."""
+
+
+def _box_bounds(vertices, faces):
+    """Prove these twelve triangles tile all six sides of one cuboid."""
+    lo, hi = vertices.min(axis=0), vertices.max(axis=0)
+    extent = hi-lo
+    tol = max(1e-10, float(extent.max())*1e-10)
+    if min(extent) <= 4*tol or faces.shape != (12,3):
+        raise UnresolvedOpening("opening subtraction requires a verified cuboid")
+    bits = np.abs(vertices-hi) <= tol
+    if not np.all(bits | (np.abs(vertices-lo) <= tol)):
+        raise UnresolvedOpening("opening or host is not aligned to the host frame")
+    tiles = {}
+    for face in bits[faces]:
+        fixed = np.where(np.all(face == face[0],axis=0))[0]
+        if len(fixed) != 1:
+            raise UnresolvedOpening("degenerate or internal cuboid triangle")
+        axis = fixed[0]
+        face_key = (axis, bool(face[0,axis]))
+        projected = {tuple(np.delete(point,axis)) for point in face}
+        tiles.setdefault(face_key,[]).append(projected)
+    if len(tiles) != 6:
+        raise UnresolvedOpening("incomplete cuboid boundary")
+    for side in tiles.values():
+        if len(side) != 2 or any(len(tri) != 3 for tri in side):
+            raise UnresolvedOpening("cuboid side lacks two triangles")
+        diagonal = list(side[0] & side[1])
+        if len(diagonal) != 2 or not all(a != b for a,b in zip(*diagonal)):
+            raise UnresolvedOpening("cuboid triangles must share an interior diagonal")
+    return lo, hi
+
+
+def _subtract_opening_boxes(host, openings, frame):
+    # Work in the host placement, retaining the original SI/world registration.
+    origin, basis = frame[:3,3], frame[:3,:3]
+    def bounds(mesh):
+        return _box_bounds((mesh.vertices-origin) @ basis, mesh.faces)
+    lo, hi = bounds(host)
+    boxes = []
+    for opening in openings:
+        low, high = bounds(opening)
+        low, high = np.maximum(lo,low), np.minimum(hi,high)
+        if np.all(low < high):
+            boxes.append((low,high))
+    if not boxes:
+        return host
+    axes = [sorted({lo[d],hi[d]} | {corner[d] for box in boxes for corner in box})
+            for d in range(3)]
+    shape = tuple(len(axis)-1 for axis in axes)
+    if math.prod(shape) > 64000:
+        raise UnresolvedOpening("opening union exceeds bounded cell count")
+    material = np.ones(shape,dtype=bool)
+    for low,high in boxes:
+        region = tuple(slice(axes[d].index(low[d]),axes[d].index(high[d])) for d in range(3))
+        material[region] = False
+    vertices = []
+    indices = {}
+    triangles = []
+    for cell in zip(*np.nonzero(material)):
+        for d in range(3):
+            u,v = (d+1)%3,(d+2)%3
+            for side in (0,1):
+                neighbor = list(cell)
+                neighbor[d] += 2*side-1
+                if 0 <= neighbor[d] < shape[d] and material[tuple(neighbor)]:
+                    continue
+                quad = []
+                for du,dv in ((0,0),(1,0),(1,1),(0,1)):
+                    corner = list(cell)
+                    corner[d] += side
+                    corner[u] += du
+                    corner[v] += dv
+                    key = tuple(corner)
+                    if key not in indices:
+                        indices[key] = len(vertices)
+                        vertices.append([axes[i][corner[i]] for i in range(3)])
+                    quad.append(indices[key])
+                if side == 0:
+                    quad.reverse()
+                triangles.extend(((quad[0],quad[1],quad[2]),(quad[0],quad[2],quad[3])))
+    if not triangles:
+        return None
+    return SolidMesh3D(host.element_id,host.ifc_type,host.name,host.discipline,
+                       np.asarray(vertices) @ basis.T + origin,np.asarray(triangles,dtype=np.int32),
+                       {**host.metadata,"opening_ids":[opening.element_id for opening in openings]})
+
+
+def _require_single_swept_body(entities, step):
+    """Refuse partial bodies and curves the vertex reader cannot certify."""
+    def resolve(ref):
+        if not isinstance(ref, tuple) or ref[0] != "ref" or ref[1] not in entities:
+            raise UnresolvedOpening("missing source geometry for opening subtraction")
+        return entities[ref[1]]
+    _, shape = resolve(entities[step][1][6])
+    items = []
+    for ref in shape[2]:
+        kind, rep = resolve(ref)
+        if kind != "IFCSHAPEREPRESENTATION" or len(rep) < 4:
+            raise UnresolvedOpening("unverified opening representation")
+        if str(rep[1]).upper() in ("AXIS","BOX","FOOTPRINT"):
+            continue
+        if str(rep[1]).upper() != "BODY" or not isinstance(rep[3], list):
+            raise UnresolvedOpening("unverified opening body")
+        items.extend(rep[3])
+    if len(items) != 1:
+        raise UnresolvedOpening("expected one complete swept opening or host body")
+    kind, solid = resolve(items[0])
+    if kind != "IFCEXTRUDEDAREASOLID":
+        raise UnresolvedOpening("only direct cuboid extrusions are qualified")
+    profile, attrs = resolve(solid[0])
+    if profile == "IFCRECTANGLEPROFILEDEF":
+        return
+    if profile == "IFCARBITRARYCLOSEDPROFILEDEF":
+        curve, args = resolve(attrs[2])
+        if curve == "IFCPOLYLINE" and len(args[0]) == 5 and args[0][0] == args[0][-1]:
+            if all(resolve(ref)[0] == "IFCCARTESIANPOINT" for ref in args[0]):
+                return
+    raise UnresolvedOpening("unsupported swept opening or host profile")
+
+
+def _physical_occurrences(solids,entities,unit_scale):
+    related = {}
+    for kind,args in entities.values():
+        if kind != "IFCRELVOIDSELEMENT":
+            continue
+        if len(args) < 6 or any(not isinstance(ref,tuple) or ref[0]!="ref" for ref in args[4:6]):
+            raise UnresolvedOpening("malformed IFC opening relationship")
+        host, opening = args[4][1],args[5][1]
+        related.setdefault(host,set()).add(opening)
+    by_step = {s.metadata["step_id"]:s for s in solids}
+    for host,openings in related.items():
+        if host not in by_step or any(i not in by_step or
+                by_step[i].ifc_type not in ("IFCOPENINGELEMENT","IFCOPENINGSTANDARDCASE")
+                for i in openings):
+            raise UnresolvedOpening("missing or unsupported host/opening body")
+        for step in (host, *sorted(openings)):
+            _require_single_swept_body(entities, step)
+        frame = _resolve_local_placement(entities,entities[host][1][5],unit_scale)
+        by_step[host] = _subtract_opening_boxes(by_step[host],[by_step[i] for i in sorted(openings)],frame)
+    return [s for s in by_step.values() if s is not None and
+            s.ifc_type not in ("IFCOPENINGELEMENT","IFCOPENINGSTANDARDCASE")]
+
+
 def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
     entities = parse_ifc_entities(ifc_text)
     unit_scale = _detect_length_unit_scale(entities)
@@ -744,7 +889,7 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
                 faces=np.vstack(all_faces),
                 metadata={"step_id": eid, "unit_scale_m": unit_scale},
             ))
-    return solids
+    return _physical_occurrences(solids,entities,unit_scale)
 
 
 def parse_stl_mesh(data: bytes | str, element_id: str = "stl_0", name: str = "stl_part", scale_to_m: float = 1.0) -> SolidMesh3D:
@@ -1381,6 +1526,9 @@ def run_router_ifc_clash(payload: dict) -> dict:
                         if has_entities and zero_solids:
                             continue
                         return out
+                except UnresolvedOpening as exc:
+                    return {"ok":False,"tool":"hamon_ifc_spatial_clash","status":"unresolved_opening",
+                            "reason":str(exc),"total_solid_volume_m3":None}
                 except Exception:
                     continue
         if fallback_out is not None:
