@@ -954,7 +954,7 @@ def parse_chemical_formula(formula: str) -> Dict[str, float]:
 
 def _colebrook_dual_friction(re_num: float, rel_rough: float) -> Tuple[float, float]:
     if re_num < 2300.0:
-        return 64.0 / max(re_num, 1e-12), 0.0
+        return 64.0 / re_num, 0.0
     x = 1.0 / math.sqrt(0.25 / (math.log10(rel_rough / 3.7 + 5.74 / (re_num ** 0.9)) ** 2))
     ln10 = math.log(10.0)
     for _ in range(30):
@@ -968,6 +968,50 @@ def _colebrook_dual_friction(re_num: float, rel_rough: float) -> Tuple[float, fl
         else: hi = mid
     f_b = 1.0 / ((0.5 * (lo + hi)) ** 2)
     return f_n, abs(f_n - f_b) / f_n
+
+
+def _scalar_pipe_energy(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Steady pump duty for signed 1→2 flow and endpoint differences (2 minus 1).
+
+    Head loss is a magnitude. Excess hydraulic power requires dissipation or
+    separate recovery equipment; a pump efficiency does not model a turbine.
+    """
+    g = 9.80665
+    diameter, length, flow = (float(spec[k]) for k in ("pipe_D_m", "pipe_L_m", "Q_m3_s"))
+    rho = float(spec.get("rho_kg_m3", 998.2))
+    mu = float(spec.get("mu_Pa_s", 1.002e-3))
+    roughness = float(spec.get("roughness_m", 4.5e-5))
+    minor = float(spec.get("K_minor", 0.0))
+    efficiency = float(spec.get("pump_efficiency", 0.78))
+    dz = float(spec.get("delta_z_m", 0.0))
+    dp = float(spec.get("delta_P_Pa", 0.0))
+    rtol = float(spec.get("rtol", 1e-4))
+    if not all(math.isfinite(x) for x in (diameter, length, flow, rho, mu, roughness, minor, efficiency, dz, dp, rtol)):
+        raise ValueError("nonfinite scalar pipe input")
+    if min(diameter, rho, mu) <= 0 or min(length, roughness, minor, rtol) < 0 or not 0 < efficiency <= 1:
+        raise ValueError("invalid scalar pipe geometry, fluid properties, loss coefficient, tolerance or efficiency")
+
+    friction = error = None
+    head_loss = reynolds = hydraulic = 0.0
+    if flow != 0:
+        speed = abs(flow) / (0.25 * math.pi * diameter * diameter)
+        reynolds = rho * speed * diameter / mu
+        if not math.isfinite(reynolds) or reynolds <= 0:
+            raise ValueError("unrepresentable Reynolds number for nonzero flow")
+        friction, error = _colebrook_dual_friction(reynolds, roughness / diameter)
+        head_loss = (friction * (length / diameter) + minor) * (speed * speed) / (2.0 * g)
+        pump_head = math.fsum((dz, dp / (rho * g), math.copysign(head_loss, flow)))
+        hydraulic = rho * g * flow * pump_head
+        if not all(math.isfinite(x) for x in (friction, error, head_loss, hydraulic)) or friction <= 0:
+            raise ValueError("unrepresentable scalar pipe result")
+
+    shaft = max(hydraulic, 0.0) / efficiency
+    if not math.isfinite(shaft):
+        raise ValueError("unrepresentable shaft power")
+    return {"darcy_f": friction, "colebrook_dual_rel_error": error, "reynolds_number": reynolds,
+            "head_loss_m": head_loss, "required_hydraulic_power_W": hydraulic,
+            "required_shaft_power_W": shaft, "excess_hydraulic_power_W": max(-hydraulic, 0.0),
+            "pipe_balance_ok": error is None or error <= rtol}
 
 
 _HX_INPUTS = ("Th_in_K", "Th_out_K", "Tc_in_K", "Tc_out_K", "Ch_W_K", "Cc_W_K")
@@ -1077,16 +1121,14 @@ def verify_thermal_fluid_chemical_balance(spec: Dict[str, Any]) -> Dict[str, Any
         hx = _heat_exchanger_balance(spec, rtol)
         out.update(hx)
         all_ok = all_ok and hx["hx_balance_ok"]
-    if "pipe_D_m" in spec and "pipe_L_m" in spec:
-        g = 9.80665
-        dp, lp, qv = float(spec["pipe_D_m"]), float(spec["pipe_L_m"]), float(spec["Q_m3_s"])
-        rho, mu, eps = float(spec.get("rho_kg_m3", 998.2)), float(spec.get("mu_Pa_s", 1.002e-3)), float(spec.get("roughness_m", 4.5e-5))
-        vel = qv / (0.25 * math.pi * dp * dp)
-        re_n = rho * vel * dp / mu
-        f_dw, f_err = _colebrook_dual_friction(re_n, eps / dp)
-        hf = (f_dw * (lp / dp) + float(spec.get("K_minor", 0.0))) * (vel * vel) / (2.0 * g)
-        hp = float(spec.get("delta_z_m", 0.0)) + float(spec.get("delta_P_Pa", 0.0)) / (rho * g) + hf
-        out.update({"darcy_f": f_dw, "colebrook_dual_rel_error": f_err, "head_loss_m": hf, "required_shaft_power_W": rho * g * qv * hp / float(spec.get("pump_efficiency", 0.78))})
+    if "pipe_D_m" in spec or "pipe_L_m" in spec:
+        try:
+            pipe = _scalar_pipe_energy(spec)
+            out.update(pipe)
+            all_ok = all_ok and pipe["pipe_balance_ok"]
+        except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+            out.update(ok=False, pipe_balance_ok=False, pipe_error=str(exc))
+            all_ok = False
     checked = any(key in out for key in ("mass_balance_ok", "species_balance_ok", "hx_balance_ok", "darcy_f"))
     out["conservation_verified"] = bool(checked and all_ok)
     return out
