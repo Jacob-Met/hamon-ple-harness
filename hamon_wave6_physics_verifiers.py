@@ -492,25 +492,45 @@ def solve_transmission_line_rlc(params: Mapping[str, Any]) -> Dict[str, Any]:
     if subkind == "transmission_line":
         z0 = complex(params.get("Z0", 50.0))
         zl = complex(float(params.get("R_L", 100.0)), float(params.get("X_L", 0.0)))
-        alpha_l = float(params.get("alpha_np_m", 0.0)) * float(params.get("length_m", 1.0))
-        if "length_wavelengths" in params and params["length_wavelengths"] is not None:
-            beta_l = 2.0 * math.pi * float(params["length_wavelengths"])
+        length = float(params.get("length_m", 1.0))
+        alpha_l = float(params.get("alpha_np_m", 0.0)) * length
+        if params.get("length_wavelengths") is not None:
+            turns = math.remainder(float(params["length_wavelengths"]), 0.5)
+            invert = abs(turns) > 0.125
+            if invert:
+                turns -= math.copysign(0.25, turns)
+            phase = math.tau * turns
         else:
-            beta_l = float(params.get("beta_rad_m", 0.0)) * float(params.get("length_m", 1.0))
+            beta_l = float(params.get("beta_rad_m", 0.0)) * length
+            sine, cosine = math.sin(beta_l), math.cos(beta_l)
+            invert = abs(sine) > abs(cosine)
+            phase = math.atan(-cosine / sine if invert else sine / cosine)
 
-        gamma_load = (zl - z0) / (zl + z0)
-        gamma_in = gamma_load * np.exp(-2.0 * complex(alpha_l, beta_l))
-        z_in = z0 * (1.0 + gamma_in) / (1.0 - gamma_in)
+        # Work within an eighth wavelength of zero. An extra quarter turn
+        # interchanges the load and characteristic impedance in the transform.
+        scale = max(abs(zl), abs(z0))
+        load, line = zl / scale, z0 / scale
+        gamma_load = (load - line) / (load + line)
         mag_g = abs(gamma_load)
-        vswr = (1.0 + mag_g) / (1.0 - mag_g) if mag_g < 1.0 - 1e-15 else float("inf")
+        # Rationalizing 1 - |Gamma| preserves finite VSWR for large mismatch.
+        power = 4.0 * (load * line.conjugate()).real
+        vswr = ((abs(load + line) + abs(load - line)) ** 2 / power
+                if power > 0 else float("inf"))
         return_loss_db = -20.0 * math.log10(max(mag_g, 1e-300))
 
-        gl = complex(alpha_l, beta_l)
-        if abs(alpha_l) < 1e-15 and abs(math.cos(beta_l)) < 1e-12:
-            z_in_check = (z0 * z0) / zl
-        else:
-            t_gl = np.tanh(gl)
-            z_in_check = z0 * (zl + z0 * t_gl) / (z0 + zl * t_gl)
+        a, b = (line, load) if invert else (load, line)
+        t = complex(np.tanh(complex(alpha_l, phase)))
+        z_in = z0 * ((a + b * t) / (b + a * t))
+
+        # Independently propagate voltage and current through the ABCD
+        # matrix. Its common cosh(alpha*l) factor cancels in their ratio.
+        sine, cosine = math.sin(phase), math.cos(phase)
+        loss = math.tanh(alpha_l)
+        cosh_gl = complex(cosine, loss * sine)
+        sinh_gl = complex(loss * cosine, sine)
+        voltage = a * cosh_gl + b * sinh_gl
+        current = b * cosh_gl + a * sinh_gl
+        z_in_check = z0 * (voltage / current)
         residual = abs(z_in - z_in_check) / max(abs(z_in), abs(z0), 1e-15)
         return {
             "domain": "rf_transmission_rlc",
