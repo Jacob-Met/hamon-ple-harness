@@ -926,6 +926,7 @@ def run(argv=None):
     dm.add_argument("file");dm.add_argument("spec")
     dl=sub.add_parser("pdf-dimension-links",help="Ground printed dimensions to actual PDF vector lines with two witnessed ends")
     dl.add_argument("file");dl.add_argument("--page",type=int,default=1)
+    dl.add_argument("--dxf",help="Register outlined PDF marker axes to this explicit ASCII DXF sidecar")
     da=sub.add_parser("pdf-auto-measure",help="Conditionally calibrate and measure from machine-witnessed source dimensions")
     da.add_argument("file");da.add_argument("spec")
     c=sub.add_parser("ifc-broadphase",help="Optional IfcOpenShell world-coordinate envelope overlaps")
@@ -970,7 +971,8 @@ def run(argv=None):
             out=hamon_scale.measure_pdf(args.file,args.spec,quantity,UNITS["m"])
         elif args.cmd=="pdf-dimension-links":
             import hamon_callout
-            out=hamon_callout.associate_pdf(args.file,args.page)
+            out=(hamon_callout.associate_sidecar(args.file,args.dxf,args.page) if args.dxf
+                 else hamon_callout.associate_pdf(args.file,args.page))
         elif args.cmd=="pdf-auto-measure":
             import hamon_callout
             out=hamon_callout.auto_measure_pdf(args.file,args.spec,quantity,UNITS["m"])
