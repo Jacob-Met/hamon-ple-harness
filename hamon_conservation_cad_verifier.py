@@ -561,11 +561,40 @@ def _parse_spice_num(tok: str) -> float:
     return float(m.group(1)) * (_SPICE_SCALE[m.group(2)] if m.group(2) else 1.0)
 
 
-def _parse_spice_netlist(netlist: str) -> Tuple[List[Dict[str, Any]], float]:
+def _independent_source_value(tokens: List[str], frequency: float) -> Tuple[float, float]:
+    """Read independent DC operating-point and AC small-signal excitations."""
+    clauses: Dict[str, List[float]] = {}
+    current = "DC"
+    for token in tokens:
+        keyword = token.upper()
+        if keyword in ("DC", "AC"):
+            if keyword in clauses:
+                raise ValueError(f"Duplicate {keyword} clause in independent source")
+            current = keyword
+            clauses[current] = []
+            continue
+        if not re.fullmatch(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?[A-Za-z]*", token):
+            raise ValueError(f"Unsupported independent source value {token!r}")
+        value = _parse_spice_num(token)
+        if not math.isfinite(value):
+            raise ValueError(f"Nonfinite independent source value {token!r}")
+        clauses.setdefault(current, []).append(value)
+
+    dc = clauses.get("DC", [0.0])
+    ac = clauses.get("AC", [0.0])
+    if len(dc) != 1 or len(ac) > 2:
+        raise ValueError("Invalid number of values in independent source DC or AC clause")
+    if frequency > 0:
+        return (ac[0] if ac else 1.0), (ac[1] if len(ac) == 2 else 0.0)
+    return dc[0], 0.0
+
+
+def _parse_spice_netlist(netlist: str, frequency_override: Optional[float] = None) -> Tuple[List[Dict[str, Any]], float]:
     branches: List[Dict[str, Any]] = []
+    source_clauses = []
     freq_hz = 0.0
     for idx, raw_line in enumerate(netlist.splitlines()):
-        line = raw_line.split("*")[0].split(";")[0].strip()
+        line = raw_line.split("*")[0].split(";")[0].split("$")[0].strip()
         if not line or (idx == 0 and not re.match(r"^[RLCVIGrlcvig\.]", line)):
             continue
         if line.lower().startswith(".end"):
@@ -581,13 +610,16 @@ def _parse_spice_netlist(netlist: str) -> Tuple[List[Dict[str, Any]], float]:
         kind = toks[0][0].upper()
         if kind in ("R", "L", "C") and len(toks) >= 4:
             branches.append({"name": toks[0], "type": kind, "n_pos": toks[1], "n_neg": toks[2], "value": _parse_spice_num(toks[3])})
-        elif kind in ("V", "I") and len(toks) >= 4:
-            rest = [t for t in toks[3:] if t.upper() not in ("DC", "AC")]
-            mag = _parse_spice_num(rest[0])
-            ph = float(rest[1]) if len(rest) >= 2 and "AC" in [t.upper() for t in toks[3:]] else 0.0
-            branches.append({"name": toks[0], "type": kind, "n_pos": toks[1], "n_neg": toks[2], "value": mag, "phase_deg": ph})
+        elif kind in ("V", "I") and (len(toks) >= 4 or (idx > 0 and len(toks) == 3)):
+            branch = {"name": toks[0], "type": kind, "n_pos": toks[1], "n_neg": toks[2]}
+            branches.append(branch)
+            source_clauses.append((branch, toks[3:]))
         elif kind == "G" and len(toks) >= 6:
             branches.append({"name": toks[0], "type": "G", "n_pos": toks[1], "n_neg": toks[2], "nc_pos": toks[3], "nc_neg": toks[4], "value": _parse_spice_num(toks[5])})
+    if frequency_override is not None:
+        freq_hz = float(frequency_override)
+    for branch, tokens in source_clauses:
+        branch["value"], branch["phase_deg"] = _independent_source_value(tokens, freq_hz)
     return branches, freq_hz
 
 
@@ -608,12 +640,9 @@ def _complex_gauss_solve(a_mat: np.ndarray, b_vec: np.ndarray) -> np.ndarray:
 
 
 def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
-    if spec.get("netlist"):
-        branches, nl_freq = _parse_spice_netlist(str(spec["netlist"]))
-        freq_hz = float(spec.get("freq_hz", nl_freq))
-    elif spec.get("file_b64"):
-        branches, nl_freq = _parse_spice_netlist(base64.b64decode(spec["file_b64"]).decode("utf-8", errors="replace"))
-        freq_hz = float(spec.get("freq_hz", nl_freq))
+    if spec.get("netlist") or spec.get("file_b64"):
+        netlist = str(spec["netlist"]) if spec.get("netlist") else base64.b64decode(spec["file_b64"]).decode("utf-8", errors="replace")
+        branches, freq_hz = _parse_spice_netlist(netlist, spec.get("freq_hz"))
     else:
         branches = list(spec.get("branches") or [])
         freq_hz = float(spec.get("freq_hz", 0.0))
