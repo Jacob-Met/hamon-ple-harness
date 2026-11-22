@@ -58,7 +58,13 @@ def _start_mock_relay(workdir: Path, log_ops: list):
             op = self.path.rsplit("/", 1)[-1]
             log_ops.append(op)
             target = (workdir / req.get("path", "")).resolve()
-            if op == "read_file" and target.is_file():
+            if op == "exec":
+                proc = subprocess.run(["bash", "-c", req["command"]], cwd=workdir,
+                                      capture_output=True, text=True, timeout=20)
+                body = json.dumps({"exit_code": proc.returncode,
+                                   "output": proc.stdout + proc.stderr,
+                                   "timed_out": False, "truncated": False})
+            elif op == "read_file" and target.is_file():
                 content = target.read_bytes()
                 body = json.dumps({"ok": True, "size": len(content), "truncated": False,
                                    "content_b64": base64.b64encode(content).decode("ascii")})

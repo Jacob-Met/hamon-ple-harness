@@ -348,33 +348,33 @@ function _registerPleWave3DomainTools(pi: any) {
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Task-container path to a deliverable file or .zip archive" },
+        path: { type: "string", description: "Task-container path to a deliverable file, directory, or .zip archive" },
         expected_task_ids: { type: "array", items: { type: "string" }, description: "Optional required task IDs" },
       },
       required: ["path"],
     },
     async execute(_id: string, params: any) {
       const taskPath = String(params.path);
-      const raw = await _pleReadTaskBytes(taskPath);
-      const tempDir = _pleFs.mkdtempSync(_plePath.join(tmpdir(), "ple-pre-"));
-      try {
-        const targetPath = _plePath.join(
-          tempDir, "deliverable" + (_plePath.extname(taskPath) || ".bin"));
-        _pleFs.writeFileSync(targetPath, raw);
-        const details = await _pleRunPythonJson("hamon_ifc_spatial_clash.py", {
-          mode: "preflight",
-          path: targetPath,
-          expected_task_ids: params.expected_task_ids ?? null,
-        });
-        // Report the verified task path rather than an ephemeral local copy.
-        details.path = taskPath;
-        return {
-          content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
-          details,
-        };
-      } finally {
-        _pleFs.rmSync(tempDir, { recursive: true, force: true });
+      const srcDir = process.env.TASK_HARNESS_SRC || _PLE_HERE_DIR;
+      const source = _pleFs.readFileSync(_plePath.join(srcDir, "hamon_preflight.py"), "utf8");
+      const payload = JSON.stringify({
+        path: taskPath,
+        expected_task_ids: params.expected_task_ids ?? null,
+      });
+      // Inspect files and directories in their original task filesystem. Copying
+      // or re-zipping directories would change the existing symlink checks.
+      const result = await relay("exec", {
+        command: `python3 -c ${quote(source)} ${quote(payload)}`,
+        timeout_sec: 120,
+      });
+      if (result.truncated || result.timed_out || result.exit_code !== 0) {
+        throw new Error(`Task preflight did not complete: ${result.output ?? ""}`);
       }
+      const details = JSON.parse(result.output ?? "");
+      return {
+        content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
+        details,
+      };
     },
   });
 }
