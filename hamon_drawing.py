@@ -1061,9 +1061,15 @@ def _divided_source_mark(ref, markers, horizontal):
                or any(((xx-x)/r)**2+((cy-y)/r)**2 >= 1.0 for xx in (box[0],box[2]))
                for box,cy in ((n,ny),(s,sy))):
             continue
-        rules = [v for lo,hi,cy,v in horizontal if abs(cy-y)<.08*r and lo<=a+.12*r and hi>=c-.12*r]
-        if len(rules)==1:
-            matches.append({"ring":m, "divider":rules[0], "numerator_line":numerators[0]["line"]})
+        rules = [(lo, hi, cy, v) for lo, hi, cy, v in horizontal
+                 if abs(cy-y) < .08*r and lo <= a+.12*r and hi >= c-.12*r]
+        if len(rules) == 1:
+            matches.append({"ring":m, "divider":rules[0][3], "numerator_line":numerators[0]["line"]})
+        elif len(rules) > 1 and len(set(rule[:3] for rule in rules)) == len(rules):
+            # Multiple vector segments are provisional until the raster establishes
+            # that they occupy one printed band across this particular ring.
+            matches.append({"ring": m, "divider_segments": rules,
+                            "numerator_line": numerators[0]["line"]})
     return matches[0] if len(matches)==1 else None
 
 
@@ -1110,6 +1116,55 @@ def _caption_raster(source, page, box, scale, erase_ring=False, pixel_limit=2500
                 if ((x+.5-cx)/rx)**2+((y+.5-cy)/ry)**2>.91**2:
                     pixels[y*width+x]=255
     return f"P5\n{width} {height}\n255\n".encode()+pixels
+
+
+def _single_divider_band(source, page, evidence):
+    """Verify multiple vector witnesses against a single continuous printed band."""
+    ring = evidence["ring"]["box"]
+    cx = (ring[0] + ring[2]) / 2
+    radius = (ring[2] - ring[0]) / 2
+    heights = [line[2] for line in evidence["divider_segments"]]
+    lo, hi = min(heights), max(heights)
+    scale = 8
+    box = [cx - .8*radius, lo - .2*radius, cx + .8*radius, hi + .2*radius]
+    try:
+        raster = _caption_raster(source, page, box, scale)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if raster is None:
+        return None
+    _, shape, _, ink = raster.split(b"\n", 3)
+    width, height = map(int, shape.split())
+    left, top = math.floor(box[0]*scale), math.floor(box[1]*scale)
+    y0, y1 = (round(y*scale - top - .5) for y in (lo, hi))
+    # The centerline can lie on a pixel edge. Allow one pixel of coverage on
+    # each outside boundary, but reject a white row *between* distinct strokes.
+    mid = (y0 + y1) // 2
+    contrast_checks = {round((cx + t*radius)*scale - left - .5)
+                       for t in (-.7, -.45, .45, .7)}
+    x0, x1 = min(contrast_checks), max(contrast_checks)
+    previous = None
+    for x in range(x0, x1+1):
+        if not (0 <= x < width and 0 < mid < height-1):
+            return None
+        def dark(y):
+            return ink[y*width+x] < 170
+        anchor = next((y for y in (mid, mid-1, mid+1) if dark(y)), None)
+        if anchor is None:
+            return None
+        first = last = anchor
+        while first and dark(first-1):
+            first -= 1
+        while last+1 < height and dark(last+1):
+            last += 1
+        if first > y0+1 or last < y1-1:
+            return None
+        if x in contrast_checks and (first == 0 or last == height-1):
+            return None
+        if previous is not None and (first > previous[1] or last < previous[0]):
+            return None
+        previous = first, last
+    return {"dpi": 72*scale, "columns": x1-x0+1, "vector_segments": len(heights)}
 
 
 def _ink_window(source, page, markers):
@@ -1228,15 +1283,53 @@ def _read_caption_words(pgm, psm, digits=False):
     return words
 
 
+def _frame_detail_digits(pgm):
+    """Give the same printed numeral a consistent white border without changing the glyphs."""
+    if not pgm or not pgm.startswith(b"P5\n"):
+        return None
+    _, shape, _, pixels = pgm.split(b"\n", 3)
+    width, height = map(int, shape.split())
+    ink = [(i % width, i // width) for i, value in enumerate(pixels) if value <= 160]
+    if not ink:
+        return None
+    xs, ys = zip(*ink)
+    left, right = min(xs), max(xs) + 1
+    top, bottom = min(ys), max(ys) + 1
+    if right - left < 2 or bottom - top < .22 * height:
+        return None
+    margin = max(8, round((bottom - top) / 4))
+    w, h = right - left + 2 * margin, bottom - top + 2 * margin
+    frame = bytearray(b"\xff" * (w * h))
+    for y in range(top, bottom):
+        offset = (y - top + margin) * w + margin
+        frame[offset:offset + right - left] = pixels[y * width + left:y * width + right]
+    return f"P5\n{w} {h}\n255\n".encode() + frame
+
+
 def _read_ruled_detail(source, page, region):
-    recognized=[]
-    for scale,mode,restrict_digits in ((4,8,True),(6,10,False)):
-        words=_read_caption_words(_caption_raster(source,page,region["ring"]["box"],scale,True),mode,restrict_digits)
-        if len(words)!=1 or not re.fullmatch(r"[1-9]\d?",words[0][0]) or words[0][1]<80:
+    recognized = []
+    views = []
+    for scale, mode, digits_only in ((4, 8, True), (6, 10, False)):
+        crop = _caption_raster(source, page, region["ring"]["box"], scale, True)
+        words = _read_caption_words(crop, mode, digits_only)
+        if len(words) != 1 or not re.fullmatch(r"[1-9]\d?", words[0][0]):
             return None
         recognized.append(words[0])
-    if recognized[0][0]!=recognized[1][0]:
+        views.append((crop, mode, digits_only))
+    detail = recognized[0][0]
+    if recognized[1][0] != detail:
         return None
+    if min(confidence for _, confidence in recognized) < 80:
+        # Retry confidence only. Both original reads must already agree on the complete numeral.
+        recognized = []
+        for crop, mode, digits_only in views:
+            framed = _frame_detail_digits(crop)
+            if framed is None:
+                return None
+            words = _read_caption_words(framed, mode, digits_only)
+            if len(words) != 1 or words[0][0] != detail or words[0][1] < 80:
+                return None
+            recognized.append(words[0])
     title=_read_caption_words(_caption_raster(source,page,region["caption_box"],3),7)
     if sum(bool(re.search(r"[A-Za-z]{2}",word)) and confidence>=70 for word,confidence in title)<2:
         return None
@@ -1262,6 +1355,11 @@ def _resolve_rendered_stacked(result, target, source, directory):
                  if (evidence:=_divided_source_mark(ref,markers,lines))]
         ink=_ink_window(source,page,[e["ring"] for ref,e in matches])
         for ref,evidence in matches:
+            if "divider_segments" in evidence:
+                band = _single_divider_band(source, page, evidence)
+                if band is None:
+                    continue
+                evidence["printed_divider_band"] = band
             visible=_printed_mark(ink,evidence["ring"])
             text_ink = _printed_source_tokens(ink, evidence["ring"], ref) if visible else None
             if text_ink:
