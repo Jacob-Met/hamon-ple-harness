@@ -1,0 +1,188 @@
+{
+  "version": 1,
+  "title": "Bounded dew/frost-point diagnostic and explicit unavailability",
+  "base_commit": "d20a6dc882302c09e6f5ae23e9796d91dfcea36c",
+  "base_tree": "7f751cfd7dca0adb7394e0c81addef1fcdb05ee1",
+  "scope_sha256": "6180cd2f733ae740c938c5ef2b1ba6d70bdd76fe642ec9b4136ec974f46aec1b",
+  "source": {
+    "file": "hamon_pde_control_psychro_fem.py",
+    "stock_sha256": "fb9df9c4c4ca5003aea5dd307e686f2401841827d3601ffa4e344f7b4e703291",
+    "candidate_sha256": "d6454765c1b756b3bc8fcb7bca0efc4b8f7d8cd9039310f757e7627be7c7864c",
+    "patch_sha256": "53c06c9073ba57a31882f8bbfa916a2ac66a8de31595118d56b34e7a4d5fc969",
+    "pre_authoring_endpoint_note_sha256": "08b5110a98086fab6c0be4ccfbc9e039a60689e18fe32aa0d3df6e98de6261c8"
+  },
+  "diagnostic": {
+    "field": "t_dp_c",
+    "exceptional_status_field": "t_dp_status",
+    "phase_policy": "Preserve the computed diagnostic's default0C ice/water switch, including when an alternate process forward state uses0.01C. No new round-trip promise in that narrow interval.",
+    "supported_branches": {
+      "ice": "[-100,nextafter(0,-infinity)]C",
+      "water": "[0,200]C"
+    },
+    "statuses": {
+      "dry_no_finite_point": "pw equals zero; no finite dew/frost point",
+      "below_correlation_range": "positive pw below the supported ice endpoint",
+      "above_correlation_range": "pw above the supported water endpoint",
+      "phase_gap": "between outer bounds but in neither phase pressure range",
+      "phase_overlap": "pressure belongs to both phase ranges, if encountered",
+      "invalid_vapor_pressure": "defensive internal invalid-pressure diagnostic"
+    },
+    "ordinary": "Finite results carry no new status field.",
+    "endpoints": [
+      "Membership is checked before endpoint conventions.",
+      "Unique membership and exact endpoint pressure equality returns-100,0 or200C as appropriate.",
+      "Ice upper pressure retains a legacy negative result when it lies in the selected branch; otherwise returns nextafter(0,-infinity), never water's zero."
+    ],
+    "inversion": "Extract the unchanged70-midpoint loop. Retain its original[-80,150] calculation when the old pressure bracket contains the target and its result lies in the selected phase. Otherwise use the supported phase bracket.",
+    "limits": "Rounded saturation pressure need not identify a unique binary64 temperature. No exact physical-root or one-ULP certificate."
+  },
+  "scope": {
+    "changed": [
+      "Computed dew/frost-point inversion and optional unavailable status",
+      "Remove the caller's independent dry-air-100C sentinel",
+      "Remove misleading 'exact' wording from the module description"
+    ],
+    "unchanged": [
+      "Saturation coefficients and forward arithmetic",
+      "Numeric input types and precedence",
+      "Computed diagnostic default0C phase policy",
+      "Wet-bulb signed inverse and explicit-input feasibility",
+      "Physical humidity, pressure, enthalpy, volume and saturation-degree arithmetic",
+      "Physical pass predicate and RH tolerance",
+      "Mixing/cooling and phase-equilibrium equations",
+      "Shared scalar comparison",
+      "All other engineering work"
+    ],
+    "explicit_input_limit": "Null computed output does not become a valid input. Extrapolated explicit dew-point input validation is separate and outside this change."
+  },
+  "receiver": {
+    "file": "tests/test_dew_frost_diagnostic.py",
+    "sha256": "ca1843f0f2296e3c7a85a7102f316ae4e39c872969660868f98b4a10af6775d5",
+    "oracle": "80-digit Decimal Horner evaluation of the primary2017 coefficient equations and independently expressed pressure-to-humidity conversion. No producer helper imports or candidate-output oracle.",
+    "pressure_relative_tolerance": 2e-12,
+    "pressure_absolute_tolerance": 0,
+    "temperature_tolerance_C": 1e-8,
+    "execution": "All17 unclaimed states/processes and14 claims before the aggregate assertion. Preserve raw decisions and printable solver/strict-JSON errors.",
+    "case_order": [
+      "pressure/ice-minus90",
+      "pressure/water170",
+      "roundtrip/explicit-minus90",
+      "endpoint/ice-lower",
+      "endpoint/water-lower",
+      "endpoint/water-upper",
+      "unavailable/dry-rh",
+      "unavailable/dry-W",
+      "unavailable/below",
+      "unavailable/gap",
+      "unavailable/above-RH-tolerance",
+      "ordinary/RH-half",
+      "ordinary/frost-minus20",
+      "ordinary/dew-plus5",
+      "endpoint/ice-upper",
+      "process/mixing",
+      "process/cooling"
+    ],
+    "evidence_classes": {
+      "independent_pressure_inversions": "W from independent pressure at-90C (Tdb20,P101325Pa) and170C (Tdb185,P5MPa), with pressure and temperature checks.",
+      "round_trip": "Explicit-90C input, pressure independently corroborated; public forward/inverse consistency.",
+      "closed_endpoints": "Explicit-100C, explicit0C and RH1 at200C/P5MPa have exact endpoint output/claim conventions.",
+      "unavailable": "Dry RH0/W0, positive W1e-16 below support, W from611.18Pa within the default phase gap, and pressure above pws200 within the existing W-branch RH tolerance.",
+      "ordinary_controls": "RH0.5 at20C, explicit frost-20C, explicit dew5C, ordinary RH-driven mixing and cooling.",
+      "ice_upper": "Explicit nextafter(0,-infinity); pressure corroborated against primary ice limit; returned point must be in[-1e-8,nextafter(0,-infinity)]. No uniquely determined floating temperature asserted."
+    },
+    "above_range_control": "Tdb200C/P5MPa with W from1.00001 times independent pws(200); explicitly require pws(200)<pw<1.0001*pws(200). This exercises the existing admission tolerance, not strict physical undersaturation or new real-fluid accuracy."
+  },
+  "claims": {
+    "requests": 14,
+    "approvals": 6,
+    "refusals": 8,
+    "extension_pairs": "Each of the three extension/round-trip cases receives a truthful target and false old clipping endpoint; atol1e-8C,rtol0.",
+    "endpoint_controls": "The three closed endpoints receive exact matching claims with atol0,rtol0.",
+    "null_controls": "Five unavailable diagnostics receive a false old numeric value; gap uses0C with atol1e-8C to include the legacy bisection limit. Other null challenges use atol0. All rtol0.",
+    "null_refusal": "passed=False with reason, unchanged null/status, and no claim_check; finite mismatches use the existing scalar comparison."
+  },
+  "expected": {
+    "systems": 17,
+    "ordinary_approvals": 17,
+    "complete_ordinary": 17,
+    "claims": 14,
+    "claim_approvals": 6,
+    "claim_refusals": 8,
+    "total_requests": 31,
+    "total_approvals": 23,
+    "total_refusals": 8,
+    "claim_failures": 0,
+    "solver_errors": 0,
+    "json_errors": 0
+  },
+  "preservation": {
+    "new_course_non_dew_projections": 17,
+    "only_excluded_fields": [
+      "t_dp_c",
+      "t_dp_status"
+    ],
+    "full_controls": [
+      "ordinary/RH-half",
+      "ordinary/frost-minus20",
+      "ordinary/dew-plus5",
+      "process/mixing",
+      "process/cooling"
+    ],
+    "inherited_wet": {
+      "file": "tests/test_explicit_wet_bulb_domain.py",
+      "original_sha256": "7796b4e90e0fa4e4149704afb90fd3565ae48e3f6ef8bac9e38ee540d0206889",
+      "reporting_only_sha256": "f203fbac2d9f3bc13ab26f1e3dff7c2353b931de629c0f5b2059e3a8dbbd74ed",
+      "patch_sha256": "3fba379a18104455ae8a3ea22fe8302294ded5004d59fef3caade9d52baa6247",
+      "new_field": "non_dew_sha256",
+      "requests": 32,
+      "requirement": "All requests/order/assertions and existing whole/projection hashes are retained. Stock full hashes must equal the original landed wet candidate. Across the new pair, all32 new non-dew hashes and all remaining row fields must match except the two original hash fields whose dew diagnostic may intentionally change; the wet bracket remains in the new digest."
+    },
+    "other_inherited_courses": [
+      "fin32/70",
+      "scalar29/58",
+      "DC14/28",
+      "Bode11/34",
+      "transfer20/80",
+      "rank49/196",
+      "Lyapunov32/128",
+      "diagnostics17/68"
+    ],
+    "other_inherited_ordered_records": 204,
+    "gates": "Every maintained CI and actual-tool gate. No workflow edits."
+  },
+  "registered_pi": {
+    "file": "tests/test_registered_engineering_verifiers.py",
+    "sha256": "3379090c381c1fc3b0123876d56f3a3a1077b7615c635d17272cbb8c365fa211",
+    "patch_sha256": "11b7da7288baf73062a62c2579efee676da88015c1ba7f178fc260c75cc94a26",
+    "requests": 8,
+    "ordinary": 4,
+    "ordinary_approvals": 4,
+    "claims": 4,
+    "claim_approvals": 1,
+    "claim_refusals": 3,
+    "approvals": 5,
+    "refusals": 3,
+    "cases": [
+      "dew-frost",
+      "dew-frost-true",
+      "dew-frost-old-floor",
+      "dew-dry",
+      "dew-dry-old-sentinel",
+      "dew-ordinary",
+      "dew-below-range",
+      "dew-below-old-floor"
+    ],
+    "temperatures": "All Tdb20C/P101325Pa. The truthful-90C claim uses1e-8C absolute tolerance. All false numeric claims use zero tolerance.",
+    "delivery": "Actual registered tool.execute with all requests batched before assertions, dedicated unittest wrapper and eight parameterized pytest cases. No JS changes or null inputs."
+  },
+  "first_execution": "After this protocol, source, both receiver additions, reporting-only inherited receiver and README/heads are frozen and preregistered, run the first maintained PR stock/candidate pair. No local numerical execution or after-output retuning.",
+  "receipt": "Preserve both original complete CI logs once; verify actual checkout trees and source blobs, scoped preservation and the exact landed tree. Any concurrent main change needs explicit combined qualification.",
+  "primary_sources": [
+    {
+      "title": "ASHRAE Fundamentals2017 SI Chapter1 equations5/6",
+      "url": "https://handbook.ashrae.org/Handbooks/F17/SI/f17_ch01/f17_ch01_si.aspx",
+      "interpretation": "Documented support of the actual ice/liquid coefficients in this source; do not substitute the different2025 correlation. All returned temperatures remain approximate model inversions."
+    }
+  ],
+  "claim_limit": "Maintained source qualification only. No new model/contest score, timing comparison, universal phase round-trip, exact transcendental arithmetic or exact thermodynamic-root certificate."
+}

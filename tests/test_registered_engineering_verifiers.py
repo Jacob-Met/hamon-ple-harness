@@ -234,6 +234,20 @@ WET_BULB_CASES = [
 ]
 
 
+# Each system uses a numeric input. None in the claim column means an ordinary
+# request; none of these calls submits null as a dew-point temperature.
+DEW_POINT_CASES = [
+    ("dew-frost", {"t_dp_c": -90}, None, None, True),
+    ("dew-frost-true", {"t_dp_c": -90}, (-90, 1e-8), None, True),
+    ("dew-frost-old-floor", {"t_dp_c": -90}, (-80, 0), None, False),
+    ("dew-dry", {"rh": 0}, None, "dry_no_finite_point", True),
+    ("dew-dry-old-sentinel", {"rh": 0}, (-100, 0), "dry_no_finite_point", False),
+    ("dew-ordinary", {"rh": 0.5}, None, None, True),
+    ("dew-below-range", {"w_kg_per_kgda": 1e-16}, None, "below_correlation_range", True),
+    ("dew-below-old-floor", {"w_kg_per_kgda": 1e-16}, (-80, 0), "below_correlation_range", False),
+]
+
+
 @pytest.fixture(scope="module")
 def routed(tmp_path_factory):
     workdir = tmp_path_factory.mktemp("registered-engineering")
@@ -341,6 +355,12 @@ def routed(tmp_path_factory):
                 "atol": 0, "rtol": 0}})
     for case, system, _ in WET_BULB_CASES:
         calls.append({"id": case, "mode": "psychrometrics", "spec": {**system, "p_atm_pa": 101325}})
+    for case, inputs, claim, _, _ in DEW_POINT_CASES:
+        spec = {"mode": "state", "t_db_c": 20, "p_atm_pa": 101325, **inputs}
+        if claim is not None:
+            value, atol = claim
+            spec.update(claimed_field="t_dp_c", claimed_value=value, atol=atol, rtol=0)
+        calls.append({"id": case, "mode": "psychrometrics", "spec": spec})
     source = r"""
 import registerTaskTools, { PLE_DOMAIN_TOOL_NAMES } from './task-tools.ts';
 const tools = new Map();
@@ -904,6 +924,38 @@ def test_registered_wet_bulb_feasibility(routed, case, system, passed):
         assert state["t_wb_c"] == pytest.approx(state["t_db_c"], rel=0, abs=1e-8)
 
 
+@pytest.mark.parametrize("case,inputs,claim,status,passed", DEW_POINT_CASES,
+                         ids=[row[0] for row in DEW_POINT_CASES])
+def test_registered_dew_point_domain(routed, case, inputs, claim, status, passed):
+    reply = routed[case]
+    assert reply["completed"], reply
+    state = reply["details"]
+    assert state["domain"] == "psychrometrics" and state["mode"] == "state"
+    assert state["passed"] is passed, state
+    assert state["t_db_c"] == 20
+    if status is None:
+        assert "t_dp_status" not in state
+        assert state["pw_pa"] > 0 and state["w_kg_per_kgda"] > 0
+        if "t_dp_c" in inputs:
+            assert state["t_dp_c"] == pytest.approx(-90, rel=0, abs=1e-8)
+        else:
+            assert state["rh"] == 0.5 and 9 < state["t_dp_c"] < 10
+    else:
+        assert state["t_dp_c"] is None and state["t_dp_status"] == status
+        if status == "dry_no_finite_point":
+            assert state["pw_pa"] == state["w_kg_per_kgda"] == state["rh"] == 0
+        else:
+            assert state["w_kg_per_kgda"] == 1e-16 and 0 < state["pw_pa"] < 2e-11
+    if not passed:
+        assert isinstance(state.get("reason"), str) and state["reason"].strip()
+    if claim is None or status is not None:
+        assert "claim_check" not in state
+    else:
+        comparison = state["claim_check"]
+        assert comparison["field"] == "t_dp_c" and comparison["claimed"] == claim[0]
+        assert comparison["actual"] == state["t_dp_c"] and comparison["within_tolerance"] is passed
+
+
 class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -978,3 +1030,8 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
         for args in WET_BULB_CASES:
             with self.subTest(case=args[0]):
                 test_registered_wet_bulb_feasibility(self.routed_data, *args)
+
+    def test_registered_dew_point_domain(self):
+        for args in DEW_POINT_CASES:
+            with self.subTest(case=args[0]):
+                test_registered_dew_point_domain(self.routed_data, *args)

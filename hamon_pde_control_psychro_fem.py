@@ -20,7 +20,7 @@ numerical cross-verification suite for Physical Engineering's Last Exam (PLE):
        certificates for stability (Q=I) and the requested forcing matrix Q.
   3. Psychrometrics (`verify_psychrometric_process`):
      - ASHRAE Fundamentals (Hyland-Wexler 1983) saturation vapor pressure over ice & liquid,
-       exact moist-air state inversion (from RH, wet-bulb, dew-point, or humidity ratio),
+       moist-air state inversion (from RH, wet-bulb, dew-point, or humidity ratio),
        2-stream adiabatic moist-air mixing conservation, and cooling/dehumidification coil
        mass & energy balance (condensate rate, total kW load, sensible heat ratio SHR).
      - Adiabatic mixing accepts condensate_model="equilibrium_ice" to resolve ice down
@@ -1479,10 +1479,7 @@ def _pws_ashrae_pa(t_c: float, *, ice_below_c: float = 0.0) -> float:
     return math.exp(ln_pws)
 
 
-def _dew_point_from_pw(pw_pa: float) -> float:
-    if pw_pa <= 0.0:
-        return -100.0
-    lo, hi = -80.0, 150.0
+def _bisect_dew_point(pw_pa: float, lo: float, hi: float) -> float:
     for _ in range(70):
         mid = 0.5 * (lo + hi)
         if _pws_ashrae_pa(mid) < pw_pa:
@@ -1490,6 +1487,47 @@ def _dew_point_from_pw(pw_pa: float) -> float:
         else:
             hi = mid
     return 0.5 * (lo + hi)
+
+
+def _dew_point_from_pw(pw_pa: float) -> Tuple[Optional[float], Optional[str]]:
+    """Invert the supported ice or liquid branch of the default 0 C diagnostic."""
+    if not math.isfinite(pw_pa) or pw_pa < 0:
+        return None, "invalid_vapor_pressure"
+    if pw_pa == 0:
+        return None, "dry_no_finite_point"
+
+    # ASHRAE 2017 SI eqs. 5 and 6 have finite, separate temperature ranges.
+    # The forward routine uses water at zero, so ice ends at the preceding float.
+    ice_lo, ice_hi = -100.0, math.nextafter(0.0, -math.inf)
+    water_lo, water_hi = 0.0, 200.0
+    p_ice_lo, p_ice_hi = _pws_ashrae_pa(ice_lo), _pws_ashrae_pa(ice_hi)
+    p_water_lo, p_water_hi = _pws_ashrae_pa(water_lo), _pws_ashrae_pa(water_hi)
+    if pw_pa < p_ice_lo:
+        return None, "below_correlation_range"
+    if pw_pa > p_water_hi:
+        return None, "above_correlation_range"
+    in_ice = p_ice_lo <= pw_pa <= p_ice_hi
+    in_water = p_water_lo <= pw_pa <= p_water_hi
+    if in_ice and in_water:
+        return None, "phase_overlap"
+    if not (in_ice or in_water):
+        return None, "phase_gap"
+
+    if pw_pa == p_ice_lo:
+        return ice_lo, None
+    if pw_pa == p_water_lo:
+        return water_lo, None
+    if pw_pa == p_water_hi:
+        return water_hi, None
+
+    lo, hi = (ice_lo, ice_hi) if in_ice else (water_lo, water_hi)
+    if _pws_ashrae_pa(-80.0) <= pw_pa <= _pws_ashrae_pa(150.0):
+        ordinary = _bisect_dew_point(pw_pa, -80.0, 150.0)
+        if lo <= ordinary <= hi:
+            return ordinary, None
+    if in_ice and pw_pa == p_ice_hi:
+        return ice_hi, None
+    return _bisect_dew_point(pw_pa, lo, hi), None
 
 
 def _signed_w_from_twb(t_db_c: float, t_wb_c: float, p_atm_pa: float, *,
@@ -1588,7 +1626,7 @@ def _psychro_state(spec: Dict[str, Any], p_atm_pa: float = 101325.0,
 
     h_kj_kgda = 1.006 * t_db + w * (2501.0 + 1.86 * t_db)
     v_m3_kgda = 287.042 * (t_db + 273.15) * (1.0 + 1.607858 * w) / p_atm_pa
-    t_dp_calc = _dew_point_from_pw(pw) if pw > 0.0 else -100.0
+    t_dp_calc, t_dp_status = _dew_point_from_pw(pw)
     t_wb_calc = _wet_bulb_from_state(t_db, w, p_atm_pa)
     ws = 0.621945 * pws / (p_atm_pa - pws)
     deg_sat = w / ws if ws > 0 else 0.0
@@ -1606,6 +1644,8 @@ def _psychro_state(spec: Dict[str, Any], p_atm_pa: float = 101325.0,
         "t_wb_c": t_wb_calc,
         "degree_of_saturation": deg_sat,
     }
+    if t_dp_status is not None:
+        state["t_dp_status"] = t_dp_status
     if dry_bracket is not None:
         state["wet_bulb_dry_bracket_c"] = dry_bracket
     return state

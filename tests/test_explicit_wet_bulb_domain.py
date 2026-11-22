@@ -55,11 +55,12 @@ def call(name, spec, *, near=False):
     try:
         full = digest(result) if not errors else None
         projected = digest({k: v for k, v in result.items() if k != TAG}) if near and not errors else full
+        non_dew = digest({k: v for k, v in result.items() if k not in ("t_dp_c", "t_dp_status")}) if not errors else None
     except (ValueError, TypeError, OverflowError) as exc:
         errors.append(["json", type(exc).__name__, str(exc)[:120]])
-        full = projected = None
+        full = projected = non_dew = None
     row = {"case": name, "passed": observed(result.get("passed")), "errors": errors, "failed_checks": [],
-           "full_sha256": full, "projection_sha256": projected, "has_bracket": TAG in result,
+           "full_sha256": full, "projection_sha256": projected, "non_dew_sha256": non_dew, "has_bracket": TAG in result,
            "bracket": observed(result.get(TAG)), "w": observed(result.get(W)), "reason": observed(result.get("reason"))}
     return result, row
 
