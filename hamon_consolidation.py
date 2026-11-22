@@ -90,6 +90,108 @@ def settlement_from_void_loss(h, e0, loss):
             "final_void_ratio": e0 - loss}
 
 
+def _corner(x, y, z):
+    """Signed influence of a corner rectangle (USACE EM 1110-1-1905 (31 July 2025), Fig. 6-8)."""
+    r = math.hypot(x, y, z)
+    rx, ry = math.hypot(x, z), math.hypot(y, z)
+    angle = math.atan2((x / r) * y, z)
+    correction = ((x / rx) * (z / rx) * (y / r)
+                  + (y / ry) * (z / ry) * (x / r))
+    return (angle + correction) / (2 * math.pi)
+
+
+def _area_integral(x0, x1, y0, y1, z):
+    """Independently integrate the point-load kernel over the actual footprint."""
+    from scipy.integrate import quad
+
+    # Far from a small footprint, taking differences of near-identical
+    # angles loses significant digits. Integrate on a unit square there.
+    width, length = x1 - x0, y1 - y0
+    nearest_x = max(x0, -x1, 0.0)
+    nearest_y = max(y0, -y1, 0.0)
+    if math.hypot(nearest_x, nearest_y, z) >= max(width, length):
+        def row(u):
+            x = x0 + u * width
+
+            def kernel(v):
+                r = math.hypot(x, y0 + v * length, z)
+                return (width / r) * (length / r) * (z / r)**3
+
+            return quad(kernel, 0, 1)[0]
+
+        return 3 * quad(row, 0, 1)[0] / (2 * math.pi)
+
+    # x = z*tan(theta), y = hypot(z,x)*tan(phi). This bounds both
+    # integration intervals even for a shallow point inside a wide footprint.
+    def strip(theta):
+        c = math.cos(theta)
+        phi0, phi1 = math.atan2(y0 * c, z), math.atan2(y1 * c, z)
+        inner, _ = quad(lambda phi: math.cos(phi)**3, phi0, phi1, epsabs=1e-13)
+        return c*c * inner
+
+    area, _ = quad(strip, math.atan2(x0, z), math.atan2(x1, z), epsabs=1e-13)
+    return 3 * area / (2 * math.pi)
+
+
+def rectangular_load_stress(spec, claim_key):
+    """Derive the increase in vertical stress from uniformly distributed net pressures."""
+    point = spec["stress_point"]
+    loads = spec["rectangular_loads"]
+    if not isinstance(point, dict) or not isinstance(loads, list) or not loads:
+        raise ValueError("Provide stress_point and a nonempty rectangular_loads list")
+    x, y, z = (_number(point, k) for k in ("x_m", "y_m", "depth_m"))
+    if z <= 0:
+        raise ValueError("Stress evaluation depth below the common loading plane must be positive")
+    closed, integrated = [], []
+    for load in loads:
+        if not isinstance(load, dict):
+            raise ValueError("Each rectangular load must be an object")
+        cx, cy, width, length, pressure = (
+            _number(load, k) for k in ("center_x_m", "center_y_m", "width_m", "length_m", "net_pressure_Pa")
+        )
+        if width <= 0 or length <= 0 or pressure < 0:
+            raise ValueError("Require positive rectangle dimensions and nonnegative net pressure")
+        x0, x1 = (cx - x) - width / 2, (cx - x) + width / 2
+        y0, y1 = (cy - y) - length / 2, (cy - y) + length / 2
+        if not all(math.isfinite(v) for v in (x0, x1, y0, y1)) or not (x0 < x1 and y0 < y1):
+            raise ValueError("Footprint offsets exceed finite coordinate resolution")
+        # Influence is homogeneous of degree zero. Binary rescaling preserves
+        # coordinate differences while keeping all Euclidean norms representable.
+        exponent = math.frexp(max(abs(x0), abs(x1), abs(y0), abs(y1), z))[1]
+        x0, x1, y0, y1, depth = (
+            math.ldexp(value, -exponent) for value in (x0, x1, y0, y1, z)
+        )
+        if depth == 0 or not (x0 < x1 and y0 < y1):
+            raise ValueError("Footprint and depth span unresolvable coordinate scales")
+        influence = math.fsum((_corner(x1, y1, depth), -_corner(x0, y1, depth),
+                               -_corner(x1, y0, depth), _corner(x0, y0, depth)))
+        check = _area_integral(x0, x1, y0, y1, depth)
+        if not 0 <= check <= 1 + 1e-12 or not math.isclose(influence, check, abs_tol=2e-12, rel_tol=1e-8):
+            raise ValueError("Boussinesq area integral disagrees with the corner influence solution")
+        # The corner subtraction can lose significant digits far outside the
+        # footprint. The positive point-load integral remains the load estimate.
+        closed.append(pressure * influence)
+        integrated.append(pressure * check)
+    value = math.fsum(integrated)
+    closed_value = math.fsum(closed)
+    if not math.isfinite(value) or not math.isfinite(closed_value):
+        raise ValueError("Superposed stress exceeds finite numerical range")
+    matched = claim_key not in spec or math.isclose(
+        _number(spec, claim_key), value, rel_tol=1e-6, abs_tol=1e-6
+    )
+    return value, {"stress_model": "Boussinesq homogeneous isotropic elastic half-space",
+                   "derived_delta_sigma_v_Pa": value, "corner_delta_sigma_v_Pa": closed_value,
+                   "declared_stress_consistent": matched}
+
+
+
+def consolidation_load(spec, key="delta_sigma_v_Pa", *, coerce_scalar=False):
+    """Resolve geometry, or preserve the invoking verifier's scalar input contract."""
+    if "rectangular_loads" in spec or "stress_point" in spec:
+        return rectangular_load_stress(spec, key)
+    return (float(spec[key]) if coerce_scalar else _number(spec, key)), {}
+
+
 def verify_consolidation_1d(spec):
     """Check a settlement-time calculation in SI units, including compression history."""
     result = {"ok": False, "conservation_verified": False, "mode": "civil_geotech",
@@ -99,7 +201,7 @@ def verify_consolidation_1d(spec):
         e0 = _number(spec, "e0")
         cc = _number(spec, "Cc")
         initial = _number(spec, "sigma_v0_eff_Pa")
-        load = _number(spec, "delta_sigma_v_Pa")
+        load, stress_check = consolidation_load(spec)
         cv = _number(spec, "cv_m2_s")
         elapsed = _number(spec, "time_s")
         drainage = spec["drainage"]
@@ -131,7 +233,8 @@ def verify_consolidation_1d(spec):
                 exceeds_upper = proposed > upper and not math.isclose(proposed, upper, rel_tol=8 * math.ulp(1.0))
                 if proposed < 0 or exceeds_upper or abs(proposed - predicted) > 1e-6:
                     valid = False
-        result.update(ok=True, conservation_verified=valid, drainage_path_m=path, time_factor=tv,
+        result.update(ok=True, conservation_verified=valid and stress_check.get("declared_stress_consistent", True),
+                      **stress_check, drainage_path_m=path, time_factor=tv,
                       degree_consolidation=degree, degree_consolidation_cn=cn,
                       dual_solver_abs_residual=residual, **compression,
                       settlement_at_time_m=settlement)

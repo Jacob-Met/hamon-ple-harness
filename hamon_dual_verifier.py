@@ -2519,11 +2519,11 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
         result = verify_bearing_capacity(spec, legacy_rectangle=("B_m" in spec or "L_m" in spec))
         return {**result, "kind": kind, "dual_verified": result["conservation_verified"]}
     if kind == "consolidation_settlement":
-        from hamon_consolidation import primary_settlement, settlement_from_void_loss
+        from hamon_consolidation import consolidation_load, primary_settlement, settlement_from_void_loss
         try:
             h, e0, cc, cr = (float(spec[k]) for k in ("H_m", "e0", "Cc", "Cr"))
-            initial, pc, load, limit = (float(spec[k]) for k in
-                                        ("sigma_v0_Pa", "sigma_p_Pa", "delta_sigma_Pa", "max_settlement_m"))
+            initial, pc, limit = (float(spec[k]) for k in ("sigma_v0_Pa", "sigma_p_Pa", "max_settlement_m"))
+            load, stress_check = consolidation_load(spec, "delta_sigma_Pa", coerce_scalar=True)
             if not all(math.isfinite(v) for v in (initial, pc, load, limit, cc, cr)):
                 raise ValueError("Require finite stresses, compression indices, and settlement limit")
             if initial <= 0 or pc < 0 or cc < 0 or not 0 <= cr <= cc:
@@ -2542,7 +2542,8 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
             return {"passes_limit": False, "dual_verified": False, "reason": str(exc)}
         settlement = response["primary_consolidation_settlement_m"]
         return {"settlement_m": settlement, "passes_limit": settlement <= limit,
-                "dual_verified": True, "initial_void_height_m": response["initial_void_height_m"],
+                "dual_verified": stress_check.get("declared_stress_consistent", True), **stress_check,
+                "initial_void_height_m": response["initial_void_height_m"],
                 "final_void_ratio": response["final_void_ratio"]}
     if kind == "manning_channel":
         return solve_manning_channel_dual(spec)
