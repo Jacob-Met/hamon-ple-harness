@@ -1,0 +1,165 @@
+{
+  "version": 1,
+  "title": "Passive fin unit-drive normalization, fixed pre-execution comparison",
+  "base_commit": "edecde96ecd6b155825e97014b9b69da146f3085",
+  "base_tree": "d3c4982c85505eafcb4508313fc7122c3480f235",
+  "source": {
+    "file": "hamon_pde_control_psychro_fem.py",
+    "stock_sha256": "1a49d00803e9e6464448fd43ecbab5292ed58366c8f9cfe766c7b36522a4b460",
+    "candidate_sha256": "e7ac0022b7e27fa0cbe481c32dbe16e2b9359ef16da32409aa6f3c929150c6e3",
+    "patch_sha256": "274c8aab97b1fda77c60fa0e7fd2a9eb4125cc8e5620cc57145682daa2ea3531"
+  },
+  "receiver": {
+    "file": "tests/test_passive_fin_normalization.py",
+    "sha256": "c2e2361f239628af07291dbe03dd21285b7027be4417661297b71846986bf6b0",
+    "oracle": "100-digit Decimal direct hyperbolic ODE solution; explicitly exact matched dyadic identities; no producer helper imports",
+    "atol": "5e-13 * abs(expected) for general ODE; zero for named dyadic/null/false controls",
+    "rtol": 0,
+    "execution": "All 32 unclaimed and 70 claimed calls before one aggregate assertion; retain raw verdicts despite strict JSON failure",
+    "ordered_cases": [
+      "drive/adiabatic/ordinary",
+      "drive/adiabatic/tiny-positive",
+      "drive/adiabatic/tiny-negative",
+      "drive/adiabatic/zero",
+      "drive/convective/ordinary",
+      "drive/convective/tiny-positive",
+      "drive/convective/tiny-negative",
+      "drive/convective/zero",
+      "drive/infinite/ordinary",
+      "drive/infinite/tiny-positive",
+      "drive/infinite/tiny-negative",
+      "drive/infinite/zero",
+      "threshold/adiabatic/below/positive",
+      "threshold/adiabatic/below/negative",
+      "threshold/convective/equal/positive",
+      "threshold/convective/equal/negative",
+      "threshold/infinite/above/positive",
+      "threshold/infinite/above/negative",
+      "zero-flux/adiabatic/positive",
+      "zero-flux/adiabatic/negative",
+      "zero-flux/convective/positive",
+      "zero-flux/convective/negative",
+      "zero-flux/infinite/positive",
+      "zero-flux/infinite/negative",
+      "matched/lateral-vs-full",
+      "matched/below-range",
+      "matched/above-range",
+      "matched/minimum-subnormal",
+      "matched/finite-overflowed-product",
+      "matched/near-maximum",
+      "prescribed/zero-base-hot-tip",
+      "prescribed/positive-base-hotter-tip"
+    ]
+  },
+  "expected": {
+    "systems": 32,
+    "unclaimed_approvals": 32,
+    "complete_unclaimed_contracts": 32,
+    "claims": 70,
+    "approvals": 54,
+    "refusals": 16,
+    "correct_claims": 70,
+    "router_calls": 102,
+    "solver_errors": 0,
+    "json_errors": 0
+  },
+  "decisions": {
+    "base": "Two metric claims per system. A finite reference is a truthful numeric claim; a null reference is challenged with zero and must refuse.",
+    "additional": "On tiny-positive of each main passive mode, also challenge efficiency=1 and effectiveness=0, both must refuse.",
+    "refusals": {
+      "passive_zero_drive": 6,
+      "prescribed_zero_base": 2,
+      "outside_float_range": 2,
+      "old_default_negative_controls": 6
+    }
+  },
+  "scope": {
+    "passive_modes": [
+      "adiabatic",
+      "convective",
+      "infinite"
+    ],
+    "unchanged": [
+      "Physical q and temperatures",
+      "Finite-volume equations and checks",
+      "Input guards and physical pass predicate",
+      "q_max_ref_w including Robin tip contribution",
+      "Shared scalar comparator",
+      "Entire prescribed-temperature ordinary outputs"
+    ],
+    "references": {
+      "fin_efficiency": "G/(h*P*provided_length_m)",
+      "fin_effectiveness": "G/(h*A_c)"
+    },
+    "zero_drive": "Literal heat-rate ratios are undefined: null plus named status and numeric-claim refusal. No silent continuous extension.",
+    "arithmetic": "Exact composition of accepted binary64 analytic shape factors protects range. Square roots/exponentials remain approximate; this is not an exact physical certificate."
+  },
+  "evidence": {
+    "field": "fin_normalization",
+    "passive_only": true,
+    "fields": {
+      "method": "passive_unit_drive",
+      "efficiency_reference": "lateral_h_P_L",
+      "effectiveness_reference": "bare_base_h_A",
+      "length_reference": "provided_length_m",
+      "zero_drive_policy": "undefined_heat_rate_ratio"
+    },
+    "status_fields": [
+      "efficiency_float_status",
+      "effectiveness_float_status"
+    ],
+    "statuses": [
+      "finite",
+      "below_float_range",
+      "above_float_range",
+      "undefined_zero_base_drive"
+    ]
+  },
+  "preservation": {
+    "physical_projection_exclusions": [
+      "fin_efficiency",
+      "fin_effectiveness",
+      "fin_normalization"
+    ],
+    "require_full_physical_hash_equality_for_all": 32,
+    "require_entire_prescribed_hash_equality_for": 2,
+    "inherited_courses": [
+      "scalar tolerance29/58",
+      "DC14/28",
+      "Bode11/34",
+      "transfer20/80",
+      "rank49/196",
+      "Lyapunov32/128",
+      "diagnostics17/68"
+    ],
+    "gates": "Every maintained CI gate; no workflow edits"
+  },
+  "registered_pi": {
+    "file": "tests/test_registered_engineering_verifiers.py",
+    "sha256": "e6462b5079e389458803f88fe9df3a93ae48548827230dcf23538103fd85063e",
+    "patch_sha256": "79eaed3e6f138aace461f4cb9bb58406bd7eec53b3f7d5bd690029ee0e7d3ba1",
+    "unclaimed": 4,
+    "claims": 9,
+    "approvals": 6,
+    "refusals": 3,
+    "requests": 13,
+    "mode": "Actual registered tool.execute through unchanged routing; all calls captured before assertions; dedicated unittest wrapper and pytest cases",
+    "cases": [
+      "matched Robin +2^-45",
+      "matched Robin -2^-45",
+      "zero passive drive",
+      "infinite G=1/2 with physical q rounding to zero"
+    ],
+    "inherited_control": "Independently driven prescribed-temperature hot tip retained"
+  },
+  "first_execution": "Matched stock/candidate maintained pull-request CI only. Freeze source, receiver, protocol, README and heads before creating PRs. No local numerical runs or retuned oracle.",
+  "receipt": "Preserve both complete original logs once. Verify actual CI checkout trees, row equality, source hashes and direct landed-tree equality.",
+  "primary_sources": [
+    {
+      "title": "Lienhard and Lienhard, A Heat Transfer Textbook, sixth edition, section4.5, equations4.31,4.52-4.54",
+      "url": "https://bpb-us-e1.wpmucdn.com/sites.mit.edu/dist/6/1810/files/2024/04/AHTTv600.pdf",
+      "interpretation": "Full-surface efficiency differs from the existing lateral-only Robin metric; the preserved reference is explicit."
+    }
+  ],
+  "claim_limit": "Maintained source qualification only. No new model/contest score, timing comparison or exact transcendental solution."
+}
