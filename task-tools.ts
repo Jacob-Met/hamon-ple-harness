@@ -211,46 +211,22 @@ export const PLE_DOMAIN_TOOL_NAMES = [
 
 const _PLE_HERE_DIR = _plePath.dirname(_pleFileURLToPath(import.meta.url));
 
-async function _pleReadTaskBytes(relPath: string): Promise<Buffer> {
-  const relayUrl = process.env.TASK_RELAY_URL;
-  if (relayUrl) {
-    try {
-      const r1 = await fetch(relayUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ op: "read_file_b64", path: relPath }),
-      });
-      if (r1.ok) {
-        const j1: any = await r1.json();
-        if (j1 && typeof j1.content_b64 === "string") {
-          return Buffer.from(j1.content_b64, "base64");
-        }
-      }
-    } catch {}
-    try {
-      const r2 = await fetch(relayUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ op: "read_file", path: relPath }),
-      });
-      if (r2.ok) {
-        const j2: any = await r2.json();
-        if (j2 && typeof j2.content_b64 === "string") {
-          return Buffer.from(j2.content_b64, "base64");
-        }
-        if (j2 && typeof j2.content === "string") {
-          const wdir = process.env.TASK_WORKDIR;
-          if (wdir && _pleFs.existsSync(_plePath.resolve(wdir, relPath))) {
-            return _pleFs.readFileSync(_plePath.resolve(wdir, relPath));
-          }
-          return Buffer.from(j2.content, "latin1");
-        }
-      }
-    } catch {}
+async function _pleReadTaskBytes(taskPath: string): Promise<Buffer> {
+  // Task files live in a different container. The authenticated relay is the
+  // only authority for these bytes, including when a local namesake exists.
+  const result = await relay("read_file", { path: taskPath });
+  if (result.truncated) {
+    throw new Error(`Task file ${taskPath} was truncated; use task bash to inspect a bounded portion`);
   }
-  const workdir = process.env.TASK_WORKDIR || ".";
-  const resolved = _plePath.resolve(workdir, relPath);
-  return _pleFs.readFileSync(resolved);
+  if (typeof result.content_b64 !== "string") {
+    throw new Error(`Task read for ${taskPath} returned no file bytes`);
+  }
+  const bytes = Buffer.from(result.content_b64, "base64");
+  if (bytes.toString("base64") !== result.content_b64 ||
+      (typeof result.size === "number" && result.size !== bytes.length)) {
+    throw new Error(`Task read for ${taskPath} returned incomplete or invalid file bytes`);
+  }
+  return bytes;
 }
 
 function _pleRunPythonJson(scriptName: string, payload: Record<string, unknown>): Promise<any> {
@@ -372,37 +348,32 @@ function _registerPleWave3DomainTools(pi: any) {
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Workspace-relative path to deliverable file, directory, or .zip" },
+        path: { type: "string", description: "Task-container path to a deliverable file or .zip archive" },
         expected_task_ids: { type: "array", items: { type: "string" }, description: "Optional required task IDs" },
       },
       required: ["path"],
     },
     async execute(_id: string, params: any) {
-      const workdir = process.env.TASK_WORKDIR || ".";
-      const candidate = _plePath.resolve(workdir, String(params.path));
-      let targetPath = candidate;
-      let tmpPath: string | null = null;
-      if (!_pleFs.existsSync(candidate)) {
-        const raw = await _pleReadTaskBytes(String(params.path));
-        const ext = _plePath.extname(String(params.path)) || ".bin";
-        tmpPath = _plePath.join(process.env.TMPDIR || "/tmp", `ple-pre-${Date.now()}${ext}`);
-        _pleFs.writeFileSync(tmpPath, raw);
-        targetPath = tmpPath;
-      }
+      const taskPath = String(params.path);
+      const raw = await _pleReadTaskBytes(taskPath);
+      const tempDir = _pleFs.mkdtempSync(_plePath.join(tmpdir(), "ple-pre-"));
       try {
+        const targetPath = _plePath.join(
+          tempDir, "deliverable" + (_plePath.extname(taskPath) || ".bin"));
+        _pleFs.writeFileSync(targetPath, raw);
         const details = await _pleRunPythonJson("hamon_ifc_spatial_clash.py", {
           mode: "preflight",
           path: targetPath,
           expected_task_ids: params.expected_task_ids ?? null,
         });
+        // Report the verified task path rather than an ephemeral local copy.
+        details.path = taskPath;
         return {
           content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
           details,
         };
       } finally {
-        if (tmpPath && _pleFs.existsSync(tmpPath)) {
-          _pleFs.unlinkSync(tmpPath);
-        }
+        _pleFs.rmSync(tempDir, { recursive: true, force: true });
       }
     },
   });
