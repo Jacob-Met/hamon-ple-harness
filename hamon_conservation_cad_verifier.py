@@ -896,6 +896,63 @@ def verify_thermal_fluid_chemical_balance(spec: Dict[str, Any]) -> Dict[str, Any
 
 
 def run_router_conservation_cad_verifier(payload: Dict[str, Any]) -> Dict[str, Any]:
+    # The tool's outer mode selects a solver family. A nested mode selects a
+    # computation within that family (for example control / state_space).
+    # Dispatch before the legacy payload merge so those two meanings cannot
+    # overwrite one another.
+    family = str(payload.get("mode", "auto")).strip().lower()
+    wave5 = {"pde", "control", "psychrometrics", "fem"}
+    wave6 = {"compressible_acoustics", "rf_transmission_rlc",
+             "solid_mohr_vessel_buckling", "reactor_kinetics"}
+    wave7 = {"thermo_cycles", "exchangers_radiation",
+             "lagrangian_orbital", "electrochem_separations"}
+    if family in wave5 | wave6 | wave7:
+        raw_spec = payload.get("spec")
+        if not isinstance(raw_spec, dict) or not raw_spec:
+            raise ValueError(f"{family} requires a non-empty spec object")
+        spec = dict(raw_spec)
+        declared_domain = str(spec.get("domain") or "").strip().lower()
+        if declared_domain and declared_domain != family:
+            raise ValueError(f"spec.domain {declared_domain!r} conflicts with mode {family!r}")
+        selector = "mode" if family in wave5 else (
+            "reactor_type" if family == "reactor_kinetics" else "subkind"
+        )
+        if not isinstance(spec.get(selector), str) or not spec[selector].strip():
+            raise ValueError(f"{family} requires explicit spec.{selector}")
+        if not (spec.keys() - {"domain", "mode", "subkind", "reactor_type"}):
+            raise ValueError(f"{family} requires supplied calculation parameters")
+        # These library calculations can otherwise succeed entirely on example
+        # defaults. Unknown keys or a tolerance are not a supplied physical
+        # problem. Test key presence rather than truthiness: explicit zero
+        # stress and zero line length are meaningful inputs.
+        default_capable_inputs = {
+            ("compressible_acoustics", "acoustics"): {
+                "rho1", "c1", "rho2", "c2"
+            },
+            ("rf_transmission_rlc", "transmission_line"): {
+                "Z0", "R_L", "X_L", "alpha_np_m", "length_m",
+                "length_wavelengths", "beta_rad_m"
+            },
+            ("solid_mohr_vessel_buckling", "mohr_stress"): {
+                "sigma_x", "sigma_y", "sigma_z", "tau_xy", "tau_xz", "tau_yz"
+            },
+        }
+        physical_inputs = default_capable_inputs.get((family, spec[selector].strip().lower()))
+        supplied_resonator = (family == "compressible_acoustics"
+                              and spec[selector].strip().lower() == "acoustics"
+                              and {"A_neck", "V_cavity", "L_eff"} <= spec.keys())
+        if physical_inputs is not None and not (spec.keys() & physical_inputs) and not supplied_resonator:
+            raise ValueError(f"{family}/{spec[selector]} requires recognized physical inputs")
+        spec["domain"] = family
+        if family in wave5:
+            from hamon_pde_control_psychro_fem import verify_wave5_engineering
+            return verify_wave5_engineering(spec)
+        if family in wave6:
+            from hamon_wave6_physics_verifiers import dispatch_wave6_verifier
+            return dispatch_wave6_verifier(family, spec)
+        from hamon_wave7_engineering_verifiers import dispatch_wave7_verifier
+        return dispatch_wave7_verifier(family, spec)
+
     spec = dict(payload.get("spec") or {})
     for k, v in payload.items():
         if k != "spec" and k not in spec and v is not None:
