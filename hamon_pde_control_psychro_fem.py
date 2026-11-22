@@ -183,25 +183,52 @@ def _thomas_solve(lower: Sequence[float], diag: Sequence[float], upper: Sequence
     return x
 
 
+def _claim_measure(value):
+    """Render a nonnegative exact error or tolerance without losing its range."""
+    try:
+        return _diagnostic_float(value), "finite"
+    except OverflowError:
+        return None, "below_float_range" if value < 1 else "above_float_range"
+
+
 def _check_claimed(result: Dict[str, Any], spec: Dict[str, Any]) -> None:
-    if "claimed_value" in spec and spec.get("claimed_field"):
-        field = str(spec["claimed_field"])
+    if "claimed_field" not in spec and "claimed_value" not in spec:
+        return
+    field = spec.get("claimed_field")
+    if not isinstance(field, str) or not field.strip() or "claimed_value" not in spec:
+        result.update(passed=False, reason="A scalar claim requires a nonempty claimed_field and a claimed_value")
+        return
+    if field not in result or not isinstance(result[field], (int, float)):
+        result.update(passed=False, reason=f"Claimed field {field} is unknown or has no numeric scalar value")
+        return
+    try:
         claimed = float(spec["claimed_value"])
         actual = float(result[field])
         rtol = float(spec.get("rtol", 1e-2))
         atol = float(spec.get("atol", 1e-4))
-        err = abs(actual - claimed)
-        limit = max(atol, rtol * max(abs(actual), 1e-12))
-        result["claim_check"] = {
-            "field": field,
-            "claimed": claimed,
-            "actual": actual,
-            "abs_error": err,
-            "within_tolerance": err <= limit,
-        }
-        if err > limit:
-            result["passed"] = False
-            result["reason"] = f"Claimed {field}={claimed} deviates from verified {actual:.6g} (err={err:.4g} > {limit:.4g})"
+    except (TypeError, ValueError, OverflowError):
+        result.update(passed=False, reason=f"Claimed {field}, its actual value and tolerances must be finite numbers")
+        return
+    if not all(math.isfinite(v) for v in (actual, claimed, rtol, atol)) or rtol < 0 or atol < 0:
+        result.update(passed=False, reason=f"Claimed {field} requires finite values and finite nonnegative tolerances")
+        return
+
+    actual_exact = Fraction(actual)
+    error = abs(actual_exact - Fraction(claimed))
+    limit = max(Fraction(atol), Fraction(rtol) * max(abs(actual_exact), Fraction(1e-12)))
+    error_display, error_status = _claim_measure(error)
+    limit_display, limit_status = _claim_measure(limit)
+    within = error <= limit
+    result["claim_check"] = {
+        "field": field, "claimed": claimed, "actual": actual,
+        "abs_error": error_display, "abs_error_exact": _fraction_text(error),
+        "abs_error_float_status": error_status,
+        "tolerance_limit": limit_display, "tolerance_limit_exact": _fraction_text(limit),
+        "tolerance_limit_float_status": limit_status,
+        "within_tolerance": within,
+    }
+    if not within:
+        result.update(passed=False, reason=f"Claimed {field} exceeds its tolerance in the exact comparison")
 
 
 def _transient_heat_modes(alpha, length, time, position, modes):
@@ -1282,7 +1309,7 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         if "claimed_value" in spec and field == "dc_gain_exact":
             res["passed"] = False
             res["reason"] = "dc_gain_exact is rational evidence. Use dc_gain for a numeric scalar claim."
-        elif "claimed_value" in spec and field in res and res[field] is None:
+        elif "claimed_value" in spec and isinstance(field, str) and field in res and res[field] is None:
             res["passed"] = False
             res["reason"] = f"Cannot verify claimed {field}: the result is undefined or unavailable"
         else:

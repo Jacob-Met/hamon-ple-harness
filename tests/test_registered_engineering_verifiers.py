@@ -160,6 +160,41 @@ DC_RANGE_CASES = [
 ]
 
 
+# Last two columns are the expected scalar (None for an invalid claim) and
+# the overall pass flag. A valid claim can describe an already failed result.
+CLAIM_UNIT_GAIN = {"mode": "transfer_function", "num": [1, 1], "den": [1, 1]}
+CLAIM_LARGE_GAIN = {"mode": "transfer_function", "num": [1e308, 1e308], "den": [1, 1]}
+CLAIM_EXACT_ZERO_TOL = {"atol": 0, "rtol": 0}
+CLAIM_TOLERANCE_CASES = [
+    ("claim-rounded-subtraction", CLAIM_UNIT_GAIN,
+     {"claimed_field": "dc_gain", "claimed_value": -(2.0**-54), "atol": 1, "rtol": 0}, 1, False),
+    ("claim-overflow-outside", CLAIM_LARGE_GAIN,
+     {"claimed_field": "dc_gain", "claimed_value": -1e308, "atol": 0, "rtol": 1.9}, 1e308, False),
+    ("claim-overflow-boundary", CLAIM_LARGE_GAIN,
+     {"claimed_field": "dc_gain", "claimed_value": -1e308, "atol": 0, "rtol": 2}, 1e308, True),
+    ("claim-boolean", {"mode": "state_space", "A": [[-1]]},
+     {"claimed_field": "hurwitz_stable", "claimed_value": True, **CLAIM_EXACT_ZERO_TOL}, True, True),
+    ("claim-rendered-third", {"mode": "transfer_function", "num": [1], "den": [3, 3]},
+     {"claimed_field": "dc_gain", "claimed_value": "0.3333333333333333", **CLAIM_EXACT_ZERO_TOL}, 1/3, True),
+    ("claim-already-failed", {"mode": "transfer_function", "num": [-1, -1], "den": [1, 1]},
+     {"claimed_field": "hurwitz_stable", "claimed_value": True, **CLAIM_EXACT_ZERO_TOL}, True, False),
+    ("claim-nan-text", CLAIM_UNIT_GAIN,
+     {"claimed_field": "dc_gain", "claimed_value": "NaN", **CLAIM_EXACT_ZERO_TOL}, None, False),
+    ("claim-negative-tolerance", CLAIM_UNIT_GAIN,
+     {"claimed_field": "dc_gain", "claimed_value": 1, "atol": -1, "rtol": 0}, None, False),
+    ("claim-unknown-field", CLAIM_UNIT_GAIN,
+     {"claimed_field": "missing_scalar", "claimed_value": 0}, None, False),
+    ("claim-evidence-field", CLAIM_UNIT_GAIN,
+     {"claimed_field": "dc_gain_exact", "claimed_value": 1}, None, False),
+    ("claim-unavailable-scalar", {"mode": "transfer_function", "num": [1], "den": [1, 0]},
+     {"claimed_field": "dc_gain", "claimed_value": 0}, None, False),
+    ("claim-list-selector", CLAIM_UNIT_GAIN,
+     {"claimed_field": ["dc_gain"], "claimed_value": 0}, None, False),
+    ("claim-missing-value", CLAIM_UNIT_GAIN, {"claimed_field": "dc_gain"}, None, False),
+    ("claim-missing-selector", CLAIM_UNIT_GAIN, {"claimed_value": 1}, None, False),
+]
+
+
 @pytest.fixture(scope="module")
 def routed(tmp_path_factory):
     workdir = tmp_path_factory.mktemp("registered-engineering")
@@ -254,6 +289,8 @@ def routed(tmp_path_factory):
         for label, field, value in claims:
             calls.append({"id": f"{case}-{label}", "mode": "control",
                           "spec": {**spec, "claimed_field": field, "claimed_value": value, "rtol": 0, "atol": 0}})
+    for case, system, claim, _, _ in CLAIM_TOLERANCE_CASES:
+        calls.append({"id": case, "mode": "control", "spec": {**system, **claim}})
     source = r"""
 import registerTaskTools, { PLE_DOMAIN_TOOL_NAMES } from './task-tools.ts';
 const tools = new Map();
@@ -700,6 +737,55 @@ def test_registered_dc_gain_range(routed, case, num, den, exact, rendered, statu
         assert check["within_tolerance"] is True
 
 
+def check_pi_error_quantity(check, name, expected):
+    evidence = check[name + "_exact"]
+    assert type(evidence) is str and evidence == str(expected)
+    try:
+        value = float(expected)
+    except OverflowError:
+        value, status = None, "above_float_range"
+    else:
+        if expected and value == 0:
+            value, status = None, "below_float_range"
+        else:
+            status = "finite"
+    assert check[name + "_float_status"] == status
+    assert check[name] == value
+
+
+@pytest.mark.parametrize("case,system,claim,actual,passed", CLAIM_TOLERANCE_CASES,
+                         ids=[row[0] for row in CLAIM_TOLERANCE_CASES])
+def test_registered_scalar_claim_tolerance(routed, case, system, claim, actual, passed):
+    reply = routed[case]
+    assert reply["completed"], reply
+    result = reply["details"]
+    assert result["domain"] == "control" and result["mode"] == system["mode"]
+    assert result["passed"] is passed, result
+    if passed is False:
+        assert isinstance(result.get("reason"), str) and result["reason"].strip()
+    if actual is None:
+        assert "claim_check" not in result
+        return
+    field = claim["claimed_field"]
+    check = result["claim_check"]
+    assert result[field] == actual and check["actual"] == float(actual)
+    if type(actual) is bool:
+        assert result[field] is actual
+    assert check["field"] == field and check["claimed"] == float(claim["claimed_value"])
+    # Compare the two accepted binary64 inputs without rounding their difference.
+    a = Fraction(float(actual))
+    c = Fraction(float(claim["claimed_value"]))
+    e = abs(a - c)
+    atol = Fraction(float(claim["atol"]))
+    rtol = Fraction(float(claim["rtol"]))
+    limit = max(atol, rtol * max(abs(a), Fraction(1e-12)))
+    check_pi_error_quantity(check, "abs_error", e)
+    check_pi_error_quantity(check, "tolerance_limit", limit)
+    assert check["within_tolerance"] is (e <= limit)
+    if case == "claim-already-failed":
+        assert check["within_tolerance"] is True and result["closed_loop_hurwitz_stable"] is None
+
+
 class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -759,3 +845,8 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
         for args in DC_RANGE_CASES:
             with self.subTest(case=args[0]):
                 test_registered_dc_gain_range(self.routed_data, *args)
+
+    def test_registered_scalar_claim_tolerance(self):
+        for args in CLAIM_TOLERANCE_CASES:
+            with self.subTest(case=args[0]):
+                test_registered_scalar_claim_tolerance(self.routed_data, *args)
