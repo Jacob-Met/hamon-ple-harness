@@ -211,7 +211,7 @@ def network(spec):
         jacobian = (A / law(flow)[1]) @ A.T
         return residual, jacobian
 
-    head = newton(np.zeros(len(d)), nodal_equations, min(1e-10, 1e-10 * scale))
+    head = newton(np.zeros(len(d)), nodal_equations, min(1e-12, 5e-13 * scale))
     qnode = inverse(A.T @ head, scale)
     # The second formulation begins with continuity satisfied, and may change
     # only circulations. This is the coupled form of the Hardy Cross correction.
@@ -223,7 +223,7 @@ def network(spec):
         return cycles.T @ drop, (cycles.T * slope) @ cycles
 
     loss_scale = np.max(np.abs(law(feasible)[0]))
-    loop_tolerance = min(1e-11, max(1e-24, 1e-10 * loss_scale))
+    loop_tolerance = min(1e-13, max(1e-26, 1e-13 * loss_scale))
     amplitude = newton(np.zeros(cycles.shape[1]), loop_equations, loop_tolerance)
     qloop = feasible + cycles @ amplitude
     drop, _ = law(qloop)
@@ -232,29 +232,52 @@ def network(spec):
     continuity = float(np.max(np.abs(A @ qloop + d)))
     energy = float(np.max(np.abs(incidence.T @ total_head - drop)))
     agreement = float(np.max(np.abs(qnode - qloop)))
-    registered = []
-    for key, labels, actual in (
-        ("proposed_flows_m3_s", pipe_ids, qloop),
-        ("proposed_heads_m", node_ids, total_head),
-    ):
-        if key in spec:
-            supplied = spec[key]
-            if not isinstance(supplied, dict) or set(supplied) != set(labels):
-                raise ValueError(f"{key} must contain every matching ID exactly once")
-            values = np.array([number(supplied[name]) for name in labels])
-            tolerance = (
-                min(1e-6, 1e-7 * scale) if key == "proposed_flows_m3_s" else 1e-6
-            )
-            registered.append(float(np.max(np.abs(values - actual))) < tolerance)
+
+    def proposed(key, labels):
+        supplied = spec[key]
+        if not isinstance(supplied, dict) or set(supplied) != set(labels):
+            raise ValueError(f"{key} must contain every matching ID exactly once")
+        return np.array([number(supplied[name]) for name in labels])
+
+    registered = {}
+    eps = np.finfo(float).eps
+    if "proposed_flows_m3_s" in spec:
+        flows = proposed("proposed_flows_m3_s", pipe_ids)
+        # Check every pipe and junction. A large main cannot conceal a missing
+        # demand or a reversed flow on a much smaller branch.
+        pipe_tolerance = np.minimum(1e-6, 1e-7 * np.abs(qloop) + 32 * eps * scale)
+        incident_flow = np.abs(A) @ np.abs(flows)
+        mass_tolerance = np.minimum(
+            1e-6, 1e-7 * np.abs(d) + 32 * eps * (incident_flow + np.abs(d))
+        )
+        registered["flows_match"] = bool(
+            np.all(np.abs(flows - qloop) <= pipe_tolerance)
+        )
+        registered["junction_demands_match"] = bool(
+            np.all(np.abs(A @ flows + d) <= mass_tolerance)
+        )
+    if "proposed_heads_m" in spec:
+        heads = proposed("proposed_heads_m", node_ids)
+        # Verify pressure differences in the pipe's physical scale. The two
+        # rounded endpoint heads can contribute at most one ulp each.
+        roundoff = np.abs(incidence.T) @ np.abs(np.spacing(heads))
+        drop_tolerance = np.minimum(1e-6, 1e-7 * np.abs(drop) + roundoff)
+        registered["reservoir_head_matches"] = bool(
+            abs(heads[reservoir] - datum) <= min(1e-6, abs(np.spacing(datum)))
+        )
+        registered["pipe_head_drops_match"] = bool(
+            np.all(np.abs(incidence.T @ heads - drop) <= drop_tolerance)
+        )
     verified = (
         continuity < min(1e-6, 1e-7 * scale)
         and energy < 1e-6
         and agreement < min(1e-6, 1e-7 * scale)
-        and all(registered)
+        and all(registered.values())
     )
     return dict(
         ok=True,
         conservation_verified=bool(verified),
+        proposed_checks=registered,
         calculation="pipe_network",
         flows_m3_s=dict(zip(pipe_ids, qloop.tolist())),
         heads_m=dict(zip(node_ids, total_head.tolist())),
