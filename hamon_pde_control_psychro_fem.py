@@ -1492,8 +1492,13 @@ def _dew_point_from_pw(pw_pa: float) -> float:
     return 0.5 * (lo + hi)
 
 
-def _signed_w_from_twb(t_db_c: float, t_wb_c: float, p_atm_pa: float, *, ice_below_c: float = 0.0) -> float:
+def _signed_w_from_twb(t_db_c: float, t_wb_c: float, p_atm_pa: float, *,
+                       ice_below_c: float = 0.0, checked: bool = False) -> float:
+    if checked and (not all(map(math.isfinite, (t_db_c, t_wb_c, p_atm_pa))) or p_atm_pa <= 0):
+        raise ValueError("Wet-bulb balance requires finite temperatures and finite positive pressure")
     pws_wb = _pws_ashrae_pa(t_wb_c, ice_below_c=ice_below_c)
+    if checked and not 0 < pws_wb < p_atm_pa:
+        raise ValueError("Wet-bulb saturation pressure must lie strictly between zero and total pressure")
     ws_wb = 0.621945 * pws_wb / (p_atm_pa - pws_wb)
     if t_wb_c >= 0.0:
         num = (2501.0 - 2.326 * t_wb_c) * ws_wb - 1.006 * (t_db_c - t_wb_c)
@@ -1501,11 +1506,28 @@ def _signed_w_from_twb(t_db_c: float, t_wb_c: float, p_atm_pa: float, *, ice_bel
     else:
         num = (2830.0 - 0.24 * t_wb_c) * ws_wb - 1.006 * (t_db_c - t_wb_c)
         den = 2830.0 + 1.86 * t_db_c - 2.1 * t_wb_c
-    return num / den
+    if checked and not (math.isfinite(den) and den > 0):
+        raise ValueError("Wet-bulb enthalpy balance requires a finite positive denominator")
+    signed = num / den
+    if checked and not math.isfinite(signed):
+        raise ValueError("Wet-bulb humidity balance must be finite")
+    return signed
 
 
-def _w_from_twb(t_db_c: float, t_wb_c: float, p_atm_pa: float, *, ice_below_c: float = 0.0) -> float:
-    return max(0.0, _signed_w_from_twb(t_db_c, t_wb_c, p_atm_pa, ice_below_c=ice_below_c))
+def _w_from_twb(t_db_c: float, t_wb_c: float, p_atm_pa: float, *, ice_below_c: float = 0.0):
+    """Validate a submitted wet bulb, allowing one same-phase input ULP at dry air."""
+    signed = _signed_w_from_twb(t_db_c, t_wb_c, p_atm_pa, ice_below_c=ice_below_c, checked=True)
+    if signed > 0:
+        return signed, None
+    if signed == 0:
+        return 0.0, None
+
+    upper = math.nextafter(t_wb_c, math.inf)
+    same_phase = (t_wb_c < ice_below_c) == (upper < ice_below_c) and (t_wb_c >= 0) == (upper >= 0)
+    if (math.isfinite(upper) and upper > t_wb_c and upper <= t_db_c + 1e-5 and same_phase
+            and _signed_w_from_twb(t_db_c, upper, p_atm_pa, ice_below_c=ice_below_c, checked=True) >= 0):
+        return 0.0, [t_wb_c, upper]
+    raise ValueError("Wet-bulb temperature requires a negative humidity ratio")
 
 
 def _wet_bulb_from_state(t_db_c: float, w: float, p_atm_pa: float) -> float:
@@ -1527,6 +1549,7 @@ def _psychro_state(spec: Dict[str, Any], p_atm_pa: float = 101325.0,
     if pws >= p_atm_pa:
         return {"passed": False, "reason": "Saturation vapor pressure exceeds atmospheric pressure"}
 
+    dry_bracket = None
     if "rh" in spec:
         rh = float(spec["rh"])
         if rh < -1e-9 or rh > 1.0 + 1e-7:
@@ -1547,7 +1570,10 @@ def _psychro_state(spec: Dict[str, Any], p_atm_pa: float = 101325.0,
         t_wb = float(spec["t_wb_c"])
         if t_wb > t_db + 1e-5:
             return {"passed": False, "reason": "Wet-bulb exceeds dry-bulb temperature"}
-        w = _w_from_twb(t_db, t_wb, p_atm_pa, ice_below_c=ice_below_c)
+        try:
+            w, dry_bracket = _w_from_twb(t_db, t_wb, p_atm_pa, ice_below_c=ice_below_c)
+        except (ValueError, ArithmeticError) as exc:
+            return {"passed": False, "reason": f"Infeasible wet-bulb input: {exc}"}
         pw = p_atm_pa * w / (0.621945 + w)
         rh = min(max(pw / pws, 0.0), 1.0)
     elif "t_dp_c" in spec:
@@ -1567,7 +1593,7 @@ def _psychro_state(spec: Dict[str, Any], p_atm_pa: float = 101325.0,
     ws = 0.621945 * pws / (p_atm_pa - pws)
     deg_sat = w / ws if ws > 0 else 0.0
 
-    return {
+    state = {
         "passed": True,
         "t_db_c": t_db,
         "rh": rh,
@@ -1580,6 +1606,9 @@ def _psychro_state(spec: Dict[str, Any], p_atm_pa: float = 101325.0,
         "t_wb_c": t_wb_calc,
         "degree_of_saturation": deg_sat,
     }
+    if dry_bracket is not None:
+        state["wet_bulb_dry_bracket_c"] = dry_bracket
+    return state
 
 
 _FUSION_ENTHALPY_KJ_KG = 333.5
