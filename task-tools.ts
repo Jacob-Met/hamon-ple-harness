@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -344,14 +343,14 @@ function _registerPleWave3DomainTools(pi: any) {
 
   pi.registerTool({
     name: "hamon_conservation_cad_verifier",
-    label: "Deterministic CAD/STEP, Dimensional & Conservation Verifier",
-    description: "Verify 3D STEP/CAD solid mass/centroid/inertia, structural stress/deflection/buckling, SPICE nodal KCL/KVL/Tellegen complex power, civil/geotech cut-fill/bearing/consolidation, thermal-fluid/chemical mass-species-energy-entropy balances, and 7-dimension SI homogeneity.",
+    label: "Deterministic Engineering & Conservation Verifier",
+    description: "Verify CAD/STEP geometry, dimensional homogeneity, structural mechanics, circuits, geotechnics and thermal-fluid balances. Also solve PDEs, control systems, psychrometrics, FEM, compressible flow/acoustics, RF/RLC, stress/vessels/buckling, reactor kinetics, thermodynamic cycles, heat exchangers/radiation, Lagrangian/orbital mechanics and electrochemistry/separations. Set the outer mode to the solver family and put calculation inputs in spec. For pde/control/psychrometrics/fem, spec.mode selects the calculation (e.g. mode=control with spec.mode=state_space and A/B/C matrices). Other new families require spec.subkind (e.g. mode=compressible_acoustics with spec.subkind=normal_shock and M1), except reactor_kinetics requires spec.reactor_type. A completed call is not evidence of a successful check: inspect the returned passed/verified/conservation_verified flags and diagnostics.",
     parameters: {
       type: "object",
       properties: {
-        mode: { type: "string" },
+        mode: { type: "string", description: "Solver family: auto, step_cad, structural, circuit, civil_geotech, thermal_fluid, dimensional, pde, control, psychrometrics, fem, compressible_acoustics, rf_transmission_rlc, solid_mohr_vessel_buckling, reactor_kinetics, thermo_cycles, exchangers_radiation, lagrangian_orbital, electrochem_separations." },
         path: { type: "string" },
-        spec: { type: "object" },
+        spec: { type: "object", description: "Calculation parameters in the selected solver's units, including explicit mode/subkind/reactor_type for the new families. A supplied domain must match the outer mode. Empty or selector-only new-family specs are rejected." },
       },
     },
     async execute(_id: string, params: any) {
@@ -412,23 +411,4 @@ function _registerPleWave3DomainTools(pi: any) {
 export default function registerTaskTools(pi: any) {
   _origRegisterTaskTools_registerTaskTools(pi);
   _registerPleWave3DomainTools(pi);
-}
-
-
-export function runWave5EngineeringVerifier(spec: Record<string, unknown>, cwd: string = process.cwd()): Record<string, unknown> {
-  const scriptPath = path.resolve(cwd, "hamon_pde_control_psychro_fem.py");
-  const child = spawnSync("python3", [scriptPath, "--json", JSON.stringify(spec)], {
-    cwd,
-    encoding: "utf-8",
-    timeout: 15000,
-  });
-  const stdout = (child.stdout || "").trim();
-  if (!stdout) {
-    return { passed: false, error: (child.stderr || "empty verifier output").trim(), status: child.status };
-  }
-  try {
-    return JSON.parse(stdout) as Record<string, unknown>;
-  } catch {
-    return { passed: false, error: stdout, status: child.status };
-  }
 }
