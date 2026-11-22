@@ -6,7 +6,7 @@ import unittest
 import hamon_drawing as d
 
 
-def fixture(path, page_boxes=b"", parent_boxes=b"", extra_objects=()):
+def fixture(path, page_boxes=b"", parent_boxes=b"", extra_objects=(), first_contents=b"4 0 R"):
     page1=b"q 0.7 w 0 0 0 RG 60 90 340 220 re S Q\nBT /F1 15 Tf 400 90 Td (SCALE 1:50) Tj ET\n"
     page2=b"q 0.8 w 0 0 0 RG 80 100 m 330 100 l 330 310 l S Q\nBT /F1 12 Tf 400 100 Td (SCALE 1:100) Tj ET\n"
     def contents(content):
@@ -16,7 +16,7 @@ def fixture(path, page_boxes=b"", parent_boxes=b"", extra_objects=()):
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 " + parent_boxes + b" >>",
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " + page_boxes
-        + b" /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>",
+        + b" /Resources << /Font << /F1 7 0 R >> >> /Contents " + first_contents + b" >>",
         contents(page1),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>",
         contents(page2),
@@ -85,7 +85,7 @@ class DrawingContracts(unittest.TestCase):
         # Crop the inherited, indirect rectangle to the MediaBox. The first
         # page overrides the parent's indirect rotation; the second inherits it.
         parent = b"/CropBox 8 0 R /Rotate 9 0 R"
-        objects = (b"[30 40 570 810]", b"-90")
+        objects = (b"[30 40 570 810]", b"-90", b"[4 0 R]")
         expected = {
             0: ((540, 752), (370, 50), (30, 50)),
             90: ((752, 540), (50, 170), (50, 510)),
@@ -96,7 +96,7 @@ class DrawingContracts(unittest.TestCase):
             path = Path(td) / "display.pdf"
             for rotation, (size, anchor, line_start) in expected.items():
                 with self.subTest(rotation=rotation):
-                    fixture(path, f"/Rotate {rotation}".encode(), parent, objects)
+                    fixture(path, f"/Rotate {rotation}".encode(), parent, objects, first_contents=b"10 0 R")
                     first, second = read_vector_pdf(path.read_bytes())
                     self.assertEqual((first.width_pt, first.height_pt), size)
                     self.assertEqual((second.width_pt, second.height_pt), (752, 540))
