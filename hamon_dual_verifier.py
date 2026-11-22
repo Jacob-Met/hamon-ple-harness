@@ -2383,8 +2383,8 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
                                         ("sigma_v0_Pa", "sigma_p_Pa", "delta_sigma_Pa", "max_settlement_m"))
             if not all(math.isfinite(v) for v in (initial, pc, load, limit, cc, cr)):
                 raise ValueError("Require finite stresses, compression indices, and settlement limit")
-            if initial <= 0 or pc <= 0 or cc <= 0 or not 0 <= cr <= cc:
-                raise ValueError("Require positive stresses and 0 <= Cr <= Cc with positive Cc")
+            if initial <= 0 or pc < 0 or cc < 0 or not 0 <= cr <= cc:
+                raise ValueError("Require positive initial stress, nonnegative prior stress, and 0 <= Cr <= Cc")
             if load < 0:
                 if initial + load <= 0:
                     raise ValueError("Unloading must leave positive effective stress")
