@@ -81,6 +81,17 @@ def direct(family, spec):
     return json.loads(json.dumps(result, allow_nan=False))
 
 
+# All three expectations are algebraic ranks of the supplied binary64 data.
+CONTROL_RANK_CASES = [
+    ("control-rank-scaled", {"A": [[-1, 0], [0, -2]],
+                             "B": [[1], [2.0**-42]], "C": [[1, 2.0**42]]}, 2),
+    ("control-rank-rounded-product", {"A": [[-1, 0], [2.0**-55, -1]],
+                                      "B": [[1], [1]], "C": [[1, 1]]}, 2),
+    ("control-rank-invariant-ports", {"A": [[-1, 0], [2.0**-55, -1]],
+                                      "B": [[0], [1]], "C": [[1, 0]]}, 1),
+]
+
+
 @pytest.fixture(scope="module")
 def routed(tmp_path_factory):
     workdir = tmp_path_factory.mktemp("registered-engineering")
@@ -126,6 +137,12 @@ def routed(tmp_path_factory):
         {"id": "explicit-zero-length", "mode": "rf_transmission_rlc",
          "spec": {"subkind": "transmission_line", "length_wavelengths": 0.0}},
     ])
+    for case, matrices, _ in CONTROL_RANK_CASES:
+        for field in ("controllable", "observable"):
+            for claim in (False, True):
+                calls.append({"id": f"{case}-{field}-{claim}", "mode": "control", "spec": {
+                    "mode": "state_space", **matrices, "claimed_field": field, "claimed_value": claim,
+                }})
     source = r"""
 import registerTaskTools, { PLE_DOMAIN_TOOL_NAMES } from './task-tools.ts';
 const tools = new Map();
@@ -217,6 +234,25 @@ def test_default_capable_solvers_distinguish_unknown_keys_from_explicit_zero(rou
         assert routed[name]["details"]["verified"] is True
 
 
+@pytest.mark.parametrize("case,matrices,rank", CONTROL_RANK_CASES,
+                         ids=[case for case, _, _ in CONTROL_RANK_CASES])
+def test_registered_algebraic_control_ranks(routed, case, matrices, rank):
+    full_rank = rank == len(matrices["A"])
+    for field in ("controllable", "observable"):
+        for claim in (False, True):
+            result = routed[f"{case}-{field}-{claim}"]
+            assert result["completed"], result
+            details = result["details"]
+            assert details["domain"] == "control" and details["mode"] == "state_space"
+            assert (details["controllability_rank"], details["observability_rank"]) == (rank, rank)
+            assert details["controllable"] is full_rank and details["observable"] is full_rank
+            accepted = claim == full_rank
+            assert details["passed"] is accepted
+            check = details["claim_check"]
+            assert check["field"] == field and check["claimed"] == float(claim)
+            assert check["actual"] == float(full_rank) and check["within_tolerance"] is accepted
+
+
 class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -246,3 +282,8 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
             test_completed_transport_preserves_failed_physics(r, family, spec)
         test_legacy_checks_and_explicit_family_contract(r)
         test_default_capable_solvers_distinguish_unknown_keys_from_explicit_zero(r)
+
+    def test_registered_algebraic_control_ranks(self):
+        for case, matrices, rank in CONTROL_RANK_CASES:
+            with self.subTest(case=case):
+                test_registered_algebraic_control_ranks(self.routed_data, case, matrices, rank)
