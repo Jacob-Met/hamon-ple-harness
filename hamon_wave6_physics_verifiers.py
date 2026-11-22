@@ -63,10 +63,24 @@ def _area_mach_ratio_sq(mach: float, gamma: float) -> float:
     return (term ** (gp1 / gm1)) / (mach * mach)
 
 
+# Treat rounded critical inputs as the sonic section within this relative
+# length/heat tolerance. There is no absolute window around a small budget.
+_DUCT_SONIC_REL_TOL = 32 * math.ulp(1.0)
+
+
 def _fanno_param(mach: float, gamma: float) -> float:
     m2 = mach * mach
     gp1 = gamma + 1.0
     gm1 = gamma - 1.0
+    if 0.0 < mach <= 1.0 and gamma > 1.0:
+        # Write the remaining friction budget as (gamma+1)/(2 gamma) times
+        # x-log1p(x).  The original formula loses this quadratic near Mach 1.
+        x = (2.0 / gp1) * ((1.0 - mach) * (1.0 + mach) / m2)
+        if x < 1.e-3:
+            difference = x*x*(0.5 + x*(-1.0/3.0 + x*(0.25 + x*(-0.2 + x/6.0))))
+        else:
+            difference = x - math.log1p(x)
+        return gp1 * difference / (2.0 * gamma)
     return (1.0 - m2) / (gamma * m2) + (gp1 / (2.0 * gamma)) * math.log((gp1 * m2) / (2.0 + gm1 * m2))
 
 
@@ -192,19 +206,40 @@ def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any
         f_fanning = float(params["f"])
         length_m = float(params["L"])
         dh_m = float(params["D_h"])
+        subsonic = 0.0 < m1 < 1.0 and gamma > 1.0
+        if subsonic and (not all(math.isfinite(v) for v in (gamma, f_fanning, length_m, dh_m))
+                         or f_fanning <= 0.0 or dh_m <= 0.0 or length_m < 0.0):
+            raise ValueError("Subsonic Fanno flow requires positive Fanning friction and diameter and nonnegative length")
         phi1 = _fanno_param(m1, gamma)
         four_fl_d = 4.0 * f_fanning * length_m / dh_m
         l_choke = phi1 * dh_m / (4.0 * f_fanning)
-        if four_fl_d >= phi1 - 1e-13:
+        at_limit = subsonic and math.isclose(length_m, l_choke, rel_tol=_DUCT_SONIC_REL_TOL)
+        if subsonic and length_m > l_choke and not at_limit:
+            # The first sonic section is reachable, but it is upstream of the
+            # requested exit. F(M2) cannot equal a negative remaining budget.
+            t_star_t1 = (2.0 + (gamma - 1.0)*m1*m1) / (gamma + 1.0)
+            return {
+                "domain": "compressible_acoustics", "subkind": subkind, "M1": m1,
+                "choked": True, "requested_state_feasible": False,
+                "reason": "Specified length exceeds the sonic limit at the supplied inlet Mach number.",
+                "requested_length_m": length_m, "L_choke_m": l_choke,
+                "reachable_sonic_state": {"M": 1.0, "length_m": l_choke,
+                                          "T_over_T1": t_star_t1,
+                                          "P_over_P1": m1 * math.sqrt(t_star_t1)},
+                "residual": 4.0 * f_fanning * (length_m - l_choke) / dh_m,
+                "verified": False,
+            }
+        sonic_exit = at_limit if subsonic else four_fl_d >= phi1 - 1e-13
+        if sonic_exit:
             m2 = 1.0
             choked = True
-            residual = 0.0
+            residual = 4.0 * f_fanning * abs(length_m - l_choke) / dh_m if subsonic else 0.0
         else:
             choked = False
             target_phi2 = phi1 - four_fl_d
             fn = lambda m: _fanno_param(m, gamma) - target_phi2
             if m1 < 1.0:
-                m2 = float(optimize.brentq(fn, m1, 1.0 - 1e-12, xtol=1e-14, rtol=1e-14))
+                m2 = float(optimize.brentq(fn, m1, 1.0, xtol=1e-14, rtol=1e-14))
             else:
                 m2 = float(optimize.brentq(fn, 1.0 + 1e-12, m1, xtol=1e-14, rtol=1e-14))
             residual = abs(_fanno_param(m2, gamma) - target_phi2)
@@ -218,6 +253,7 @@ def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any
             "M2": m2,
             "choked": choked,
             "L_choke_m": l_choke,
+            **({"requested_state_feasible": True} if subsonic else {}),
             "P2_over_P1": p2_p1,
             "T2_over_T1": t2_t1,
             "residual": residual,
@@ -229,11 +265,44 @@ def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any
         t01 = float(params["T01"])
         q_heat = float(params["q_J_kg"])
         cp = float(params.get("cp", gamma * r_gas / (gamma - 1.0)))
+        subsonic = 0.0 < m1 < 1.0 and gamma > 1.0
+        if subsonic and (not all(math.isfinite(v) for v in (gamma, t01, q_heat, cp))
+                         or cp <= 0.0 or t01 <= 0.0):
+            raise ValueError("Subsonic Rayleigh flow requires positive stagnation temperature and specific heat")
         t02 = t01 + q_heat / cp
         r1 = _rayleigh_t0_ratio(m1, gamma)
         t0_star = t01 / r1
         target_r2 = t02 / t0_star
-        if target_r2 >= 1.0 - 1e-12:
+        if subsonic:
+            # 1 - T01/T0* = [(1-M1²)/(1+gamma M1²)]².  This keeps the
+            # available heat representable even when T01/T0* rounds to 1.
+            inlet_gap = ((1.0 - m1) * (1.0 + m1) / (1.0 + gamma*m1*m1))**2
+            heat_scale = cp * t0_star
+            q_choke = heat_scale * inlet_gap
+            at_limit = math.isclose(q_heat, q_choke, rel_tol=_DUCT_SONIC_REL_TOL)
+            if q_heat > q_choke and not at_limit:
+                return {
+                    "domain": "compressible_acoustics", "subkind": subkind, "M1": m1,
+                    "choked": True, "requested_state_feasible": False,
+                    "reason": "Specified heat input exceeds the sonic limit at the supplied inlet Mach number.",
+                    "requested_heat_J_kg": q_heat, "q_choke_J_kg": q_choke,
+                    "T0_star_K": t0_star,
+                    "reachable_sonic_state": {"M": 1.0, "heat_J_kg": q_choke,
+                                              "T0_K": t0_star, "P_over_P1": (1.0 + gamma*m1*m1)/(1.0 + gamma)},
+                    "residual": (q_heat - q_choke) / heat_scale,
+                    "verified": False,
+                }
+            if t02 <= 0.0:
+                raise ValueError("Specified heat removal gives nonpositive stagnation temperature")
+            choked = at_limit
+            if at_limit:
+                m2 = 1.0
+                residual = abs(q_heat - q_choke) / heat_scale
+            else:
+                gap_root = math.sqrt((q_choke - q_heat) / heat_scale)
+                m2 = math.sqrt(target_r2 / ((1.0 + gap_root) * (1.0 + gamma*gap_root)))
+                residual = abs(_rayleigh_t0_ratio(m2, gamma) - target_r2)
+        elif target_r2 >= 1.0 - 1e-12:
             m2 = 1.0
             choked = True
             residual = 0.0
@@ -253,6 +322,7 @@ def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any
             "M2": m2,
             "choked": choked,
             "T0_star_K": t0_star,
+            **({"requested_state_feasible": True, "q_choke_J_kg": q_choke} if subsonic else {}),
             "P2_over_P1": p2_p1,
             "residual": residual,
             "verified": residual < 1e-10,
