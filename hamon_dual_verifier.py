@@ -1531,13 +1531,20 @@ def _seg_aabb_dist_3d_dual(
 
 def solve_continuous_beam_2span_dual(spec: dict[str, Any]) -> dict[str, Any]:
     """Cross-check three-moment statics against two prismatic Hermite beam elements."""
-    # Preserve the numerical SI values supplied by the existing quantity parser.
-    L1 = Fraction(eval_quantity(str(spec["span1"])).val)
-    L2 = Fraction(eval_quantity(str(spec["span2"])).val)
-    q1 = Fraction(eval_quantity(str(spec.get("udl1", "0*N/m"))).val)
-    q2 = Fraction(eval_quantity(str(spec.get("udl2", "0*N/m"))).val)
-    E = Fraction(eval_quantity(str(spec.get("E", "200*GPa"))).val)
-    I = Fraction(eval_quantity(str(spec.get("I", "1e-4*m**4"))).val)
+    # JSON numbers are coherent SI. An expression carries its own units.
+    def read_si(field: str, unit: str, default: str | None = None) -> Fraction:
+        value = spec[field] if default is None else spec.get(field, default)
+        quantity = eval_quantity(str(value))
+        if type(value) not in (int, float) and quantity.dim != eval_quantity(unit).dim:
+            raise ValueError(f"{field} must have units compatible with {unit}, got {quantity.dim_list()}")
+        return Fraction(quantity.val)
+
+    L1 = read_si("span1", "m")
+    L2 = read_si("span2", "m")
+    q1 = read_si("udl1", "N/m", "0*N/m")
+    q2 = read_si("udl2", "N/m", "0*N/m")
+    E = read_si("E", "Pa", "200*GPa")
+    I = read_si("I", "m**4", "1e-4*m**4")
     if min(L1, L2, E, I) <= 0:
         raise ValueError("two-span beam requires positive span lengths, modulus and inertia")
 
