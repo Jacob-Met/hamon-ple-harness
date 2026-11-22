@@ -1,0 +1,231 @@
+{
+  "version": 1,
+  "title": "Explicit thermodynamic wet-bulb feasibility and adjacent floating-input dry boundary",
+  "base_commit": "b027447e7d6db9d699ff0a6f6adac81ab45ee6d7",
+  "base_tree": "6dea960350c57f90e935a712e3e0c0e133490f97",
+  "source": {
+    "file": "hamon_pde_control_psychro_fem.py",
+    "stock_sha256": "e7ac0022b7e27fa0cbe481c32dbe16e2b9359ef16da32409aa6f3c929150c6e3",
+    "candidate_sha256": "fb9df9c4c4ca5003aea5dd307e686f2401841827d3601ffa4e344f7b4e703291",
+    "patch_sha256": "6786d114c6db217b24d24a17c95a48f6acaa26db8c3b4da61751d3cf94ca8978"
+  },
+  "receiver": {
+    "file": "tests/test_explicit_wet_bulb_domain.py",
+    "sha256": "7796b4e90e0fa4e4149704afb90fd3565ae48e3f6ef8bac9e38ee540d0206889",
+    "oracle": "Tabulated primary saturation-pressure intervals and an independently expressed moist-air/condensate energy balance; no producer helper import.",
+    "sat_pa_bounds": {
+      "5": [
+        870,
+        875
+      ],
+      "-20": [
+        102,
+        105
+      ],
+      "-10": [
+        258,
+        262
+      ]
+    },
+    "table_pressure_pa": {
+      "5": 872.57,
+      "-20": 103.24,
+      "-10": 259.87
+    },
+    "execution": "Issue all 20 fixed calls and all 12 relational calls before aggregate assertions; preserve raw verdicts, solver errors and strict-JSON errors separately.",
+    "pre_execution_reporting_revision": {
+      "original_sha256": "5b0c3f66923892777082044c9aa32c47517d22fa6b25b596c9fb39de07d26c6a",
+      "patch_sha256": "89c30375bff19ce36c109216e553ff6e18f2173d6e8e870e6e2d84c113a27956",
+      "scope": "Keep nonfinite evidence printable after strict-JSON failure and guard unexpected saturated-RH types; no changes to inputs, count, order, oracle or tolerances."
+    }
+  },
+  "fixed": {
+    "requests": 20,
+    "ordinary": 15,
+    "ordinary_approvals": 10,
+    "ordinary_refusals": 5,
+    "claims": "Zero humidity on the three infeasible states must refuse before scalar comparison; zero humidity on genuine dry air and RH1 on saturation must approve. All claim tolerances zero.",
+    "claim_approvals": 2,
+    "claim_refusals": 3,
+    "approvals": 12,
+    "refusals": 8,
+    "physical_states": [
+      {
+        "case": "liquid/strong-negative",
+        "db": 40,
+        "wb": 5,
+        "p": 101325,
+        "passed": false
+      },
+      {
+        "case": "ice/strong-negative",
+        "db": 0,
+        "wb": -20,
+        "p": 101325,
+        "passed": false
+      },
+      {
+        "case": "pressure/sea-level",
+        "db": 21,
+        "wb": 5,
+        "p": 101325,
+        "passed": false
+      },
+      {
+        "case": "pressure/lower",
+        "db": 21,
+        "wb": 5,
+        "p": 70000,
+        "passed": true
+      },
+      {
+        "case": "ice/positive",
+        "db": -8,
+        "wb": -10,
+        "p": 101325,
+        "passed": true
+      },
+      {
+        "case": "liquid/saturated",
+        "db": 5,
+        "wb": 5,
+        "p": 101325,
+        "passed": true
+      }
+    ],
+    "alternate_inputs": [
+      "20C RH0.5",
+      "20C RH1",
+      "20C W0",
+      "20C dew-point5C",
+      "20C RH0.5 takes precedence over explicit Twb-40C"
+    ],
+    "processes": [
+      "impossible inlet mixing",
+      "valid inlet mixing at70000Pa",
+      "impossible inlet cooling",
+      "valid inlet cooling at70000Pa"
+    ]
+  },
+  "boundary": {
+    "requests": 12,
+    "anchors": [
+      {
+        "db": 40,
+        "p": 101325,
+        "phase": "water"
+      },
+      {
+        "db": -10,
+        "p": 101325,
+        "phase": "ice"
+      }
+    ],
+    "recipe": "For each anchor query the unchanged public RH0 inverse once, then submit exactly t-1e-4, predecessor(t), t, successor(t), t+1e-4; record the anchor and every submitted temperature as binary64 hex.",
+    "requirements": [
+      "Each anchor is an admitted dry state without new metadata and has a finite wet bulb in its named same-phase interval.",
+      "Exactly one of predecessor(t) and t is the tagged negative lower endpoint; its immediate upper endpoint must be admitted without a tag.",
+      "The far lower input refuses without a tag; the far upper input admits strictly positive humidity without a tag.",
+      "The other near input has no fixed verdict. Any independently present tag must be the submitted value and its next float upward, with positive-sign zero humidity.",
+      "An anchor failure is a failure and does not silently drop its five planned requests."
+    ],
+    "interpretation": "Public inverse self-consistency only, independent from the table/energy physical oracle. No universal RH0 round-trip or exact thermodynamic root claim.",
+    "approval_count": "No exact boundary or combined tally is frozen. The stated relations imply 8-10 boundary approvals and2-4 boundary refusals.",
+    "pre_execution_correction": "Rejected an earlier proposed all-neighbor monotonic RRAAA/RAAAA expectation and +8-ULP strict-positive claim before any numerical execution. Celsius-to-Kelvin quantization can create local plateaus; the final fixed plan uses far offsets and only the necessary adjacent pair."
+  },
+  "scope": {
+    "input": "Only explicit t_wb_c feasibility and its floating-input dry boundary.",
+    "positive": "Return finite positive signed humidity verbatim, including tiny positives.",
+    "zero": "Canonical positive zero without bracket evidence.",
+    "negative": "Inspect only u=nextafter(t,+infinity). Admit zero only when both checked endpoints are finite/admissible, have p>0, 0<pws<p, positive finite denominator and finite signed balance, share both vapor and wick phase keys, and S(u)>=0. Otherwise refuse with a reason.",
+    "evidence": "Only an accepted negative lower endpoint adds wet_bulb_dry_bracket_c:[t,u].",
+    "unchanged": [
+      "RH/W/dew-point precedence and arithmetic",
+      "Unchecked signed helper arithmetic used by the public inverse",
+      "Inverse bracket and70 bisections",
+      "Existing vapor-pressure and wick-enthalpy phase choices",
+      "Mixing/cooling equations and established invalid-inlet propagation",
+      "Shared scalar comparison",
+      "All inherited fin/control/pipe work"
+    ],
+    "excluded": "General invalid dry-bulb sanitation, exact real-fluid certification, new psychrometric phase models and any broad epsilon clipping."
+  },
+  "preservation": {
+    "entire_fixed_approvals": [
+      "pressure/lower",
+      "ice/positive",
+      "liquid/saturated",
+      "alternate/rh",
+      "alternate/saturated",
+      "alternate/dry-W",
+      "alternate/dew-point",
+      "alternate/RH-priority",
+      "mix/valid",
+      "coil/valid",
+      "claim/alternate/dry-W",
+      "claim/alternate/saturated"
+    ],
+    "boundary_full_hash": "Retain original full hashes for every row. Require exact equality for the two anchors and far-upper controls and for any admitted untagged neighbor whose behavior is unchanged.",
+    "boundary_projection": "Only the named predecessor/center/successor rows may omit the single wet_bulb_dry_bracket_c key; compare a tagged row with its stock result when all other output fields are unchanged. No blanket exclusion for physical results or refusal rows.",
+    "inherited_courses": [
+      "fin32/70",
+      "scalar29/58",
+      "DC14/28",
+      "Bode11/34",
+      "transfer20/80",
+      "rank49/196",
+      "Lyapunov32/128",
+      "diagnostics17/68"
+    ],
+    "inherited_ordered_rows": 204,
+    "gates": "All maintained CI stages and actual registered tool delivery checks; no workflow edits."
+  },
+  "registered_pi": {
+    "file": "tests/test_registered_engineering_verifiers.py",
+    "sha256": "35f093e18f9fdc4d06bc28a0d0156bb23fdb202e1a5d8da5e55fe71a2daf043d",
+    "patch_sha256": "6491044ef5aab12b26cf0c4413ed6b982d527659f26582172ee2e3e71e7b8f5d",
+    "requests": 8,
+    "ordinary": 7,
+    "ordinary_approvals": 3,
+    "ordinary_refusals": 4,
+    "claims": 1,
+    "claim_approvals": 0,
+    "claim_refusals": 1,
+    "approvals": 3,
+    "refusals": 5,
+    "cases": [
+      "wet-liquid-infeasible",
+      "wet-ice-infeasible",
+      "wet-clipped-zero-claim",
+      "wet-mixing-inlet",
+      "wet-cooling-inlet",
+      "wet-chart-state",
+      "wet-dry-control",
+      "wet-saturated-control"
+    ],
+    "chart_control": "ASHRAE Example1 40C/20C/101325Pa: W0.0065 +/-0.0002 and RH0.14 +/-0.01 are approximate chart-read checks. Recovered Twb20 +/-1e-8 is separately a model consistency check.",
+    "delivery": "Actual tool.execute on unchanged registration/routing; all requests collected before assertions, dedicated unittest wrapper plus eight pytest cases.",
+    "limit": "The frozen Pi cases do not exercise a bracket-bearing response. The direct router receiver checks bracket endpoints and positive zero; source review confirms the adapter forwards detail arrays without a whitelist."
+  },
+  "expected": {
+    "router_calls": 32,
+    "fixed_approvals": 12,
+    "fixed_refusals": 8,
+    "failed_rows": 0,
+    "solver_errors": 0,
+    "json_errors": 0,
+    "registered_requests": 8,
+    "registered_approvals": 3,
+    "registered_refusals": 5
+  },
+  "first_execution": "Matched stock/candidate maintained pull-request CI only after source, receivers, protocol, README and branch heads are frozen and preregistered. No local numerical execution or after-output oracle retuning.",
+  "receipt": "Fetch each complete original CI log once; verify actual checkout trees, all named preservation hashes, inherited ordered records, and direct equality of the landed tree with a successful CI tree. If main advances, preserve both originals and qualify the combined tree separately.",
+  "primary_sources": [
+    {
+      "title": "ASHRAE Fundamentals2025 SI Chapter1, sections3/7, Table3 and Example1",
+      "url": "https://handbook.ashrae.org/handbooks/F25/SI/F25_Ch01/F25_Ch01_si.aspx",
+      "interpretation": "Nonnegative humidity follows its mass-ratio definition; adiabatic saturation supplies the approximate energy model. Table3 values are kPa converted to Pa, with broad intervals to accommodate the maintained correlation. The chapter's chart reads are approximate."
+    }
+  ],
+  "claim_limit": "Maintained source qualification only; no model or contest score, timing result, exact transcendental arithmetic or exact thermodynamic-root certificate."
+}

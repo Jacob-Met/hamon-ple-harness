@@ -216,6 +216,24 @@ FIN_NORMALIZATION_CASES = [
 ]
 
 
+WET_BULB_LOW_LIQUID = {"t_db_c": 40, "t_wb_c": 5}
+WET_BULB_CASES = [
+    ("wet-liquid-infeasible", {"mode": "state", **WET_BULB_LOW_LIQUID}, False),
+    ("wet-ice-infeasible", {"mode": "state", "t_db_c": 0, "t_wb_c": -20}, False),
+    ("wet-clipped-zero-claim", {"mode": "state", **WET_BULB_LOW_LIQUID,
+                                "claimed_field": "w_kg_per_kgda", "claimed_value": 0,
+                                "atol": 0, "rtol": 0}, False),
+    ("wet-mixing-inlet", {"mode": "adiabatic_mixing",
+                          "stream1": {**WET_BULB_LOW_LIQUID, "m_da_kg_s": 1},
+                          "stream2": {"t_db_c": 20, "w_kg_per_kgda": 0, "m_da_kg_s": 1}}, False),
+    ("wet-cooling-inlet", {"mode": "cooling_coil", "inlet": WET_BULB_LOW_LIQUID,
+                           "outlet": {"t_db_c": 20, "w_kg_per_kgda": 0}, "m_da_kg_s": 1}, False),
+    ("wet-chart-state", {"mode": "state", "t_db_c": 40, "t_wb_c": 20}, True),
+    ("wet-dry-control", {"mode": "state", "t_db_c": 40, "w_kg_per_kgda": 0}, True),
+    ("wet-saturated-control", {"mode": "state", "t_db_c": 20, "rh": 1}, True),
+]
+
+
 @pytest.fixture(scope="module")
 def routed(tmp_path_factory):
     workdir = tmp_path_factory.mktemp("registered-engineering")
@@ -321,6 +339,8 @@ def routed(tmp_path_factory):
             calls.append({"id": f"{case}-{field}", "mode": "pde", "spec": {
                 **system, "claimed_field": field, "claimed_value": 0 if value is None else value,
                 "atol": 0, "rtol": 0}})
+    for case, system, _ in WET_BULB_CASES:
+        calls.append({"id": case, "mode": "psychrometrics", "spec": {**system, "p_atm_pa": 101325}})
     source = r"""
 import registerTaskTools, { PLE_DOMAIN_TOOL_NAMES } from './task-tools.ts';
 const tools = new Map();
@@ -851,6 +871,39 @@ def test_registered_passive_fin_normalization(routed, case, system, q, q_max, et
             assert comparison["within_tolerance"] is True
 
 
+@pytest.mark.parametrize("case,system,passed", WET_BULB_CASES, ids=[row[0] for row in WET_BULB_CASES])
+def test_registered_wet_bulb_feasibility(routed, case, system, passed):
+    reply = routed[case]
+    assert reply["completed"], reply
+    state = reply["details"]
+    assert state["domain"] == "psychrometrics" and state["mode"] == system["mode"]
+    assert state["passed"] is passed, state
+    assert "wet_bulb_dry_bracket_c" not in state
+    if not passed:
+        reason = state.get("reason")
+        assert isinstance(reason, str) and reason.strip()
+        assert "claim_check" not in state
+        assert {"w_kg_per_kgda", "w_mix_kg_per_kgda", "q_total_kw"}.isdisjoint(state)
+        if case == "wet-clipped-zero-claim":
+            assert reason == routed["wet-liquid-infeasible"]["details"]["reason"]
+        return
+
+    assert state["t_db_c"] == system["t_db_c"]
+    if case == "wet-chart-state":
+        # ASHRAE Fundamentals (2025 SI), ch. 1, Example 1 reads rounded values
+        # from chart 1: W=6.5 g/kg dry air and RH=14% at 101.325 kPa.
+        assert state["w_kg_per_kgda"] == pytest.approx(0.0065, rel=0, abs=0.0002)
+        assert state["rh"] == pytest.approx(0.14, rel=0, abs=0.01)
+        assert state["t_wb_c"] == pytest.approx(20, rel=0, abs=1e-8)
+    elif case == "wet-dry-control":
+        assert state["w_kg_per_kgda"] == state["pw_pa"] == state["rh"] == 0
+        assert 0 < state["t_wb_c"] < state["t_db_c"]
+    else:
+        assert state["rh"] == 1 and state["w_kg_per_kgda"] > 0
+        assert state["pw_pa"] == state["pws_pa"]
+        assert state["t_wb_c"] == pytest.approx(state["t_db_c"], rel=0, abs=1e-8)
+
+
 class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -920,3 +973,8 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
         for args in FIN_NORMALIZATION_CASES:
             with self.subTest(case=args[0]):
                 test_registered_passive_fin_normalization(self.routed_data, *args)
+
+    def test_registered_wet_bulb_feasibility(self):
+        for args in WET_BULB_CASES:
+            with self.subTest(case=args[0]):
+                test_registered_wet_bulb_feasibility(self.routed_data, *args)
