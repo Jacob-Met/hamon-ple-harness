@@ -42,5 +42,55 @@ class BrentBracketTest(unittest.TestCase):
             self.assertLess(error, 1e-12)
 
 
+    def test_end_to_end_wave6_wave7_solvers_without_scipy(self):
+        from types import SimpleNamespace
+        import _scipy_compat as sc
+        import hamon_wave6_physics_verifiers as w6
+        import hamon_wave7_engineering_verifiers as w7
+
+        orig_w6 = (w6.integrate, w6.optimize)
+        orig_w7 = (w7.integrate, w7.linalg, w7.optimize)
+        try:
+            w6.integrate = SimpleNamespace(quad=sc.quad_fallback, solve_ivp=sc.solve_ivp_fallback)
+            w6.optimize = SimpleNamespace(brentq=sc.brentq_fallback)
+            w7.integrate = SimpleNamespace(quad=sc.quad_fallback, solve_ivp=sc.solve_ivp_fallback)
+            w7.optimize = SimpleNamespace(brentq=sc.brentq_fallback)
+            w7.linalg = SimpleNamespace(
+                lu_factor=sc.lu_factor_fallback,
+                lu_solve=sc.lu_solve_fallback,
+                eigh=sc.eigh_fallback,
+            )
+            gamma = 1.4
+            for mach_expected, regime in ((0.5, "subsonic"), (3.0, "supersonic")):
+                ar = (1.0 / mach_expected) * (
+                    (2.0 / (gamma + 1.0)) * (1.0 + 0.5 * (gamma - 1.0) * mach_expected * mach_expected)
+                ) ** ((gamma + 1.0) / (2.0 * (gamma - 1.0)))
+                out = w6.solve_compressible_gas_acoustics(
+                    {"subkind": "isentropic", "area_ratio": ar, "gamma": gamma, "regime": regime}
+                )
+                self.assertTrue(out["verified"])
+                self.assertAlmostEqual(out["mach"], mach_expected, places=11)
+            hx_eq = w7.solve_exchanger_or_radiation(
+                {"subkind": "heat_exchanger", "flow_arrangement": "counterflow",
+                 "C_h": 2400.0, "C_c": 2400.0, "T_h_in": 400.0, "T_c_in": 300.0, "UA": 2400.0}
+            )
+            hx_inv = w7.solve_exchanger_or_radiation(
+                {"subkind": "heat_exchanger", "flow_arrangement": "counterflow",
+                 "C_h": 2400.0, "C_c": 2400.0, "T_h_in": 400.0, "T_c_in": 300.0,
+                 "effectiveness": hx_eq["effectiveness"]}
+            )
+            self.assertTrue(hx_inv["verified"])
+            self.assertAlmostEqual(hx_inv["UA_W_K"], 2400.0, places=9)
+            hx_par = w7.solve_exchanger_or_radiation(
+                {"subkind": "heat_exchanger", "flow_arrangement": "parallel",
+                 "C_h": 2000.0, "C_c": 2000.0, "T_h_in": 400.0, "T_c_in": 300.0, "effectiveness": 0.25}
+            )
+            self.assertTrue(hx_par["verified"])
+            self.assertAlmostEqual(hx_par["UA_W_K"], 2000.0 * (0.5 * math.log(2.0)), places=9)
+        finally:
+            w6.integrate, w6.optimize = orig_w6
+            w7.integrate, w7.linalg, w7.optimize = orig_w7
+
+
 if __name__ == "__main__":
     unittest.main()
