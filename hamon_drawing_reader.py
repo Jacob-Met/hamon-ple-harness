@@ -3,6 +3,7 @@ and PLE competition deliverable pre-flight validator.
 """
 from __future__ import annotations
 
+import io
 import math
 import re
 import zlib
@@ -127,107 +128,37 @@ def _apply_pdf_ctm(x: float, y: float, m: Tuple[float, float, float, float, floa
     return (x * m[0] + y * m[2] + m[4], x * m[1] + y * m[3] + m[5])
 
 
-def _decode_pdf_literal_string(raw: str) -> str:
-    out: List[str] = []
-    i = 0
-    n = len(raw)
-    escape_map = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f", "(": "(", ")": ")", "\\": "\\"}
-    while i < n:
-        ch = raw[i]
-        if ch == "\\" and i + 1 < n:
-            nxt = raw[i + 1]
-            if nxt in "01234567":
-                oct_digits = nxt
-                j = i + 2
-                while j < n and len(oct_digits) < 3 and raw[j] in "01234567":
-                    oct_digits += raw[j]
-                    j += 1
-                out.append(chr(int(oct_digits, 8)))
-                i = j
-                continue
-            out.append(escape_map.get(nxt, nxt))
-            i += 2
+def _clip_segment(segment: PdfVectorSegment, box: Tuple[float, ...]):
+    """Clip a centerline in form space before the form's affine placement."""
+    x0, y0, x1, y1 = segment.x0_pt, segment.y0_pt, segment.x1_pt, segment.y1_pt
+    dx, dy = x1 - x0, y1 - y0
+    enter, leave = 0.0, 1.0
+    for delta, margin in ((-dx, x0-box[0]), (dx, box[2]-x0),
+                          (-dy, y0-box[1]), (dy, box[3]-y0)):
+        if delta == 0:
+            if margin < 0:
+                return None
+        elif delta < 0:
+            enter = max(enter, margin / delta)
         else:
-            out.append(ch)
-            i += 1
-    return "".join(out)
-
-
-def _tokenize_content_stream(stream_text: str) -> List[Any]:
-    tokens: List[Any] = []
-    i = 0
-    n = len(stream_text)
-    while i < n:
-        ch = stream_text[i]
-        if ch in " \t\r\n\x00\x0c":
-            i += 1
-            continue
-        if ch == "%":
-            while i < n and stream_text[i] not in "\r\n":
-                i += 1
-            continue
-        if ch == "(":
-            depth = 1
-            i += 1
-            buf: List[str] = []
-            while i < n and depth > 0:
-                c = stream_text[i]
-                if c == "\\" and i + 1 < n:
-                    buf.append(c)
-                    buf.append(stream_text[i + 1])
-                    i += 2
-                    continue
-                if c == "(":
-                    depth += 1
-                    buf.append(c)
-                elif c == ")":
-                    depth -= 1
-                    if depth > 0:
-                        buf.append(c)
-                else:
-                    buf.append(c)
-                i += 1
-            tokens.append(("str", _decode_pdf_literal_string("".join(buf))))
-            continue
-        if ch == "<" and (i + 1 >= n or stream_text[i + 1] != "<"):
-            j = stream_text.find(">", i + 1)
-            if j == -1:
-                j = n
-            hex_s = re.sub(r"\s+", "", stream_text[i + 1:j])
-            if len(hex_s) % 2 == 1:
-                hex_s += "0"
-            try:
-                raw_b = bytes.fromhex(hex_s)
-                txt = raw_b.decode("utf-16-be") if raw_b.startswith(b"\xfe\xff") else raw_b.decode("latin-1")
-            except Exception:
-                txt = ""
-            tokens.append(("str", txt))
-            i = j + 1
-            continue
-        if ch == "[":
-            tokens.append("[")
-            i += 1
-            continue
-        if ch == "]":
-            tokens.append("]")
-            i += 1
-            continue
-        j = i
-        while j < n and stream_text[j] not in " \t\r\n\x00\x0c()[]<>%":
-            j += 1
-        tok = stream_text[i:j]
-        i = j
-        try:
-            tokens.append(float(tok))
-        except ValueError:
-            tokens.append(tok)
-    return tokens
+            leave = min(leave, margin / delta)
+    if enter >= leave:
+        return None
+    return (x0 + enter*dx, y0 + enter*dy, x0 + leave*dx, y0 + leave*dy)
 
 
 def _interpret_pdf_stream(
-    stream_text: str, page_index: int, ctm: Tuple[float, ...],
+    stream, resources, pdf, page_index: int, ctm: Tuple[float, ...], ancestors=(),
 ) -> Tuple[List[PdfTextSpan], List[PdfVectorSegment]]:
-    tokens = _tokenize_content_stream(stream_text)
+    from pypdf.generic import ByteStringObject, ContentStream, TextStringObject
+
+    def text_operand(value):
+        if isinstance(value, TextStringObject):
+            return str(value)
+        if isinstance(value, ByteStringObject):
+            return bytes(value).decode("latin-1")
+        return ""
+
     stack: List[Tuple[float, float, float, float, float, float]] = []
     tm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
     tlm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
@@ -239,29 +170,9 @@ def _interpret_pdf_stream(
     cur_pt: Optional[Tuple[float, float]] = None
     subpath_start: Optional[Tuple[float, float]] = None
 
-    operands: List[Any] = []
-    arr_stack: List[List[Any]] = []
     paint_ops = {"S", "s", "f", "F", "f*", "B", "B*", "b", "b*"}
-
-    for tok in tokens:
-        if tok == "[":
-            arr_stack.append([])
-            continue
-        if tok == "]":
-            arr = arr_stack.pop() if arr_stack else []
-            if arr_stack:
-                arr_stack[-1].append(arr)
-            else:
-                operands.append(arr)
-            continue
-        if arr_stack:
-            arr_stack[-1].append(tok)
-            continue
-        if isinstance(tok, (float, int, tuple, list)) or (isinstance(tok, str) and tok.startswith("/")):
-            operands.append(tok)
-            continue
-
-        op = tok
+    for operands, operator in ContentStream(stream, pdf).operations:
+        op = operator.decode("ascii")
         if op == "q":
             stack.append(ctm)
         elif op == "Q":
@@ -270,6 +181,36 @@ def _interpret_pdf_stream(
         elif op == "cm" and len(operands) >= 6:
             vals = tuple(float(x) for x in operands[-6:])
             ctm = _mat_mul_pdf(vals, ctm)
+        elif op == "Do" and operands:
+            xobjects = resources.get("/XObject")
+            if xobjects is None:
+                continue
+            form_ref = xobjects.get_object().get(operands[-1])
+            if form_ref is None or form_ref in ancestors:
+                continue
+            form = form_ref.get_object()
+            if form.get("/Subtype") != "/Form":
+                continue
+            matrix = form["/Matrix"] if "/Matrix" in form else (1, 0, 0, 1, 0, 0)
+            form_matrix = tuple(map(float, matrix))
+            nested_resources = form.get("/Resources")
+            nested_text, nested_segments = _interpret_pdf_stream(
+                form, nested_resources.get_object() if nested_resources is not None else resources,
+                pdf, page_index, (1, 0, 0, 1, 0, 0), (*ancestors, form_ref),
+            )
+            box = tuple(map(float, form["/BBox"]))
+            placement = _mat_mul_pdf(form_matrix, ctm)
+            for text in nested_text:
+                # The API reports text origins, not every painted glyph pixel.
+                if box[0] <= text.x_pt <= box[2] and box[1] <= text.y_pt <= box[3]:
+                    x, y = _apply_pdf_ctm(text.x_pt, text.y_pt, placement)
+                    texts.append(PdfTextSpan(page_index, text.text, x, y))
+            for segment in nested_segments:
+                clipped = _clip_segment(segment, box)
+                if clipped is not None:
+                    a = _apply_pdf_ctm(*clipped[:2], placement)
+                    b = _apply_pdf_ctm(*clipped[2:], placement)
+                    segments.append(PdfVectorSegment(page_index, *a, *b))
         elif op == "m" and len(operands) >= 2:
             x, y = _apply_pdf_ctm(float(operands[-2]), float(operands[-1]), ctm)
             cur_pt = (x, y)
@@ -331,116 +272,43 @@ def _interpret_pdf_stream(
             tm = tlm
         elif op == "Tj" and len(operands) >= 1:
             last = operands[-1]
-            if isinstance(last, tuple) and last[0] == "str":
+            if text_operand(last):
                 px, py = _apply_pdf_ctm(0.0, 0.0, _mat_mul_pdf(tm, ctm))
-                texts.append(PdfTextSpan(page_index, last[1], px, py))
+                texts.append(PdfTextSpan(page_index, text_operand(last), px, py))
         elif op == "'" and len(operands) >= 1:
             tlm = _mat_mul_pdf((1.0, 0.0, 0.0, 1.0, 0.0, -leading), tlm)
             tm = tlm
             last = operands[-1]
-            if isinstance(last, tuple) and last[0] == "str":
+            if text_operand(last):
                 px, py = _apply_pdf_ctm(0.0, 0.0, _mat_mul_pdf(tm, ctm))
-                texts.append(PdfTextSpan(page_index, last[1], px, py))
+                texts.append(PdfTextSpan(page_index, text_operand(last), px, py))
         elif op == "TJ" and len(operands) >= 1 and isinstance(operands[-1], list):
-            parts = [item[1] for item in operands[-1] if isinstance(item, tuple) and item[0] == "str"]
+            parts = [text_operand(item) for item in operands[-1]]
             joined = "".join(parts)
             if joined:
                 px, py = _apply_pdf_ctm(0.0, 0.0, _mat_mul_pdf(tm, ctm))
                 texts.append(PdfTextSpan(page_index, joined, px, py))
-        operands.clear()
 
     return texts, segments
 
 
-def read_vector_pdf(pdf_bytes: bytes) -> List[PdfSheetPage]:
-    objs: Dict[int, bytes] = {}
-    for m in re.finditer(rb"(\d+)\s+(\d+)\s+obj\b(.*?)endobj", pdf_bytes, flags=re.DOTALL):
-        objs[int(m.group(1))] = m.group(3)
+def read_vector_pdf(pdf_bytes: bytes, page_index: Optional[int] = None) -> List[PdfSheetPage]:
+    from pypdf import PdfReader
 
-    def extract_stream(obj_body: bytes) -> bytes:
-        sm = re.search(rb"<<(.*?)>>\s*stream(?:\r\n|\n)(.*?)endstream", obj_body, flags=re.DOTALL)
-        if not sm:
-            return b""
-        hdr = sm.group(1)
-        raw = sm.group(2)
-        if raw.endswith(b"\r\n"):
-            raw = raw[:-2]
-        elif raw.endswith(b"\n"):
-            raw = raw[:-1]
-        if b"/FlateDecode" in hdr:
-            try:
-                return zlib.decompress(raw)
-            except zlib.error:
-                return zlib.decompress(raw.strip(b"\r\n"))
-        return raw
+    return _read_pdf_pages(PdfReader(io.BytesIO(pdf_bytes)), page_index)
 
-    number = rb"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
-    rectangle = rb"\[\s*" + rb"\s+".join([number] * 4) + rb"\s*\]"
-    reference = rb"(\d+)\s+\d+\s+R\b"
 
-    def attribute(header, key, direct):
-        match = re.search(rb"/" + key + rb"\s*(?:" + reference + rb"|(" + direct + rb"))", header)
-        if match is None:
-            return None
-        if match.group(1) is None:
-            return match.group(2)
-        value = objs.get(int(match.group(1)), b"").strip()
-        if not re.fullmatch(direct, value):
-            raise ValueError(f"Invalid indirect PDF {key.decode()}")
-        return value
-
-    def page_attributes(header, parent):
-        attrs = parent.copy()
-        for key in (b"MediaBox", b"CropBox"):
-            raw = attribute(header, key, rectangle)
-            if raw is not None:
-                x0, y0, x1, y1 = map(float, re.findall(number, raw))
-                attrs[key] = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
-        rotation = attribute(header, b"Rotate", rb"[-+]?\d+")
-        if rotation is not None:
-            attrs[b"Rotate"] = int(rotation) % 360
-        return attrs
-
-    defaults = {b"MediaBox": (0.0, 0.0, 612.0, 792.0), b"Rotate": 0}
-    ordered_pages = []
-
-    def walk_pages(oid: int, parent, visited: set) -> None:
-        if oid in visited or oid not in objs:
-            return
-        visited.add(oid)
-        header = objs[oid].split(b"stream", 1)[0]
-        attrs = page_attributes(header, parent)
-        if re.search(rb"/Type\s*/Pages\b", header):
-            kids = re.search(rb"/Kids\s*\[(.*?)\]", header, flags=re.DOTALL)
-            if kids:
-                for ref in re.finditer(reference, kids.group(1)):
-                    walk_pages(int(ref.group(1)), attrs, visited)
-        elif re.search(rb"/Type\s*/Page\b", header):
-            ordered_pages.append((oid, attrs))
-
-    for oid, body in sorted(objs.items()):
-        hdr = body.split(b"stream", 1)[0]
-        if re.search(rb"/Type\s*/Catalog\b", hdr):
-            pm = re.search(rb"/Pages\s+(\d+)\s+\d+\s+R", hdr)
-            if pm:
-                walk_pages(int(pm.group(1)), defaults, set())
-                break
-
-    if not ordered_pages:
-        for oid, body in sorted(objs.items()):
-            hdr = body.split(b"stream", 1)[0]
-            if re.search(rb"/Type\s*/Page\b", hdr):
-                ordered_pages.append((oid, page_attributes(hdr, defaults)))
-
+def _read_pdf_pages(pdf, page_index: Optional[int]) -> List[PdfSheetPage]:
+    if page_index is not None and (type(page_index) is not int or not 0 <= page_index < len(pdf.pages)):
+        raise ValueError("page_index outside PDF")
     sheets: List[PdfSheetPage] = []
-    for p_idx, (oid, attrs) in enumerate(ordered_pages):
-        body = objs[oid]
-        hdr = body.split(b"stream", 1)[0]
-        media = attrs[b"MediaBox"]
-        crop = attrs.get(b"CropBox", media)
+    page_indexes = range(len(pdf.pages)) if page_index is None else (page_index,)
+    for p_idx in page_indexes:
+        page = pdf.pages[p_idx]
+        media, crop = (tuple(map(float, box)) for box in (page.mediabox, page.cropbox))
         x0, y0 = max(media[0], crop[0]), max(media[1], crop[1])
         x1, y1 = min(media[2], crop[2]), min(media[3], crop[3])
-        rotation = attrs[b"Rotate"]
+        rotation = page.rotation % 360
         if x0 >= x1 or y0 >= y1 or rotation not in (0, 90, 180, 270):
             raise ValueError("Invalid PDF display box or page rotation")
         width_pt, height_pt = x1 - x0, y1 - y0
@@ -455,23 +323,11 @@ def read_vector_pdf(pdf_bytes: bytes) -> List[PdfSheetPage]:
             270: (0, 1, -1, 0, y1, -x0),
         }[rotation]
 
-        content_ids: List[int] = []
-        cm_arr = re.search(rb"/Contents\s*\[(.*?)\]", hdr, flags=re.DOTALL)
-        if cm_arr:
-            content_ids = [int(rm.group(1)) for rm in re.finditer(rb"(\d+)\s+\d+\s+R", cm_arr.group(1))]
-        else:
-            cm_single = re.search(rb"/Contents\s+(\d+)\s+\d+\s+R", hdr)
-            if cm_single:
-                cid = int(cm_single.group(1))
-                # A Contents reference can point to the array of streams itself.
-                target = objs.get(cid, b"").strip()
-                if target.startswith(b"[") and target.endswith(b"]"):
-                    content_ids = [int(ref.group(1)) for ref in re.finditer(reference, target)]
-                else:
-                    content_ids = [cid]
-
-        combined = b"\n".join(extract_stream(objs[cid]) for cid in content_ids if cid in objs)
-        texts, segs = _interpret_pdf_stream(combined.decode("latin-1", errors="replace"), p_idx, page_ctm)
+        resources = page.get("/Resources")
+        texts, segs = _interpret_pdf_stream(
+            page.get_contents(), resources.get_object() if resources is not None else {},
+            pdf, p_idx, page_ctm,
+        )
 
         detected_scale: Optional[float] = None
         tb_texts = [t for t in texts if t.x_pt >= 0.55 * width_pt and t.y_pt <= 0.35 * height_pt]
@@ -651,83 +507,21 @@ if "build_minimal_vector_pdf" in globals():
 
 def run_router_drawing_reader(payload: dict) -> dict:
     import base64 as _b64
-    import inspect as _ins
-    import os as _os
-    import tempfile as _tf
-    from pathlib import Path as _Path
+    path = payload.get("path")
+    if path and Path(path).is_file():
+        pdf_bytes = Path(path).read_bytes()
+    elif payload.get("pdf_b64"):
+        pdf_bytes = _b64.b64decode(payload["pdf_b64"])
+    elif isinstance(payload.get("pdf_bytes"), (bytes, bytearray)):
+        pdf_bytes = bytes(payload["pdf_bytes"])
+    else:
+        raise FileNotFoundError(f"PDF file not found: {path}")
+    from pypdf import PdfReader
 
-    tmp_file = None
-    try:
-        if payload.get("path") and _Path(payload["path"]).is_file():
-            pdf_path = _Path(payload["path"])
-        else:
-            fd, tname = _tf.mkstemp(suffix=".pdf", prefix="ple-pdf-")
-            _os.close(fd)
-            tmp_file = _Path(tname)
-            if "pdf_b64" in payload and payload["pdf_b64"]:
-                tmp_file.write_bytes(_b64.b64decode(payload["pdf_b64"]))
-            elif "pdf_bytes" in payload and isinstance(payload["pdf_bytes"], (bytes, bytearray)):
-                tmp_file.write_bytes(bytes(payload["pdf_bytes"]))
-            else:
-                raise FileNotFoundError(f"PDF file not found: {payload.get('path')}")
-            pdf_path = tmp_file
-
-        preferred = (
-            "read_engineering_drawing",
-            "analyze_drawing_pdf",
-            "read_drawing_pdf",
-            "analyze_engineering_drawing",
-            "extract_drawing_takeoff",
-            "parse_drawing_pdf",
-            "read_vector_pdf",
-            "inspect_drawing_pdf",
-            "analyze_pdf",
-            "extract_pdf_pages",
-            "parse_pdf_sheets",
-        )
-        g = globals()
-        cands = []
-        for nm in preferred:
-            if nm in g and callable(g[nm]):
-                cands.append((nm, g[nm]))
-        for nm, fn in g.items():
-            if callable(fn) and not nm.startswith("_") and nm not in ("build_minimal_vector_pdf", "run_router_drawing_reader"):
-                if any(k in nm.lower() for k in ("read", "analyze", "extract", "parse", "takeoff", "inspect", "sheet")):
-                    if (nm, fn) not in cands:
-                        cands.append((nm, fn))
-        pdf_bytes = pdf_path.read_bytes()
-        for nm, fn in cands:
-            try:
-                sig = _ins.signature(fn)
-            except Exception:
-                continue
-            params = list(sig.parameters.values())
-            if not params:
-                continue
-            kw = {}
-            for pk in sig.parameters:
-                if pk in ("scale_override", "scale", "override_scale") and payload.get("scale_override") is not None:
-                    kw[pk] = payload["scale_override"]
-                elif pk in ("page_index", "page") and payload.get("page_index") is not None:
-                    kw[pk] = int(payload["page_index"])
-            for arg0 in (pdf_path, str(pdf_path), pdf_bytes):
-                try:
-                    raw_out = fn(arg0, **kw)
-                    if raw_out is None:
-                        continue
-                    out = _wave3_pdf_to_jsonable(raw_out)
-                    if isinstance(out, list):
-                        out = {"pages": out, "page_count": len(out)}
-                    if isinstance(out, dict) and len(out) >= 1:
-                        out["ok"] = True
-                        out.setdefault("tool", "hamon_drawing_reader")
-                        return out
-                except Exception:
-                    continue
-        raise RuntimeError("No compatible PDF drawing reader entrypoint matched")
-    finally:
-        if tmp_file is not None:
-            tmp_file.unlink(missing_ok=True)
+    pdf = PdfReader(io.BytesIO(pdf_bytes))
+    pages = _read_pdf_pages(pdf, payload.get("page_index"))
+    return {"pages": _wave3_pdf_to_jsonable(pages), "page_count": len(pdf.pages),
+            "ok": True, "tool": "hamon_drawing_reader"}
 
 
 if __name__ == "__main__" and "--json-stdin" in __import__("sys").argv:
