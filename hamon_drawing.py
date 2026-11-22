@@ -1593,12 +1593,42 @@ _SIMPLEX_PRINTABLE = (
 
 
 def _visible_complete_label(source, page, region, glyphs, vectors):
-    """Every predicted edge must be visibly inked outside the ring's own stroke."""
+    """Check the complete printed label, resolving subpixel gaps only when physically plausible."""
     identifiers = {identifier for _, identifier in glyphs}
     ring = region["ring"]["box"]
+    selected = [v for v in vectors if v["id"] in identifiers]
+    if _visible_label_at_scale(source, page, ring, selected, 8):
+        return True
+    # A lettering stroke and a marker rim can occupy adjacent pixels at 8 px/pt
+    # even if the vector pen footprints leave a small positive gap. Choose one
+    # finer observation using the two pen widths, then repeat the original
+    # connected-component and complete-edge proof on the unmodified PDF.
+    ring_vector = next((v for v in vectors if v["id"] == region["ring"].get("id")), None)
+    if not selected or not ring_vector or not ring_vector.get("svg_pen_diameter"):
+        return False
+    cx, cy = (ring[0]+ring[2])/2, (ring[1]+ring[3])/2
+    inner_radius = min(ring[2]-ring[0], ring[3]-ring[1])/2 - ring_vector["svg_pen_diameter"]/2
+    extent = 0.
+    for v in selected:
+        pen = v.get("svg_pen_diameter")
+        if not pen or not v.get("svg_points"):
+            return False
+        extent = max(extent, max(math.hypot(x-cx,y-cy) for x,y in v["svg_points"])+pen/2)
+    clearance = inner_radius - extent
+    if not 0 < clearance < (2+math.sqrt(2))/8:
+        return False
+    scale = math.ceil((2+math.sqrt(2))/clearance)
+    width = math.ceil(ring[2]*scale)-math.floor(ring[0]*scale)
+    height = math.ceil(ring[3]*scale)-math.floor(ring[1]*scale)
+    if width*height > 2_500_000:
+        return False
+    return _visible_label_at_scale(source, page, ring, selected, scale)
+
+
+def _visible_label_at_scale(source, page, ring, selected, scale):
+    """Every predicted edge must be visibly inked outside the ring's own stroke."""
     cx, cy = (ring[0]+ring[2])/2, (ring[1]+ring[3])/2
     radius = (ring[2]-ring[0])/2
-    scale = 8
     raster = _caption_raster(source, page, ring, scale)
     if raster is None:
         return False
@@ -1623,9 +1653,7 @@ def _visible_complete_label(source, page, region, glyphs, vectors):
                     frontier.append(neighbor)
     interior = dark_pixels - rim
     expected_paint = set()
-    for v in vectors:
-        if v["id"] not in identifiers:
-            continue
+    for v in selected:
         pen = v.get("svg_pen_diameter")
         if pen is None or not 0 < pen <= .2*radius:
             return False
