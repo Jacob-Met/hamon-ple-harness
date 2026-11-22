@@ -91,7 +91,7 @@ def settlement_from_void_loss(h, e0, loss):
 
 
 def _corner(x, y, z):
-    """Signed influence of a corner rectangle (USACE EM 1110-1-1905, Fig. 6-8)."""
+    """Signed influence of a corner rectangle (USACE EM 1110-1-1905 (31 July 2025), Fig. 6-8)."""
     r = math.hypot(x, y, z)
     rx, ry = math.hypot(x, z), math.hypot(y, z)
     angle = math.atan2((x / r) * y, z)
@@ -155,9 +155,17 @@ def rectangular_load_stress(spec, claim_key):
         y0, y1 = (cy - y) - length / 2, (cy - y) + length / 2
         if not all(math.isfinite(v) for v in (x0, x1, y0, y1)) or not (x0 < x1 and y0 < y1):
             raise ValueError("Footprint offsets exceed finite coordinate resolution")
-        influence = math.fsum((_corner(x1, y1, z), -_corner(x0, y1, z),
-                               -_corner(x1, y0, z), _corner(x0, y0, z)))
-        check = _area_integral(x0, x1, y0, y1, z)
+        # Influence is homogeneous of degree zero. Binary rescaling preserves
+        # coordinate differences while keeping all Euclidean norms representable.
+        exponent = math.frexp(max(abs(x0), abs(x1), abs(y0), abs(y1), z))[1]
+        x0, x1, y0, y1, depth = (
+            math.ldexp(value, -exponent) for value in (x0, x1, y0, y1, z)
+        )
+        if depth == 0 or not (x0 < x1 and y0 < y1):
+            raise ValueError("Footprint and depth span unresolvable coordinate scales")
+        influence = math.fsum((_corner(x1, y1, depth), -_corner(x0, y1, depth),
+                               -_corner(x1, y0, depth), _corner(x0, y0, depth)))
+        check = _area_integral(x0, x1, y0, y1, depth)
         if not 0 <= check <= 1 + 1e-12 or not math.isclose(influence, check, abs_tol=2e-12, rel_tol=1e-8):
             raise ValueError("Boussinesq area integral disagrees with the corner influence solution")
         # The corner subtraction can lose significant digits far outside the

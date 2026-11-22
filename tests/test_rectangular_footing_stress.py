@@ -18,7 +18,7 @@ def check(loads, point=(0, 0, 1), **changes):
 
 class RectangularStressTest(unittest.TestCase):
     def test_square_corner_and_center(self):
-        # A square of side z has Fadum corner influence 0.17522 (USACE Fig. 6-8).
+        # A square of side z has Fadum corner influence 0.17522 (USACE EM 1110-1-1905 (2025), Fig. 6-8).
         corner = check([load(width=1, length=1)], point=(.5, .5, 1))
         self.assertTrue(corner["conservation_verified"])
         self.assertAlmostEqual(corner["derived_delta_sigma_v_Pa"] / 1000, .17522, places=5)
@@ -49,6 +49,16 @@ class RectangularStressTest(unittest.TestCase):
                 out = check([load()], point=point)
                 self.assertTrue(out["conservation_verified"], out)
                 self.assertAlmostEqual(out["derived_delta_sigma_v_Pa"] / 1000, fraction, places=6)
+
+    def test_scale_invariance_beyond_representable_norm(self):
+        reference = check([load(width=1, length=1)], point=(17, 0, 17))
+        scaled = check([load(width=1e307, length=1e307)], point=(1.7e308, 0, 1.7e308),
+                       delta_sigma_v_Pa=0)
+        self.assertTrue(reference["conservation_verified"])
+        self.assertTrue(scaled["ok"])
+        self.assertFalse(scaled["conservation_verified"])
+        self.assertAlmostEqual(scaled["derived_delta_sigma_v_Pa"], .292215405486, places=10)
+        self.assertAlmostEqual(scaled["derived_delta_sigma_v_Pa"], reference["derived_delta_sigma_v_Pa"])
 
     def test_far_field_and_legacy_scalar(self):
         out = check([load(width=1, length=1, pressure=1.e45)], point=(1.e9, 0, 1))
