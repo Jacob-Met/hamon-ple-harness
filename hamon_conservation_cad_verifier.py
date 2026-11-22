@@ -478,11 +478,86 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _thin_tube_properties(spec):
+    """Uniform ideal thin-wall ring, using the wall median for stress recovery."""
+    section = spec["section"]
+    if not isinstance(section, dict) or section.get("shape") != "thin_walled_circular_tube":
+        raise ValueError("unsupported section shape")
+    radius = float(section["mean_radius_m"])
+    thickness = float(section["wall_thickness_m"])
+    if not (math.isfinite(radius) and 0 < thickness <= 0.05 * radius):
+        raise ValueError("require positive finite mean radius and 0 < thickness/radius <= 0.05")
+    area = 2 * math.pi * radius * thickness
+    inertia = math.pi * radius ** 3 * thickness
+    outer = radius + thickness / 2
+    expected = {"I_m4": inertia, "J_m4": 2 * inertia, "area_m2": area,
+                "c_m": outer, "depth_m": 2 * outer, "r_outer_m": outer}
+    if any(key in spec and not math.isclose(float(spec[key]), value, rel_tol=1e-6)
+           for key, value in expected.items()):
+        raise ValueError("section properties disagree with the uniform thin-wall ring")
+    return radius, area, inertia
+
+
+def _tube_stress_bounds(boundary, moment, shear, torque, axial, radius, area, inertia):
+    """Enclose peak von Mises over each span cell and circumferential cell.
+
+    Opposite quadrants permit both membrane terms to have reinforcing signs.
+    The flexural flow 2V cos(theta)/A and uniform torsional flow TR/(2I)
+    act in the same local wall tangent. Bending varies as sin(theta).
+    """
+    angles = np.linspace(0, math.pi / 2, 257)
+    sin_theta, cos_theta = np.sin(angles), np.cos(angles)
+    axial_stress = abs(axial) / area
+    torsion_stress = abs(torque) * radius / (2 * inertia)
+    bending = abs(moment) * radius / inertia
+    transverse = 2 * shear / area
+    def stress(m, v, sn, cs):
+        return np.hypot(axial_stress + m * sn, math.sqrt(3) * (torsion_stress + v * cs))
+
+    if boundary == "simply_supported_udl":
+        # u ranges from midspan to support. |M|=Mmax*(1-u²), |V|=Vmax*u.
+        u = np.linspace(0, 1, 129)[:, None]
+        m = bending * (1 - u * u)
+        v = transverse * u
+        sample = stress(m, v, sin_theta, cos_theta)
+        enclosure = stress(m[:-1], v[1:], sin_theta[1:], cos_theta[:-1])
+    else:
+        # For the other supported load cases both maxima occur together
+        # at a built-in end or at the one-sided limit of the central point load.
+        sample = stress(bending, transverse, sin_theta, cos_theta)
+        enclosure = stress(bending, transverse, sin_theta[1:], cos_theta[:-1])
+    return float(np.max(sample)), float(np.max(enclosure))
+
+
 def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
-    L, E, I = float(spec["span_m"]), float(spec["E_Pa"]), float(spec["I_m4"])
-    c_dist = float(spec.get("c_m", 0.5 * float(spec.get("depth_m", 0.2))))
-    area = float(spec.get("area_m2", 0.01))
+    """Ideal beam response in SI units under one specified load case.
+
+    For mixed shear, pass section={shape: thin_walled_circular_tube,
+    mean_radius_m: R, wall_thickness_m: t}. The uniform thin-wall membrane
+    approximation uses constant internal torque, shear through the shear center
+    and centroidal axial compression. Local load/support concentrations,
+    distortional behavior and shell buckling are outside this section model.
+    An unresolved stress assessment leaves passes_stress null. Equilibrium and
+    virtual-work consistency are reported separately by conservation_verified.
+    """
+    def unsupported(message):
+        return {"ok": False, "mode": "structural", "tool": "hamon_conservation_cad_verifier",
+                "error": message, "conservation_verified": False}
+
     bc = str(spec.get("boundary", "simply_supported_udl")).lower()
+    if bc not in {"simply_supported_udl", "simply_supported_point", "cantilever_point",
+                  "cantilever_udl", "fixed_fixed_udl"}:
+        return unsupported(f"unsupported structural boundary: {bc}")
+    tube = None
+    if "section" in spec:
+        try:
+            tube = _thin_tube_properties(spec)
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            return unsupported(str(exc))
+    L, E = float(spec["span_m"]), float(spec["E_Pa"])
+    I = tube[2] if tube else float(spec["I_m4"])
+    c_dist = float(spec.get("c_m", 0.5 * float(spec.get("depth_m", 0.2))))
+    area = tube[1] if tube else float(spec.get("area_m2", 0.01))
     w, P = float(spec.get("w_N_m", 0.0)), float(spec.get("P_N", 0.0))
     torque = float(spec.get("torque_Nm", 0.0))
     J = float(spec.get("J_m4", 2.0 * I))
@@ -491,6 +566,13 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
     K_eff = float(spec.get("K_buckling", 1.0))
     fy, fs_req = float(spec.get("yield_strength_Pa", 250e6)), float(spec.get("safety_factor", 1.5))
     defl_ratio = float(spec.get("deflection_limit_ratio", 360.0))
+
+    if not all(math.isfinite(x) and x > 0 for x in (L, E, I, area, c_dist, J, r_outer, K_eff, fy, fs_req, defl_ratio)):
+        return unsupported("section, material, span and limit parameters must be finite and positive")
+    if not all(map(math.isfinite, (P, w, torque, axial_comp))) or axial_comp < 0:
+        return unsupported("loads must be finite, with nonnegative axial compression")
+    if (bc.endswith("_udl") and P != 0) or (bc.endswith("_point") and w != 0):
+        return unsupported("applied loads do not match the selected boundary/load case")
 
     if bc == "simply_supported_udl":
         r_l = r_r = 0.5 * w * L
@@ -524,11 +606,24 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
     defl_vw = abs(float(np.sum(wts * np.array([m_fn(float(x)) * m_u(float(x)) / (E * I) for x in xs])) * (L / (3.0 * n_p))))
     dual_err = abs(defl_a - defl_vw) / max(defl_a, 1e-30)
     fy_res = abs((r_l + r_r) - (w * L + P))
-    sigma_b = abs(m_max) * c_dist / I + (axial_comp / area if area > 0 else 0.0)
-    tau_t = abs(torque) * r_outer / J if J > 0 else 0.0
-    tau_tot = tau_t + (1.5 * v_max / area if (torque == 0.0 and area > 0) else 0.0)
-    vm = math.sqrt(sigma_b * sigma_b + 3.0 * tau_tot * tau_tot)
     allow = fy / fs_req
+    limit = allow * (1.0 + 1e-9)
+    stress_bounds = None
+    if tube:
+        lower, upper = _tube_stress_bounds(bc, m_max, v_max, torque, axial_comp, *tube)
+        stress_bounds = {"lower": lower, "upper": upper}
+        vm = upper
+        passes_stress = True if upper <= limit else False if lower > limit else None
+        assessment = "ideal_thin_wall_circular_tube_upper_bound"
+    elif torque != 0 and v_max != 0:
+        vm = passes_stress = None
+        assessment = "indeterminate_combined_shear_requires_supported_section"
+    else:
+        sigma_b = abs(m_max) * c_dist / I + axial_comp / area
+        shear_stress = abs(torque) * r_outer / J if torque else 1.5 * v_max / area
+        vm = math.hypot(sigma_b, math.sqrt(3) * shear_stress)
+        passes_stress = vm <= limit
+        assessment = "legacy_scalar_section_screen"
     p_cr = (math.pi ** 2) * E * I / ((K_eff * L) ** 2)
     d_lim = L / defl_ratio
     return {
@@ -544,7 +639,9 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
         "von_mises_stress_Pa": vm,
         "allowable_stress_Pa": allow,
         "euler_critical_load_N": p_cr,
-        "passes_stress": vm <= allow * (1.0 + 1e-9),
+        "passes_stress": passes_stress,
+        "stress_assessment": assessment,
+        "von_mises_bounds_Pa": stress_bounds,
         "passes_deflection": defl_a <= d_lim * (1.0 + 1e-9),
         "passes_buckling": axial_comp <= (p_cr / fs_req) if axial_comp > 0 else True,
         "conservation_verified": bool(fy_res <= 1e-7 * max(abs(w * L + P), 1.0) and dual_err <= 1e-5),
