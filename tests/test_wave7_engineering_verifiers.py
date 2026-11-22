@@ -5,7 +5,19 @@ import math
 try:
     import pytest
 except ModuleNotFoundError:
-    pytest = None  # type: ignore[assignment]
+    class _Approx:
+        def __init__(self, expected, rel=1e-6, abs_tol=1e-12):
+            self.expected = expected
+            self.rel = rel
+            self.abs_tol = abs_tol
+        def __eq__(self, actual):
+            import numpy as _np
+            return bool(_np.allclose(actual, self.expected, rtol=self.rel if self.rel is not None else 0.0, atol=self.abs_tol if self.abs_tol is not None else 0.0))
+    class _PytestShim:
+        @staticmethod
+        def approx(expected, rel=1e-6, abs=1e-12):
+            return _Approx(expected, rel=rel, abs_tol=abs)
+    pytest = _PytestShim()  # type: ignore[assignment]
 
 from hamon_wave6_physics_verifiers import prune_deterministic_fast_path
 from hamon_wave7_engineering_verifiers import (

@@ -549,9 +549,13 @@ def solve_mohr_vessel_buckling(params: Mapping[str, Any]) -> Dict[str, Any]:
             sigma_cr = sy * (1.0 - (sy * (slenderness ** 2)) / (4.0 * (math.pi ** 2) * e_mod))
         p_cr = sigma_cr * area
 
-        s_sym = sp.Symbol("lam", positive=True)
-        euler_at_cc = float(((sp.pi ** 2) * e_mod / (s_sym ** 2)).subs(s_sym, c_c).evalf())
-        johnson_at_cc = float((sy * (1 - sy * (s_sym ** 2) / (4 * (sp.pi ** 2) * e_mod))).subs(s_sym, c_c).evalf())
+        if HAS_SYMPY:
+            s_sym = sp.Symbol("lam", positive=True)
+            euler_at_cc = float(((sp.pi ** 2) * e_mod / (s_sym ** 2)).subs(s_sym, c_c).evalf())
+            johnson_at_cc = float((sy * (1 - sy * (s_sym ** 2) / (4 * (sp.pi ** 2) * e_mod))).subs(s_sym, c_c).evalf())
+        else:
+            euler_at_cc = float((math.pi ** 2) * e_mod / (c_c ** 2))
+            johnson_at_cc = float(sy * (1.0 - sy * (c_c ** 2) / (4.0 * (math.pi ** 2) * e_mod)))
         residual = abs(euler_at_cc - johnson_at_cc) / sy
         return {
             "domain": "solid_mohr_vessel_buckling",
