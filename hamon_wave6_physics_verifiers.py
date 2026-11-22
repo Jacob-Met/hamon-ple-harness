@@ -820,6 +820,219 @@ def solve_mohr_vessel_buckling(params: Mapping[str, Any]) -> Dict[str, Any]:
     raise ValueError(f"Unsupported solid_mohr_vessel_buckling subkind: {subkind}")
 
 
+
+def _cstr_stationary_points(coefficients):
+    """Isolate every distinct open-unit-interval root using exact Sturm signs."""
+    from fractions import Fraction
+
+    def trim(p):
+        while len(p) > 1 and p[-1] == 0:
+            p.pop()
+        return p
+
+    def value(p, x):
+        y = Fraction(0)
+        for c in reversed(p):
+            y = y * x + c
+        return y
+
+    def remainder(p, q):
+        p = p[:]
+        while len(p) >= len(q) and any(p):
+            factor = p[-1] / q[-1]
+            shift = len(p) - len(q)
+            for i, c in enumerate(q):
+                p[i + shift] -= factor * c
+            trim(p)
+        return p
+
+    p = trim(coefficients[:])
+    if not any(p):
+        raise ValueError("indeterminate CSTR stationary polynomial")
+    while len(p) > 1 and p[0] == 0:
+        p.pop(0)
+    while len(p) > 1 and value(p, Fraction(1)) == 0:
+        # Exact division by x - 1 removes physical-interval endpoints.
+        q = [Fraction(0)] * (len(p) - 1)
+        q[-1] = p[-1]
+        for j in range(len(q) - 2, -1, -1):
+            q[j] = p[j + 1] + q[j + 1]
+        p = trim(q)
+    if len(p) == 1:
+        return []
+    chain = [p, [i * p[i] for i in range(1, len(p))]]
+    while any(chain[-1]):
+        rem = trim([-x for x in remainder(chain[-2], chain[-1])])
+        if not any(rem):
+            break
+        # Positive rescaling preserves every Sturm sign.
+        scale = abs(rem[-1])
+        chain.append([x / scale for x in rem])
+
+    def variations(x):
+        signs = [1 if y > 0 else -1 for q in chain if (y := value(q, x)) != 0]
+        return sum(a != b for a, b in zip(signs, signs[1:]))
+
+    left, right = Fraction(0), Fraction(1)
+    pending = [(left, right, variations(left), variations(right), 0)]
+    roots = []
+    while pending:
+        lo, hi, vlo, vhi, depth = pending.pop()
+        count = vlo - vhi
+        if count == 0:
+            continue
+        if count == 1 and (hi - lo <= Fraction(1, 2**190) or value(p, (lo+hi)/2) == 0):
+            roots.append((lo + hi) / 2)
+            continue
+        if depth > 2048:
+            raise ValueError("CSTR stationary points are not numerically separable")
+        mid = (lo + hi) / 2
+        vmid = variations(mid)
+        pending.extend(((mid, hi, vmid, vhi, depth + 1),
+                        (lo, mid, vlo, vmid, depth + 1)))
+    return sorted(roots)
+
+
+def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon, order, gas):
+    """Enumerate the single-CSTR power-law/Arrhenius steady-state equation.
+
+    Exact stationary-polynomial isolation partitions the physical interval.
+    High-precision log balances avoid a conversion grid, exponential overflow,
+    and a single bracketing search silently discarding other branches.
+    No dynamical stability classification follows from this steady-state model.
+    """
+    from fractions import Fraction
+
+    inputs = (volume, c0, feed, t0, top, delta, epsilon, order)
+    if not all(math.isfinite(x) for x in inputs):
+        raise ValueError("CSTR inputs must be finite")
+    if volume < 0 or min(c0, feed, t0) <= 0 or epsilon <= -1:
+        raise ValueError("CSTR requires nonnegative volume, positive feed/concentration/temperature and epsilon_A > -1")
+    slope = delta if abs(delta) > 1e-15 else 0.0
+    inlet = t0 if slope else top
+    if min(inlet, inlet + slope) <= 0:
+        raise ValueError("CSTR temperature must stay positive on 0 <= conversion <= 1")
+    if volume == 0:
+        return [0.0]
+
+    # Use precisely the same precedence as the maintained rate law.
+    if "A_preexp" in params and "E_a" in params:
+        rate_kind = "preexponential"
+        rate = float(params["A_preexp"])
+        activation = float(params["E_a"])
+        reference = 1.0
+    elif "k_ref" in params and "T_ref" in params and "E_a" in params:
+        rate_kind = "reference"
+        rate = float(params["k_ref"])
+        activation = float(params["E_a"])
+        reference = float(params["T_ref"])
+    else:
+        rate_kind = "constant"
+        rate = float(params["k"])
+        activation = 0.0
+        reference = 1.0
+    if not all(math.isfinite(x) for x in (rate, activation, reference)) or min(rate, reference) <= 0:
+        raise ValueError("CSTR kinetic rate and reference temperature must be finite and positive")
+    F = Fraction.from_float
+    x, remaining, expansion, temperature = [F(0.), F(1.)], [F(1.), F(-1.)], [F(1.), F(epsilon)], [F(inlet), F(slope)]
+
+    def multiply(*polys):
+        out = [Fraction(1)]
+        for p in polys:
+            product = [Fraction(0)] * (len(out) + len(p) - 1)
+            for i, a in enumerate(out):
+                for j, b in enumerate(p):
+                    product[i+j] += a*b
+            out = product
+        return out
+
+    coefficients = [Fraction(0)] * 5
+    terms = [
+        (Fraction(1), multiply(remaining, expansion, temperature, temperature)),
+        (F(order), multiply(x, expansion, temperature, temperature)),
+        (F(order)*F(epsilon), multiply(x, remaining, temperature, temperature)),
+        (F(order)*F(slope) if gas else Fraction(0), multiply(x, remaining, expansion, temperature)),
+        (-F(activation)/F(8.31446261815324)*F(slope), multiply(x, remaining, expansion)),
+    ]
+    for factor, poly in terms:
+        for i, c in enumerate(poly):
+            coefficients[i] += factor*c
+    stationary = _cstr_stationary_points(coefficients)
+
+    with localcontext() as context:
+        context.prec = 80
+        D = Decimal.from_float
+        dc, df, dt0, di, ds, de, dn, dr = map(D, (c0, feed, t0, inlet, slope, epsilon, order, rate))
+        ea = D(activation) / D(8.31446261815324)
+        tref = D(reference)
+        target = D(volume).ln()
+        exact_power = activation == 0.0 and order.is_integer() and abs(order) <= 32
+
+        def balance(z):
+            if z == 0:
+                return Decimal("-Infinity")
+            temp = di + ds*z
+            log_k = dr.ln()
+            if rate_kind == "preexponential":
+                log_k -= ea/temp
+            elif rate_kind == "reference":
+                log_k -= ea*(1/temp - 1/tref)
+            if z == 1 and dn != 0:
+                return Decimal("Infinity") if dn > 0 else Decimal("-Infinity")
+            if exact_power:
+                # Preserve exact endpoint/fold equalities and the adjacent
+                # binary64 volumes. Independently rounded logarithms can change
+                # a zero into a sign even in 4*x*(1-x) == 1 at x == 1/2.
+                q = Fraction(z)
+                concentration = F(c0)*(1-q)/(1+F(epsilon)*q)
+                if gas:
+                    concentration *= F(t0)/(F(inlet)+F(slope)*q)
+                mass_balance = F(feed)*q - F(volume)*F(rate)*concentration**int(order)
+                return Decimal((mass_balance > 0) - (mass_balance < 0))
+            log_c = dc.ln() - (1 + de*z).ln()
+            if dn:
+                log_c += (1-z).ln()
+            if gas:
+                log_c -= (temp/dt0).ln()
+            return df.ln() + z.ln() - log_k - dn*log_c - target
+
+        cuts = [Decimal(0)] + [Decimal(z.numerator)/Decimal(z.denominator) for z in stationary] + [Decimal(1)]
+        values = [balance(z) for z in cuts]
+        found = []
+        for z, value_ in zip(cuts, values):
+            if value_ == 0:
+                found.append(z)
+        for lo, hi, flo, fhi in zip(cuts, cuts[1:], values, values[1:]):
+            if flo == 0 or fhi == 0 or (flo > 0) == (fhi > 0):
+                continue
+            for _ in range(1100):
+                mid = (lo+hi)/2
+                fm = balance(mid)
+                if fm == 0:
+                    lo = hi = mid
+                    break
+                if (flo > 0) == (fm > 0):
+                    lo, flo = mid, fm
+                else:
+                    hi, fhi = mid, fm
+                if float(lo) == float(hi):
+                    break
+            else:
+                raise ValueError("CSTR root refinement did not converge")
+            root = (lo+hi)/2
+            if not 0 < float(root) < 1:
+                raise ValueError("interior CSTR conversion is not representable as a finite scalar")
+            found.append(root)
+        roots = sorted(float(z) for z in found)
+        if len(set(roots)) != len(roots):
+            raise ValueError("distinct CSTR branches are not separable in scalar output precision")
+        if not roots:
+            raise ValueError("no physical CSTR steady state for the supplied volume")
+        return roots
+
+
+
+
 def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
     """Deterministic solver for CSTR, PFR, N-CSTRs, Arrhenius, and adiabatic reactor design."""
     reactor_type = str(params.get("reactor_type", "pfr")).strip().lower()
@@ -887,6 +1100,7 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
             return n_stages * tau_s * v0
         raise ValueError(f"Unsupported reactor_type: {reactor_type}")
 
+    cstr_branches = None
     if "conversion" in params and params["conversion"] is not None:
         x_out = float(params["conversion"])
         vol_m3 = volume_for_conversion(x_out)
@@ -904,7 +1118,35 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
             residual = abs(vol_m3 - v_exact) / max(abs(v_exact), 1e-15)
     elif "volume" in params and params["volume"] is not None:
         vol_m3 = float(params["volume"])
-        if vol_m3 <= 0.0:
+        if reactor_type == "cstr":
+            if not math.isfinite(v0) or v0 <= 0:
+                raise ValueError("CSTR inlet volume flow must be finite and positive")
+            conversions = _cstr_conversion_branches(params, vol_m3, c_a0, f_a0, t0_k, t_op,
+                                                    delta_t_ad, eps_a, order_n, gas_phase)
+            cstr_branches = []
+            for conversion in conversions:
+                temperature = (t0_k + delta_t_ad * conversion) if abs(delta_t_ad) > 1e-15 else t_op
+                feed_consumed = f_a0 * conversion
+                reactor_consumed = vol_m3 * rate_minus_ra(conversion)
+                error = abs(feed_consumed - reactor_consumed) / max(abs(feed_consumed), abs(reactor_consumed), 1e-300)
+                cstr_branches.append({"conversion_X": conversion, "exit_T_K": temperature,
+                                      "k_exit": k_at_temp(temperature), "residual": error,
+                                      "verified": error < 1e-9})
+            branch = params.get("steady_state_branch")
+            if branch == "all":
+                return {"domain": "reactor_kinetics", "reactor_type": "cstr", "volume_m3": vol_m3,
+                        "space_time_s": vol_m3 / v0, "steady_states": cstr_branches,
+                        "steady_state_count": len(cstr_branches), "steady_state_branch": "all",
+                        "residual": max(row["residual"] for row in cstr_branches),
+                        "verified": all(row["verified"] for row in cstr_branches)}
+            if branch is None:
+                if len(conversions) != 1:
+                    raise ValueError("multiple physical CSTR steady states; set steady_state_branch to 'all' or an ascending zero-based branch index")
+                branch = 0
+            if type(branch) is not int or not 0 <= branch < len(conversions):
+                raise ValueError("steady_state_branch must be 'all' or a valid ascending zero-based branch index")
+            x_out = conversions[branch]
+        elif vol_m3 <= 0.0:
             x_out = 0.0
         elif reactor_type == "cstr_series":
             n_stages = int(params.get("n_stages", 2))
@@ -925,7 +1167,7 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
 
     tau_total = vol_m3 / v0
     temp_exit = (t0_k + delta_t_ad * x_out) if abs(delta_t_ad) > 1e-15 else t_op
-    return {
+    result = {
         "domain": "reactor_kinetics",
         "reactor_type": reactor_type,
         "conversion_X": x_out,
@@ -936,6 +1178,12 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
         "residual": residual,
         "verified": residual < 1e-9,
     }
+    if cstr_branches is not None:
+        result.update(steady_states=cstr_branches, steady_state_count=len(cstr_branches),
+                      steady_state_branch=branch)
+        result["residual"] = cstr_branches[branch]["residual"]
+        result["verified"] = cstr_branches[branch]["verified"]
+    return result
 
 
 def infer_wave6_domain(text_or_domain: str) -> Optional[str]:
@@ -1039,3 +1287,4 @@ def prune_deterministic_fast_path(
         "cost_saved_usd": 0.0,
         "fast_path_pruned": False,
     }
+

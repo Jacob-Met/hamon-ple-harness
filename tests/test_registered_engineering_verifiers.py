@@ -332,6 +332,12 @@ def routed(tmp_path_factory):
             {"id": "unknown-input-" + family, "mode": family,
              "spec": {selector: spec[selector], "typo_parameter": 1}},
         ])
+    cstr = {"reactor_type":"cstr","order":1,"C_A0":1,"v0":1,"T0":300,"delta_T_adiabatic":200,"k_ref":1,"T_ref":350,"E_a":80000,"gas_phase":False,"volume":1}
+    calls.extend([
+        {"id": "cstr-all-branches", "mode": "reactor_kinetics", "spec": {**cstr, "steady_state_branch": "all"}},
+        {"id": "cstr-cold-branch", "mode": "reactor_kinetics", "spec": {**cstr, "steady_state_branch": 0}},
+        {"id": "cstr-implicit-branch", "mode": "reactor_kinetics", "spec": cstr},
+    ])
     equal_lengths = {"lhs": {"value": 2, "unit": "m"},
                      "rhs": {"value": 200, "unit": "cm"}}
     calls.extend([
@@ -1226,6 +1232,22 @@ def test_registered_heat_modal_amplitude(routed, case, system, claim, passed):
             assert isinstance(result.get("reason"), str) and result["reason"].strip()
 
 
+
+def test_registered_cstr_preserves_all_branches_and_refuses_implicit_choice(routed):
+    complete = routed["cstr-all-branches"]
+    assert complete["completed"], complete
+    states = complete["details"]["steady_states"]
+    assert len(states) == 3 and complete["details"]["verified"]
+    assert abs(states[0]["conversion_X"] - .01342170533580371) < 2e-14
+    assert abs(states[1]["conversion_X"] - .14297312550405095) < 2e-14
+    assert abs(states[2]["conversion_X"] - .99973756033601) < 2e-14
+    selected = routed["cstr-cold-branch"]
+    assert selected["completed"] and selected["details"]["conversion_X"] == states[0]["conversion_X"]
+    refused = routed["cstr-implicit-branch"]
+    assert not refused["completed"]
+    assert "multiple physical CSTR steady states" in refused["error"]
+
+
 class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1243,6 +1265,9 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls._tmpdir.cleanup()
+
+    def test_cstr_branch_boundary(self):
+        test_registered_cstr_preserves_all_branches_and_refuses_implicit_choice(self.routed_data)
 
     def test_all_registered_solver_boundaries(self):
         r = self.routed_data
