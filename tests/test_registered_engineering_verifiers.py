@@ -123,6 +123,19 @@ DIAGNOSTIC_CASES = [
 ]
 
 
+TF_DELTA = 2.0**-55
+TF_UNIT = Fraction(1)
+# Root count triples are ordered right half-plane, imaginary axis, left half-plane.
+# Closed coefficients are specified independently at exact wire precision.
+TRANSFER_CASES = [
+    ("tf-slow", [1, TF_DELTA], [1], (0, 0, 1), [1, TF_UNIT + Fraction(TF_DELTA)], (0, 0, 1)),
+    ("tf-feedback-boundary", [1, 1, 1, 1], [-TF_DELTA], (0, 2, 1),
+     [1, 1, 1, TF_UNIT - Fraction(TF_DELTA)], (0, 0, 3)),
+    ("tf-double-axis-pair", [1, 0, 2, 0, 1], [0], (0, 4, 0), [1, 0, 2, 0, 1], (0, 4, 0)),
+    ("tf-undefined-feedback", [1, 1], [-1, -1], (0, 0, 1), [], None),
+]
+
+
 @pytest.fixture(scope="module")
 def routed(tmp_path_factory):
     workdir = tmp_path_factory.mktemp("registered-engineering")
@@ -185,6 +198,13 @@ def routed(tmp_path_factory):
         spec = {"mode": "state_space", "A": matrix}
         calls.append({"id": case, "mode": "control", "spec": spec})
         for field in ("hurwitz_stable", "lyapunov_pd"):
+            for claim in (False, True):
+                calls.append({"id": f"{case}-{field}-{claim}", "mode": "control",
+                              "spec": {**spec, "claimed_field": field, "claimed_value": claim}})
+    for case, den, num, _, _, _ in TRANSFER_CASES:
+        spec = {"mode": "transfer_function", "den": den, "num": num}
+        calls.append({"id": case, "mode": "control", "spec": spec})
+        for field in ("hurwitz_stable", "closed_loop_hurwitz_stable"):
             for claim in (False, True):
                 calls.append({"id": f"{case}-{field}-{claim}", "mode": "control",
                               "spec": {**spec, "claimed_field": field, "claimed_value": claim}})
@@ -410,6 +430,87 @@ def test_registered_state_space_diagnostic_range(routed, case, matrix, poly_stat
             assert check["actual"] == 1.0 and check["within_tolerance"] is claim
 
 
+def check_pi_transfer_certificate(cert, coefficients, counts):
+    assert cert["method"] == "infinitesimal_shift_hurwitz"
+    encoded = cert["normalized_coefficients"]
+    assert isinstance(encoded, list) and all(type(value) is str for value in encoded)
+    assert [Fraction(value) for value in encoded] == [Fraction(c) for c in coefficients]
+    keys = ("rhp_poles", "jw_axis_poles", "lhp_poles")
+    if counts is None:
+        assert cert["status"] == "identically_zero" and cert["minor_leading_terms"] == []
+        assert isinstance(cert.get("reason"), str) and cert["reason"].strip()
+        assert all(cert[key] is None for key in (*keys, "degree", "hurwitz_stable",
+                                                "first_column_signs_plus", "first_column_signs_minus"))
+        return
+    degree = len(coefficients) - 1
+    assert cert["status"] == "classified" and type(cert["degree"]) is int and cert["degree"] == degree
+    assert all(type(cert[key]) is int for key in keys)
+    assert tuple(cert[key] for key in keys) == counts
+    assert cert["hurwitz_stable"] is (counts[:2] == (0, 0))
+    # Reconstruct the first column from the recorded least nonzero determinant
+    # coefficients. Each first-column sign is the sign of consecutive minors' ratio.
+    terms = cert["minor_leading_terms"]
+    assert len(terms) == degree
+    for direction, key, variations in ((1, "first_column_signs_plus", counts[0]),
+                                       (-1, "first_column_signs_minus", counts[0] + counts[1])):
+        signs, previous = [1], 1
+        for term in terms:
+            power = term["power"]
+            assert type(power) is int and power >= 0 and type(term["coefficient"]) is str
+            value = Fraction(term["coefficient"])
+            assert value != 0
+            current = (1 if value > 0 else -1) * direction**power
+            signs.append(previous * current)
+            previous = current
+        assert cert[key] == signs
+        assert sum(x != y for x, y in zip(signs, signs[1:])) == variations
+
+
+@pytest.mark.parametrize("case,den,num,open_counts,closed_coeffs,closed_counts", TRANSFER_CASES,
+                         ids=[row[0] for row in TRANSFER_CASES])
+def test_registered_transfer_hurwitz(routed, case, den, num, open_counts, closed_coeffs, closed_counts):
+    result = routed[case]
+    assert result["completed"], result
+    details = result["details"]
+    assert details["domain"] == "control" and details["mode"] == "transfer_function"
+    assert details["passed"] is (closed_counts is not None)
+    check_pi_transfer_certificate(details["open_loop_root_certificate"], den, open_counts)
+    check_pi_transfer_certificate(details["closed_loop_root_certificate"], closed_coeffs, closed_counts)
+    assert (details["rhp_poles_routh"], details["jw_axis_poles"]) == open_counts[:2]
+    assert details["rhp_poles_eigen_is_approximate"] is True
+    for status, poles in (("poles_status", "poles_real_imag"),
+                          ("closed_loop_poles_status", "closed_loop_poles_real_imag")):
+        if status == "closed_loop_poles_status" and closed_counts is None:
+            continue
+        if details[status] == "finite_approximation":
+            assert isinstance(details[poles], list) and all(
+                len(z) == 2 and all(math.isfinite(x) for x in z) for z in details[poles])
+        else:
+            assert details[status] == "unavailable_numerical_diagnostic" and details[poles] is None
+    assert details["hurwitz_stable"] is (open_counts[:2] == (0, 0))
+    assert details["closed_loop_hurwitz_stable"] is (
+        None if closed_counts is None else closed_counts[:2] == (0, 0)
+    )
+    if closed_counts is None:
+        assert isinstance(details.get("reason"), str) and details["reason"].strip()
+        assert details["closed_loop_poles_real_imag"] is None
+        assert details["closed_loop_poles_status"] == "undefined_characteristic"
+
+    for field in ("hurwitz_stable", "closed_loop_hurwitz_stable"):
+        for claim in (False, True):
+            reply = routed[f"{case}-{field}-{claim}"]
+            assert reply["completed"], reply
+            claimed = reply["details"]
+            assert claimed[field] is details[field]
+            assert claimed["passed"] is (closed_counts is not None and claim is details[field])
+            if closed_counts is None:
+                assert isinstance(claimed.get("reason"), str) and claimed["reason"].strip()
+            else:
+                check = claimed["claim_check"]
+                assert check["field"] == field and check["claimed"] == float(claim)
+                assert check["actual"] == float(details[field]) and check["within_tolerance"] is (claim is details[field])
+
+
 class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -454,3 +555,8 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
         for case, matrix, poly_status, poles in DIAGNOSTIC_CASES:
             with self.subTest(case=case):
                 test_registered_state_space_diagnostic_range(self.routed_data, case, matrix, poly_status, poles)
+
+    def test_registered_transfer_hurwitz(self):
+        for args in TRANSFER_CASES:
+            with self.subTest(case=args[0]):
+                test_registered_transfer_hurwitz(self.routed_data, *args)
