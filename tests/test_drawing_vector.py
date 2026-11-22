@@ -6,7 +6,7 @@ import unittest
 import hamon_drawing as d
 
 
-def fixture(path, page_boxes=b""):
+def fixture(path, page_boxes=b"", parent_boxes=b"", extra_objects=()):
     page1=b"q 0.7 w 0 0 0 RG 60 90 340 220 re S Q\nBT /F1 15 Tf 400 90 Td (SCALE 1:50) Tj ET\n"
     page2=b"q 0.8 w 0 0 0 RG 80 100 m 330 100 l 330 310 l S Q\nBT /F1 12 Tf 400 100 Td (SCALE 1:100) Tj ET\n"
     def contents(content):
@@ -14,7 +14,7 @@ def fixture(path, page_boxes=b""):
                 content+b"endstream")
     objects=[
         b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+        b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 " + parent_boxes + b" >>",
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " + page_boxes
         + b" /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>",
         contents(page1),
@@ -22,16 +22,18 @@ def fixture(path, page_boxes=b""):
         contents(page2),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     ]
+    objects.extend(extra_objects)
+    size = len(objects) + 1
     stream=bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
     offsets=[0]
     for index,payload in enumerate(objects,start=1):
         offsets.append(len(stream))
         stream.extend(f"{index} 0 obj\n".encode()+payload+b"\nendobj\n")
     xref=len(stream)
-    stream.extend(b"xref\n0 8\n0000000000 65535 f \n")
+    stream.extend(f"xref\n0 {size}\n0000000000 65535 f \n".encode())
     for offset in offsets[1:]:
         stream.extend(f"{offset:010d} 00000 n \n".encode())
-    stream.extend(f"trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
+    stream.extend(f"trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
     path.write_bytes(stream)
 
 
@@ -76,6 +78,38 @@ class DrawingContracts(unittest.TestCase):
             self.assertGreaterEqual(right, 50)
             self.assertLessEqual(top, 370)
             self.assertGreaterEqual(bottom, 370)
+
+    def test_lightweight_reader_uses_visible_lower_left_for_text_and_vectors(self):
+        from hamon_drawing_reader import read_vector_pdf, query_sheet_region
+
+        # Crop the inherited, indirect rectangle to the MediaBox. The first
+        # page overrides the parent's indirect rotation; the second inherits it.
+        parent = b"/CropBox 8 0 R /Rotate 9 0 R"
+        objects = (b"[30 40 570 810]", b"-90")
+        expected = {
+            0: ((540, 752), (370, 50), (30, 50)),
+            90: ((752, 540), (50, 170), (50, 510)),
+            180: ((540, 752), (170, 702), (510, 702)),
+            270: ((752, 540), (702, 370), (702, 30)),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "display.pdf"
+            for rotation, (size, anchor, line_start) in expected.items():
+                with self.subTest(rotation=rotation):
+                    fixture(path, f"/Rotate {rotation}".encode(), parent, objects)
+                    first, second = read_vector_pdf(path.read_bytes())
+                    self.assertEqual((first.width_pt, first.height_pt), size)
+                    self.assertEqual((second.width_pt, second.height_pt), (752, 540))
+                    span = next(w for w in first.texts if "SCALE" in w.text)
+                    self.assertEqual((span.x_pt, span.y_pt), anchor)
+                    segment = first.segments[0]
+                    self.assertEqual((segment.x0_pt, segment.y0_pt), line_start)
+                    self.assertEqual((segment.x1_pt, segment.y1_pt), anchor)
+                    self.assertEqual(segment.length_pt, 340)
+                    x, y = anchor
+                    w, h = size
+                    actual = query_sheet_region(first, ((x-2)/w, (y-2)/h, (x+2)/w, (y+2)/h))
+                    self.assertIn("SCALE 1:50", actual["texts"])
 
     def test_invalid_page_and_crop_rejected(self):
         with tempfile.TemporaryDirectory() as td:
