@@ -171,6 +171,8 @@ def calculate(spec, legacy_rectangle=False):
         raise ValueError(
             "Invalid footing dimension, strength, unit weight or factor of safety"
         )
+    if fs < 1:
+        raise ValueError("Design factor of safety must be at least one")
     length = get("footing_L_m") if "footing_L_m" in spec else None
     if length is not None:
         if length <= 0:
@@ -254,6 +256,7 @@ def calculate(spec, legacy_rectangle=False):
         "q_allow_Pa": total / fs,
         "q_net_ult_Pa": total - surcharge,
         "q_net_allow_Pa": (total - surcharge) / fs,
+        "allowable_basis": "gross ultimate / FS; net ultimate / FS",
         "stress_integration_residual_Pa": error,
     }
     checks = [error < 1e-6]
