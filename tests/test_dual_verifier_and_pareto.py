@@ -313,6 +313,21 @@ class DualSolverVerifierTests(unittest.TestCase):
         self.assertAlmostEqual(result["normal_depth_m"], 54.0, places=8)
         self.assertAlmostEqual(result["velocity_m_s"], 9.0, places=8)
 
+    def test_declared_us_survey_units_in_dxf_lengths(self):
+        from hamon_cad_takeoff import scan_dxf_takeoff
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "survey.dxf"
+            for code, metres in [(21, 1200), (22, 100), (23, 3600), (24, 6336000)]:
+                with self.subTest(insunits=code):
+                    tags = [(0, "SECTION"), (2, "HEADER"), (9, "$INSUNITS"), (70, code),
+                            (0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES"),
+                            (0, "LINE"), (8, "survey"), (10, 0), (20, 0), (11, 3937),
+                            (21, 0), (0, "ENDSEC"), (0, "EOF")]
+                    path.write_text("".join(f"{k}\n{v}\n" for k, v in tags))
+                    result = scan_dxf_takeoff(path)
+                    self.assertAlmostEqual(result["line_length_m_by_layer"]["survey"], metres)
+
     def test_classic_3d_polyline_uses_spatial_edges_and_plan_area(self):
         from hamon_cad_takeoff import scan_dxf_takeoff
 

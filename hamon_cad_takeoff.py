@@ -29,6 +29,11 @@ INSUNITS_TO_METERS: dict[int, float] = {
     12: 1e-9,        # nanometers
     13: 1e-6,        # microns
     14: 0.1,         # decimeters
+    # Legacy U.S. survey lengths use exactly 1200/3937 metres per foot.
+    21: 1200 / 3937,         # survey feet
+    22: 100 / 3937,          # survey inches
+    23: 3600 / 3937,         # survey yards
+    24: 5280 * 1200 / 3937,  # survey miles
 }
 
 # 16-point Gauss-Legendre nodes and weights on [-1, 1] for elliptical arc quadrature
