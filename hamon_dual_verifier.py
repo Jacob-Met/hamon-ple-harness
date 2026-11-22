@@ -2387,25 +2387,9 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
             "dual_verified": True,
         }
     if kind == "bearing_capacity":
-        B, L, Df = float(spec["B_m"]), float(spec["L_m"]), float(spec["Df_m"])
-        c_pa, phi_deg, gam = float(spec["c_Pa"]), float(spec["phi_deg"]), float(spec["gamma_N_m3"])
-        phi_r = math.radians(phi_deg)
-        nq = math.exp(math.pi * math.tan(phi_r)) * (math.tan(math.radians(45.0 + 0.5 * phi_deg)) ** 2)
-        nc = (nq - 1.0) / math.tan(phi_r) if phi_deg > 1e-6 else 5.14
-        ng = 2.0 * (nq + 1.0) * math.tan(phi_r)
-        sc = 1.0 + (B / L) * (nq / nc)
-        sq = 1.0 + (B / L) * math.tan(phi_r)
-        sg = max(0.6, 1.0 - 0.4 * (B / L))
-        q_ov = gam * Df
-        q_ult = c_pa * nc * sc + q_ov * nq * sq + 0.5 * gam * B * ng * sg
-        q_all = q_ult / float(spec["FS"])
-        q_app = float(spec["column_load_N"]) / (B * L)
-        return {
-            "Nq": nq, "Nc": nc, "Ngamma": ng,
-            "q_ult_Pa": q_ult, "q_allow_Pa": q_all, "q_applied_Pa": q_app,
-            "bearing_ok": q_app <= q_all,
-            "dual_verified": True,
-        }
+        from hamon_bearing_capacity import verify_bearing_capacity
+        result = verify_bearing_capacity(spec, legacy_rectangle=("B_m" in spec or "L_m" in spec))
+        return {**result, "kind": kind, "dual_verified": result["conservation_verified"]}
     if kind == "consolidation_settlement":
         from hamon_consolidation import primary_settlement, settlement_from_void_loss
         try:
