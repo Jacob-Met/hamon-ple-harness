@@ -108,6 +108,18 @@ class TrussCompatibilityTests(unittest.TestCase):
                                  "alpha_per_K": 1e-5, "dT_K": 10})
         self.assertEqual(verify_fem_structure(case)["passed"], original["passed"])
 
+    def test_last_distinct_binary64_anchor_and_half_ulp_collapse(self):
+        for y in (math.nextafter(1.0, 2.0), 1.0 + 2*math.ulp(1.0)):
+            result = verify_fem_structure(truss(y))
+            self.assertTrue(result["passed"])
+            dx, dy, n1, n2 = analytical(y)
+            values = result["displacements_xy_m"][0] + result["axial_forces_N"]
+            for actual, expected in zip(values, (dx, dy, n1, n2)):
+                self.assertTrue(math.isclose(actual, expected, rel_tol=1e-14))
+        collapsed_y = 1.0 + math.ulp(1.0)/2
+        self.assertEqual(collapsed_y, 1.0)
+        self.assertFalse(verify_fem_structure(truss(collapsed_y))["passed"])
+
     def test_exact_transverse_mechanism_is_rejected_in_every_order(self):
         for reflection in (-1, 1):
             for reorder in (False, True):
