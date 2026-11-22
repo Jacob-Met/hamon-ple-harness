@@ -28,6 +28,37 @@ class DxfEvidenceTests(unittest.TestCase):
             proc=subprocess.run([sys.executable,"engineering_toolkit.py","dxf-dimensions",str(p)],capture_output=True,text=True)
             self.assertEqual(proc.returncode,0,proc.stdout+proc.stderr)
             self.assertEqual(json.loads(proc.stdout)["total_dimensions"],1)
+    def test_layout_evidence_must_identify_model_space(self):
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/"layout.dxf"
+            fixture(path)
+            original=path.read_text()
+            for markers,expected in (("67\n0\n410\nModel\n",120),
+                                     ("67\n1\n410\nLayout1\n",None),
+                                     ("410\nLayout2\n67\n0\n",None),
+                                     ("410\nModel\n67\nbad\n",None)):
+                with self.subTest(markers=markers):
+                    path.write_text(original.replace("8\nDIM\n","8\nDIM\n"+markers))
+                    result=hamon_dxf.scan_dxf(path)
+                    self.assertEqual(result["total_dimensions"],1)
+                    values=[row["usable_qualified_value"] for row in result["dimensions"]]
+                    self.assertEqual(values,[] if expected is None else [expected])
+                    self.assertEqual(result["excluded_non_model_dimensions"],int(expected is None))
+                    self.assertEqual(result["geometry_supported_count"],int(expected is not None))
+
+    def test_paper_dimension_before_bounded_model_report(self):
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/"mixed.dxf"
+            fixture(path)
+            model="0\nDIMENSION\n"
+            paper=model+"67\n1\n70\n1\n"
+            path.write_text(path.read_text().replace(model,paper+model))
+            report=hamon_dxf.scan_dxf(path,limit=1)
+            self.assertEqual(report["total_dimensions"],2)
+            self.assertEqual(report["excluded_non_model_dimensions"],1)
+            self.assertFalse(report["dimension_limit_hit"])
+            self.assertEqual([(r["ordinal"],r["usable_qualified_value"]) for r in report["dimensions"]],[(2,120)])
+
     def test_source_change_mismatch_fails(self):
         with tempfile.TemporaryDirectory() as td:
             p=Path(td)/"a.dxf";fixture(p);before=hamon_dxf.scan_dxf(p)

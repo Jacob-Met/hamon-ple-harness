@@ -36,6 +36,22 @@ def _point(groups,x,y,z):
     a,b,c=_float(groups,x),_float(groups,y),_float(groups,z)
     return [a,b,c if c is not None else 0.0] if a is not None and b is not None else None
 
+def _model_space(groups):
+    # Layout flags belong to the entity, outside application-defined 102 groups.
+    depth=0
+    for code,value in groups:
+        if code==102 and value.startswith("{"): depth+=1
+        elif code==102 and value=="}":
+            if not depth: return False
+            depth-=1
+        elif not depth and code==67:
+            try:
+                if int(value)!=0: return False
+            except ValueError: return False
+        elif not depth and code==410 and value.casefold()!="model":
+            return False
+    return depth==0
+
 def _dimension(groups,ordinal,offset):
     try: t=int(_get(groups,70) or "0")
     except ValueError: t=-1
@@ -86,11 +102,14 @@ def scan_dxf(filename,limit=1000):
         raise ValueError("missing DXF or larger than 32 MB inspection bound")
     data=p.read_bytes()
     section=None;var=None;units=None;entity=None;offset=0;groups=[]
-    results=[];seen=0
+    results=[];seen=0;excluded=0
     def flush():
-        nonlocal seen
+        nonlocal seen,excluded
         if entity!="DIMENSION":return
         seen+=1
+        if not _model_space(groups):
+            excluded+=1
+            return
         if len(results)<limit:
             results.append(_dimension(groups,seen,offset))
     it=iter(_groups(data))
@@ -127,7 +146,8 @@ def scan_dxf(filename,limit=1000):
       "declared_unit":_UNITS.get(units),
       "unit_status":"declared" if units in _UNITS else "unknown",
       "total_dimensions":seen,"reported_dimensions":len(results),
-      "dimension_limit_hit":seen>limit,
+      "excluded_non_model_dimensions":excluded,
+      "dimension_limit_hit":seen-excluded>limit,
       "cad_geometry_agreement_count":sum(d["geometry_status"]=="geometry_and_cad_agree" for d in results),
       "geometry_supported_count":sum(d["usable_qualified_value"] is not None for d in results),
       "dimensions":results,
