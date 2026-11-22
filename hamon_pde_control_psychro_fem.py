@@ -262,6 +262,28 @@ def _heat_sine_phase(numerator, denominator):
     return sign * math.sin(math.pi * (reduced / denominator))
 
 
+def _heat_spatial_factor(numerator, denominator):
+    """Keep a subnormal nonzero reduced phase available for amplitude scaling."""
+    value = _heat_sine_phase(numerator, denominator)
+    # For a subnormal reduced coordinate r, |sin(pi*r)| <= pi*r < 4*min.
+    if abs(value) >= 4 * sys.float_info.min:
+        return value
+    phase = numerator % (2 * denominator)
+    half_cycle = phase % denominator
+    reduced = min(half_cycle, denominator - half_cycle)
+    if reduced == 0 or reduced / denominator >= sys.float_info.min:
+        return value
+    # Relative to pi*r the small-angle error is bounded by (pi*r)^2/6.
+    signed = -reduced if phase > denominator else reduced
+    return Fraction(math.pi) * Fraction(signed, denominator)
+
+
+def _heat_spatial_product(amplitude, decay, factor):
+    if isinstance(factor, Fraction):
+        return float(Fraction(amplitude) * Fraction(decay) * factor)
+    return amplitude * decay * factor
+
+
 def _heat_positive_normal(value):
     return sys.float_info.min <= value <= sys.float_info.max
 
@@ -398,15 +420,28 @@ def _transient_heat_modes(alpha, length, time, position, modes):
         right_weight = remainder / q
 
         def interpolated_mode(n):
-            left_value = _heat_sine_phase(n * left, cells)
+            left_value = _heat_spatial_factor(n * left, cells)
             if remainder == 0:
                 return left_value
-            right_value = _heat_sine_phase(n * (left + 1), cells)
-            return left_weight * left_value + right_weight * right_value
+            right_value = _heat_spatial_factor(n * (left + 1), cells)
+            normal = sys.float_info.min
+            if (isinstance(left_value, float) and isinstance(right_value, float)
+                    and min(left_weight, right_weight) >= normal):
+                left_term = left_weight * left_value
+                right_term = right_weight * right_value
+                sample = left_term + right_term
+                if ((left_value == 0 or abs(left_term) >= normal)
+                        and (right_value == 0 or abs(right_term) >= normal)
+                        and (sample == 0 or abs(sample) >= normal)):
+                    return sample
+            # A tiny weight or unit-amplitude sample can still contribute a
+            # normal temperature. Carry both signed terms to the modal product.
+            return ((q - remainder) * Fraction(left_value)
+                    + remainder * Fraction(right_value)) / q
 
-        u_numeric = math.fsum(amplitude * decay * interpolated_mode(n)
+        u_numeric = math.fsum(_heat_spatial_product(amplitude, decay, interpolated_mode(n))
                               for (n, amplitude), decay in zip(harmonics, numerical_decay))
-        u_exact = math.fsum(amplitude * decay * _heat_sine_phase(n * p, q)
+        u_exact = math.fsum(_heat_spatial_product(amplitude, decay, _heat_spatial_factor(n * p, q))
                             for (n, amplitude), decay in zip(harmonics, exact_decay))
     query_error = abs(u_numeric - u_exact)
     return {
