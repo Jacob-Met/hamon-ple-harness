@@ -1,6 +1,13 @@
 """Physical references for the passive-network conservation gate."""
 
+import asyncio
+import json
 import math
+import subprocess
+import sys
+from pathlib import Path
+
+import engineering_intake
 
 import pytest
 
@@ -110,3 +117,27 @@ def test_normal_auto_and_legacy_routes_check_answer():
         case["proposed_flows_m3_s"] = {"a": (0.8 if valid else 0.7)*1e-7, "b": -0.2e-7}
         assert run_router_conservation_cad_verifier({"spec": case})["conservation_verified"] is valid
         assert run_dual_verify_spec({"mode": "domain", "kind": "pipe_network", "spec": case})["dual_verified"] is valid
+
+
+def test_isolated_participant_dual_verifier_cli(tmp_path):
+    class TaskContainer:
+        async def write_file(self, path, content):
+            return (tmp_path / Path(path).name).write_bytes(content)
+
+    note = asyncio.run(engineering_intake.provision_engineering_cli(TaskContainer()))
+    assert "dual-verify" in note
+    water = {"mode": "domain", "kind": "pipe_network", "spec": parallel_case(1e-7)}
+    soil = {
+        "mode": "domain", "kind": "consolidation_settlement",
+        "spec": {"H_m": 2, "e0": .5, "Cc": .2, "Cr": .1, "sigma_v0_Pa": 10000,
+                 "sigma_p_Pa": 10000, "delta_sigma_Pa": 10000, "max_settlement_m": .5},
+    }
+    for problem in (water, soil):
+        source = tmp_path / "problem.json"
+        source.write_text(json.dumps(problem))
+        run = subprocess.run(
+            [sys.executable, "-E", "-s", str(tmp_path / "hamon-engineering-toolkit.py"),
+             "dual-verify", str(source)], cwd=tmp_path, capture_output=True, text=True,
+        )
+        assert run.returncode == 0, (run.stdout, run.stderr)
+        assert json.loads(run.stdout)["dual_verified"] is True
