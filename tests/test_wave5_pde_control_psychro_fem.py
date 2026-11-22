@@ -213,6 +213,40 @@ class TestWave5PDEControlPsychroFEM(unittest.TestCase):
         })
         self.assertFalse(mech["passed"])
 
+    def test_distributed_load_recovers_clamped_beam_interior_and_energy(self):
+        # Exact w(x)=q*x²*(L-x)²/(24EI). Clamps have no nodal motion.
+        for nodes in ([0.0, 2.0], [0.0, 0.25, 1.4, 2.0]):
+            for load in (-120.0, 120.0):
+                with self.subTest(nodes=nodes, load=load):
+                    result = w5.verify_fem_structure({
+                        "mode": "euler_bernoulli_beam_1d", "x_nodes_m": nodes,
+                        "EI_Nm2": 1000.0, "q_uniform_N_m": load,
+                        "supports": [{"node": index, "fix_w": True, "fix_theta": True}
+                                     for index in (0, len(nodes) - 1)],
+                    })
+                    self.assertTrue(result["passed"])
+                    for mid, a, b in zip(result["element_midspan_deflections_m"], nodes, nodes[1:]):
+                        x = (a + b) / 2
+                        self.assertAlmostEqual(mid, load * x**2 * (2 - x)**2 / 24000, places=13)
+                    self.assertAlmostEqual(result["strain_energy_J"], 0.32, places=12)
+                    self.assertAlmostEqual(result["external_work_J"], 0.32, places=12)
+                    self.assertEqual(result["support_work_J"], 0.0)
+
+    def test_prescribed_beam_motion_performs_support_work(self):
+        # Prescribed displacement with zero end rotations, plus a load acting at
+        # that constrained coordinate. The load changes its reaction, not U.
+        result = w5.verify_fem_structure({
+            "mode": "euler_bernoulli_beam_1d", "x_nodes_m": [0.0, 2.0],
+            "EI_Nm2": 1000.0, "nodal_loads": [{"node": 1, "fy_N": 7.0}],
+            "supports": [{"node": 0, "fix_w": True, "fix_theta": True},
+                         {"node": 1, "fix_w": True, "fix_theta": True, "w_m": 0.01}],
+        })
+        self.assertTrue(result["passed"])
+        self.assertAlmostEqual(result["strain_energy_J"], 0.075)
+        self.assertAlmostEqual(result["element_midspan_deflections_m"][0], 0.005)
+        self.assertAlmostEqual(result["external_work_J"], 0.035)
+        self.assertAlmostEqual(result["support_work_J"], 0.040)
+
     def test_fem_euler_bernoulli_beam_propped_cantilever_and_cli(self):
         beam = w5.verify_fem_structure({
             "mode": "euler_bernoulli_beam_1d",
