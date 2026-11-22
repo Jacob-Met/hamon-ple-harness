@@ -943,13 +943,16 @@ def verify_civil_geotech_balance(spec: Dict[str, Any]) -> Dict[str, Any]:
         if not bearing["ok"]:
             return out
         if "Cc" in spec and "H_clay_m" in spec:
-            from hamon_consolidation import primary_settlement
+            from hamon_consolidation import consolidation_load, primary_settlement
             try:
                 initial = float(spec["sigma_v0_eff_Pa"])
                 pc = float(spec.get("sigma_preconsolidation_Pa", initial))
                 cr = float(spec["Cr"]) if "Cr" in spec or pc > initial else 0.0
+                load, stress_check = consolidation_load(spec, coerce_scalar=True)
+                out.update(stress_check)
+                ok = ok and stress_check.get("declared_stress_consistent", True)
                 out.update(primary_settlement(float(spec["H_clay_m"]), float(spec["e0"]),
-                                              float(spec["Cc"]), initial, float(spec["delta_sigma_v_Pa"]), pc, cr))
+                                              float(spec["Cc"]), initial, load, pc, cr))
             except (KeyError, TypeError, ValueError, OverflowError) as exc:
                 out.update(ok=False, reason=str(exc))
                 ok = False
