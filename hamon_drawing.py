@@ -1458,20 +1458,6 @@ def _same_detail_stroke(a, b):
     return covers(a,b) and covers(b,a)
 
 
-def _transfer_detail_strokes(observed, anchors):
-    """A character needs a matching printed shape and a single supported reading."""
-    if not observed:
-        return None
-    letters = []
-    for shape, _ in observed:
-        matches = {char for char, exemplar in anchors if _same_detail_stroke(shape, exemplar)}
-        if len(matches) != 1:
-            return None
-        letters.append(matches.pop())
-    label = "".join(letters)
-    return label if re.fullmatch(r"[1-9]\d?[A-Z]?", label) else None
-
-
 def _stroke_reference_pages(result, target_page):
     """Use other independently stamped sheets with repeated incoming drawing references."""
     references = Counter(r["target_sheet"] for r in result["references"]
