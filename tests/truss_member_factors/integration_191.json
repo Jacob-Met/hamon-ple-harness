@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "state": "frozen_before_third_combined_numerical_execution",
+  "reason": "Other owner's disjoint pipe-wall PR191 landed after second combined qualification, before PR189 merge.",
+  "previous_head": "8caea5e7e6ef6f8a1148e78f08b40dfb43169a92",
+  "previous_tree": "68111d4d29e97ca9d3745cdc8cd5a55401580ae8",
+  "previous_original_log_sha256": "1f64a23070e5a37eeb809a9e350e76d605e18cb201d760d1e713d59b5aa3848e",
+  "incoming_main": "a33b4d5516694fa1b22429f55f648b2727da2439",
+  "incoming_tree": "17ac638cf533999721187e281de0030fd01e347f",
+  "incoming_pr": 191,
+  "incoming_owner_credit": "Other owner's material-radius and free-end loading correction for pipe-wall stress.",
+  "incoming_files": [
+    {
+      "path": "hamon_wave6_physics_verifiers.py",
+      "blob": "800c8d8afd16932b69fc76bf625d94f2a06a6b15"
+    },
+    {
+      "path": "tests/test_pipe_wall_stress.py",
+      "blob": "67dff9158f0474efe2d7b4df0dafb21bf26cdfbd"
+    }
+  ],
+  "preserved_blobs": {
+    "tests/test_truss_member_factors.py": "be578c4233201cf64df700f487b9c32620528bd0",
+    "tests/test_registered_engineering_verifiers.py": "1cb966bd1e57c14e3daf3868a16e4d9676bddcc7",
+    "tests/truss_member_factors/protocol.json": "64d6e11c824682021ffc86234a181b912f648c28",
+    "tests/truss_member_factors/README.md": "fa9a91deff42d838f4224d4cc7d66aa68f0f5ebf",
+    "tests/test_truss_beam_integration.py": "1c95ac1dc177d3f673954f613961d51d61094b8a",
+    "tests/truss_member_factors/integration_187.json": "2fe5a422db342975addbbaee6343e40ddf9d9492",
+    "tests/truss_member_factors/integration_190.json": "1d6d0cce7ef274ba547c5d3e70077c8d8706892c",
+    "hamon_pde_control_psychro_fem.py": "3b387ab3957536886a7b84361e3217e75408220f"
+  },
+  "incoming_wave5_test_blob": "2288e0e3f8c87e25a2df0918b2f5f5a3f846c187",
+  "source_composition": "Normal merge of pinned incoming main. Its two files remain exact; all eight solver/receiver/protocol blobs remain exact. Add only this separate protocol.",
+  "requirements": [
+    "All sixteen truss records including the complete beam hash equal second combined original.",
+    "Truss total and all253 other inherited records/ten totals identical.",
+    "Separate beam integration record identical.",
+    "All prior registered contracts and incoming191 three tests pass.",
+    "Every maintained gate passes.",
+    "Preserve complete first third-combined log and actual checkout/landed tree proof."
+  ],
+  "beam_exception": "None for this combination; solver unchanged. The exact expected beam hash is47199ee518a5f0939e54b624d24f5f3345b5fc1106b692064b6897e161de7b4a.",
+  "execution": "No stock replay, receiver changes, forced merge/push or numerical execution outside maintained CI.",
+  "scope_limit": "Coexistence qualification only, not independent revalidation or authorship of the incoming pressure-vessel work; no model/score/timing assertion."
+}

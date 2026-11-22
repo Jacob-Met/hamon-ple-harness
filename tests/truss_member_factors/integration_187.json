@@ -1,0 +1,78 @@
+{
+  "state": "frozen_before_combined_numerical_execution",
+  "reason": "Other owner's PR187 landed while original truss pair was running; preserve first originals and qualify combined source",
+  "original_base": "c9ab834a4b3d089fb47f90b0a21aac60e105ab25",
+  "original_candidate": "d512440ccdb55cf216c4548c260faa87451b885d",
+  "incoming_main": "a1aa6a8afd79c8501e1e2d5fb6bb6eab2fda4f93",
+  "incoming_tree": "0fca8dec507dede82fde83202e856c685a2ef301",
+  "incoming_feature": "fa814167f44959a52b49647a9b5b5ec8a56d5d34",
+  "incoming_pr": 187,
+  "incoming_owner_credit": "Other owner's recovery of distributed-load bending field, energy and support work",
+  "incoming_files": [
+    {
+      "path": "hamon_pde_control_psychro_fem.py",
+      "blob": "e6b301934ae230d1a46ab867571122d5f156ca09"
+    },
+    {
+      "path": "tests/test_wave5_pde_control_psychro_fem.py",
+      "blob": "78a115bf4c830b4dc21d023b4252c9c31bd58641"
+    }
+  ],
+  "source_equivalence": {
+    "delimiter": "    if mode == \"euler_bernoulli_beam_1d\":\n",
+    "combined_before_delimiter": "byte-identical to frozen original truss candidate before delimiter",
+    "combined_from_delimiter": "byte-identical to pinned incoming PR187 source from delimiter to EOF",
+    "inherited_shared_helpers": "unchanged by both truss and187 hunks",
+    "other_four_original_own_blobs": "unchanged"
+  },
+  "original_course": "Require original188/189 entire beam hash match before integrating; never revise that first-pair gate",
+  "combined_exception": {
+    "case": "beam/cantilever",
+    "allowed_changed_keys": [
+      "full_sha256"
+    ],
+    "reason": "Incoming187 always adds element_midspan_deflections_m and support_work_J; its energy arithmetic changes operation order",
+    "qualification": "Original receiver remains byte-identical and checks every old numeric field against closed forms. Add a separate one-case incoming beam contract; its complete output hash must equal the combined original beam record; enforce midpoint5/48,support_work0 and old numerical closed forms. This plus exact beam source equivalence qualifies coexistence without a stock replay."
+  },
+  "combined_required": [
+    "All other15 TRUSS_FACTOR_CASE records equal original candidate",
+    "TRUSS_FACTOR_TOTAL unchanged",
+    "All253 inherited records andten totals equal original candidate",
+    "Five actual Pi contracts pass",
+    "Incoming187 test blob preserved and new distributed-load/support-work tests pass",
+    "All maintained gates pass",
+    "Complete original combined log retained and actual landed tree exactly qualified"
+  ],
+  "operation": "Wait for original candidate terminal and preserve original. Close stock188; normal-merge incoming main into candidate; add only separate integration gate/protocol, keeping original receiver/oracle files untouched; preregister before push; run maintained combined CI; normal merge189 after proof.",
+  "version": 1,
+  "original_stock_log_sha256": "d2ce5954b238c9016d679998e85e9a640b139befc7de31f39d2f5fd774c4cc44",
+  "original_candidate_log_sha256": "de21e117af5bbc24ecf180ac8a02a1ee177621b2544d4e03d940ac139cd68a4c",
+  "original_beam_full_hash": "fcc07f9454b9068179bc178f7da9e965d1ac226c4f9d7da38732a3a50b7ed58e",
+  "original_pair_beam_full_hash_equal": true,
+  "integration_gate": {
+    "path": "tests/test_truss_beam_integration.py",
+    "sha256": "59f0142624682e89c010ffd68cd0fb366d3c86872e7bd3df43fdecd50dba90e5",
+    "git_blob": "1c95ac1dc177d3f673954f613961d51d61094b8a",
+    "requests": 1,
+    "expected": {
+      "tip": "1/3",
+      "rotation": "1/2",
+      "midpoint": "5/48",
+      "strain_energy": "1/6",
+      "external_work": "1/6",
+      "support_work": "0",
+      "reactions": [
+        [
+          -1,
+          -1
+        ],
+        [
+          0,
+          0
+        ]
+      ]
+    },
+    "numeric_tolerance": "16 ULPs of reference; fixed zeros exact; reaction residuals16ULPs on unit load/moment",
+    "hash_gate": "TRUSS_BEAM_INTEGRATION_CASE.full_sha256 must equal same-run TRUSS_FACTOR_CASE for beam/cantilever"
+  }
+}
