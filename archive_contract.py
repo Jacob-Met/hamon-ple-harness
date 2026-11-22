@@ -9,27 +9,133 @@ import secrets
 import shlex
 
 NUMBERS = "zero one two three four five six seven eight nine ten eleven twelve".split()
-HEADER = re.compile(
-    r"containing\s+exactly\s+(?:these\s+)?(\d+|" + "|".join(NUMBERS) +
-    r")\s+files\b[^:]{0,100}?(?:archive root|top level)\b[^:]{0,90}:", re.I)
-MEMBER = re.compile(r"(?m)^\s*(\d+)\.\s+\*{0,2}`([\w+ .-]+\.[\w]+)`")
+EARLY_RE = re.compile(
+    r"\b(?:early.{0,65}improv|first.{0,60}complete.{0,120}(?:then\s+)?(?:iterat|improv))",
+    re.I | re.S,
+)
+ZIP_OUT_RE = re.compile(r"\b[\w./-]+\.zip\b", re.I)
+PARAMETRIC_ZIP_RE = re.compile(
+    r"\.zip`?\*{0,2}\s+containing,\s+for\s+\*{0,2}each\*{0,2}\b[^:\n]{0,90}\bin\s*\{",
+    re.I,
+)
+COUNT_HEADERS = (
+    re.compile(
+        r"containing\s+(?:exactly\s+(?:these\s+)?|these\s+|the\s+)?(\d+|"
+        + "|".join(NUMBERS)
+        + r")\s+files\b[^:]{0,160}?(?:archive root|top level|below|templates)[^:]{0,110}[:.]",
+        re.I | re.S,
+    ),
+    re.compile(
+        r"(?:write|produce)\s+(?:exactly\s+)?(?:these\s+|the\s+)(\d+|"
+        + "|".join(NUMBERS)
+        + r")\s+files\b[^:.]{0,160}[.:]",
+        re.I | re.S,
+    ),
+    re.compile(
+        r"(?m)^##+\s+Deliverables?\s*\n+(\d+|"
+        + "|".join(NUMBERS)
+        + r")\s+files\s*[.:]",
+        re.I,
+    ),
+)
+ROOT_HEADING_CONTRACT_RE = re.compile(
+    r"Write\s+one\s+file,\s*`[^`\n]+\.zip`,\s*containing\s+at\s+its\s+root\s*:\s*\n",
+    re.I,
+)
+BULLET_ZIP_CONTRACT_RE = re.compile(
+    r"Hand\s+back\s+`[^`\n]+\.zip`\s+containing\s*:?\s*\n+",
+    re.I,
+)
+NUMBERED_ITEM_RE = re.compile(
+    r"(?m)^\s*\*{0,2}(\d+)\.\s+\*{0,2}`([\w+ .-]+\.[A-Za-z0-9]+)`(?!`*/)"
+)
+HEADING_ITEM_RE = re.compile(
+    r"(?m)^###\s+(\d+)\.\s+\*{0,2}`([\w+ .-]+\.[A-Za-z0-9]+)`(?!`*/)"
+)
+TABLE_ROW_RE = re.compile(
+    r"(?m)^\|\s*`([\w+ .-]+\.[A-Za-z0-9]+)`\s*\|"
+)
+BULLET_ITEM_RE = re.compile(
+    r"^\s*-\s+`([\w+ .-]+\.[A-Za-z0-9]+)`(?:\s+--|\s+[-\u2013\u2014:])"
+)
+STOP_SECTION_RE = re.compile(
+    r"(?m)^##\s+(?:How\b|Grading\b|Verifier\b|Section\s+format\b|Deliverable\s+schema\b|Attribution\b)"
+)
 
 
-def member_names(instruction):
-    if not re.search(r"\b(?:early.{0,65}improv|first.{0,45}complete.{0,90}then iterat)", instruction, re.I | re.S):
+def _parse_count(token: str) -> int:
+    low = token.lower()
+    return int(low) if low.isdecimal() else NUMBERS.index(low)
+
+
+def _valid_distinct_root_names(names: list[str], expected_count: int | None = None) -> list[str]:
+    if not names or len(set(names)) != len(names):
         return []
-    h = HEADER.search(instruction)
-    if not h:
+    if any("/" in n or "\\" in n or n in {".", ".."} for n in names):
         return []
-    raw = h[1].lower()
-    count = int(raw) if raw.isdecimal() else NUMBERS.index(raw)
-    if not 1 <= count <= 32:
+    if expected_count is not None and len(names) != expected_count:
         return []
-    found = list(MEMBER.finditer(instruction, h.end()))[:count]
-    if [int(m[1]) for m in found] != list(range(1,count+1)):
+    return names
+
+
+def _bounded_tail(instruction: str, start: int) -> str:
+    stop = STOP_SECTION_RE.search(instruction, start)
+    return instruction[start : stop.start()] if stop else instruction[start:]
+
+
+def member_names(instruction: str) -> list[str]:
+    if not EARLY_RE.search(instruction) or not ZIP_OUT_RE.search(instruction):
         return []
-    names = [m[2] for m in found]
-    return names if len(set(names)) == count else []
+    if PARAMETRIC_ZIP_RE.search(instruction):
+        return []
+
+    for header_re in COUNT_HEADERS:
+        for h in header_re.finditer(instruction):
+            count = _parse_count(h[1])
+            if not 1 <= count <= 32:
+                continue
+            scope = _bounded_tail(instruction, h.end())
+            for item_re in (NUMBERED_ITEM_RE, HEADING_ITEM_RE):
+                found = list(item_re.finditer(scope))[:count]
+                if [int(m[1]) for m in found] == list(range(1, count + 1)):
+                    valid = _valid_distinct_root_names([m[2] for m in found], count)
+                    if valid:
+                        return valid
+            table_window = scope[:1600]
+            trows = [m[1] for m in TABLE_ROW_RE.finditer(table_window)]
+            if len(trows) == count:
+                valid = _valid_distinct_root_names(trows, count)
+                if valid:
+                    return valid
+
+    m_root = ROOT_HEADING_CONTRACT_RE.search(instruction)
+    if m_root:
+        scope = _bounded_tail(instruction, m_root.end())
+        found = list(HEADING_ITEM_RE.finditer(scope))
+        if len(found) >= 2 and [int(m[1]) for m in found] == list(range(1, len(found) + 1)):
+            valid = _valid_distinct_root_names([m[2] for m in found])
+            if valid:
+                return valid
+
+    m_bul = BULLET_ZIP_CONTRACT_RE.search(instruction)
+    if m_bul:
+        scope = _bounded_tail(instruction, m_bul.end())
+        bullets: list[str] = []
+        started = False
+        for line in scope.splitlines():
+            bm = BULLET_ITEM_RE.match(line)
+            if bm:
+                bullets.append(bm[1])
+                started = True
+            elif started:
+                if not line.strip() or not line.startswith("  "):
+                    break
+        if len(bullets) >= 2:
+            valid = _valid_distinct_root_names(bullets)
+            if valid:
+                return valid
+
+    return []
 
 
 async def provision(session, targets):

@@ -87,6 +87,9 @@ class ProvenanceGateTests(unittest.TestCase):
             provenance["edited"] = []
             review["tasks"] = [{"id": "fixture", "status": "ok", "warnings": ["not in manifest.json"]}]
             check("stale")
+            review["tasks"] = [{"id": "foundation-strategy", "status": "empty", "warnings": []}]
+            check("stale")
+
 
     def test_real_repository_requires_a_new_evaluation(self):
         root=Path(__file__).resolve().parents[1]

@@ -110,6 +110,52 @@ archive_checkpoint.publish(Path(stage), Path(target), names)
             self.assertNotEqual(hashlib.sha256(target.read_bytes()).hexdigest(), old_hash)
 
 
+
+    def test_all_29_dev_worlds_cover_9_of_9_fixed_root_zip_contracts(self):
+        expected_fixed = {
+            "cooling-water-flush-plan": 7,
+            "data-hall-device-takeoff": 5,
+            "eor-review-corrections": 7,
+            "foundation-strategy": 6,
+            "frame-extension-method": 6,
+            "lv-cable-sizing": 5,
+            "roof-deck-design": 4,
+            "seismic-diaphragm-shear": 5,
+            "wind-diaphragm-shear": 5,
+        }
+        matched = {}
+        for task_dir in sorted((ROOT / "artifacts").iterdir()):
+            traj = task_dir / "trajectory.json"
+            if not traj.is_file():
+                continue
+            names = archive_contract.member_names(public_task(task_dir.name))
+            if names:
+                matched[task_dir.name] = len(names)
+                zips = list((task_dir / "files").rglob("*.zip")) if (task_dir / "files").exists() else []
+                if zips:
+                    with zipfile.ZipFile(zips[0]) as zf:
+                        self.assertEqual(sorted(names), sorted(zf.namelist()))
+        self.assertEqual(matched, expected_fixed)
+
+    def test_cutoff_loose_output_hydration_and_pdf_dxf_md_validation(self):
+        names = ["plan.dxf", "report.pdf", "basis.md"]
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = Path(tmp) / "stage"
+            out_dir = Path(tmp) / "output"
+            out_dir.mkdir(parents=True)
+            target = out_dir / "submission.zip"
+            (out_dir / "plan.dxf").write_text("0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n")
+            (out_dir / "report.pdf").write_bytes(b"%PDF-1.4\n1 0 obj<<>>endobj\n%%EOF\n")
+            (out_dir / "basis.md").write_text("# Design Basis\nGoverning load case verified.\n")
+            archive_checkpoint.publish(stage, target, names)
+            archive_checkpoint.verify_checkpoint(stage, target, names)
+            # Corrupt PDF header must be rejected without clobbering target
+            good_sha = hashlib.sha256(target.read_bytes()).hexdigest()
+            (stage / "report.pdf").write_bytes(b"NOT_A_PDF")
+            with self.assertRaisesRegex(ValueError, "invalid PDF header"):
+                archive_checkpoint.publish(stage, target, names)
+            self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), good_sha)
+
 class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
     async def exercise(self, complete):
         prompt = public_task("eor-review-corrections")
