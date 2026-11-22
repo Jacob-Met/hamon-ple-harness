@@ -4,7 +4,7 @@ Self-contained zero-external-dependency (Python stdlib math/cmath) symbolic and
 numerical cross-verification suite for Physical Engineering's Last Exam (PLE):
   1. PDE (`verify_pde_system`):
      - 1D convective extended-surface fin (adiabatic, convective, prescribed-tip, infinite)
-       exact hyperbolic analytical solution cross-checked against 400-cell FVM Thomas solver.
+       exact boundary solution cross-checked with uniform finite-volume heat balances.
      - 1D transient heat diffusion exact Fourier eigenmode series cross-checked against
        second-order unconditionally stable Crank-Nicolson solver.
      - 2D steady Laplace equation on rectangular domain exact harmonic eigenseries
@@ -277,6 +277,28 @@ def _transient_heat_modes(alpha, length, time, position, modes):
     }
 
 
+def _passive_fin_fvm(length, m_len, axial, lateral, tip_loss, base):
+    """Condense the finite-volume heat balances of identical uniform fin cells."""
+    # At least 512 cells and at least 32 per decay length keep the leading
+    # base-flux error (m*dx)^2/8 below the 1e-3 verification tolerance.
+    doublings = max(9, math.frexp(m_len)[1] + 5)
+    dx = math.ldexp(length, -doublings)
+    coupling = axial / dx
+    shunt = lateral * dx / 2.0
+    # For either end i, Q_i = shunt*T_i + coupling*(T_i - T_j).
+    # Eliminate the middle temperature of two identical sections. Keeping
+    # the shunt separately avoids subtracting near-equal terms for short fins.
+    for _ in range(doublings):
+        fraction = coupling / (coupling + shunt)
+        coupling *= 0.5 * fraction
+        shunt *= 1.0 + fraction
+    # Balance the last node against its tip-to-ambient thermal conductance.
+    total = shunt + coupling + tip_loss
+    tip = base * (coupling / total)
+    flux = base * (shunt + coupling * ((shunt + tip_loss) / total))
+    return flux, tip
+
+
 def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "convective_fin_1d")).strip().lower()
 
@@ -291,28 +313,44 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         tip_bc = str(spec.get("tip_bc", "adiabatic")).strip().lower()
         x_eval = float(spec.get("x_eval_m", length))
 
-        if min(k, ac, perim, h, length) <= 0.0 or not (0.0 <= x_eval <= length + 1e-12):
+        if (not all(map(math.isfinite, (k, ac, perim, h, length, t_b, t_inf, x_eval)))
+                or min(k, ac, perim, h, length) <= 0.0 or not (0.0 <= x_eval <= length + 1e-12)):
             return {"passed": False, "domain": "pde", "mode": mode, "reason": "Non-positive fin geometry/property or out-of-range x_eval_m"}
 
         theta_b = t_b - t_inf
-        m = math.sqrt((h * perim) / (k * ac))
+        axial, lateral = k * ac, h * perim
+        if not (0 < axial < math.inf and 0 < lateral < math.inf):
+            return {"passed": False, "domain": "pde", "mode": mode, "reason": "Unrepresentable fin conductance"}
+        m = math.sqrt(lateral) / math.sqrt(axial)
         m_len = m * length
-        cap_m = math.sqrt(h * perim * k * ac) * theta_b
+        flux_scale = math.sqrt(lateral) * math.sqrt(axial)
+        cap_m = flux_scale * theta_b
+        if not (0 < m_len < math.inf and 0 < flux_scale < math.inf and math.isfinite(cap_m)):
+            return {"passed": False, "domain": "pde", "mode": mode, "reason": "Unrepresentable fin heat scale"}
 
-        if tip_bc == "adiabatic":
-            theta_x = theta_b * math.cosh(m * (length - x_eval)) / math.cosh(m_len)
-            theta_tip = theta_b / math.cosh(m_len)
-            q_fin = cap_m * math.tanh(m_len)
-            h_tip = 0.0
-        elif tip_bc == "convective":
-            h_tip = float(spec.get("h_tip_w_m2k", h))
-            if h_tip < 0.0:
-                return {"passed": False, "domain": "pde", "mode": mode, "reason": "Negative h_tip_w_m2k"}
-            u = h_tip / (m * k)
-            denom = math.cosh(m_len) + u * math.sinh(m_len)
-            theta_x = theta_b * (math.cosh(m * (length - x_eval)) + u * math.sinh(m * (length - x_eval))) / denom
-            theta_tip = theta_b / denom
-            q_fin = cap_m * (math.sinh(m_len) + u * math.cosh(m_len)) / denom
+        if tip_bc in ("adiabatic", "convective"):
+            h_tip = float(spec.get("h_tip_w_m2k", h)) if tip_bc == "convective" else 0.0
+            if not math.isfinite(h_tip) or h_tip < 0.0:
+                return {"passed": False, "domain": "pde", "mode": mode, "reason": "Invalid h_tip_w_m2k"}
+            # Divide both hyperbolic solutions by exp(mL), and scale the
+            # Robin coefficients together so an almost-isothermal tip is safe.
+            tip_loss = h_tip * ac
+            if not math.isfinite(tip_loss):
+                return {"passed": False, "domain": "pde", "mode": mode, "reason": "Unrepresentable tip conductance"}
+            boundary_scale = max(flux_scale, tip_loss)
+            a, b = flux_scale / boundary_scale, tip_loss / boundary_scale
+            x_m = m * min(x_eval, length)
+            remaining = m * max(length - x_eval, 0.0)
+
+            def boundary(z):
+                return a * (1.0 + math.exp(-2.0 * z)) + b * -math.expm1(-2.0 * z)
+
+            denom = boundary(m_len)
+            decay_x, decay_tip = math.exp(-x_m / 2), math.exp(-m_len / 2)
+            theta_x = (theta_b * decay_x) * (decay_x * (boundary(remaining) / denom))
+            theta_tip = (theta_b * decay_tip) * (decay_tip * (2.0 * a / denom))
+            q_fin = cap_m * ((a * -math.expm1(-2.0 * m_len) +
+                              b * (1.0 + math.exp(-2.0 * m_len))) / denom)
         elif tip_bc == "prescribed_temp":
             theta_L = float(spec["t_tip_c"]) - t_inf
             # Two prescribed temperatures drive the base flux independently.
@@ -332,59 +370,53 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             transfer = (k * ac / length) * (2.0 * (m_len * math.exp(-m_len) / denominator))
             surface = k * ac * m * math.tanh(m_len / 2.0)
             q_fin = transfer * (theta_b - theta_L) + surface * theta_b
-            h_tip = 0.0
         elif tip_bc == "infinite":
-            theta_x = theta_b * math.exp(-m * x_eval)
-            theta_tip = theta_b * math.exp(-m_len)
+            decay_x, decay_tip = math.exp(-m * x_eval / 2), math.exp(-m_len / 2)
+            theta_x = (theta_b * decay_x) * decay_x
+            theta_tip = (theta_b * decay_tip) * decay_tip
             q_fin = cap_m
-            h_tip = m * k
+            tip_loss = flux_scale
         else:
             return {"passed": False, "domain": "pde", "mode": mode, "reason": f"Unsupported tip_bc: {tip_bc}"}
 
-        n_nodes = 401
         if tip_bc == "prescribed_temp":
             # The grid exponent is 2N asinh(z/(2N)) for z=mL. The leading
             # remote flux error is (z**3/24 + z**2/8)/N**2. Budget half
             # the 1e-3 check for it; a bounded mesh still has to pass.
             capped_z = min(m_len, 1000.0)
             cells = capped_z * math.sqrt((capped_z / 24.0 + 1.0 / 8.0) / 5e-4)
-            n_nodes = max(n_nodes, 1 + math.ceil(min(65536.0, cells)))
-        dx = length / (n_nodes - 1)
-        lower = [0.0] * n_nodes
-        diag = [1.0] * n_nodes
-        upper = [0.0] * n_nodes
-        rhs = [0.0] * n_nodes
-        diag[0] = 1.0
-        rhs[0] = theta_b
-        cond = k * ac / dx
-        sink = h * perim * dx
-        for i in range(1, n_nodes - 1):
-            lower[i] = -cond
-            diag[i] = 2.0 * cond + sink
-            upper[i] = -cond
-            rhs[i] = 0.0
-        if tip_bc == "prescribed_temp":
-            diag[n_nodes - 1] = 1.0
-            rhs[n_nodes - 1] = theta_tip
-        else:
-            lower[n_nodes - 1] = -cond
-            diag[n_nodes - 1] = cond + 0.5 * sink + h_tip * ac
-            rhs[n_nodes - 1] = 0.0
+            n_nodes = max(401, 1 + math.ceil(min(65536.0, cells)))
+            dx = length / (n_nodes - 1)
+            lower = [0.0] * n_nodes
+            diag = [1.0] * n_nodes
+            upper = [0.0] * n_nodes
+            rhs = [0.0] * n_nodes
+            diag[0] = 1.0
+            rhs[0] = theta_b
+            cond = k * ac / dx
+            sink = h * perim * dx
+            for i in range(1, n_nodes - 1):
+                lower[i] = -cond
+                diag[i] = 2.0 * cond + sink
+                upper[i] = -cond
+                rhs[i] = 0.0
+            diag[-1] = 1.0
+            rhs[-1] = theta_tip
+            theta_fvm = _thomas_solve(lower, diag, upper, rhs)
+            if m_len < 1.0:
+                # Linear test-function balance of the same finite-volume equations.
+                # This avoids subtracting adjacent nearly isothermal cells.
+                cells = n_nodes - 1
+                weighted = math.fsum((1.0 - i / cells) * theta_fvm[i] for i in range(1, cells))
+                q_fvm = k * ac / length * (theta_b - theta_tip) + sink * (0.5 * theta_b + weighted)
+            else:
+                q_fvm = cond * (theta_fvm[0] - theta_fvm[1]) + 0.5 * sink * theta_fvm[0]
 
-        theta_fvm = _thomas_solve(lower, diag, upper, rhs)
-        q_conv_fvm = 0.5 * sink * theta_fvm[0] + sum(sink * theta_fvm[i] for i in range(1, n_nodes - 1)) + 0.5 * sink * theta_fvm[-1]
-        if tip_bc != "prescribed_temp":
-            q_fvm = q_conv_fvm + h_tip * ac * theta_fvm[-1]
-        elif m_len < 1.0:
-            # Linear test-function balance of the same finite-volume equations.
-            # This avoids subtracting adjacent nearly isothermal cells.
-            cells = n_nodes - 1
-            weighted = math.fsum((1.0 - i / cells) * theta_fvm[i] for i in range(1, cells))
-            q_fvm = k * ac / length * (theta_b - theta_tip) + sink * (0.5 * theta_b + weighted)
+            tip_fvm = theta_fvm[-1]
         else:
-            q_fvm = cond * (theta_fvm[0] - theta_fvm[1]) + 0.5 * sink * theta_fvm[0]
+            q_fvm, tip_fvm = _passive_fin_fvm(length, m_len, axial, lateral, tip_loss, theta_b)
 
-        q_max = h * perim * length * theta_b + (h_tip * ac * theta_b if tip_bc == "convective" else 0.0)
+        q_max = h * perim * length * theta_b + (tip_loss * theta_b if tip_bc == "convective" else 0.0)
         eta_fin = (q_fin / (h * perim * length * theta_b)) if abs(theta_b) > 1e-12 else 1.0
         eps_fin = (q_fin / (h * ac * theta_b)) if abs(theta_b) > 1e-12 else 0.0
         rel_q_err = abs(q_fvm - q_fin) / max(abs(q_fin), 1e-9)
@@ -396,7 +428,7 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             scaled_q_err = abs(q_fvm - q_fin) / scale
             eta_fin = q_fin / (h * perim * length * theta_b) if theta_b else None
             eps_fin = q_fin / (h * ac * theta_b) if theta_b else None
-        tip_err = abs(theta_fvm[-1] - theta_tip)
+        tip_err = abs(tip_fvm - theta_tip)
         passed = (scaled_q_err < 1e-3) and (tip_err < max(1e-3, 1e-3 * abs(theta_b)))
 
         res: Dict[str, Any] = {
