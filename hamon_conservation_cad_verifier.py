@@ -300,17 +300,52 @@ def _axis2_frame(entities: Dict[int, Tuple[str, List[str]]], aid: Optional[int],
 
 
 def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, density_kg_m3: float) -> Dict[str, Any]:
-    v0, v1, v2 = vertices[faces[:, 0]], vertices[faces[:, 1]], vertices[faces[:, 2]]
+    # Form edge differences and signed tetrahedra in the body's coordinate scale.
+    low, high = vertices.min(axis=0), vertices.max(axis=0)
+    reference = low + 0.5 * (high - low)
+    local = vertices - reference
+    v0, v1, v2 = local[faces[:, 0]], local[faces[:, 1]], local[faces[:, 2]]
+    qverts = np.round(local, 9)
+    _, inv = np.unique(qverts, axis=0, return_inverse=True)
+    qfaces = inv.reshape(-1)[faces]
+    edge_counts: Dict[Tuple[int, int], int] = {}
+    directed = set()
+    manifold = True
+    for tri in qfaces:
+        a, b, c = int(tri[0]), int(tri[1]), int(tri[2])
+        if a == b or b == c or c == a:
+            manifold = False
+        for u, w in ((a, b), (b, c), (c, a)):
+            if (u, w) in directed:
+                manifold = False
+            directed.add((u, w))
+            k = (u, w) if u < w else (w, u)
+            edge_counts[k] = edge_counts.get(k, 0) + 1
+    watertight = manifold and bool(edge_counts) and all(cnt == 2 for cnt in edge_counts.values())
+    edge1, edge2 = v1 - v0, v2 - v0
+    area_vectors = 0.5 * np.cross(edge1, edge2)
+    surface_area = float(np.linalg.norm(area_vectors, axis=1).sum())
+    net_area = np.array([math.fsum(area_vectors[:, i]) for i in range(3)])
+    area_residual = float(np.linalg.norm(net_area))
+    cross_scale = 0.5 * np.sum(np.linalg.norm(edge1, axis=1) * np.linalg.norm(edge2, axis=1))
+    area_tolerance = float(64 * np.finfo(np.float64).eps * cross_scale)
+    diagnostics = {
+        "watertight_manifold": bool(watertight),
+        "net_oriented_area_residual_m2": area_residual,
+        "net_oriented_area_tolerance_m2": area_tolerance,
+        "triangle_count": int(len(faces)),
+    }
+    if not watertight or not area_residual <= area_tolerance:
+        return {**diagnostics, "reason": "Mesh lacks consistently paired edges or balanced oriented surface area"}
+
     dets = np.einsum("ij,ij->i", np.cross(v0, v1), v2)
     signed_vol = float(np.sum(dets) / 6.0)
     if signed_vol < 0.0:
-        faces = faces[:, [0, 2, 1]]
         v1, v2 = v2, v1
         dets = -dets
         signed_vol = -signed_vol
     if signed_vol <= 1e-18:
         raise ValueError("Degenerate zero-volume mesh in STEP/CAD verifier")
-    surface_area = float(np.sum(0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1)))
     centroid = np.sum(((v0 + v1 + v2) / 4.0) * dets[:, None], axis=0) / (6.0 * signed_vol)
     m_canon = np.array([[2.0, 1.0, 1.0], [1.0, 2.0, 1.0], [1.0, 1.0, 2.0]], dtype=np.float64)
     v_stack = np.stack([v0, v1, v2], axis=1)
@@ -320,33 +355,17 @@ def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, densi
     inertia_c = 0.5 * (inertia_c + inertia_c.T)
     principal = np.sort(np.linalg.eigvalsh(inertia_c))
 
-    qverts = np.round(vertices, 9)
-    _, inv = np.unique(qverts, axis=0, return_inverse=True)
-    qfaces = inv[faces]
-    edge_counts: Dict[Tuple[int, int], int] = {}
-    directed = set()
-    manifold = True
-    for tri in qfaces:
-        a, b, c = int(tri[0]), int(tri[1]), int(tri[2])
-        for u, w in ((a, b), (b, c), (c, a)):
-            if (u, w) in directed:
-                manifold = False
-            directed.add((u, w))
-            k = (u, w) if u < w else (w, u)
-            edge_counts[k] = edge_counts.get(k, 0) + 1
-    watertight = manifold and bool(edge_counts) and all(cnt == 2 for cnt in edge_counts.values())
     mass = density_kg_m3 * signed_vol
     return {
         "volume_m3": signed_vol,
         "surface_area_m2": surface_area,
         "mass_kg": mass,
         "density_kg_m3": density_kg_m3,
-        "centroid_m": [float(x) for x in centroid],
+        "centroid_m": [float(x) for x in (reference + centroid)],
         "aabb_extents_m": [float(x) for x in (np.max(vertices, axis=0) - np.min(vertices, axis=0))],
         "inertia_tensor_centroid_kg_m2": [[float(x) for x in row] for row in inertia_c],
         "principal_moments_kg_m2": [float(x) for x in principal],
-        "watertight_manifold": bool(watertight),
-        "triangle_count": int(len(faces)),
+        **diagnostics,
     }
 
 
@@ -386,7 +405,6 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
     shell_polys: List[np.ndarray] = []
     for eid, (et, args) in entities.items():
         if et in ("ADVANCED_FACE", "FACE_SURFACE") and len(args) >= 2:
-            same_sense = ".F." not in (args[3].upper() if len(args) >= 4 else ".T.")
             for bid in _ref_list(args[1]):
                 if bid not in entities:
                     continue
@@ -414,29 +432,21 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
                                     lpts.append(verts_map[vp])
                 if len(lpts) >= 3:
                     arr = np.array(lpts, dtype=np.float64)
-                    if same_sense != bound_sense:
+                    # FACE_SURFACE.same_sense relates surface and face normals.
+                    # FACE_BOUND.orientation determines the topological loop winding.
+                    if not bound_sense:
                         arr = arr[::-1].copy()
                     shell_polys.append(arr)
 
     if shell_polys:
-        center_est = np.mean(np.vstack(shell_polys), axis=0)
-        for repair in (False, True):
-            bv: List[np.ndarray] = []
-            bf: List[List[int]] = []
-            for poly in shell_polys:
-                pu = poly
-                if repair:
-                    nrm = np.cross(poly[1] - poly[0], poly[2] - poly[0])
-                    if np.dot(nrm, np.mean(poly, axis=0) - center_est) < 0.0:
-                        pu = poly[::-1].copy()
-                base = len(bv)
-                bv.extend(pu)
-                for i in range(1, len(pu) - 1):
-                    bf.append([base, base + i, base + i + 1])
-            va, fa = np.array(bv, dtype=np.float64), np.array(bf, dtype=np.int32)
-            if abs(float(np.sum(np.einsum("ij,ij->i", np.cross(va[fa[:, 0]], va[fa[:, 1]]), va[fa[:, 2]]))) / 6.0) > 1e-15:
-                _append(va, fa)
-                break
+        bv: List[np.ndarray] = []
+        bf: List[List[int]] = []
+        for poly in shell_polys:
+            base = len(bv)
+            bv.extend(poly)
+            for i in range(1, len(poly) - 1):
+                bf.append([base, base + i, base + i + 1])
+        _append(np.array(bv, dtype=np.float64), np.array(bf, dtype=np.int32))
 
     for eid, (et, args) in entities.items():
         if et == "BLOCK" and len(args) >= 5:
@@ -465,6 +475,10 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
     if not all_verts:
         raise ValueError("No supported 3D solid entities found in STEP input")
     props = _compute_mesh_mass_properties(np.vstack(all_verts), np.vstack(all_faces), density)
+    if "reason" in props:
+        return {"ok": True, "tool": "hamon_conservation_cad_verifier", "mode": "step_cad",
+                "unit_scale_m": unit_scale, "entity_count": len(entities),
+                "conservation_verified": False, **props}
     dual_rel_err = abs(props["volume_m3"] - analytic_vol) / analytic_vol if (analytic_vol and analytic_vol > 0) else 0.0
     return {
         "ok": True,

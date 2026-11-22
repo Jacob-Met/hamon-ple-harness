@@ -1,0 +1,67 @@
+{
+  "course": "heat_modal_spatial_amplitude_step200_integration",
+  "version": 1,
+  "state": "frozen_before_combined_tree_execution",
+  "cause": "PR200 advanced main after both original amplitude CI checkouts. Integrate its disjoint STEP changes into the candidate and qualify the exact combined tree before merge.",
+  "original_pair": {
+    "base": "75a72cce535126b48ff534d506fb9e23f7e5d54a",
+    "stock": "e8d21c5b5d4d5ab0704566eba2e8271eda40f012",
+    "candidate": "e05a1f6aeec70a7faa27faaaf1f238a096f991c9",
+    "stock_tree": "2889d2695f70397f86dbae11ce1b201af9d59cd2",
+    "candidate_tree": "c956e13693c5025056dc25ac062cc9c84403292f",
+    "stock_run": 45066718907,
+    "candidate_run": 45066721537,
+    "stock_log_sha256": "1f709972d3b73947c1bee91768b89e0c9310794827b50e6c0129e4f7c771393b",
+    "candidate_log_sha256": "4cb578f115e09c47e9e6efe2a0b7b0254ad38bf4f6e6ab2b8dd5cd26999d1093",
+    "unchanged": true
+  },
+  "incoming": {
+    "pr": 200,
+    "merge": "2662f204afc984c5547289165999542b1941eed3",
+    "tree": "d7a1d315a1c9abc093826cfacb8dc2d59694496b",
+    "feature": "67e53b9ebb4b52cdaafcb4c68244dd86c4720d4f",
+    "parent": "75a72cce535126b48ff534d506fb9e23f7e5d54a",
+    "files": [
+      {
+        "path": "hamon_conservation_cad_verifier.py",
+        "blob": "5fd2ec40a03146ee437e41a9ba7d5f80aad9e7c2"
+      },
+      {
+        "path": "tests/test_step_translated_properties.py",
+        "blob": "6af6f0d61fb5c15400592b8ccf04ebc6d9e37b36"
+      }
+    ],
+    "scope": "STEP topological loop orientation, local-coordinate mass properties, consistently paired edges and oriented-area diagnostic/refusal;15 independent pytest cases."
+  },
+  "composition": {
+    "candidate_branch": "lab/161636-lead-heat-modal-amplitude",
+    "parents": [
+      "e05a1f6aeec70a7faa27faaaf1f238a096f991c9",
+      "2662f204afc984c5547289165999542b1941eed3"
+    ],
+    "preserve_candidate_blobs": {
+      "tests/test_heat_modal_amplitude.py": "98fe803f87adac7f639679d29760962e69f43342",
+      "tests/test_registered_engineering_verifiers.py": "03b4ffb277901b282a6e3fac739cbf830ae9a100",
+      "hamon_pde_control_psychro_fem.py": "c1af938b54e86353c9a45a2b4e0c342a631d59a3",
+      "tests/heat_modal_amplitude/protocol.json": "7fa7fb091a1691ff59435b89e53e24fbd402a2b7",
+      "tests/heat_modal_amplitude/README.md": "6e3ba59593bd767038ed7443e22b7f0be4cde3b2",
+      "tests/heat_modal_amplitude/integration_199.json": "e935c08ad28ba2a2b09feff96d6ee39c0316933f"
+    },
+    "add_only": "tests/heat_modal_amplitude/integration_200.json",
+    "no_solver_receiver_or_threshold_edits": true
+  },
+  "acceptance": {
+    "all_direct_records": 314,
+    "total_markers": 14,
+    "separate_beam": 1,
+    "all_records_and_totals_exactly_equal_original_candidate": true,
+    "amplitude_direct": "15 ordinary/30 claims,all45 full contracts;14A1R and14A16R",
+    "amplitude_registered": "All5 actual Pi contracts,4A1R",
+    "whole_controls": 8,
+    "incoming_step_pytest_instances": 15,
+    "gates": "Entire maintained CI,including all15 STEP pytest instances and actual registered heat route. Retain first combined original once; verify actual checkout tree and feature-to-CI delta before merge, and landed tree after merge.",
+    "new_stock_replay": false,
+    "expectation_changes": false
+  },
+  "limits": "The original stock/candidate evidence remains attached to base75a72. Combined CI establishes only its exact source tree; no timing, model score or universal platform claim."
+}
