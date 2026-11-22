@@ -22,6 +22,8 @@ numerical cross-verification suite for Physical Engineering's Last Exam (PLE):
        exact moist-air state inversion (from RH, wet-bulb, dew-point, or humidity ratio),
        2-stream adiabatic moist-air mixing conservation, and cooling/dehumidification coil
        mass & energy balance (condensate rate, total kW load, sensible heat ratio SHR).
+     - Adiabatic mixing accepts condensate_model="equilibrium_ice" to resolve ice down
+       to -60 C and coexisting ice and liquid at 0 C. The default is liquid condensate.
   4. Structural FEM (`verify_fem_structure`):
      - Arbitrary 2D pin-jointed determinate & statically indeterminate truss direct-stiffness
        solver with thermal strain support, kinematic mechanism detection, nodal reaction
@@ -729,11 +731,11 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
     return {"passed": False, "domain": "control", "mode": mode, "reason": f"Unknown control mode: {mode}"}
 
 
-def _pws_ashrae_pa(t_c: float) -> float:
+def _pws_ashrae_pa(t_c: float, *, ice_below_c: float = 0.0) -> float:
     tk = t_c + 273.15
     if tk <= 0.0:
         raise ValueError("Temperature below absolute zero")
-    if t_c < 0.0:
+    if t_c < ice_below_c:
         c1 = -5.6745359e3
         c2 = 6.3925247e0
         c3 = -9.6778430e-3
@@ -766,8 +768,8 @@ def _dew_point_from_pw(pw_pa: float) -> float:
     return 0.5 * (lo + hi)
 
 
-def _w_from_twb(t_db_c: float, t_wb_c: float, p_atm_pa: float) -> float:
-    pws_wb = _pws_ashrae_pa(t_wb_c)
+def _w_from_twb(t_db_c: float, t_wb_c: float, p_atm_pa: float, *, ice_below_c: float = 0.0) -> float:
+    pws_wb = _pws_ashrae_pa(t_wb_c, ice_below_c=ice_below_c)
     ws_wb = 0.621945 * pws_wb / (p_atm_pa - pws_wb)
     if t_wb_c >= 0.0:
         num = (2501.0 - 2.326 * t_wb_c) * ws_wb - 1.006 * (t_db_c - t_wb_c)
@@ -789,9 +791,10 @@ def _wet_bulb_from_state(t_db_c: float, w: float, p_atm_pa: float) -> float:
     return 0.5 * (lo + hi)
 
 
-def _psychro_state(spec: Dict[str, Any], p_atm_pa: float = 101325.0) -> Dict[str, Any]:
+def _psychro_state(spec: Dict[str, Any], p_atm_pa: float = 101325.0,
+                   *, ice_below_c: float = 0.0) -> Dict[str, Any]:
     t_db = float(spec["t_db_c"])
-    pws = _pws_ashrae_pa(t_db)
+    pws = _pws_ashrae_pa(t_db, ice_below_c=ice_below_c)
     if pws >= p_atm_pa:
         return {"passed": False, "reason": "Saturation vapor pressure exceeds atmospheric pressure"}
 
@@ -815,14 +818,14 @@ def _psychro_state(spec: Dict[str, Any], p_atm_pa: float = 101325.0) -> Dict[str
         t_wb = float(spec["t_wb_c"])
         if t_wb > t_db + 1e-5:
             return {"passed": False, "reason": "Wet-bulb exceeds dry-bulb temperature"}
-        w = _w_from_twb(t_db, t_wb, p_atm_pa)
+        w = _w_from_twb(t_db, t_wb, p_atm_pa, ice_below_c=ice_below_c)
         pw = p_atm_pa * w / (0.621945 + w)
         rh = min(max(pw / pws, 0.0), 1.0)
     elif "t_dp_c" in spec:
         t_dp = float(spec["t_dp_c"])
         if t_dp > t_db + 1e-5:
             return {"passed": False, "reason": "Dew-point exceeds dry-bulb temperature"}
-        pw = _pws_ashrae_pa(t_dp)
+        pw = _pws_ashrae_pa(t_dp, ice_below_c=ice_below_c)
         rh = min(max(pw / pws, 0.0), 1.0)
         w = 0.621945 * pw / (p_atm_pa - pw)
     else:
@@ -850,6 +853,16 @@ def _psychro_state(spec: Dict[str, Any], p_atm_pa: float = 101325.0) -> Dict[str
     }
 
 
+_FUSION_ENTHALPY_KJ_KG = 333.5
+
+
+def _ice_enthalpy_kj_kg(temp_c: float) -> float:
+    """Ice Ih relative to liquid water at 0 C, approximate from -60 to 0 C."""
+    # Integral of a linear ice heat capacity, based on ASHRAE Fundamentals
+    # (2025), Psychrometrics, Table 3. Fusion at 0 C is 333.5 kJ/kg.
+    return -_FUSION_ENTHALPY_KJ_KG + temp_c * (2.097 + 0.00365 * temp_c)
+
+
 def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "state")).strip().lower()
     p_atm = float(spec.get("p_atm_pa", 101325.0))
@@ -863,8 +876,16 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
         return st
 
     if mode == "adiabatic_mixing":
-        s1 = _psychro_state(spec["stream1"], p_atm)
-        s2 = _psychro_state(spec["stream2"], p_atm)
+        model = spec.get("condensate_model", "liquid")
+        if model not in ("liquid", "equilibrium_ice"):
+            return {"passed": False, "domain": "psychrometrics", "mode": mode,
+                    "reason": "condensate_model must be liquid or equilibrium_ice"}
+        equilibrium = model == "equilibrium_ice"
+        # The vapor-pressure correlations meet at the triple point. Use the same
+        # switch for both inlet and outlet states of the equilibrium model.
+        ice_below = 0.01 if equilibrium else 0.0
+        s1 = _psychro_state(spec["stream1"], p_atm, ice_below_c=ice_below)
+        s2 = _psychro_state(spec["stream2"], p_atm, ice_below_c=ice_below)
         if not s1.get("passed") or not s2.get("passed"):
             return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": "Invalid inlet stream state"}
         m1 = float(spec["stream1"].get("m_da_kg_s") or (float(spec["stream1"]["v_dot_m3_s"]) / s1["v_m3_per_kgda"]))
@@ -875,40 +896,56 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
         w3 = (m1 * s1["w_kg_per_kgda"] + m2 * s2["w_kg_per_kgda"]) / m3
         h3 = (m1 * s1["h_kj_per_kgda"] + m2 * s2["h_kj_per_kgda"]) / m3
         t_db3 = (h3 - 2501.0 * w3) / (1.006 + 1.86 * w3)
-        pws3 = _pws_ashrae_pa(t_db3)
+        pws3 = _pws_ashrae_pa(t_db3, ice_below_c=ice_below)
         pw3 = p_atm * w3 / (0.621945 + w3)
         rh3 = pw3 / pws3
-        fogged = rh3 > 1.0
+        fogged = rh3 > (1.0 + 8.0 * math.ulp(1.0) if equilibrium else 1.0)
         vapor = w3
+        ice = 0.0
         if fogged:
-            # The split across vapor and liquid must conserve total water and
-            # total enthalpy. Use the same liquid datum as the cooling coil.
+            frozen = False
+            on_melting_plateau = False
+
             def saturated_outlet(temp: float) -> Tuple[float, float]:
-                pws = _pws_ashrae_pa(temp)
+                pws = _pws_ashrae_pa(temp, ice_below_c=ice_below)
                 w_sat = 0.621945 * pws / (p_atm - pws)
                 h_air = 1.006 * temp + w_sat * (2501.0 + 1.86 * temp)
-                return w_sat, h_air + (w3 - w_sat) * 4.186 * temp
+                h_condensed = _ice_enthalpy_kj_kg(temp) if frozen else 4.186 * temp
+                return w_sat, h_air + (w3 - w_sat) * h_condensed
 
-            # Condensation releases latent heat. The inlet enthalpy average
-            # bounds the equilibrium temperature above by the warmer inlet.
             hi = max(s1["t_db_c"], s2["t_db_c"])
             lo = max(0.0, min(t_db3, hi))
-            enthalpy_roundoff = 8.0 * math.ulp(max(abs(h3), 1.0))
-            if hi < 0.0 or (t_db3 < 0.0 and saturated_outlet(lo)[1] > h3 + enthalpy_roundoff):
-                return {"passed": False, "domain": "psychrometrics", "mode": mode,
-                        "reason": "Fog equilibrium requires an ice or mixed-phase model"}
-            if (saturated_outlet(lo)[1] > h3 + enthalpy_roundoff
-                    or saturated_outlet(hi)[1] < h3 - enthalpy_roundoff):
-                return {"passed": False, "domain": "psychrometrics", "mode": mode,
-                        "reason": "Inlets do not bracket a saturated liquid-water equilibrium"}
-            for _ in range(64):
-                mid = 0.5 * (lo + hi)
-                if saturated_outlet(mid)[1] < h3:
-                    lo = mid
+            roundoff = 8.0 * math.ulp(max(abs(h3), 1.0))
+            if hi < 0.0 or (t_db3 < 0.0 and saturated_outlet(lo)[1] > h3 + roundoff):
+                if not equilibrium:
+                    return {"passed": False, "domain": "psychrometrics", "mode": mode,
+                            "reason": "Fog equilibrium requires an ice or mixed-phase model"}
+                # At the melting point the air and total condensate mass are fixed.
+                # The fusion enthalpy determines how much condensate is ice.
+                vapor_zero, liquid_zero = saturated_outlet(0.0)
+                frozen = True
+                _, ice_zero = saturated_outlet(0.0)
+                if hi >= 0.0 and w3 >= vapor_zero and ice_zero <= h3 <= liquid_zero:
+                    on_melting_plateau = True
+                    t_db3, vapor = 0.0, vapor_zero
+                    ice = (liquid_zero - h3) / _FUSION_ENTHALPY_KJ_KG
                 else:
-                    hi = mid
-            t_db3 = 0.5 * (lo + hi)
-            vapor = min(w3, saturated_outlet(t_db3)[0])
+                    lo, hi = max(-60.0, min(t_db3, hi)), min(0.0, hi)
+            if not on_melting_plateau:
+                if (lo > hi or saturated_outlet(lo)[1] > h3 + roundoff
+                        or saturated_outlet(hi)[1] < h3 - roundoff):
+                    return {"passed": False, "domain": "psychrometrics", "mode": mode,
+                            "reason": "Inlets do not bracket a supported condensate equilibrium"}
+                for _ in range(64):
+                    mid = 0.5 * (lo + hi)
+                    if saturated_outlet(mid)[1] < h3:
+                        lo = mid
+                    else:
+                        hi = mid
+                t_db3 = 0.5 * (lo + hi)
+                vapor = min(w3, saturated_outlet(t_db3)[0])
+                if frozen:
+                    ice = w3 - vapor
             rh3 = 1.0
         res: Dict[str, Any] = {
             "passed": True,
@@ -923,6 +960,11 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
             "rh_mix": min(rh3, 1.0),
             "fog_saturated": fogged,
         }
+        if equilibrium:
+            condensate = w3 - vapor
+            ice = min(ice, condensate)
+            res.update(condensate_model=model, w_ice_kg_per_kgda=ice,
+                       w_liquid_kg_per_kgda=condensate - ice)
         _check_claimed(res, spec)
         return res
 
