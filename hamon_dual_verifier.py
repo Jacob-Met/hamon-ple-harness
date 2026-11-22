@@ -2376,20 +2376,31 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
             "dual_verified": True,
         }
     if kind == "consolidation_settlement":
-        H, e0, cc, cr = float(spec["H_m"]), float(spec["e0"]), float(spec["Cc"]), float(spec["Cr"])
-        sv0, sp, ds = float(spec["sigma_v0_Pa"]), float(spec["sigma_p_Pa"]), float(spec["delta_sigma_Pa"])
-        sf = sv0 + ds
-        if sf <= sp:
-            sc_m = (H / (1.0 + e0)) * cr * math.log10(sf / sv0)
-        elif sv0 >= sp:
-            sc_m = (H / (1.0 + e0)) * cc * math.log10(sf / sv0)
-        else:
-            sc_m = (H / (1.0 + e0)) * (cr * math.log10(sp / sv0) + cc * math.log10(sf / sp))
-        return {
-            "settlement_m": sc_m,
-            "passes_limit": sc_m <= float(spec["max_settlement_m"]),
-            "dual_verified": True,
-        }
+        from hamon_consolidation import primary_settlement, settlement_from_void_loss
+        try:
+            h, e0, cc, cr = (float(spec[k]) for k in ("H_m", "e0", "Cc", "Cr"))
+            initial, pc, load, limit = (float(spec[k]) for k in
+                                        ("sigma_v0_Pa", "sigma_p_Pa", "delta_sigma_Pa", "max_settlement_m"))
+            if not all(math.isfinite(v) for v in (initial, pc, load, limit, cc, cr)):
+                raise ValueError("Require finite stresses, compression indices, and settlement limit")
+            if initial <= 0 or pc <= 0 or cc <= 0 or not 0 <= cr <= cc:
+                raise ValueError("Require positive stresses and 0 <= Cr <= Cc with positive Cc")
+            if load < 0:
+                if initial + load <= 0:
+                    raise ValueError("Unloading must leave positive effective stress")
+                # Preserve the signed historical unloading convention of this public schema.
+                index = cr if initial + load <= pc else cc
+                loss = index * math.log1p(load / initial) / math.log(10.0)
+                response = settlement_from_void_loss(h, e0, loss)
+            else:
+                # A historical preconsolidation stress below the current stress is virgin loading.
+                response = primary_settlement(h, e0, cc, initial, load, max(pc, initial), cr)
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            return {"passes_limit": False, "dual_verified": False, "reason": str(exc)}
+        settlement = response["primary_consolidation_settlement_m"]
+        return {"settlement_m": settlement, "passes_limit": settlement <= limit,
+                "dual_verified": True, "initial_void_height_m": response["initial_void_height_m"],
+                "final_void_ratio": response["final_void_ratio"]}
     if kind == "manning_channel":
         return solve_manning_channel_dual(spec)
     if kind == "spillway_weir":
