@@ -36,6 +36,8 @@ dev-task files and appropriate model and judge access.
 
 Inside the isolated task container, Pi can run `python3 /tmp/hamon-engineering-toolkit.py` with `pdf-vector`, `pdf-dimension-links`, `pdf-auto-measure`, `pdf-measure`, `ifc-narrowphase`, `calc-pack`, `quantity`, `check` and `xlsx-audit`. The tools produce qualified evidence rather than assuming source labels, collision envelopes or engineering code compliance. See the [anchored PDF guide](docs/pdf_measurement.md) for the new source-verified dimension graph: it requires a real PDF word box and two separate crossing endpoint strokes before using an automatically associated reference, then validates four independent directions against the physical affine tensor. Missing/ambiguous evidence fails closed; neither visual proximity nor a passing metric is building-code approval.
 
+The `dual-verify` command also computes passive transformer voltage regulation, operating efficiency and the conditions under which a finite optimal load exists. See the [transformer efficiency contract](docs/transformer_efficiency.md).
+
 ## Files
 
 | File | Purpose |
