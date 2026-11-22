@@ -1,0 +1,13 @@
+{
+  "source": "07fba2d00720e6bfb82e485c39ba2bc05e25324d",
+  "equation": "k A T'' - h P (T-Tinf)=0; endpoint temperatures fixed; q_base=-kA T'(0)",
+  "reference": "MIT 2.051 Fall 2015 equation sheet for quiz 2, straight fin with prescribed tip",
+  "mL": [0.001, 0.1, 0.6931471805599453, 1.0, 5.0, 20.0, 800.0],
+  "geometry": {"k": 2.0, "A": 0.02, "P": 0.4, "L": 1.0},
+  "endpoint_excesses_K": [[0,50],[0,-50],[5e-13,50],[-5e-13,-50],[50,0],[50,50],[20,25],[-50,30],[0,0]],
+  "positions_L": [0, 0.375, 1.0],
+  "ambient_C": 0.0,
+  "oracle": "80-digit Decimal two-end exponential solution of independent Dirichlet BVP; flux and evaluated temperature absolute error <= 3e-11 * max(1, |physical oracle value|). All 189 synthetic cases accept correct claims. Positive and negative 2W perturbations must fail. All results finite or explicit null for an undefined normalized ratio. Do not use unconstrained event or organizer input.",
+  "ordinary_controls": ["adiabatic", "convective", "infinite"],
+  "work_bound": "Finite-volume node count bounded independent of mL; registered Python conservation router for all cases, actual registered Pi entry for representative cases and normal CI for any merge."
+}

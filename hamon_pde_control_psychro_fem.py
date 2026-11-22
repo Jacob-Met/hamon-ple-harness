@@ -271,11 +271,24 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             theta_tip = theta_b / denom
             q_fin = cap_m * (math.sinh(m_len) + u * math.cosh(m_len)) / denom
         elif tip_bc == "prescribed_temp":
-            t_tip_spec = float(spec["t_tip_c"])
-            theta_L = t_tip_spec - t_inf
-            theta_x = (theta_L * math.sinh(m * x_eval) + theta_b * math.sinh(m * (length - x_eval))) / math.sinh(m_len)
+            theta_L = float(spec["t_tip_c"]) - t_inf
+            # Two prescribed temperatures drive the base flux independently.
+            # Scaled exponentials keep both temperature weights finite at long lengths.
+            if not all(map(math.isfinite, (theta_b, theta_L, m_len))) or m_len <= 0.0:
+                return {"passed": False, "domain": "pde", "mode": mode,
+                        "reason": "Non-finite fin temperatures or conduction scale"}
+            x_m = m * min(x_eval, length)
+            remaining = m * max(length - x_eval, 0.0)
+            denominator = -math.expm1(-2.0 * m_len)
+            base_weight = math.exp(-x_m) * -math.expm1(-2.0 * remaining) / denominator
+            tip_weight = math.exp(-remaining) * -math.expm1(-2.0 * x_m) / denominator
+            theta_x = theta_b * base_weight + theta_L * tip_weight
             theta_tip = theta_L
-            q_fin = cap_m * (math.cosh(m_len) - (theta_L / theta_b if abs(theta_b) > 1e-12 else 0.0)) / math.sinh(m_len)
+            # coth(z) - csch(z) = tanh(z/2). The separated difference avoids
+            # cancellation for equal endpoint temperatures on a weakly cooled fin.
+            transfer = (k * ac / length) * (2.0 * (m_len * math.exp(-m_len) / denominator))
+            surface = k * ac * m * math.tanh(m_len / 2.0)
+            q_fin = transfer * (theta_b - theta_L) + surface * theta_b
             h_tip = 0.0
         elif tip_bc == "infinite":
             theta_x = theta_b * math.exp(-m * x_eval)
@@ -286,6 +299,13 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             return {"passed": False, "domain": "pde", "mode": mode, "reason": f"Unsupported tip_bc: {tip_bc}"}
 
         n_nodes = 401
+        if tip_bc == "prescribed_temp":
+            # The grid exponent is 2N asinh(z/(2N)) for z=mL. The leading
+            # remote flux error is (z**3/24 + z**2/8)/N**2. Budget half
+            # the 1e-3 check for it; a bounded mesh still has to pass.
+            capped_z = min(m_len, 1000.0)
+            cells = capped_z * math.sqrt((capped_z / 24.0 + 1.0 / 8.0) / 5e-4)
+            n_nodes = max(n_nodes, 1 + math.ceil(min(65536.0, cells)))
         dx = length / (n_nodes - 1)
         lower = [0.0] * n_nodes
         diag = [1.0] * n_nodes
@@ -312,6 +332,12 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         q_conv_fvm = 0.5 * sink * theta_fvm[0] + sum(sink * theta_fvm[i] for i in range(1, n_nodes - 1)) + 0.5 * sink * theta_fvm[-1]
         if tip_bc != "prescribed_temp":
             q_fvm = q_conv_fvm + h_tip * ac * theta_fvm[-1]
+        elif m_len < 1.0:
+            # Linear test-function balance of the same finite-volume equations.
+            # This avoids subtracting adjacent nearly isothermal cells.
+            cells = n_nodes - 1
+            weighted = math.fsum((1.0 - i / cells) * theta_fvm[i] for i in range(1, cells))
+            q_fvm = k * ac / length * (theta_b - theta_tip) + sink * (0.5 * theta_b + weighted)
         else:
             q_fvm = cond * (theta_fvm[0] - theta_fvm[1]) + 0.5 * sink * theta_fvm[0]
 
@@ -319,8 +345,16 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         eta_fin = (q_fin / (h * perim * length * theta_b)) if abs(theta_b) > 1e-12 else 1.0
         eps_fin = (q_fin / (h * ac * theta_b)) if abs(theta_b) > 1e-12 else 0.0
         rel_q_err = abs(q_fvm - q_fin) / max(abs(q_fin), 1e-9)
+        scaled_q_err = rel_q_err
+        if tip_bc == "prescribed_temp":
+            # Near a zero net base flux, compare the independent FVM result to
+            # the scale of the opposing boundary contributions, in watts.
+            scale = max(abs(q_fin), abs(transfer * (theta_b - theta_L)), abs(surface * theta_b), 1e-9)
+            scaled_q_err = abs(q_fvm - q_fin) / scale
+            eta_fin = q_fin / (h * perim * length * theta_b) if theta_b else None
+            eps_fin = q_fin / (h * ac * theta_b) if theta_b else None
         tip_err = abs(theta_fvm[-1] - theta_tip)
-        passed = (rel_q_err < 1e-3) and (tip_err < max(1e-3, 1e-3 * abs(theta_b)))
+        passed = (scaled_q_err < 1e-3) and (tip_err < max(1e-3, 1e-3 * abs(theta_b)))
 
         res: Dict[str, Any] = {
             "passed": passed,
@@ -336,6 +370,12 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             "fvm_rel_error": rel_q_err,
             "q_max_ref_w": q_max,
         }
+        if tip_bc == "prescribed_temp":
+            res["fvm_scaled_flux_residual"] = scaled_q_err
+            if (not theta_b and "claimed_value" in spec
+                    and spec.get("claimed_field") in ("fin_efficiency", "fin_effectiveness")):
+                res.update(passed=False, reason="Fin normalization is undefined at zero base excess temperature")
+                return res
         _check_claimed(res, spec)
         return res
 
