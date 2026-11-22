@@ -1940,12 +1940,14 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
             {"EI_Nm2": default_ei, "q_N_m": default_q} for _ in range(n_nodes - 1)
         ]
 
+        beam_elements = []
         for e_idx in range(n_nodes - 1):
             le = x_nodes[e_idx + 1] - x_nodes[e_idx]
             ei = float(el_specs[e_idx].get("EI_Nm2", default_ei))
             q_val = float(el_specs[e_idx].get("q_N_m", default_q))
             if ei <= 0.0:
                 return {"passed": False, "domain": "fem", "mode": mode, "reason": "Non-positive flexural rigidity EI_Nm2"}
+            beam_elements.append((le, ei, q_val))
             c_fac = ei / (le ** 3)
             ke = [
                 [12.0 * c_fac, 6.0 * le * c_fac, -12.0 * c_fac, 6.0 * le * c_fac],
@@ -1960,10 +1962,13 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
                 for b_i in range(4):
                     k_glob[dofs[a_i]][dofs[b_i]] += ke[a_i][b_i]
 
+        nodal_loads = [0.0] * ndof
         for ld in spec.get("nodal_loads", []):
             nd = int(ld["node"])
-            f_eq[2 * nd] += float(ld.get("fy_N", 0.0))
-            f_eq[2 * nd + 1] += float(ld.get("mz_Nm", 0.0))
+            nodal_loads[2 * nd] += float(ld.get("fy_N", 0.0))
+            nodal_loads[2 * nd + 1] += float(ld.get("mz_Nm", 0.0))
+        for d, value in enumerate(nodal_loads):
+            f_eq[d] += value
 
         prescribed = {}
         for sup in spec.get("supports", []):
@@ -1991,10 +1996,33 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
             sum(k_glob[i][j] * u_full[j] for j in range(ndof)) - f_eq[i]
             for i in range(ndof)
         ]
-        u_strain = 0.5 * sum(u_full[i] * sum(k_glob[i][j] * u_full[j] for j in range(ndof)) for i in range(ndof))
-        w_ext = 0.5 * sum(f_eq[i] * u_full[i] for i in range(ndof))
-        has_settlement = any(abs(v) > 0.0 for v in prescribed.values())
-        clapeyron_ok = True if has_settlement else (abs(u_strain - w_ext) <= 1e-7 * max(abs(u_strain), 1e-12))
+        # A constant distributed load adds a clamped quartic particular solution
+        # h*t²*(1-t)², t=(x-x_i)/L. It has zero nodal displacement and slope,
+        # so the assembled nodal solution and reactions already include its load.
+        energy_terms = []
+        distributed_work = []
+        midspans = []
+        for index, (length, rigidity, load) in enumerate(beam_elements):
+            w0, theta0, w1, theta1 = u_full[2 * index:2 * index + 4]
+            h = load * length ** 4 / (24.0 * rigidity)
+            # The second derivative with respect to t separates into orthogonal
+            # constant, linear and quadratic terms on [0,1]. Integrate EI*w''²/2.
+            constant = length * (theta1 - theta0)
+            linear = length * (theta0 + theta1) - 2.0 * (w1 - w0)
+            energy_terms.append(0.5 * rigidity / length ** 3
+                                * (constant ** 2 + 3.0 * linear ** 2 + 0.8 * h ** 2))
+            average_w = 0.5 * (w0 + w1) + length * (theta0 - theta1) / 12.0 + h / 30.0
+            distributed_work.append(0.5 * load * length * average_w)
+            midspans.append(0.5 * (w0 + w1) + length * (theta0 - theta1) / 8.0 + h / 16.0)
+
+        point_work = [0.5 * force * displacement for force, displacement in zip(nodal_loads, u_full)]
+        support_terms = [0.5 * reactions[d] * value for d, value in prescribed.items()]
+        u_strain = math.fsum(energy_terms)
+        w_ext = math.fsum(distributed_work + point_work)
+        support_work = math.fsum(support_terms)
+        work_terms = distributed_work + point_work + support_terms
+        work_scale = max(u_strain, math.fsum(abs(term) for term in work_terms), 1e-12)
+        clapeyron_ok = abs(u_strain - math.fsum(work_terms)) <= 1e-7 * work_scale
 
         res = {
             "passed": clapeyron_ok,
@@ -2002,6 +2030,8 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
             "mode": mode,
             "deflections_m": [u_full[2 * i] for i in range(n_nodes)],
             "rotations_rad": [u_full[2 * i + 1] for i in range(n_nodes)],
+            "element_midspan_deflections_m": midspans,
+            "support_work_J": support_work,
             "tip_deflection_m": u_full[2 * (n_nodes - 1)],
             "reactions_V_M": [[reactions[2 * i], reactions[2 * i + 1]] for i in range(n_nodes)],
             "strain_energy_J": u_strain,
