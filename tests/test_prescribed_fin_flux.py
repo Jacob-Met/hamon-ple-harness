@@ -44,3 +44,23 @@ class PrescribedFinFluxTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertIsNone(fin(1., 0., 50.)[field])
                 self.assertFalse(fin(1., 0., 50., claimed_field=field, claimed_value=1.)["passed"])
+
+    def test_frozen_two_end_flux_and_temperature_matrix(self):
+        from pathlib import Path
+        import json
+        import subprocess
+        import sys
+        import tempfile
+
+        root = Path(__file__).resolve().parents[1]
+        course = root / "tests" / "fin_flux" / "course.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            results = Path(temporary) / "fin.json"
+            subprocess.run([sys.executable, str(course), str(root), str(results)], check=True)
+            rows = json.loads(results.read_text())
+        physical = sum(row["qualified"] for row in rows)
+        rejected = sum(row.get("wrong_rejected", False) for row in rows)
+        exceptions = sum("error" in row for row in rows)
+        print(f"Prescribed-tip flux and temperature {physical}/{len(rows)}, "
+              f"wrong-claim refusals {rejected}/{len(rows)}, exceptions {exceptions}")
+        self.assertEqual((len(rows), physical, rejected, exceptions), (189, 189, 189, 0))
