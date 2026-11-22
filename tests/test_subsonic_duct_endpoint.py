@@ -2,7 +2,7 @@
 import math
 from decimal import Decimal, localcontext
 
-import pytest
+import unittest
 
 from hamon_wave6_physics_verifiers import (
     dispatch_wave6_verifier,
@@ -32,9 +32,7 @@ def reference(mach, mode, ratio):
     return spec, float(critical)
 
 
-@pytest.mark.parametrize('mach', [.5, .9999, .9999999])
-@pytest.mark.parametrize('mode', ['fanno', 'rayleigh'])
-def test_prescribed_duct_state_distinct_from_first_sonic_section(mach, mode):
+def check_prescribed_duct(mach, mode):
     def solve(ratio):
         spec, critical = reference(mach, mode, ratio)
         return dispatch_wave6_verifier('compressible_acoustics',spec), critical
@@ -66,11 +64,18 @@ def test_prescribed_duct_state_distinct_from_first_sonic_section(mach, mode):
     assert not decision['fast_path_pruned']
 
 
-def test_rayleigh_cooling_keeps_the_subsonic_solution():
-    spec, _ = reference(.5, 'rayleigh', 0)
-    spec['q_J_kg'] = -30000.
-    result = dispatch_wave6_verifier('compressible_acoustics', spec)
-    assert result['verified'] and not result['choked'] and 0 < result['M2'] < .5
-    def t0_ratio(mach):
-        return 2*2.4*mach**2*(1+.2*mach**2)/(1+1.4*mach**2)**2
-    assert math.isclose(t0_ratio(result['M2'])/t0_ratio(.5), 1-30000/(1004.5*300), rel_tol=2e-14)
+class SubsonicDuctEndpointTests(unittest.TestCase):
+    def test_limits_and_choking_diagnostic(self):
+        for mach in (.5, .9999, .9999999):
+            for mode in ('fanno', 'rayleigh'):
+                with self.subTest(mach=mach, mode=mode):
+                    check_prescribed_duct(mach, mode)
+
+    def test_rayleigh_cooling_keeps_the_subsonic_solution(self):
+        spec, _ = reference(.5, 'rayleigh', 0)
+        spec['q_J_kg'] = -30000.
+        result = dispatch_wave6_verifier('compressible_acoustics', spec)
+        assert result['verified'] and not result['choked'] and 0 < result['M2'] < .5
+        def t0_ratio(mach):
+            return 2*2.4*mach**2*(1+.2*mach**2)/(1+1.4*mach**2)**2
+        assert math.isclose(t0_ratio(result['M2'])/t0_ratio(.5), 1-30000/(1004.5*300), rel_tol=2e-14)
