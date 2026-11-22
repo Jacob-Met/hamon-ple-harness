@@ -147,7 +147,7 @@ def test_inverse_counterflow_near_pinch_and_balanced_capacity_rates():
                         result = solve_exchanger_or_radiation({**base, field: float(value)})
                         assert result["verified"], (ratio, eff, field, result)
                         assert math.isclose(result["UA_W_K"], float(duty / lmtd), rel_tol=1e-8)
-    for invalid in (0, 1, 1.01, float("nan")):
+    for invalid in (-.01, 1, 1.01, float("nan")):
         result = solve_exchanger_or_radiation({**base, "effectiveness": invalid})
         assert result["verified"] is False
 
@@ -280,3 +280,36 @@ def test_counterflow_mean_temperature_check_handles_a_rounded_terminal_pinch():
             assert result["verified"], result
             low, high = result["LMTD_bounds_K"]
             assert low <= result["LMTD_K"] <= high
+
+
+def test_zero_duty_exchanger_inverse_binds_all_observations():
+    from hamon_conservation_cad_verifier import run_router_conservation_cad_verifier as solve
+
+    for arrangement in ("counterflow", "parallel", "shell_tube_1_2", "crossflow_unmixed",
+                        "crossflow_cmin_mixed", "crossflow_cmax_mixed", "condenser", "boiler"):
+        base = {"subkind": "heat_exchanger", "flow_arrangement": arrangement, "T_h_in": 400.,
+                "T_c_in": 300., "C_h": 1000., "C_c": 1000.}
+
+        def check(**observations):
+            return solve({"mode": "exchangers_radiation", "spec": {**base, **observations}})
+
+        fixed = {"condenser": "T_h_out", "boiler": "T_c_out"}.get(arrangement)
+        controls = {"effectiveness": 0., "Q": 0., "T_h_out": 400., "T_c_out": 300.}
+        for key, value in controls.items():
+            result = check(**{key: value})
+            if key == fixed:
+                assert not result["verified"]
+            else:
+                assert result["verified"] and result["UA_W_K"] == result["NTU"] == result["Q_W"] == 0.
+        recovered = check(**controls)
+        assert recovered["verified"] and all(value == 0. for value in recovered["observation_residuals"].values())
+        assert not check(Q=0., effectiveness=.25)["verified"]
+        assert not check(effectiveness=0., Q=1.)["verified"]
+        assert not check(Q=0., effectiveness=0., T_h_out=390.)["verified"]
+        assert not check(Q=0., T_h_in=300.)["verified"]
+        assert not check(Q=0., **{"C_c" if arrangement == "condenser" else "C_h": 0.})["verified"]
+
+        if arrangement == "counterflow":
+            # Precise nonzero duty can coexist with an outlet rounded to its inlet.
+            tiny = check(Q=1e-13, T_h_out=400., T_c_out=300.)
+            assert tiny["verified"] and tiny["UA_W_K"] > 0.
