@@ -7,6 +7,7 @@ that the callout exists, NOT proof it refers to the chosen dimension line.
 """
 from __future__ import annotations
 
+from itertools import groupby
 import hashlib
 import json
 import math
@@ -58,11 +59,21 @@ def _segment(row, vectors):
 def _source_text(words, label):
     if not isinstance(label, str) or not 2 <= len(label) <= 100:
         raise ValueError("source_label must be 2..100 characters")
-    raw = " ".join(w.get("text", "") for w in words)
-    norm = lambda x: re.sub(r"\s+", "", x).casefold()
-    if norm(label) not in norm(raw):
-        raise ValueError(f"dimension source_label {label!r} not found in PDF page words")
-    return label
+    # Keep numeric and alphabetic runs intact, while allowing a value and its
+    # unit to appear in one PDF word or in two words on the same source line.
+    tokenize = re.compile(r"\d+|[^\W\d_]+|[^\s]").findall
+    wanted = tokenize(label.casefold())
+    for _, line in groupby(words, key=lambda word: word.get("source_line_id")):
+        tokens = []
+        boundaries = {0}
+        for word in line:
+            tokens.extend(tokenize(word.get("text", "").casefold()))
+            boundaries.add(len(tokens))
+        for start in boundaries:
+            end = start + len(wanted)
+            if wanted and end in boundaries and tokens[start:end] == wanted:
+                return tuple(wanted)
+    raise ValueError(f"dimension source_label {label!r} not found in PDF page words")
 
 
 def calibrate_inventory(page, spec, quantity, metre):
@@ -127,10 +138,11 @@ def calibrate_inventory(page, spec, quantity, metre):
         if physical.dim != metre.dim or not physical.val.is_finite() \
                 or physical.val <= 0:
             raise ValueError(f"reference {i}: positive physical length required")
-        label = _source_text(page["words"], reference.get("source_label"))
-        if label in source_labels:
+        label = reference.get("source_label")
+        label_key = _source_text(page["words"], label)
+        if label_key in source_labels:
             raise ValueError("independent source_label required per reference")
-        source_labels.add(label)
+        source_labels.add(label_key)
         length_m = float(physical.val / metre_value)
         direction_vectors.append(((b[0] - a[0]) / width,
                                   (b[1] - a[1]) / width))

@@ -117,6 +117,26 @@ class AnchoredMeasureContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "identifiers"):
             self.calculate(page=page)
 
+    def test_source_label_must_cover_whole_words_on_one_line(self):
+        page = inventory()
+        spec = specification()
+        page["words"] = [{"text": "11000mm", "source_line_id": 0},
+                         {"text": "1.0m", "source_line_id": 1}]
+        with self.assertRaisesRegex(ValueError, "not found"):
+            self.calculate(page, spec)
+        page["words"][:1] = [{"text": "1000", "source_line_id": 2},
+                             {"text": "mm", "source_line_id": 3}]
+        with self.assertRaisesRegex(ValueError, "not found"):
+            self.calculate(page, spec)
+        page["words"][:2] = [{"text": "1", "source_line_id": 2},
+                             {"text": "000", "source_line_id": 2},
+                             {"text": "mm", "source_line_id": 2}]
+        with self.assertRaisesRegex(ValueError, "not found"):
+            self.calculate(page, spec)
+        page["words"][:3] = [{"text": "1000", "source_line_id": 2},
+                             {"text": "mm", "source_line_id": 2}]
+        self.assertAlmostEqual(self.calculate(page, spec)["targets"][0]["estimate"], 500)
+
     def test_no_duplicate_labels_or_names(self):
         spec = specification()
         spec["references"][1]["source_label"] = "1000mm"
