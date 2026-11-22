@@ -141,3 +141,71 @@ def test_proposed_and_native_generator_reactive_limits(reactance, direction):
     assert limited["conservation_verified"], limited
     assert limited["clamped_pv_q_pu"] == {"G":0}
     assert limited["voltages"]["G"]["vm_pu"] == pytest.approx(1,abs=1e-13)
+
+
+@pytest.mark.parametrize("setpoint_a", [0.96, 0.92])
+@pytest.mark.parametrize("slack_susceptance", [0.2, 0.65])
+def test_coupled_regulators_can_release_a_temporary_reactive_limit(setpoint_a, slack_susceptance):
+    # With zero active power all angles vanish. Q_i = V_i sum_j (V_i-V_j)/X_ij.
+    va, vb = 0.94, 1.02
+    qa = va * ((va - 1) * slack_susceptance + (va - vb) / 0.1)
+    qb = vb * ((vb - 1) * slack_susceptance + (vb - va) / 0.1)
+    if setpoint_a > va:
+        bounds_a, bounds_b = (qa - 2, qa), (qb - 0.0004, qb + 2)
+    else:
+        bounds_a, bounds_b = (qa, qa + 2), (qb - 2, qb + 0.0004)
+    spec = {
+        "buses": [
+            {"id": "S", "type": "slack", "vm_pu": 1},
+            {"id": "A", "type": "PV", "vm_pu": setpoint_a, "p_injection_pu": 0,
+             "q_min_injection_pu": bounds_a[0], "q_max_injection_pu": bounds_a[1]},
+            {"id": "B", "type": "PV", "vm_pu": vb, "p_injection_pu": 0,
+             "q_min_injection_pu": bounds_b[0], "q_max_injection_pu": bounds_b[1]},
+        ],
+        "lines": [
+            {"id": "SA", "from": "S", "to": "A", "r_pu": 0, "x_pu": 1 / slack_susceptance},
+            {"id": "AB", "from": "A", "to": "B", "r_pu": 0, "x_pu": 0.1},
+            {"id": "SB", "from": "S", "to": "B", "r_pu": 0, "x_pu": 1 / slack_susceptance},
+        ],
+    }
+    result = verify_ac_power_flow(spec)
+    assert result["conservation_verified"], result
+    assert result["clamped_pv_q_pu"] == {"A": qa}
+    assert result["voltages"]["A"]["vm_pu"] == pytest.approx(va, abs=1e-10)
+    assert result["voltages"]["B"]["vm_pu"] == pytest.approx(vb, abs=1e-10)
+    assert result["bus_injections"]["B"]["q_pu"] == pytest.approx(qb, abs=1e-10)
+
+
+@pytest.mark.parametrize("vb, angle, slack_x, upper", [(0.98, 5, 3, True), (1.04, 2, 5, False)])
+def test_alternative_reactive_pivot_after_inconsistent_intermediate(vb, angle, slack_x, upper):
+    magnitudes = [1.0, 0.94, vb]
+    angles = [0, angle, -angle]
+    voltages = [cmath.rect(vm, math.radians(va)) for vm, va in zip(magnitudes, angles)]
+    currents = [0j, 0j, 0j]
+    ids = "SAB"
+    lines = []
+    for f, t, x in [(0, 1, slack_x), (1, 2, 0.1), (2, 0, slack_x)]:
+        branch = (voltages[f] - voltages[t]) / (1j*x)
+        currents[f] += branch
+        currents[t] -= branch
+        lines.append({"id": ids[f] + ids[t], "from": ids[f], "to": ids[t], "r_pu": 0, "x_pu": x})
+    power = [v * i.conjugate() for v, i in zip(voltages, currents)]
+    qa, qb = power[1].imag, power[2].imag
+    a_bounds = (qa - 1.5, qa) if upper else (qa, qa + 1.5)
+    b_bounds = (qb - 0.001, qb + 1.5) if upper else (qb - 1.5, qb + 0.001)
+    spec = {
+        "buses": [
+            {"id": "S", "type": "slack", "vm_pu": 1},
+            {"id": "A", "type": "PV", "vm_pu": 0.94 + (0.07 if upper else -0.07),
+             "p_injection_pu": power[1].real,
+             "q_min_injection_pu": a_bounds[0], "q_max_injection_pu": a_bounds[1]},
+            {"id": "B", "type": "PV", "vm_pu": vb, "p_injection_pu": power[2].real,
+             "q_min_injection_pu": b_bounds[0], "q_max_injection_pu": b_bounds[1]},
+        ],
+        "lines": lines,
+        "proposed_voltages": {name: {"vm_pu": vm, "va_deg": va}
+                              for name, vm, va in zip(ids, magnitudes, angles)},
+    }
+    result = verify_ac_power_flow(spec)
+    assert result["conservation_verified"], result
+    assert result["clamped_pv_q_pu"] == {"A": qa}
