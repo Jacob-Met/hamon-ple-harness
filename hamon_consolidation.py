@@ -1,0 +1,108 @@
+"""Terzaghi primary consolidation for one layer and a uniform step in effective load."""
+import math
+
+import numpy as np
+from scipy.linalg import solve_banded
+
+
+def _number(spec, key):
+    value = spec[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f"{key} must be a finite number")
+    return float(value)
+
+
+def _average_fourier(tv):
+    if tv < 1.0 / 144:
+        # The first reflected image is exponentially suppressed by exp(-1/Tv).
+        return 2.0 * math.sqrt(tv / math.pi)
+    remainder = 0.0
+    for n in range(200):
+        k = math.pi * (n + 0.5)
+        term = 2.0 * math.exp(-(k*k)*tv) / (k*k)
+        remainder += term
+        if term < 1e-16:
+            break
+    return 1.0 - remainder
+
+
+def _average_cn(tv, cells):
+    if tv == 0.0:
+        return 0.0
+    # Work on one drainage path: zero excess pressure at x=0 and zero flux
+    # at x=1. At early times 12 diffusion lengths suffice to double precision.
+    if tv < 1.0 / 144:
+        length, end_time = 12.0 * math.sqrt(tv), 1.0 / 144
+    else:
+        length, end_time = 1.0, min(tv, 20.0)
+    # Beyond Tv=20 the surviving lowest diffusion mode is below 4e-22.
+    steps = cells
+    r = end_time * cells**2 / (2.0 * steps)
+    diagonal = np.full(cells, -2.0)
+    diagonal[0], diagonal[-1] = -3.0, -1.0
+    implicit = np.zeros((3, cells))
+    implicit[0, 1:] = implicit[2, :-1] = -r
+    implicit[1] = 1.0 - r * diagonal
+    state = np.ones(cells)
+    # Two half steps of backward Euler damp the initially discontinuous
+    # drainage boundary before the centered Crank–Nicolson time steps.
+    for _ in range(2):
+        state = solve_banded((1, 1), implicit, state, check_finite=False)
+    for _ in range(1, steps):
+        rhs = (1.0 + r * diagonal) * state
+        rhs[1:] += r * state[:-1]
+        rhs[:-1] += r * state[1:]
+        state = solve_banded((1, 1), implicit, rhs, check_finite=False)
+    return length * float(np.mean(1.0 - state))
+
+
+def verify_consolidation_1d(spec):
+    """Check a settlement-time calculation in SI units, including compression history."""
+    result = {"ok": False, "conservation_verified": False, "mode": "civil_geotech",
+              "tool": "hamon_conservation_cad_verifier", "calculation": "consolidation_1d"}
+    try:
+        h = _number(spec, "H_clay_m")
+        e0 = _number(spec, "e0")
+        cc = _number(spec, "Cc")
+        initial = _number(spec, "sigma_v0_eff_Pa")
+        load = _number(spec, "delta_sigma_v_Pa")
+        cv = _number(spec, "cv_m2_s")
+        elapsed = _number(spec, "time_s")
+        drainage = spec["drainage"]
+        if h <= 0 or initial <= 0 or cv <= 0 or cc <= 0 or min(e0, load, elapsed) < 0:
+            raise ValueError("Invalid layer, effective stress, load increment, compression index, time, or Cv")
+        if drainage not in ("single", "double"):
+            raise ValueError("drainage must be single or double")
+        pc = _number(spec, "sigma_preconsolidation_Pa") if "sigma_preconsolidation_Pa" in spec else initial
+        cr = _number(spec, "Cr") if "Cr" in spec or pc > initial else 0.0
+        if pc < initial or not 0 <= cr <= cc:
+            raise ValueError("Require preconsolidation stress >= initial effective stress and 0 <= Cr <= Cc")
+        recompression = min(load, pc - initial)
+        virgin = load - recompression
+        strain = (cr * math.log1p(recompression / initial)
+                  + cc * math.log1p(virgin / (initial + recompression))) / ((1.0 + e0) * math.log(10.0))
+        path = h if drainage == "single" else h / 2.0
+        tv = (cv / path) * (elapsed / path)
+        if not math.isfinite(tv):
+            raise ValueError("Time factor exceeds finite numerical range")
+        degree = _average_fourier(tv)
+        coarse = _average_cn(tv, 128)
+        fine = _average_cn(tv, 256)
+        cn = fine + (fine - coarse) / 3.0
+        ultimate = h * strain
+        settlement = degree * ultimate
+        if not all(math.isfinite(v) for v in (degree, cn, ultimate, settlement)):
+            raise ValueError("Nonfinite consolidation response")
+        residual = abs(degree - cn)
+        valid = 0 <= degree <= 1 and abs(max(0.0, min(1.0, cn)) - cn) < 1e-6 and residual < 1e-6
+        for key, predicted in (("proposed_degree_consolidation", degree), ("proposed_settlement_m", settlement)):
+            if key in spec and abs(_number(spec, key) - predicted) > 1e-6:
+                valid = False
+        result.update(ok=True, conservation_verified=valid, drainage_path_m=path, time_factor=tv,
+                      degree_consolidation=degree, degree_consolidation_cn=cn,
+                      dual_solver_abs_residual=residual, primary_consolidation_settlement_m=ultimate,
+                      settlement_at_time_m=settlement)
+        return result
+    except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError) as exc:
+        result["reason"] = str(exc)
+        return result
