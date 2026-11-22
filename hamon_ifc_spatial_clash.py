@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from hamon_preflight import check_deliverable_preflight, run_router_preflight
+
 
 @dataclass
 class SolidMesh3D:
@@ -1440,115 +1442,6 @@ def _wave3_to_jsonable(obj):
     return str(obj)
 
 
-_orig_wave3_preflight = globals().get("check_deliverable_preflight")
-if _orig_wave3_preflight is None:
-    try:
-        from hamon_drawing_reader import check_deliverable_preflight as _orig_wave3_preflight
-    except Exception:
-        try:
-            from .drawing_reader import check_deliverable_preflight as _orig_wave3_preflight
-        except Exception:
-            _orig_wave3_preflight = None
-
-
-def check_deliverable_preflight(target_path, expected_task_ids=None, **kwargs):
-    import csv as _csv
-    import inspect as _ins
-    import json as _json
-    import math as _math
-    import zipfile as _zf
-    from pathlib import Path as _Path
-
-    p = _Path(target_path)
-    if not p.exists():
-        return {"ok": False, "passed": False, "valid": False, "path": str(p), "size_bytes": 0, "issues": ["missing_deliverable"], "errors": ["missing_deliverable"]}
-    if p.is_file() and p.suffix.lower() != ".zip":
-        sz = p.stat().st_size
-        issues = []
-        if sz == 0:
-            issues.append("empty_file")
-        suf = p.suffix.lower()
-        if suf == ".json" and sz > 0:
-            try:
-                data = _json.loads(p.read_text(encoding="utf-8"))
-                def _scan_num(v):
-                    if isinstance(v, float) and (_math.isnan(v) or _math.isinf(v)):
-                        issues.append("non_finite_float")
-                    elif isinstance(v, dict):
-                        for vv in v.values():
-                            _scan_num(vv)
-                    elif isinstance(v, list):
-                        for vv in v:
-                            _scan_num(vv)
-                _scan_num(data)
-                if expected_task_ids and isinstance(data, dict):
-                    missing = [tid for tid in expected_task_ids if tid not in data or data[tid] is None]
-                    if missing:
-                        issues.append(f"missing_task_ids:{missing}")
-            except Exception as exc:
-                issues.append(f"invalid_json:{exc}")
-        elif suf == ".csv" and sz > 0:
-            try:
-                rows = list(_csv.reader(p.read_text(encoding="utf-8", errors="replace").splitlines()))
-                if not rows:
-                    issues.append("empty_csv")
-            except Exception as exc:
-                issues.append(f"invalid_csv:{exc}")
-        elif suf == ".ifc" and sz > 0:
-            txt = p.read_text(encoding="utf-8", errors="replace")
-            if "ISO-10303-21" not in txt and "DATA;" not in txt:
-                issues.append("invalid_ifc_header")
-        elif suf == ".pdf" and sz > 0:
-            raw = p.read_bytes()
-            if not raw.startswith(b"%PDF"):
-                issues.append("invalid_pdf_header")
-        ok = len(issues) == 0
-        return {
-            "ok": ok,
-            "passed": ok,
-            "valid": ok,
-            "path": str(p),
-            "size_bytes": sz,
-            "file_count": 1,
-            "issues": issues,
-            "errors": issues,
-        }
-    if _orig_wave3_preflight is not None:
-        sig = _ins.signature(_orig_wave3_preflight)
-        call_kw = {k: v for k, v in kwargs.items() if k in sig.parameters}
-        if expected_task_ids is not None and "expected_task_ids" in sig.parameters:
-            call_kw["expected_task_ids"] = expected_task_ids
-        res = _wave3_to_jsonable(_orig_wave3_preflight(target_path, **call_kw))
-        if not isinstance(res, dict):
-            res = {"value": res}
-        ok_val = bool(res.get("ok", res.get("passed", res.get("valid", not res.get("issues") and not res.get("errors")))))
-        res.setdefault("ok", ok_val)
-        res.setdefault("passed", ok_val)
-        res.setdefault("valid", ok_val)
-        return res
-    issues = []
-    fcount = 0
-    if p.is_file() and p.suffix.lower() == ".zip":
-        try:
-            with _zf.ZipFile(p, "r") as zf:
-                bad = zf.testzip()
-                if bad:
-                    issues.append(f"corrupt_zip_entry:{bad}")
-                names = [n for n in zf.namelist() if not n.endswith("/")]
-                fcount = len(names)
-                if fcount == 0:
-                    issues.append("empty_zip")
-        except Exception as exc:
-            issues.append(f"invalid_zip:{exc}")
-    elif p.is_dir():
-        files = [f for f in p.rglob("*") if f.is_file()]
-        fcount = len(files)
-        if fcount == 0:
-            issues.append("empty_directory")
-    ok = len(issues) == 0
-    return {"ok": ok, "passed": ok, "valid": ok, "path": str(p), "file_count": fcount, "issues": issues, "errors": issues}
-
-
 def run_router_ifc_clash(payload: dict) -> dict:
     import base64 as _b64
     import inspect as _ins
@@ -1653,14 +1546,6 @@ def run_router_ifc_clash(payload: dict) -> dict:
         if tmp_file is not None:
             tmp_file.unlink(missing_ok=True)
 
-
-def run_router_preflight(payload: dict) -> dict:
-    target = payload.get("path") or payload.get("target_path") or ""
-    exp_ids = payload.get("expected_task_ids")
-    out = _wave3_to_jsonable(check_deliverable_preflight(target, expected_task_ids=exp_ids))
-    if isinstance(out, dict):
-        out.setdefault("tool", "check_deliverable_preflight")
-    return out
 
 
 if __name__ == "__main__" and "--json-stdin" in __import__("sys").argv:
