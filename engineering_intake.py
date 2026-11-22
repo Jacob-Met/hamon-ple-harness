@@ -283,6 +283,12 @@ async def provision_engineering_cli(session: Any) -> str:
             session.write_file("/tmp/hamon_dxf.py", dxf_bytes), timeout=12)
         if dxf_size != len(dxf_bytes):
             return ""
+        for filename in ("hamon_consolidation.py", "hamon_pipe_network.py"):
+            module = pathlib.Path(__file__).with_name(filename).read_bytes()
+            copied = await asyncio.wait_for(
+                session.write_file("/tmp/" + filename, module), timeout=12)
+            if copied != len(module):
+                return ""
         dual_size = await asyncio.wait_for(
             session.write_file("/tmp/hamon_dual_verifier.py", dual_bytes), timeout=12)
         if dual_size != len(dual_bytes):
