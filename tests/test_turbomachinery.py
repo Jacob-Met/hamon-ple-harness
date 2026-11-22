@@ -121,3 +121,19 @@ def test_registered_conservation_and_domain_solvers_require_independent_measurem
         case["measured_fluid_torque_N_m"] = sign*3
         assert run_router_conservation_cad_verifier({"spec":case})["conservation_verified"] is (sign == 1)
         assert run_dual_verify_spec({"mode":"domain","kind":"euler_rotor","spec":case})["dual_verified"] is (sign == 1)
+
+
+@pytest.mark.parametrize("swirl", [5e-6,5e-7,5e-8,5e-9,5e-11,5e-13,5e-15])
+def test_redundant_angles_use_local_swirl_and_preserve_relative_cancellation(swirl):
+    spec = {
+        "machine_kind": "pump", "rotation_rpm":6000/(2*math.pi), "mass_flow_kg_s":2,
+        "inlet":{"radius_m":.1,"meridional_velocity_m_s":4,"absolute_tangential_velocity_m_s":0},
+        "outlet":{"radius_m":.2,"meridional_velocity_m_s":3,"absolute_tangential_velocity_m_s":swirl},
+        "measured_fluid_torque_N_m":.4*swirl,
+    }
+    station = spec["outlet"]
+    station["relative_flow_angle_deg"] = math.degrees(math.atan2(swirl-20,3))
+    station["absolute_flow_angle_deg"] = math.degrees(math.atan2(swirl,3))
+    assert verify_turbomachinery(spec)["conservation_verified"]
+    station["absolute_flow_angle_deg"] *= -1
+    assert not verify_turbomachinery(spec)["conservation_verified"]
