@@ -213,6 +213,46 @@ class TestWave5PDEControlPsychroFEM(unittest.TestCase):
         })
         self.assertFalse(mech["passed"])
 
+    def test_cantilever_stability_is_independent_of_translation_rotation_scale(self):
+        # Identical dimensionless deformation on metre and micrometre cantilevers.
+        for length, ei in ((1.0, 2e6), (1e-6, 1e-15)):
+            force = 0.003 * ei / length**2
+            spec = {"mode": "euler_bernoulli_beam_1d", "x_nodes_m": [0.0, length],
+                    "EI_Nm2": ei, "supports": [{"node": 0, "fix_w": True, "fix_theta": True}],
+                    "nodal_loads": [{"node": 1, "fy_N": force}]}
+            result = w5.verify_fem_structure(spec)
+            with self.subTest(length=length):
+                self.assertTrue(result["passed"])
+                self.assertAlmostEqual(result["tip_deflection_m"] / length, 0.001)
+                self.assertAlmostEqual(result["rotations_rad"][-1], 0.0015)
+                self.assertAlmostEqual(result["reactions_V_M"][0][0] / force, -1)
+                self.assertAlmostEqual(result["reactions_V_M"][0][1] / (length * force), -1)
+                # The same element pinned at its root still has a rigid rotation.
+                spec["supports"][0]["fix_theta"] = False
+                self.assertFalse(w5.verify_fem_structure(spec)["passed"])
+
+    def test_independent_axial_stiffness_scales_and_oblique_mechanism(self):
+        for k in (1.0, 1e12):
+            result = w5.verify_fem_structure({
+                "mode": "truss_2d", "nodes": [[0, 0], [1, 0], [0, 1]],
+                "elements": [{"i": 0, "j": 1, "E_pa": k, "A_m2": 1},
+                             {"i": 0, "j": 2, "E_pa": 1, "A_m2": 1}],
+                "supports": [{"node": 0, "fix_x": True, "fix_y": True},
+                             {"node": 1, "fix_y": True}, {"node": 2, "fix_x": True}],
+                "loads": [{"node": 1, "fx_N": k * 1e-6}, {"node": 2, "fy_N": 1e-6}],
+            })
+            self.assertTrue(result["passed"])
+            self.assertAlmostEqual(result["displacements_xy_m"][1][0], 1e-6, places=17)
+            self.assertAlmostEqual(result["displacements_xy_m"][2][1], 1e-6, places=17)
+        # Both diagonal stiffnesses are positive; an orthogonal motion still costs zero energy.
+        result = w5.verify_fem_structure({
+            "mode": "truss_2d", "nodes": [[0, 0], [3, 4]],
+            "elements": [{"i": 0, "j": 1, "E_pa": 7e12, "A_m2": 1}],
+            "supports": [{"node": 0, "fix_x": True, "fix_y": True}],
+            "loads": [{"node": 1, "fx_N": -4, "fy_N": 3}],
+        })
+        self.assertFalse(result["passed"])
+
     def test_distributed_load_recovers_clamped_beam_interior_and_energy(self):
         # Exact w(x)=q*x²*(L-x)²/(24EI). Clamps have no nodal motion.
         for nodes in ([0.0, 2.0], [0.0, 0.25, 1.4, 2.0]):

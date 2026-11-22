@@ -96,6 +96,24 @@ def _solve_linear(a_in: Sequence[Sequence[float]], b_in: Sequence[float], tol: f
     return x
 
 
+def _solve_free_stiffness(stiffness: List[List[float]], force: List[float]) -> Optional[List[float]]:
+    """Solve K u = f in unit-diagonal elastic-energy coordinates."""
+    diagonal = [row[i] for i, row in enumerate(stiffness)]
+    if any(k <= 0.0 or not math.isfinite(k) for k in diagonal):
+        return None
+    # K = D A D with D_ii = sqrt(K_ii). A compares how strongly coordinates
+    # couple, independent of their units and the magnitudes of their own springs.
+    scale = [math.sqrt(k) for k in diagonal]
+    matrix = [[value / scale[i] / scale[j] for j, value in enumerate(row)]
+              for i, row in enumerate(stiffness)]
+    rhs = [value / d for value, d in zip(force, scale)]
+    scaled = _solve_linear(matrix, rhs, tol=1e-11)
+    if scaled is None:
+        return None
+    motion = [value / d for value, d in zip(scaled, scale)]
+    return motion if all(math.isfinite(value) for value in motion) else None
+
+
 def _primitive_integer_vector(values: Sequence[int]) -> List[int]:
     """Remove only a nonzero scalar, preserving the represented direction."""
     divisor = math.gcd(*values)
@@ -2045,9 +2063,9 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
             f_eq[r] - sum(k_glob[r][p] * u_p for p, u_p in prescribed.items())
             for r in free_dofs
         ]
-        u_free = _solve_linear(k_ff, rhs_f, tol=1e-11)
+        u_free = _solve_free_stiffness(k_ff, rhs_f)
         if u_free is None:
-            return {"passed": False, "domain": "fem", "mode": mode, "reason": "Unstable beam boundary conditions"}
+            return {"passed": False, "domain": "fem", "mode": mode, "reason": "Free beam stiffness is singular or numerically unresolved (check beam supports)"}
 
         u_full = [prescribed.get(d, 0.0) for d in range(ndof)]
         for idx, d in enumerate(free_dofs):
