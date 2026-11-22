@@ -364,7 +364,7 @@ def _shape_points(tag,attr):
     return None
 
 
-def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None,stroke_widths=False):
+def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None,stroke_widths=False,source_repaints=None):
     if selected_vector_ids is not None:
         if (not isinstance(selected_vector_ids,set) or len(selected_vector_ids)>2048
                 or any(not isinstance(i,str) or not re.fullmatch(r"v[1-9][0-9]*",i)
@@ -379,11 +379,18 @@ def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None
     # Poppler emits the paper background before every painted path.
     children = list(root)
     solid_black = {"black", "#000", "#000000", "rgb(0%, 0%, 0%)"}
+    source_paths = set()
+    if (source_repaints is not None
+            and root.attrib.keys() <= {"width", "height", "viewBox", "version", "preserveAspectRatio"}
+            and not any(local(node.tag) == "style" for node in root.iter())):
+        source_paths = set(children)
+    seen_paint = {}
+    path_paint = {"d","fill","fill-rule","stroke","stroke-width","fill-opacity",
+                  "stroke-opacity","stroke-linecap","stroke-linejoin","stroke-miterlimit",
+                  "transform"}
     flat = bool(children) and all(
         local(node.tag) == "path" and not list(node)
-        and all(k in {"d","fill","fill-rule","stroke","stroke-width","fill-opacity",
-                      "stroke-opacity","stroke-linecap","stroke-linejoin","stroke-miterlimit",
-                      "transform"} for k in node.attrib)
+        and node.attrib.keys() <= path_paint
         and node.attrib.get("fill","black") in solid_black | {"none"}
         and node.attrib.get("stroke","none") in solid_black | {"none"}
         and node.attrib.get("fill-opacity","1") == node.attrib.get("stroke-opacity","1") == "1"
@@ -416,6 +423,17 @@ def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None
                  box[1]<=region[3] and box[3]>=region[1]))
             selected = (selected_vector_ids is None or
                         f"v{stats['vector_primitives']}" in selected_vector_ids)
+            if (name == "path" and node in source_paths and not len(node)
+                    and node.attrib.keys() <= path_paint and node.get("fill") == "none"
+                    and node.get("stroke") in solid_black and node.get("stroke-opacity","1") == "1"):
+                # An opaque stroke painted twice at the exact same location is one
+                # printed mark. Only direct siblings share this full paint context.
+                paint = tuple(sorted(node.attrib.items()))
+                if paint in seen_paint:
+                    source_repaints.add(seen_paint[paint])
+                    selected = False
+                else:
+                    seen_paint[paint] = f"v{stats['vector_primitives']}"
             if selected and retained and len(out)<limit_paths:
                 vertices = ([transform_point(matrix, p) for p in points]
                             if points is not None and matrix is not None
@@ -1060,9 +1078,11 @@ def _resolve_ruled_captions(result, pages, target, source, directory):
                                  else "candidate_detail")
 
 
-def _detail_symbol_inventory(source, page, directory, stroke_vectors=None):
+def _detail_symbol_inventory(source, page, directory, stroke_vectors=None, *, source_repaints=None):
     try:
-        inventory = _svg_inventory(_page_svg(source, page, directory), 30000, stroke_widths=stroke_vectors is not None)
+        inventory = _svg_inventory(_page_svg(source, page, directory), 30000,
+                                   stroke_widths=stroke_vectors is not None,
+                                   source_repaints=source_repaints)
     except (OSError, ValueError, subprocess.TimeoutExpired, ET.ParseError):
         return [], []
     if inventory["vector_limit_hit"] or inventory["unlocalized_vectors"]:
@@ -1354,6 +1374,22 @@ def _frame_detail_digits(pgm):
     return f"P5\n{w} {h}\n255\n".encode() + frame
 
 
+def _read_repainted_source(source, page, ref):
+    rows = (ref["numerator_evidence"][0], ref["source"])
+    observed = []
+    try:
+        for row in rows:
+            for scale in (6, 8):
+                crop = _frame_detail_digits(_caption_raster(source, page, row["box"], scale))
+                words = _read_caption_words(crop, 7)
+                if len(words) != 1 or words[0][0] != row["text"] or words[0][1] < 80:
+                    return None
+                observed.append(words[0])
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    return observed
+
+
 def _read_ruled_detail(source, page, region, *, record_number_only=False):
     recognized = []
     views = []
@@ -1391,13 +1427,10 @@ def _qualify_detail_title(source, page, region, label, record_number_only):
     return dict(label, caption=" ".join(word for word, confidence in title))
 
 
-def _detail_strokes(region, vectors, ink):
-    """Recover complete straight-stroke glyphs and confirm their ink on the rendered page."""
-    if not ink:
-        return []
+def _detail_strokes(region, vectors):
+    """Nominate complete vector glyphs for the full-resolution printed-label check."""
     a, b, c, d = region["ring"]["box"]
     diameter = d - b
-    cx, cy = (a + c) / 2, (b + d) / 2
     glyphs = []
     for v in vectors:
         x0, y0, x1, y1 = v["svg_bbox"]
@@ -1414,38 +1447,13 @@ def _detail_strokes(region, vectors, ink):
             return []
         shape = tuple(tuple((x-x0) / height if k == 0 else (x-y0) / height
                             for pt in edge for k, x in enumerate(pt)) for edge in edges)
-        glyphs.append((x0, x1, height, edges, shape, v["id"]))
+        glyphs.append((x0, x1, height, shape, v["id"]))
     glyphs.sort(key=lambda g: g[0])
     if not 1 <= len(glyphs) <= 3 or any(g[1] >= h[0] for g,h in zip(glyphs, glyphs[1:])):
         return []
     if max(g[2] for g in glyphs) > 1.12 * min(g[2] for g in glyphs):
         return []
-    left, top, scale, width, height, pixels = ink
-    expected = set()
-    rad = .45*diameter
-    for _, _, _, edges, _, _ in glyphs:
-        glyph_pixels = set()
-        for (x0,y0), (x1,y1) in edges:
-            steps = max(1, math.ceil(math.hypot(x1-x0, y1-y0)*scale*2))
-            for n in range(steps+1):
-                x, y = x0+(x1-x0)*n/steps, y0+(y1-y0)*n/steps
-                glyph_pixels.add((math.floor((x-left)*scale), math.floor((y-top)*scale)))
-        interior = {(i,j) for i,j in glyph_pixels if
-                    ((i+.5)/scale+left-cx)**2 + ((j+.5)/scale+top-cy)**2 <= rad**2}
-        if not glyph_pixels or len(interior) < .8*len(glyph_pixels):
-            return []
-        expected.update(interior)
-    actual = set()
-    for j in range(max(0,math.floor((cy-rad-top)*scale)), min(height,math.ceil((cy+rad-top)*scale))):
-        for i in range(max(0,math.floor((cx-rad-left)*scale)), min(width,math.ceil((cx+rad-left)*scale))):
-            if ((i+.5)/scale+left-cx)**2 + ((j+.5)/scale+top-cy)**2 <= rad**2 and pixels[j*width+i] <= 150:
-                actual.add((i,j))
-    def supported(points, support):
-        return bool(points) and sum(any((i+dx,j+dy) in support for dx in (-1,0,1) for dy in (-1,0,1))
-                                    for i,j in points) >= .95 * len(points)
-    if not (supported(expected,actual) and supported(actual,expected)):
-        return []
-    return [(g[4],g[5]) for g in glyphs]
+    return [(g[3],g[4]) for g in glyphs]
 
 
 # OpenCV 4.10.0, modules/imgproc/src/hershey_fonts.cpp and drawing.cpp.
@@ -2381,7 +2389,8 @@ def _resolve_rendered_stacked(result, target, source, directory):
         by_source.setdefault(ref["source"]["page"],[]).append(ref)
     verified=[]
     for page, group in by_source.items():
-        markers,lines=_detail_symbol_inventory(source,page,directory)
+        source_repaints = set()
+        markers,lines=_detail_symbol_inventory(source,page,directory,source_repaints=source_repaints)
         matches=[(ref,evidence) for ref in group
                  if (evidence:=_divided_source_mark(ref,markers,lines))]
         ink=_ink_window(source,page,[e["ring"] for ref,e in matches])
@@ -2393,6 +2402,15 @@ def _resolve_rendered_stacked(result, target, source, directory):
                 evidence["printed_divider_band"] = band
             visible=_printed_mark(ink,evidence["ring"])
             text_ink = _printed_source_tokens(ink, evidence["ring"], ref) if visible else None
+            repaint_ids = {evidence["ring"].get("id"), evidence.get("divider")}
+            repaint_ids.update(line[3] for line in evidence.get("divider_segments", []))
+            if text_ink and source_repaints.intersection(repaint_ids):
+                # Overprinted symbols can carry different text at one location.
+                # Read the final visible numerator and sheet before binding either.
+                observed = _read_repainted_source(source, page, ref)
+                if observed is None:
+                    continue
+                evidence["repainted_source_text"] = observed
             if text_ink:
                 ref["source_symbol_evidence"]=dict(evidence,visible_ink=visible, token_ink=text_ink)
                 verified.append(ref)
@@ -2416,7 +2434,7 @@ def _resolve_rendered_stacked(result, target, source, directory):
             evidence=_read_ruled_detail(source,target_page,region,record_number_only=True)
         except (OSError, ValueError, subprocess.TimeoutExpired):
             continue
-        strokes = _detail_strokes(region,stroke_vectors,ink)
+        strokes = _detail_strokes(region,stroke_vectors)
         detail = _recognize_stroke_label(strokes,alphabet)
         if detail and not _visible_complete_label(source, target_page, region, strokes, stroke_vectors):
             if evidence and evidence["detail"] != detail:
