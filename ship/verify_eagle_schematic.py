@@ -109,9 +109,16 @@ def main():
             "Complete document differs from the independent recount")
     print(json.dumps({"combined_pages_without_inter_sheet_stitching": result}))
     result = counts(flat_rows)
-    require(result == {"nets": 111, "exact": 106, "false_connected": 0, "false_separated": 854},
+    require(result == {"nets": 111, "exact": 106, "false_connected": 0, "false_separated": 165},
             f"Flat-document comparison differs: {result}")
-    print(json.dumps({"flat_document": result, "anchors": flat["inter_sheet_anchors"]}))
+    pairs_by_name = defaultdict(list)
+    for name, group in flat_rows:
+        pairs_by_name[name].append((name, group))
+    missing = {name: total for name, rows in pairs_by_name.items()
+               if (total := counts(rows)["false_separated"])}
+    require(missing == {"RESET": 78, "GND": 66, "+3V3": 11, "VIN": 8, "AREF": 2},
+            f"Remaining per-net separations differ: {missing}")
+    print(json.dumps({"flat_document": result, "anchors": flat["inter_sheet_anchors"], "missing_by_net": missing}))
 
 
 if __name__ == "__main__":

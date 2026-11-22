@@ -47,7 +47,9 @@ class EagleSchematicTests(unittest.TestCase):
         def page(number, names, glyphs):
             return {"page": number, "wire_groups": [0, 1, 2, 3, 4, 5, 6, 6],
                     "printed_equivalence_anchors": names,
-                    "supply_glyphs": [{"name": name, "wire_index": index} for name, index in glyphs]}
+                    "supply_glyphs": [{"name": name, "wire_index": index,
+                                       "shape": "ground_bar" if name == "GND" else "supply_arrow"}
+                                      for name, index in glyphs]}
         pages = [
             page(1, {"CLK": [1], "GND": [2], "+5V": [3], "D0": [4], "ALIAS": [4], "REF": [5]}, [("GND", 2), ("+5V", 3)]),
             page(2, {"CLK": [0], "GND": [1], "+5V": [2], "D0": [3], "REF": [4, 5]}, [("+5V", 2)]),
@@ -72,3 +74,33 @@ class EagleSchematicTests(unittest.TestCase):
             result = document_connectivity("design.pdf")
         self.assertEqual(result["status"], "unresolved_profile")
         self.assertIsNone(result["document_wire_groups"])
+
+    def test_ground_requires_independent_glyph_islands_and_single_incidental_label(self):
+        def ground_page(number):
+            return {"page": number, "wire_groups": [0, 0, 0, 1],
+                    "printed_equivalence_anchors": {"GND": [0, 1]},
+                    "supply_glyphs": [{"name": "GND", "shape": "ground_bar", "wire_index": i}
+                                      for i in (0, 1)]}
+
+        a, b = ground_page(1), ground_page(2)
+        a["printed_equivalence_anchors"]["U12"] = [1]
+        members, links = _stitch_pages([a, b])
+        self.assertEqual(members[0][0], members[1][1])
+        self.assertEqual(links[0]["ground_bar_witnesses"][0]["incidental_labels"], ["U12"])
+        for trial in ("same island twice", "bare label away from stem", "recurrent label",
+                      "second supply glyph", "different ground family"):
+            a, b = ground_page(1), ground_page(2)
+            a["printed_equivalence_anchors"]["U12"] = [1]
+            if trial == "same island twice":
+                b["supply_glyphs"][1]["wire_index"] = 0
+            elif trial == "bare label away from stem":
+                a["printed_equivalence_anchors"]["U12"] = [2]
+            elif trial == "recurrent label":
+                b["printed_equivalence_anchors"]["U12"] = [3]
+            elif trial == "second supply glyph":
+                b["supply_glyphs"].append({"name": "VCC", "shape": "supply_arrow", "wire_index": 1})
+            else:
+                a["printed_equivalence_anchors"]["AGND"] = [1]
+            with self.subTest(trial=trial):
+                left, right = _stitch_pages([a, b])[0]
+                self.assertNotEqual(left[0], right[0])
