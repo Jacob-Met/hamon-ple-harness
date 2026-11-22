@@ -48,3 +48,28 @@ class TwoSpanSupportReactions(unittest.TestCase):
             ("M_B_hogging_Nm", Fraction(223, 32)),
         ):
             self.assertEqual(result[field], float(expected))
+
+    def test_same_numbers_with_incompatible_units(self):
+        fields = {"span1": "4*m", "span2": "4*m", "udl1": "1*N/m",
+                  "udl2": "7*N/m", "E": "200*GPa", "I": "1e-4*m**4"}
+        for name, value in fields.items():
+            with self.subTest(field=name):
+                spec = dict(fields, **{name: f"({value})*s/m"})
+                with self.assertRaisesRegex(ValueError, name + " must have units"):
+                    dv.solve_continuous_beam_2span_dual(spec)
+        for name in ("udl1", "udl2"):
+            with self.subTest(zero=name):
+                with self.assertRaisesRegex(ValueError, name + " must have units"):
+                    dv.solve_continuous_beam_2span_dual(dict(fields, **{name: "0*kg"}))
+
+    def test_rescaled_units_and_coherent_si_numbers(self):
+        numeric = {"span1": 4, "span2": 5, "udl1": -2, "udl2": 7,
+                   "E": 200e9, "I": 1e-4}
+        rescaled = {"span1": "4000*mm", "span2": "500*cm", "udl1": "-0.002*kN/m",
+                    "udl2": "7*kg/s**2", "E": "200000*MPa", "I": "10000*cm**4"}
+        baseline = dv.solve_continuous_beam_2span_dual(numeric)
+        for name, value in rescaled.items():
+            with self.subTest(field=name):
+                result = dv.solve_continuous_beam_2span_dual(dict(numeric, **{name: value}))
+                self.assertEqual(result, baseline)
+        self.assertEqual(dv.solve_continuous_beam_2span_dual(rescaled), baseline)
