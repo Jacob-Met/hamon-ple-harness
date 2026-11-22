@@ -29,7 +29,7 @@ def test_solver_receipt_reaches_low_effort_participant_with_original_request(tmp
         }
     )
     relay = mock.MagicMock()
-    relay.__aenter__.return_value.env.return_value = {}
+    relay.__aenter__.return_value = SimpleNamespace(env=lambda: {})
     for overloaded, tier in ((False, "low"), (True, "medium")):
         if overloaded:
             spec["applied_gross_pressure_Pa"] = 1e12
