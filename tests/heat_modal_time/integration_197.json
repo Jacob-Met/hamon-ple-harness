@@ -1,0 +1,63 @@
+{
+  "course": "heat_modal_time_concurrent_mineral_integration",
+  "version": 1,
+  "state": "frozen_before_combined_tree_execution",
+  "cause": "PR197 reached main between the fresh PR196 base check and GitHub merge. expected_head_sha protects only the feature head. The PR196 landed tree was correctly marked unqualified pending this separate course.",
+  "original_pair": {
+    "base": "e6aff7826346fba47d725b3f522c137b0720faf5",
+    "stock": "ec2e8051187ef54bc85125c5e83a23f2fbef4d67",
+    "candidate": "434772755807fc51d7a4ca209048e2b7658fcf04",
+    "qualified_tree": "fdf99de77e2876b486745c2661a599d78e3268a4",
+    "stock_run": 45062949688,
+    "candidate_run": 45062951539,
+    "stock_original_sha256": "5e9eeb84cf714e205b2e11a40def39c27b617d473f7bf4bda0f004346485998e",
+    "candidate_original_sha256": "131f06fe2891e1e55758118972bb5842fcee3b351d4922deac164daf1fefb7cb",
+    "unchanged": true
+  },
+  "incoming": {
+    "pr": 197,
+    "merge": "848e4cb54d40fd1537966258db0cb3acdbfbc666",
+    "parent": "e6aff7826346fba47d725b3f522c137b0720faf5",
+    "files": [
+      {
+        "path": "hamon_conservation_cad_verifier.py",
+        "blob": "f5609076a320e4ec42b18f84e283403414374f65"
+      },
+      {
+        "path": "tests/test_mineral_formula_balance.py",
+        "blob": "8807b42f0c4a555bca14ec4f52343388a2e012e4"
+      }
+    ],
+    "scope": "Chemical hydrate formula parsing and its thermal species-balance caller; three new mineral-formula tests."
+  },
+  "already_landed": {
+    "pr": 196,
+    "commit": "f77b8e06ef2c6b6ddab8e427ec4a3ff90e6d4012",
+    "tree": "1f841daddf978487b637a0bba8199530a988c828",
+    "parents": [
+      "848e4cb54d40fd1537966258db0cb3acdbfbc666",
+      "434772755807fc51d7a4ca209048e2b7658fcf04"
+    ],
+    "not_the_original_qualified_tree": true
+  },
+  "followup": {
+    "base": "f77b8e06ef2c6b6ddab8e427ec4a3ff90e6d4012",
+    "change": "Add only this integration protocol. Preserve the five frozen temporal files and both incoming files by blob identity; no solver or receiver edits.",
+    "branch": "lab/161636-lead-heat-time-integrate-mineral197"
+  },
+  "acceptance": {
+    "inherited_and_temporal_direct_records": 299,
+    "total_markers": 13,
+    "separate_beam": 1,
+    "all_records_and_totals_exactly_equal_original_candidate": true,
+    "direct_temporal": "14 ordinary and28 claims all full contracts,13A1R and13A15R",
+    "registered_temporal": "All7 actual Pi contracts,5A2R",
+    "full_controls": 4,
+    "incoming_tests": "Retain all3 mineral formula tests exactly and require them to pass.",
+    "gates": "Entire maintained CI; retain its first complete original once. Verify actual checkout tree, feature-to-CI delta and final landed tree.",
+    "new_stock_replay": false,
+    "expectation_changes": false
+  },
+  "limits": "Integration qualification covers the combined source and tests. It does not retroactively make the first PR196 merge equal to its original CI tree, nor imply model score, timing or universal platform guarantees."
+}
+
