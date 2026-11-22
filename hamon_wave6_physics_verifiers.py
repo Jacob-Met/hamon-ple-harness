@@ -727,29 +727,53 @@ def solve_mohr_vessel_buckling(params: Mapping[str, Any]) -> Dict[str, Any]:
         pi = float(params["p_i"])
         po = float(params.get("p_o", 0.0))
         r_eval = float(params.get("r_eval", ri))
-        t_wall = ro - ri
+        if not all(math.isfinite(value) for value in (ri, ro, r_eval, pi, po)):
+            return {"domain": "solid_mohr_vessel_buckling", "subkind": subkind,
+                    "verified": False, "error": "Pressures and radii must be finite."}
+        if not (0.0 < ri < ro and ri <= r_eval <= ro):
+            return {"domain": "solid_mohr_vessel_buckling", "subkind": subkind,
+                    "verified": False, "r_i": ri, "r_o": ro, "r_eval": r_eval,
+                    "error": "Solid stress requires 0 < r_i < r_o and r_i <= r_eval <= r_o."}
 
-        denom = ro * ro - ri * ri
-        a_lame = (pi * ri * ri - po * ro * ro) / denom
-        b_lame = ((pi - po) * ri * ri * ro * ro) / denom
-        sigma_r = a_lame - b_lame / (r_eval * r_eval)
-        sigma_theta = a_lame + b_lame / (r_eval * r_eval)
-        sigma_z = a_lame if bool(params.get("closed_ends", True)) else 0.0
-        sigma_vm_inner = math.sqrt(
-            0.5 * ((sigma_theta - sigma_z) ** 2 + (sigma_z - sigma_r) ** 2 + (sigma_r - sigma_theta) ** 2)
-        )
-        sr_ri = a_lame - b_lame / (ri * ri)
-        sr_ro = a_lame - b_lame / (ro * ro)
-        residual = max(abs(sr_ri + pi), abs(sr_ro + po)) / max(abs(pi), abs(po), 1.0)
+        t_wall = ro - ri
+        closed = bool(params.get("closed_ends", True))
+        dp = pi - po
+        # Express the Lamé solution relative to the uniform external pressure.
+        # Keeping (ro - r) explicit preserves the outer traction at a thin wall.
+        inner = ri / ro
+        denominator = (t_wall / ro) * (1.0 + inner)
+        axial_pressure = -po + dp * (inner * inner / denominator)
+
+        def radial_stress(radius):
+            position = radius / ro
+            span = ((ro - radius) / ro) * (1.0 + position)
+            return -po - dp * ((ri / radius) ** 2 * (span / denominator))
+
+        sigma_r = radial_stress(r_eval)
+        sigma_theta = -po + dp * ((ri / r_eval) ** 2 * (1.0 + (r_eval / ro) ** 2) / denominator)
+        sigma_z = axial_pressure if closed else 0.0
+        sigma_vm = math.hypot(sigma_theta - sigma_z, sigma_z - sigma_r, sigma_r - sigma_theta) / math.sqrt(2.0)
+        # The mean hoop stress balances a diametral cut. The thin axial estimate
+        # uses the inner radius and leading wall area; the Lamé axial value above
+        # uses the full annular area. A freely open end has no axial end load.
+        pressure_membrane = dp * (ri / t_wall)
+        thin_hoop = -po + pressure_membrane
+        thin_axial = -po + 0.5 * pressure_membrane if closed else 0.0
+        residual = max(abs(radial_stress(ri) + pi), abs(radial_stress(ro) + po)) / max(abs(pi), abs(po), 1.0)
+        if not all(math.isfinite(value) for value in (sigma_r, sigma_theta, sigma_z,
+                                                       sigma_vm, thin_hoop, thin_axial, residual)):
+            return {"domain": "solid_mohr_vessel_buckling", "subkind": subkind,
+                    "verified": False, "error": "Stress at the requested wall point exceeds numerical range."}
         return {
             "domain": "solid_mohr_vessel_buckling",
             "subkind": subkind,
             "sigma_hoop_lame": sigma_theta,
             "sigma_radial_lame": sigma_r,
             "sigma_axial_lame": sigma_z,
-            "sigma_hoop_thin": pi * ri / t_wall,
-            "sigma_axial_thin": 0.5 * pi * ri / t_wall,
-            "sigma_von_mises": sigma_vm_inner,
+            "sigma_hoop_thin": thin_hoop,
+            "sigma_axial_thin": thin_axial,
+            "thin_wall_model": "Hoop mean includes external pressure. Closed ends use the inner-radius axial membrane approximation. Freely open ends carry zero axial stress.",
+            "sigma_von_mises": sigma_vm,
             "residual": residual,
             "verified": residual < 1e-11,
         }
