@@ -1,6 +1,7 @@
 """Balanced AC load flow and terminal faults of three-sequence Thevenin equivalents."""
 
 import cmath
+from collections import deque
 import math
 
 import numpy as np
@@ -166,10 +167,15 @@ def network(spec):
         for _ in range(40):
             current, res = terms(voltage)
             norm = np.linalg.norm(res, np.inf)
-            limits = np.r_[
-                power_tolerances(voltage, p, nonslack), power_tolerances(voltage, q, pq)
-            ]
-            if norm < 1e-11 and np.all(np.abs(res) <= limits):
+            q_tolerance = power_tolerances(voltage, q, pq)
+            # A saturated regulator must meet the same roundoff bound used by
+            # the final reactive-limit check, including after another release.
+            rounding = power_roundoff(voltage)
+            for pos, idx in enumerate(pq):
+                if idx in limits:
+                    q_tolerance[pos] = min(q_tolerance[pos], rounding[idx] + 4 * math.ulp(q[idx]))
+            tolerances = np.r_[power_tolerances(voltage, p, nonslack), q_tolerance]
+            if norm < 1e-11 and np.all(np.abs(res) <= tolerances):
                 return voltage
             vd = np.diag(voltage)
             iv = np.diag(current)
@@ -203,25 +209,84 @@ def network(spec):
 
     initial = vset * np.exp(1j * reference)
     voltage = initial.copy()
-    limited = {}
-    for _ in range(len(limits) + 1):
-        pq = np.flatnonzero(bus_types == "PQ")
-        voltage = polar(pq, voltage)
+
+    def voltage_violation(idx, bound, magnitude):
+        lower, upper = limits[idx]
+        if lower == upper:
+            return 0.0
+        excess = magnitude - vset[idx] if bound == upper else vset[idx] - magnitude
+        roundoff = 16 * np.finfo(float).eps * max(magnitude, vset[idx])
+        return excess if excess > roundoff else 0.0
+
+    original_bus_types = bus_types.copy()
+    original_q = q.copy()
+
+    def apply_regime(state):
+        bus_types[:] = original_bus_types
+        q[:] = original_q
+        for idx, bound in state:
+            bus_types[idx] = "PQ"
+            q[idx] = bound
+        return dict(state), np.flatnonzero(bus_types == "PQ")
+
+    pending = deque([((), initial)])
+    seen = set()
+    last_solved = None
+    first_error = None
+    # Try the strongest correction first. Retain competing regulator choices
+    # if that intermediate power flow has no reachable physical solution.
+    # Four bounded regulators have at most 3**4 possible states. For larger
+    # networks keep the fallback work proportional to the number of regulators.
+    regime_budget = max(81, 4 * len(limits) + 1)
+    while pending and len(seen) < regime_budget:
+        state, seed = pending.popleft()
+        if state in seen:
+            continue
+        seen.add(state)
+        limited, pq = apply_regime(state)
+        voltage = seed.copy()
+        regulating = np.flatnonzero(bus_types == "PV")
+        voltage[regulating] *= vset[regulating] / np.abs(voltage[regulating])
+        try:
+            voltage = polar(pq, voltage)
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            if first_error is None:
+                first_error = exc
+            continue
         injection = voltage * np.conj(ybus @ voltage)
-        violations = []
         residual_floor = power_roundoff(voltage)
+        changes = []
         for idx, (lower, upper) in limits.items():
-            bound = reactive_violation(
-                injection[idx].imag, lower, upper, residual_floor[idx]
-            )
-            if idx not in limited and bound is not None:
-                violations.append((abs(injection[idx].imag - bound), idx, bound))
-        if not violations:
+            if idx in limited:
+                excess = voltage_violation(idx, limited[idx], abs(voltage[idx]))
+                if excess:
+                    changes.append((0, excess, idx, None))
+            else:
+                bound = reactive_violation(injection[idx].imag, lower, upper, residual_floor[idx])
+                if bound is not None:
+                    changes.append((1, abs(injection[idx].imag - bound), idx, bound))
+        if not changes:
             break
-        _, idx, bound = max(violations)
-        limited[idx] = bound
-        bus_types[idx] = "PQ"
-        q[idx] = bound
+        last_solved = (state, voltage)
+        children = []
+        for _, _, idx, bound in sorted(changes, reverse=True):
+            child = limited.copy()
+            if bound is None:
+                del child[idx]
+            else:
+                child[idx] = bound
+            key = tuple(sorted(child.items()))
+            if key not in seen:
+                children.append((key, voltage))
+        if children:
+            pending.appendleft(children[0])
+            pending.extend(children[1:])
+    else:
+        if last_solved is None:
+            raise first_error or ValueError("No converged AC regulator state")
+        state, voltage = last_solved
+        limited, pq = apply_regime(state)
+        injection = voltage * np.conj(ybus @ voltage)
     pv = np.flatnonzero(bus_types == "PV")
 
     # Independent rectangular current-balance solve. Form the currents at each
@@ -258,13 +323,8 @@ def network(spec):
         for idx, (lower, upper) in limits.items():
             if reactive_violation(s[idx].imag, lower, upper, rounding[idx]) is not None:
                 return False
-            if idx in limited and lower != upper:
-                magnitude = abs(v[idx])
-                voltage_floor = 16 * np.finfo(float).eps * max(magnitude, vset[idx])
-                if limited[idx] == upper and magnitude > vset[idx] + voltage_floor:
-                    return False
-                if limited[idx] == lower and magnitude < vset[idx] - voltage_floor:
-                    return False
+            if idx in limited and voltage_violation(idx, limited[idx], abs(v[idx])):
+                return False
         return True
 
     complementarity = regulated_state(voltage, injection)
