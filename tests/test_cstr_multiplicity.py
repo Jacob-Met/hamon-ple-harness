@@ -96,6 +96,61 @@ class CstrMultiplicity(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"no physical"):
             solve({**p,"volume":math.nextafter(.5,math.inf)})
 
+    def test_non_dyadic_and_rational_order_folds(self):
+        for order,c0,feed,root in ((-2.,1.,6.75,1/3),(-.5,3.,1.5,2/3)):
+            p=dict(reactor_type="cstr",order=order,k=1.,C_A0=c0,F_A0=feed,
+                   volume=1.,steady_state_branch="all")
+            with self.subTest(order=order):
+                at=solve(p)
+                self.assertEqual(at["steady_state_count"],1)
+                self.assertAlmostEqual(at["steady_states"][0]["conversion_X"],root,delta=1e-16)
+                self.assertTrue(at["verified"])
+                self.assertEqual(solve({**p,"volume":math.nextafter(1.,0.)})["steady_state_count"],2)
+                with self.assertRaisesRegex(ValueError,"no physical"):
+                    solve({**p,"volume":math.nextafter(1.,math.inf)})
+
+    def test_exact_reference_temperature_fold_and_adjacent_volumes(self):
+        p=dict(reactor_type="cstr",order=1.,k_ref=1.,T_ref=512.,
+               E_a=2048*8.31446261815324,T0=256.,delta_T_adiabatic=512.,
+               C_A0=1.,F_A0=1.,volume=1.,steady_state_branch="all")
+        at=solve(p)
+        self.assertEqual(at["steady_state_count"],2)
+        self.assertEqual(at["steady_states"][-1]["conversion_X"],.5)
+        self.assertAlmostEqual(at["steady_states"][0]["conversion_X"],.02676548297,delta=1e-11)
+        self.assertTrue(at["verified"])
+        self.assertEqual(solve({**p,"volume":math.nextafter(1.,0.)})["steady_state_count"],1)
+        self.assertEqual(solve({**p,"volume":math.nextafter(1.,math.inf)})["steady_state_count"],3)
+
+    def test_large_conversion_and_subnormal_residual_are_not_erased(self):
+        p=dict(reactor_type="cstr",order=1.,k=1.,C_A0=1.,F_A0=1.,volume=1e100)
+        result=solve(p)
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["conversion_X"],1.)
+        self.assertEqual(result["unreacted_fraction"],1e-100)
+        subnormal=solve({**p,"F_A0":math.ulp(0.),"volume":1.5})
+        self.assertFalse(subnormal["verified"])
+        self.assertAlmostEqual(subnormal["residual"],1/3,delta=1e-15)
+        self.assertTrue(solve({**p,"F_A0":math.ulp(0.),"volume":1.})["verified"])
+
+    def test_near_complete_state_retains_unreacted_coordinate(self):
+        for volume in (1.7815094986951783,10.,1e8):
+            with self.subTest(volume=volume):
+                p={**FIRST,"order":.5,"volume":volume,"steady_state_branch":"all"}
+                result=solve(p)
+                self.assertTrue(result["verified"])
+                state=result["steady_states"][-1]
+                x,u=state["conversion_X"],state["unreacted_fraction"]
+                self.assertGreater(u,0.)
+                temperature=300.+200.*x
+                k=math.exp(-80000./8.31446261815324*(1/temperature-1/350.))
+                self.assertLess(abs(x-volume*k*math.sqrt(u)),1e-12)
+                if volume==1e8:
+                    self.assertEqual(x,1.)
+                    self.assertLess(u,1e-20)
+                    selected=solve({**p,"steady_state_branch":0})
+                    self.assertTrue(selected["verified"])
+                    self.assertEqual(selected["unreacted_fraction"],u)
+
     def test_temperature_and_expansion_invalid_intervals_are_rejected(self):
         for extra in ({"delta_T_adiabatic":-400.},{"epsilon_A":-1.},
                       {"v0":0.},{"volume":-1.},{"volume":math.inf}):
