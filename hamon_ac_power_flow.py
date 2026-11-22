@@ -260,13 +260,18 @@ def network(spec):
             # A voltage setpoint can be unreachable at the specified P even
             # though a reactive limit admits a physical PQ solution. No Q
             # mismatch exists to select a bound in this failed regime.
-            for idx, bounds in limits.items():
-                if idx in limited:
-                    continue
-                for bound in bounds:
-                    key = tuple(sorted((*state, (idx, bound))))
-                    if key not in seen:
-                        failed_pivots.setdefault(key, seed)
+            free = [(idx, bounds) for idx, bounds in limits.items() if idx not in limited]
+            pivots = [((idx, bound),) for idx, bounds in free for bound in bounds]
+            # Several regulators may have to leave their setpoints together.
+            # Try both common bound directions before all single-bus subsets
+            # consume the budget. Each trial still needs independent validation.
+            if len(free) > 1:
+                pivots[:0] = [tuple((idx, bounds[side]) for idx, bounds in free)
+                              for side in (0, 1)]
+            for additions in pivots:
+                key = tuple(sorted(state + additions))
+                if key not in seen:
+                    failed_pivots.setdefault(key, seed)
             continue
         injection = voltage * np.conj(ybus @ voltage)
         residual_floor = power_roundoff(voltage)
@@ -297,6 +302,14 @@ def network(spec):
             pending.appendleft(children[0])
             pending.extend(children[1:])
     else:
+        untried = any(key not in seen for key, _ in pending) or any(
+            key not in seen for key in failed_pivots
+        )
+        if untried:
+            return {"ok": False, "calculation": "ac_power_flow",
+                    "conservation_verified": False, "regime_search_budget_exhausted": True,
+                    "regimes_tried": len(seen),
+                    "reason": "AC regulator search budget exhausted; feasibility undetermined"}
         if last_solved is None:
             raise first_error or ValueError("No converged AC regulator state")
         state, voltage = last_solved

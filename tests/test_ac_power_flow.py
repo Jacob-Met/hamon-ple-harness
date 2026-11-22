@@ -211,7 +211,7 @@ def test_alternative_reactive_pivot_after_inconsistent_intermediate(vb, angle, s
     assert result["clamped_pv_q_pu"] == {"A": qa}
 
 
-@pytest.mark.parametrize("injections", [(1.2,), (-1.2,), (1.2, -1.4)])
+@pytest.mark.parametrize("injections", [(1.2,), (-1.2,), (1.2, -1.4), (1.2,) * 5])
 def test_reactive_bound_can_solve_unreachable_pv_setpoint(injections):
     # A unit slack and unit reactance give P=Im(V), Q=|V|²-Re(V).
     # |P|>1 rules out the PV setpoint |V|=1. V=1+jP satisfies Qmin=P².
@@ -235,4 +235,8 @@ def test_reactive_bound_can_solve_unreachable_pv_setpoint(injections):
     # Q=Re(V)^2-Re(V)+P^2 >= P^2-1/4, so neither bound is attainable.
     del spec["proposed_voltages"]
     buses[1].update(q_min_injection_pu=-1, q_max_injection_pu=0)
-    assert not verify_ac_power_flow(spec)["conservation_verified"]
+    rejected = verify_ac_power_flow(spec)
+    assert not rejected["conservation_verified"]
+    if len(injections) == 5:
+        assert rejected["regime_search_budget_exhausted"]
+        assert rejected["regimes_tried"] == 81
