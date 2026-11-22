@@ -1,5 +1,6 @@
-"""Balanced per-unit AC load flow on a connected network with one slack bus."""
+"""Balanced AC load flow and terminal faults of three-sequence Thevenin equivalents."""
 
+import cmath
 import math
 
 import numpy as np
@@ -329,6 +330,177 @@ def verify_ac_power_flow(spec):
         return {
             "ok": False,
             "calculation": "ac_power_flow",
+            "conservation_verified": False,
+            "reason": str(exc),
+        }
+
+
+def phasor(data):
+    if not isinstance(data, dict) or set(data) != {"real", "imag"}:
+        raise ValueError("A phasor requires finite real and imag components")
+    if any(
+        isinstance(x, bool) or not isinstance(x, (float, int)) or not math.isfinite(x)
+        for x in data.values()
+    ):
+        raise ValueError("A phasor requires finite real and imag components")
+    return complex(data["real"], data["imag"])
+
+
+def symmetrical_fault(spec):
+    fault = spec["fault_type"]
+    if fault not in ("3PH", "SLG", "LL", "DLG"):
+        raise ValueError("Use 3PH, SLG, LL or DLG")
+    labels = ("A", "B", "C")
+    faulted = spec.get(
+        "faulted_phases",
+        {"3PH": ["A", "B", "C"], "SLG": ["A"], "LL": ["B", "C"], "DLG": ["B", "C"]}[
+            fault
+        ],
+    )
+    if (
+        not isinstance(faulted, list)
+        or not all(p in labels for p in faulted)
+        or len(set(faulted)) != len(faulted)
+    ):
+        raise ValueError("faulted_phases must be a list of distinct phase names")
+    count = {"3PH": 3, "SLG": 1, "LL": 2, "DLG": 2}[fault]
+    if len(faulted) != count:
+        raise ValueError("Incorrect number of faulted phases")
+    sequence_impedances = spec["sequence_impedances_pu"]
+    if not isinstance(sequence_impedances, dict) or set(sequence_impedances) != {
+        "zero",
+        "positive",
+        "negative",
+    }:
+        raise ValueError("Specify zero-, positive- and negative-sequence impedances")
+    z0, z1, z2 = (
+        phasor(sequence_impedances[k]) for k in ("zero", "positive", "negative")
+    )
+    zf = phasor(spec.get("fault_impedance_pu", {"real": 0, "imag": 0}))
+    emf = phasor(spec["prefault_positive_voltage_pu"])
+    if min(z.real for z in (z0, z1, z2, zf)) < 0 or emf == 0:
+        raise ValueError(
+            "Require nonnegative resistances and nonzero prefault positive-sequence voltage"
+        )
+    # Preserve the ABC positive sequence when rotating the fault to canonical
+    # A (SLG) or BC (LL/DLG) positions.
+    offset = (
+        0
+        if fault == "3PH"
+        else labels.index(
+            faulted[0]
+            if fault == "SLG"
+            else next(p for p in labels if p not in faulted)
+        )
+    )
+    order = np.roll(np.arange(3), -offset)
+    alpha = cmath.exp(2j * math.pi / 3)
+    rotation = emf * alpha ** (-offset)
+    transform = np.array([[1, 1, 1], [1, alpha**2, alpha], [1, alpha, alpha**2]])
+    if fault == "3PH":
+        seq = (0, rotation / (z1 + zf), 0)
+    elif fault == "SLG":
+        i = rotation / (z0 + z1 + z2 + 3 * zf)
+        seq = (i, i, i)
+    elif fault == "LL":
+        i = rotation / (z1 + z2 + zf)
+        seq = (0, i, -i)
+    else:
+        # BC meet at a common point connected to ground by zf. The parallel
+        # negative/zero-sequence paths can be solved without dividing by their sum.
+        zg = z0 + 3 * zf
+        determinant = z1 * (zg + z2) + zg * z2
+        seq = (
+            -rotation * z2 / determinant,
+            rotation * (zg + z2) / determinant,
+            -rotation * zg / determinant,
+        )
+    canonical = transform @ np.asarray(seq)
+    iabc = np.empty(3, dtype=complex)
+    iabc[order] = canonical
+    # Independent phase-domain system: v = e - Zabc i, with three linear
+    # terminal boundary conditions. No sequence-fault formulas enter this solve.
+    zabc = (transform * np.array([z0, z1, z2])) @ np.conjugate(transform.T) / 3
+    source = emf * transform[:, 1]
+    voltage = source - zabc @ iabc
+    zero_v = np.zeros((3, 3), dtype=complex)
+    zero_i = np.zeros_like(zero_v)
+    a, b, c = order
+    if fault == "3PH":
+        zero_v = np.eye(3, dtype=complex)
+        zero_i = -zf * zero_v
+    elif fault == "SLG":
+        zero_v[0, a] = 1
+        zero_i[0, a] = -zf
+        zero_i[1, b] = 1
+        zero_i[2, c] = 1
+    elif fault == "LL":
+        zero_i[0, a] = 1
+        zero_i[1, b] = zero_i[1, c] = 1
+        zero_v[2, b] = 1
+        zero_v[2, c] = -1
+        zero_i[2, b] = -zf
+    else:
+        zero_i[0, a] = 1
+        zero_v[1, b] = 1
+        zero_v[1, c] = -1
+        zero_v[2, b] = 1
+        zero_i[2, b] = zero_i[2, c] = -zf
+    iphase = np.linalg.solve(zero_v @ zabc - zero_i, zero_v @ source)
+    residual = zero_v @ voltage + zero_i @ iabc
+    scale = max(abs(iabc))
+    precision = 32 * np.finfo(float).eps * scale
+    tol = np.minimum(1e-6, 1e-7 * np.abs(iabc) + precision)
+    verified = bool(
+        np.all(np.abs(iphase - iabc) <= tol) and np.max(np.abs(residual)) < 1e-6
+    )
+    if "proposed_phase_currents_pu" in spec:
+        proposed = spec["proposed_phase_currents_pu"]
+        if not isinstance(proposed, dict) or set(proposed) != set(labels):
+            raise ValueError("Proposed currents must contain A, B and C")
+        claimed = np.array([phasor(proposed[k]) for k in labels])
+        verified = verified and bool(np.all(np.abs(claimed - iabc) <= tol))
+
+    def pack(z):
+        return {"real": float(z.real), "imag": float(z.imag)}
+
+    def vector(names, vec):
+        return dict(zip(names, map(pack, vec)))
+
+    seq_names = ("zero", "positive", "negative")
+    return {
+        "ok": True,
+        "calculation": "symmetrical_fault",
+        "conservation_verified": verified,
+        "fault_type": fault,
+        "phase_currents_pu": vector(labels, iabc),
+        "phase_voltages_pu": vector(labels, voltage),
+        "sequence_currents_pu": vector(seq_names, np.conjugate(transform.T) @ iabc / 3),
+        "sequence_voltages_pu": vector(
+            seq_names, np.conjugate(transform.T) @ voltage / 3
+        ),
+        "ground_return_current_pu": pack(np.sum(iabc)),
+        "max_phase_sequence_difference_pu": float(np.max(np.abs(iphase - iabc))),
+        "max_terminal_boundary_residual_pu": float(np.max(np.abs(residual))),
+    }
+
+
+def verify_symmetrical_fault(spec):
+    try:
+        with np.errstate(over="raise", divide="raise", invalid="raise"):
+            return symmetrical_fault(spec)
+    except (
+        ValueError,
+        TypeError,
+        KeyError,
+        ZeroDivisionError,
+        OverflowError,
+        FloatingPointError,
+        np.linalg.LinAlgError,
+    ) as exc:
+        return {
+            "ok": False,
+            "calculation": "symmetrical_fault",
             "conservation_verified": False,
             "reason": str(exc),
         }
