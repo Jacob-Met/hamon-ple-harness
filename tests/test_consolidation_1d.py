@@ -16,15 +16,25 @@ DAY = 86400
 PSF = 47.88025898033584
 
 
-def example(**change):
+def example_spec(**change):
     spec = {"calculation":"consolidation_1d", "H_clay_m":10*FT, "Cc":.5, "e0":1,
             "sigma_v0_eff_Pa":600*PSF, "delta_sigma_v_Pa":2400*PSF,
             "cv_m2_s":.2*FT**2/DAY, "time_s":424*DAY, "drainage":"single"}
     spec.update(change)
-    return route({"mode":"civil_geotech", "spec":spec})
+    return spec
+
+
+def example(**change):
+    return route({"mode":"civil_geotech", "spec":example_spec(**change)})
 
 
 class TestConsolidation(unittest.TestCase):
+    def test_explicit_calculation_routes_without_a_footing_or_outer_mode(self):
+        explicit = example()
+        self.assertTrue(explicit["conservation_verified"])
+        self.assertEqual(route({"spec": example_spec()}), explicit)
+        self.assertEqual(route(example_spec()), explicit)
+
     def test_fhwa_worked_example_7_3(self):
         r = example()
         self.assertTrue(r["conservation_verified"])
