@@ -385,10 +385,14 @@ async def solve(session: taskbridge.Session) -> str:
       )
       pareto_plan = hamon_pareto.route_from_intake_prompt(
           engineering_inventory,
+          instruction=session.instruction,
           mcp_server_count=len(getattr(session, "mcp_servers", None) or []),
           deliverable_count=len(delivery_targets),
           model_api=model,
       )
+      if pareto_plan and "presolve_result_json" in pareto_plan:
+        first_request += ("\n\nDeterministic engineering calculation for the inline request (JSON tool output):\n"
+                          + pareto_plan["presolve_result_json"])
       thinking_level = pareto_plan["thinking_tier"] if pareto_plan else THINKING
       reserve_window = (
           pareto_plan["delivery_reserve_sec"]
