@@ -16,8 +16,8 @@ numerical cross-verification suite for Physical Engineering's Last Exam (PLE):
        unity-feedback closed-loop stability, and static DC gain.
      - State-space Faddeev-LeVerrier characteristic polynomial (M_1 = I), Cayley-Hamilton
        residual gate, exact algebraic controllability/observability ranks of the supplied
-       finite binary64 coefficients, and continuous
-       Lyapunov equation A^T P + P A = -Q Sylvester positive-definiteness check.
+       finite binary64 coefficients, and exact symmetric continuous Lyapunov
+       certificates for stability (Q=I) and the requested forcing matrix Q.
   3. Psychrometrics (`verify_psychrometric_process`):
      - ASHRAE Fundamentals (Hyland-Wexler 1983) saturation vapor pressure over ice & liquid,
        exact moist-air state inversion (from RH, wet-bulb, dew-point, or humidity ratio),
@@ -41,6 +41,7 @@ import json
 import math
 import re
 import sys
+from decimal import Decimal
 from fractions import Fraction
 from itertools import zip_longest
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -827,6 +828,109 @@ def _bode_margins(num: Sequence[float], den: Sequence[float]) -> Dict[str, Any]:
             "removable_holes_rad_s": [frequency(i) for i in removable]}
 
 
+def _symmetric_lyapunov_solutions(a, forcings):
+    """Solve AᵀP + PA = −Q on symmetric matrices, sharing elimination across Qs."""
+    n = len(a)
+    coords = [(i, j) for i in range(n) for j in range(i, n)]
+    width = len(coords)
+    indices = {(i, j): col for col, (i, j) in enumerate(coords)}
+    indices.update({(j, i): col for col, (i, j) in enumerate(coords)})
+    rows = []
+    for i, j in coords:
+        row = [Fraction(0)] * width
+        for k in range(n):
+            row[indices[k, j]] += a[k][i]
+            row[indices[i, k]] += a[k][j]
+        row.extend(-q[i][j] for q in forcings)
+        # The input coefficients are dyadic. Multiplying the entire equation,
+        # including both right-hand sides, clears every denominator exactly.
+        denominator = max(value.denominator for value in row)
+        rows.append(_primitive_integer_vector(
+            [value.numerator * (denominator // value.denominator) for value in row]
+        ))
+
+    rank = 0
+    for col in range(width):
+        pivot = next((i for i in range(rank, width) if rows[i][col]), None)
+        if pivot is None:
+            continue
+        rows[rank], rows[pivot] = rows[pivot], rows[rank]
+        pivot_row = rows[rank]
+        for i in range(rank + 1, width):
+            row = rows[i]
+            if row[col]:
+                divisor = math.gcd(pivot_row[col], row[col])
+                left, right = pivot_row[col] // divisor, row[col] // divisor
+                rows[i] = _primitive_integer_vector(
+                    [left * x - right * y for x, y in zip(row, pivot_row)]
+                )
+        rank += 1
+
+    solutions = []
+    for rhs in range(width, width + len(forcings)):
+        if rank < width:
+            # The bottom rows have zero coefficients. Their right-hand sides
+            # distinguish inconsistency from infinitely many symmetric solutions.
+            status = "inconsistent" if any(row[rhs] for row in rows[rank:]) else "nonunique"
+            solutions.append((status, None))
+            continue
+        values = [Fraction(0)] * width
+        for i in reversed(range(width)):
+            rest = sum(rows[i][j] * values[j] for j in range(i + 1, width))
+            values[i] = (Fraction(rows[i][rhs]) - rest) / rows[i][i]
+        p = [[values[indices[i, j]] for j in range(n)] for i in range(n)]
+        solutions.append(("unique", p))
+    return solutions
+
+
+def _positive_definite_exact(matrix):
+    """A symmetric rational matrix is positive definite iff all LDLᵀ pivots are positive."""
+    work = [row.copy() for row in matrix]
+    for k in range(len(work)):
+        pivot = work[k][k]
+        if pivot <= 0:
+            return False
+        for i in range(k + 1, len(work)):
+            factor = work[i][k] / pivot
+            for j in range(k + 1, i + 1):
+                work[i][j] -= factor * work[j][k]
+    return True
+
+
+def _lyapunov_certificate(a, q, solution):
+    status, p = solution
+    if p is None:
+        return {"solution_status": status, "P_exact": None, "positive_definite": None,
+                "residual_exact": None}
+    # Check the full original matrix equation independently of the triangular solve.
+    n = len(a)
+    zero_residual = all(
+        q[i][j] + sum(a[k][i] * p[k][j] + p[i][k] * a[k][j] for k in range(n)) == 0
+        for i in range(n) for j in range(n)
+    )
+    # Decimal(int) is exact and avoids Python's limit on integer-to-text digits.
+    def fraction_text(value):
+        numerator = str(Decimal(value.numerator))
+        return numerator if value.denominator == 1 else numerator + "/" + str(Decimal(value.denominator))
+
+    return {"solution_status": status, "P_exact": [[fraction_text(v) for v in row] for row in p],
+            "positive_definite": _positive_definite_exact(p), "residual_exact": zero_residual}
+
+
+def _lyapunov_float_matrix(p):
+    if p is None:
+        return None, "not_unique_solution"
+    try:
+        matrix = [[float(v) for v in row] for row in p]
+    except OverflowError:
+        return None, "outside_float_range"
+    for exact_row, float_row in zip(p, matrix):
+        if any(not math.isfinite(value) or (exact and value == 0.0)
+               for exact, value in zip(exact_row, float_row)):
+            return None, "outside_float_range"
+    return matrix, "finite"
+
+
 def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "transfer_function" if "den" in spec else "state_space")).strip().lower()
 
@@ -910,8 +1014,6 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
 
         ch_residual = max(abs(m_cur[i][j]) for i in range(n) for j in range(n))
         eigs = _poly_roots(char_poly)
-        _, rhp_routh, zero_row = _routh_table(char_poly)
-        hurwitz = (rhp_routh == 0) and (not zero_row) and all(z.real < -1e-6 for z in eigs)
 
         controllable: Optional[bool] = None
         ctrl_rank: Optional[int] = None
@@ -938,41 +1040,37 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             obs_rank = _algebraic_reachable_rank(transpose_a, transpose_c)
             observable = obs_rank == n
 
-        q_mat = [[float(v) for v in r] for r in spec["Q"]] if "Q" in spec else [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
-        n2 = n * n
-        kron = [[0.0] * n2 for _ in range(n2)]
-        rhs_vec = [0.0] * n2
-        for i in range(n):
-            for j in range(n):
-                row_idx = i * n + j
-                rhs_vec[row_idx] = -q_mat[i][j]
-                for k in range(n):
-                    kron[row_idx][k * n + j] += a_mat[k][i]
-                    kron[row_idx][i * n + k] += a_mat[k][j]
+        a_exact = [[Fraction(v) for v in row] for row in a_mat]
+        identity = [[int(i == j) for j in range(n)] for i in range(n)]
+        q = identity
+        if "Q" in spec:
+            raw = spec["Q"]
+            if (not isinstance(raw, (list, tuple)) or len(raw) != n
+                    or any(not isinstance(row, (list, tuple)) or len(row) != n for row in raw)):
+                return {"passed": False, "domain": "control", "mode": mode,
+                        "reason": "Matrix Q must be square with one row and column per state"}
+            try:
+                q = [[Fraction(float(v)) for v in row] for row in raw]
+            except (TypeError, ValueError, OverflowError):
+                return {"passed": False, "domain": "control", "mode": mode,
+                        "reason": "Matrix Q must contain finite numeric coefficients"}
+            if any(q[i][j] != q[j][i] for i in range(n) for j in range(i)):
+                return {"passed": False, "domain": "control", "mode": mode,
+                        "reason": "Matrix Q must be symmetric"}
 
-        p_vec = _solve_linear(kron, rhs_vec)
-        lyapunov_pd = False
-        p_mat: Optional[List[List[float]]] = None
-        if p_vec is not None:
-            p_mat = [[0.5 * (p_vec[i * n + j] + p_vec[j * n + i]) for j in range(n)] for i in range(n)]
-            lyapunov_pd = True
-            for m_sub in range(1, n + 1):
-                sub = [[p_mat[r][c] for c in range(m_sub)] for r in range(m_sub)]
-                ok_sub = True
-                for c_idx in range(m_sub):
-                    if sub[c_idx][c_idx] <= 1e-10:
-                        ok_sub = False
-                        break
-                    for r_idx in range(c_idx + 1, m_sub):
-                        f = sub[r_idx][c_idx] / sub[c_idx][c_idx]
-                        for k_idx in range(c_idx, m_sub):
-                            sub[r_idx][k_idx] -= f * sub[c_idx][k_idx]
-                if not ok_sub:
-                    lyapunov_pd = False
-                    break
+        forcings = [identity] if q == identity else [identity, q]
+        solutions = _symmetric_lyapunov_solutions(a_exact, forcings)
+        stability = _lyapunov_certificate(a_exact, identity, solutions[0])
+        requested = (stability if len(solutions) == 1 else
+                     _lyapunov_certificate(a_exact, q, solutions[1]))
+        # A is Hurwitz exactly when the identity forcing has a positive-definite
+        # solution. For Hurwitz A the Lyapunov operator is invertible.
+        hurwitz = stability["positive_definite"] is True and stability["residual_exact"] is True
+        p_mat, float_status = _lyapunov_float_matrix(solutions[-1][1])
 
         scale_a = max((abs(a_mat[i][j]) for i in range(n) for j in range(n)), default=1.0) ** max(1, n)
-        passed = (ch_residual <= 1e-7 * max(1.0, scale_a)) and (lyapunov_pd == hurwitz)
+        passed = (ch_residual <= 1e-7 * max(1.0, scale_a)
+                  and stability["residual_exact"] is not False and requested["residual_exact"] is not False)
         res = {
             "passed": passed,
             "domain": "control",
@@ -984,11 +1082,20 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             "controllability_rank": ctrl_rank,
             "observable": observable,
             "observability_rank": obs_rank,
-            "lyapunov_pd": lyapunov_pd,
+            "stability_certificate": stability,
+            "lyapunov_solution_status": requested["solution_status"],
+            "lyapunov_pd": requested["positive_definite"],
+            "lyapunov_P_exact": requested["P_exact"],
+            "lyapunov_residual_exact": requested["residual_exact"],
+            "lyapunov_float_status": float_status,
             "lyapunov_P": p_mat,
             "eigenvalues_real_imag": [[z.real, z.imag] for z in sorted(eigs, key=lambda z: (round(z.real, 7), round(z.imag, 7)))],
         }
-        _check_claimed(res, spec)
+        if ("claimed_value" in spec and spec.get("claimed_field") == "lyapunov_pd"
+                and res["lyapunov_pd"] is None):
+            res.update(passed=False, reason="No unique symmetric P exists for this definiteness claim")
+        else:
+            _check_claimed(res, spec)
         return res
 
     return {"passed": False, "domain": "control", "mode": mode, "reason": f"Unknown control mode: {mode}"}
