@@ -15,6 +15,7 @@ and First/Second-Law & dynamical conservation invariants:
 from __future__ import annotations
 
 import math
+from fractions import Fraction
 from functools import lru_cache
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -824,11 +825,17 @@ def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]
         q = float(params.get("q", 1.0))
         f_flow = float(params.get("F_mol_s", 100.0))
 
-        if not (0.0 < x_b < z_f < x_d < 1.0) or alpha <= 1.0 or f_flow <= 0.0:
+        if (not all(math.isfinite(v) for v in (x_b, z_f, x_d, alpha, q, f_flow))
+                or not 0.0 < x_b < z_f < x_d < 1.0 or alpha <= 1.0 or f_flow <= 0.0):
             return {"domain": "electrochem_separations", "subkind": subkind, "verified": False, "error": "invalid_distillation_compositions_or_volatility"}
 
-        d_flow = f_flow * (z_f - x_b) / (x_d - x_b)
-        b_flow = f_flow - d_flow
+        # Use the round-trip decimal inputs for exact flow signs and boundary contacts.
+        xb, z, xd, volatility, quality, feed = (
+            Fraction(str(value)) for value in (x_b, z_f, x_d, alpha, q, f_flow)
+        )
+        distillate = feed * (z - xb) / (xd - xb)
+        bottoms = feed - distillate
+        d_flow, b_flow = float(distillate), float(bottoms)
 
         n_min = math.log((x_d * (1.0 - x_b)) / ((1.0 - x_d) * x_b)) / math.log(alpha)
 
@@ -849,46 +856,97 @@ def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]
             r_minus = (-b_q - disc) / (2.0 * a_q)
             theta_alg = r_plus if (1.0 < r_plus < alpha) else r_minus
 
-        r_min = (alpha * x_d) / (alpha - theta_brent) + (1.0 - x_d) / (1.0 - theta_brent) - 1.0
-        r_op = float(params["R"]) if "R" in params and params["R"] is not None else float(params.get("R_mult", 1.25)) * r_min
-        if r_op <= r_min * (1.0 + 1e-7):
-            return {"domain": "electrochem_separations", "subkind": subkind, "verified": False, "error": "reflux_below_minimum_pinch"}
+        pinch_reflux = (alpha * x_d) / (alpha - theta_brent) + (1.0 - x_d) / (1.0 - theta_brent) - 1.0
+        # L = R D >= 0 and V' = (R+1)D - (1-q)F >= 0. Then L' = V' + B > 0.
+        flow_floor = max(Fraction(0), (1 - quality) * feed / distillate - 1)
 
-        x_int = ((r_op + 1.0) * z_f + (q - 1.0) * x_d) / (r_op + q)
-        y_int = (r_op / (r_op + 1.0)) * x_int + x_d / (r_op + 1.0)
+        def feed_contact(reflux):
+            # Eliminate the section flows from the total and component balances.
+            x = ((reflux + 1) * z + (quality - 1) * xd) / (reflux + quality)
+            y = (reflux * x + xd) / (reflux + 1)
+            equilibrium_gap = volatility * x / (1 + (volatility - 1) * x) - y
+            return x, y, equilibrium_gap
 
-        l_rect = r_op * d_flow
-        v_rect = (r_op + 1.0) * d_flow
-        l_strip = l_rect + q * f_flow
-        v_strip = v_rect - (1.0 - q) * f_flow
-        slope_strip_geom = (y_int - x_b) / (x_int - x_b)
-        slope_strip_molar = l_strip / v_strip
+        _, _, floor_gap = feed_contact(flow_floor)
+        # A pinch outside the working composition interval cannot set its minimum.
+        r_min = float(flow_floor) if floor_gap >= 0 else max(float(flow_floor), pinch_reflux)
+        limits = {"R_min": r_min, "R_flow_floor": float(flow_floor), "R_feed_pinch": pinch_reflux}
+        if params.get("R") is None:
+            multiplier = float(params.get("R_mult", 1.25))
+            if not math.isfinite(multiplier) or multiplier < 0:
+                return {"domain": "electrochem_separations", "subkind": subkind, "verified": False,
+                        "error": "invalid_reflux_multiplier", **limits}
+            r_op = multiplier * r_min
+        else:
+            r_op = float(params["R"])
+        if not math.isfinite(r_op):
+            return {"domain": "electrochem_separations", "subkind": subkind, "verified": False,
+                    "error": "nonfinite_reflux", **limits}
+        # A multiplier applied at an exact flow floor should preserve its boundary.
+        if params.get("R") is None and floor_gap >= 0:
+            reflux = Fraction(str(multiplier)) * flow_floor
+        else:
+            reflux = Fraction(str(r_op))
+        liquid = reflux * distillate
+        vapor = liquid + distillate
+        strip_vapor = vapor - (1 - quality) * feed
+        strip_liquid = strip_vapor + bottoms
+        flow_report = {"L_rect_mol_s": float(liquid), "V_rect_mol_s": float(vapor),
+                       "L_strip_mol_s": float(strip_liquid), "V_strip_mol_s": float(strip_vapor)}
+        conditions = {**limits, **flow_report, "R_operating": r_op}
+        if min(liquid, strip_vapor) < 0:
+            return {"domain": "electrochem_separations", "subkind": subkind, "verified": False,
+                    "error": "negative_internal_section_flow", **conditions}
+        xi, yi, gap = feed_contact(reflux)
+        x_int, y_int = float(xi), float(yi)
+        one_stage = xd * (1 + (volatility - 1) * xb) == volatility * xb
+        flash = liquid == 0 and strip_vapor == 0
+        if flash and gap:
+            return {"domain": "electrochem_separations", "subkind": subkind, "verified": False,
+                    "error": "zero_circulation_flash_products_not_in_equilibrium", **conditions}
+        if not flash and (gap <= 0 or (floor_gap < 0 and r_op <= r_min * (1.0 + 1e-7))):
+            return {"domain": "electrochem_separations", "subkind": subkind, "verified": False,
+                    "error": "reflux_below_minimum_pinch", **conditions}
+        if flash:
+            section_mode = "single_equilibrium_flash"
+        elif liquid == 0:
+            section_mode = "stripping_only"
+        elif strip_vapor == 0:
+            section_mode = "rectifying_only"
+        else:
+            section_mode = "two_section"
 
         y_cur = x_d
         x_prev = x_d
         stages = 0
-        feed_stage = 1
+        feed_stage = None
         frac_stages = 0.0
         for step in range(1, 500):
             x_eq = y_cur / (alpha - (alpha - 1.0) * y_cur)
             stages = step
-            if x_eq <= x_int and feed_stage == 1 and x_prev > x_int:
+            if feed_stage is None and x_eq <= x_int and x_prev > x_int:
                 feed_stage = step
+            if one_stage:
+                # These exact products share an equilibrium tie line; Fenske equality is attainable.
+                frac_stages = 1.0
+                break
             if x_eq <= x_b:
-                frac = (x_prev - x_b) / max(x_prev - x_eq, 1e-15)
+                frac = (x_prev - x_b) / (x_prev - x_eq)
                 frac_stages = (step - 1) + frac
                 break
             x_prev = x_eq
-            if x_eq > x_int:
+            if strip_vapor == 0 or x_eq > x_int:
                 y_cur = (r_op / (r_op + 1.0)) * x_eq + x_d / (r_op + 1.0)
             else:
-                y_cur = x_b + slope_strip_geom * (x_eq - x_b)
+                # The stripping component balance, defined also when top reflux is zero.
+                y_cur = x_b + float(strip_liquid / strip_vapor) * (x_eq - x_b)
         else:
             return {"domain": "electrochem_separations", "subkind": subkind, "verified": False, "error": "mccabe_thiele_did_not_converge"}
 
         mb_err = abs(d_flow * x_d + b_flow * x_b - f_flow * z_f) / max(f_flow * z_f, 1e-12)
         theta_err = abs(theta_brent - theta_alg) / max(theta_brent, 1.0)
-        strip_err = abs(slope_strip_geom - slope_strip_molar) / max(abs(slope_strip_molar), 1.0)
+        # Verify the section component balance without dividing by vanishing boilup.
+        strip_err = abs(float(strip_vapor) * (y_int - x_b) - float(strip_liquid) * (x_int - x_b)) / f_flow
         residual = float(max(mb_err, theta_err, strip_err))
         return {
             "domain": "electrochem_separations",
@@ -897,13 +955,13 @@ def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]
             "B_mol_s": float(b_flow),
             "N_min_fenske": float(n_min),
             "underwood_theta": float(theta_brent),
-            "R_min": float(r_min),
-            "R_operating": float(r_op),
+            **conditions,
+            "section_mode": section_mode,
             "N_stages_integer": int(stages),
             "N_theoretical": float(frac_stages),
-            "feed_stage": int(feed_stage),
+            "feed_stage": feed_stage if feed_stage is not None else stages,
             "residual": residual,
-            "verified": bool(frac_stages > n_min and residual < 1e-10),
+            "verified": bool((one_stage or frac_stages > n_min) and residual < 1e-10),
         }
 
     return {"domain": "electrochem_separations", "subkind": subkind, "verified": False, "error": f"unsupported_electrochem_separation:{subkind}"}
