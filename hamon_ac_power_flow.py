@@ -141,12 +141,20 @@ def network(spec):
         np.add.at(nodal, t, receive)
         return nodal, send, receive
 
+    def power_roundoff(v):
+        return 32 * np.finfo(float).eps * np.abs(v) * (np.abs(ybus) @ np.abs(v))
+
     def power_tolerances(v, targets, positions):
         # Terminal currents can cancel even when the specified net injection
         # is exactly zero. Allow local floating-point cancellation, not a
         # whole-network relative error that can erase a small bus load.
-        rounding = 64 * np.finfo(float).eps * np.abs(v) * (np.abs(ybus) @ np.abs(v))
+        rounding = power_roundoff(v)
         return np.minimum(1e-6, 1e-7 * np.abs(targets[positions]) + rounding[positions])
+
+    def reactive_violation(value, lower, upper, roundoff):
+        bound = float(np.clip(value, lower, upper))
+        tolerance = min(1e-6, roundoff + 4 * math.ulp(bound))
+        return bound if abs(value - bound) > tolerance else None
 
     def polar(pq, voltage):
         def terms(v):
@@ -201,12 +209,12 @@ def network(spec):
         voltage = polar(pq, voltage)
         injection = voltage * np.conj(ybus @ voltage)
         violations = []
+        residual_floor = power_roundoff(voltage)
         for idx, (lower, upper) in limits.items():
-            if (
-                idx not in limited
-                and not lower - 1e-9 <= injection[idx].imag <= upper + 1e-9
-            ):
-                bound = float(np.clip(injection[idx].imag, lower, upper))
+            bound = reactive_violation(
+                injection[idx].imag, lower, upper, residual_floor[idx]
+            )
+            if idx not in limited and bound is not None:
                 violations.append((abs(injection[idx].imag - bound), idx, bound))
         if not violations:
             break
@@ -244,12 +252,23 @@ def network(spec):
     tellegen = float(abs(np.sum(injection) - total_lines - total_shunts))
     current_mismatch = float(np.max(np.abs(ybus @ voltage - current)))
     difference = float(np.max(np.abs(voltage - other)))
-    complementarity = all(
-        (limits[i][0] == limits[i][1])
-        or (bound == limits[i][1] and abs(voltage[i]) <= vset[i] + 1e-8)
-        or (bound == limits[i][0] and abs(voltage[i]) >= vset[i] - 1e-8)
-        for i, bound in limited.items()
-    )
+
+    def regulated_state(v, s):
+        rounding = power_roundoff(v)
+        for idx, (lower, upper) in limits.items():
+            if reactive_violation(s[idx].imag, lower, upper, rounding[idx]) is not None:
+                return False
+            if idx in limited and lower != upper:
+                magnitude = abs(v[idx])
+                voltage_floor = 16 * np.finfo(float).eps * max(magnitude, vset[idx])
+                if limited[idx] == upper and magnitude > vset[idx] + voltage_floor:
+                    return False
+                if limited[idx] == lower and magnitude < vset[idx] - voltage_floor:
+                    return False
+        return True
+
+    complementarity = regulated_state(voltage, injection)
+    proposed_limits = None
     verified = (
         complementarity
         and independent_res < 1e-6
@@ -271,8 +290,10 @@ def network(spec):
         claimed = np.asarray(values)
         claim_error = np.max(np.abs(claimed - voltage))
         power = claimed * np.conj(branch_currents(claimed)[0])
+        proposed_limits = regulated_state(claimed, power)
         verified = (
             verified
+            and proposed_limits
             and claim_error < 1e-6
             and abs(claimed[slack] - initial[slack])
             <= 16 * np.finfo(float).eps * vset[slack]
@@ -283,7 +304,10 @@ def network(spec):
             and np.all(
                 np.abs(power.imag[pq] - q[pq]) <= power_tolerances(claimed, q, pq)
             )
-            and np.all(np.abs(np.abs(claimed[pv]) - vset[pv]) < 1e-6)
+            and np.all(
+                np.abs(np.abs(claimed[pv]) - vset[pv])
+                <= 16 * np.finfo(float).eps * vset[pv]
+            )
         )
     return {
         "ok": True,
@@ -307,6 +331,7 @@ def network(spec):
             for name, a, b in zip(line_ids, sf, st)
         },
         "pv_limits_consistent": bool(complementarity),
+        "proposed_pv_limits_consistent": proposed_limits,
         "clamped_pv_q_pu": {ids[i]: x for i, x in limited.items()},
         "max_rectangular_mismatch_pu": independent_res,
         "max_voltage_disagreement_pu": difference,
