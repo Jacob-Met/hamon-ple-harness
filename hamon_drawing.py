@@ -1275,7 +1275,7 @@ def _read_caption_words(pgm, psm, digits=False):
     cmd=["tesseract","stdin","stdout","--psm",str(psm)]
     if digits:
         cmd.extend(["-c","tessedit_char_whitelist=0123456789"])
-    call=subprocess.run(cmd+["tsv"],input=pgm,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
+    call=subprocess.run(cmd+["-c", "tessedit_create_tsv=1"],input=pgm,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
     words=[]
     if call.returncode==0:
         for line in call.stdout.decode(errors="replace").splitlines()[1:]:
@@ -1352,7 +1352,7 @@ def _caption_stroke_anchors(source, page, region, vectors):
     crop = _caption_raster(source, page, box, scale)
     if crop is None:
         return []
-    call = subprocess.run(["tesseract", "stdin", "stdout", "--psm", "7", "tsv"],
+    call = subprocess.run(["tesseract", "stdin", "stdout", "--psm", "7", "-c", "tessedit_create_tsv=1"],
                           input=crop, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
     if call.returncode != 0:
         return []
