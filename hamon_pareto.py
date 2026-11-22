@@ -117,6 +117,177 @@ def sanitize_scalar_or_json_answer(raw_text: str, expected_format: str = "auto")
     return text
 
 
+# These schemas are the self-contained part of the public conservation tool.
+# Inputs outside them can still use the full solver during the normal model turn.
+_WAVE8_INPUTS = {
+    "pipe_network": (
+        "thermal_fluid",
+        "nodes pipes kinematic_viscosity_m2_s",
+        "max_mass_residual_m3_s max_energy_residual_m max_nodal_cycle_flow_difference_m3_s",
+    ),
+    "ac_power_flow": (
+        "circuit",
+        "buses lines",
+        "max_rectangular_mismatch_pu max_voltage_disagreement_pu tellegen_residual_pu max_terminal_current_mismatch_pu",
+    ),
+    "symmetrical_fault": (
+        "circuit",
+        "fault_type faulted_phases sequence_impedances_pu prefault_positive_voltage_pu fault_impedance_pu",
+        "max_phase_sequence_difference_pu max_terminal_boundary_residual_pu",
+    ),
+    "euler_rotor": (
+        "thermal_fluid",
+        "machine_kind rotation_rpm inlet outlet mass_flow_kg_s measured_fluid_torque_N_m measured_rotor_static_enthalpy_change_J_kg isentropic_specific_work_J_kg stage_boundary_speeds_m_s suction_flange",
+        "energy_residual_J_kg",
+    ),
+    "consolidation_1d": (
+        "civil_geotech",
+        "H_clay_m e0 Cc sigma_v0_eff_Pa delta_sigma_v_Pa cv_m2_s time_s drainage sigma_preconsolidation_Pa Cr",
+        "dual_solver_abs_residual",
+    ),
+    "rankine_layers": (
+        "civil_geotech",
+        "pressure_state layers water_table_depth_m gamma_water_N_m3 surcharge_Pa",
+        "dual_solver_rel_residual",
+    ),
+    "bearing_capacity": (
+        "civil_geotech",
+        "footing_B_m footing_L_m footing_shape depth_Df_m c_prime_Pa phi_deg gamma_N_m3 gamma_sat_N_m3 FS bearing_method water_table_depth_m applied_gross_pressure_Pa column_load_N",
+        "stress_integration_residual_Pa",
+    ),
+}
+_WAVE8_ROW_KEYS = {
+    "nodes": "id demand_m3_s fixed_head_m",
+    "pipes": "id from to length_m diameter_m roughness_m minor_loss_K",
+    "buses": "id type p_injection_pu q_injection_pu vm_pu va_deg q_min_injection_pu q_max_injection_pu shunt_g_pu shunt_b_pu",
+    "lines": "id from to r_pu x_pu tap_ratio phase_shift_deg line_charging_b_pu",
+    "layers": "thickness_m phi_deg gamma_above_water_N_m3 gamma_submerged_N_m3",
+}
+_STATION_KEYS = "radius_m meridional_velocity_m_s absolute_tangential_velocity_m_s absolute_flow_angle_deg relative_flow_angle_deg blade_metal_angle_deg"
+_WAVE8_RECORD_KEYS = {
+    "inlet": _STATION_KEYS,
+    "outlet": _STATION_KEYS,
+    "stage_boundary_speeds_m_s": "inlet outlet",
+    "suction_flange": "density_kg_m3 suction_absolute_pressure_Pa vapor_pressure_Pa suction_velocity_m_s required_npsh_m",
+    "fault_impedance_pu": "real imag",
+    "prefault_positive_voltage_pu": "real imag",
+}
+
+
+def _unique_keys(pairs):
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("Repeated specification field")
+    return result
+
+
+def _scalar_record(record, keys):
+    return (
+        isinstance(record, dict)
+        and record.keys() <= set(keys.split())
+        and all(type(v) in (int, float, str) for v in record.values())
+    )
+
+
+def _bounded_wave8_field(key, value):
+    if key in _WAVE8_ROW_KEYS:
+        return (
+            isinstance(value, list)
+            and 0 < len(value) <= 32
+            and all(_scalar_record(row, _WAVE8_ROW_KEYS[key]) for row in value)
+        )
+    if key in _WAVE8_RECORD_KEYS:
+        return _scalar_record(value, _WAVE8_RECORD_KEYS[key])
+    if key == "faulted_phases":
+        return (
+            isinstance(value, list)
+            and 1 <= len(value) <= 3
+            and all(x in ("A", "B", "C") for x in value)
+        )
+    if key == "sequence_impedances_pu":
+        return (
+            isinstance(value, dict)
+            and set(value) == {"zero", "positive", "negative"}
+            and all(_scalar_record(x, "real imag") for x in value.values())
+        )
+    return type(value) in (int, float, str)
+
+
+def _wave8_certificate(instruction, inventory, mcp_server_count, deliverable_count):
+    """Solve only a complete inline tool request with a confirmed empty workspace."""
+    if (
+        not isinstance(instruction, str)
+        or len(instruction) > 12000
+        or not instruction.lstrip().startswith("{")
+        or mcp_server_count
+        or deliverable_count
+        or inventory.get("schema") != "hamon.ple.intake.v1"
+        or inventory.get("scanned_files") != 0
+        or inventory.get("engineering_file_count") != 0
+        or inventory.get("files") != []
+        or inventory.get("warnings") != []
+        or inventory.get("by_extension") != {}
+    ):
+        return None
+    try:
+        req = json.loads(instruction, object_pairs_hook=_unique_keys)
+        if (
+            not isinstance(req, dict)
+            or set(req) != {"mode", "spec"}
+            or not isinstance(req["spec"], dict)
+        ):
+            return None
+        spec = req["spec"]
+        calculation = spec["calculation"]
+        mode, fields, required = _WAVE8_INPUTS[calculation]
+        if req["mode"] not in ("auto", mode) or not spec.keys() <= {
+            "calculation",
+            *fields.split(),
+        }:
+            return None
+        if not all(_bounded_wave8_field(k, v) for k, v in spec.items()):
+            return None
+        result = dispatch_ple_tool("hamon_conservation_cad_verifier", req)
+        if (
+            result.get("calculation") != calculation
+            or result.get("ok") is not True
+            or not result.get("conservation_verified")
+        ):
+            return None
+        names = required.split()
+        if calculation == "euler_rotor":
+            for measured, residual in (
+                ("measured_fluid_torque_N_m", "measured_torque_residual_N_m"),
+                (
+                    "measured_rotor_static_enthalpy_change_J_kg",
+                    "measured_rothalpy_residual_J_kg",
+                ),
+            ):
+                if measured in spec:
+                    names.append(residual)
+            if len(names) == 1:
+                return None
+        if not all(
+            type(result[k]) in (float, int)
+            and math.isfinite(result[k])
+            and abs(result[k]) < 1e-6
+            for k in names
+        ):
+            return None
+        # Reject non-JSON results and keep the additional model context bounded.
+        encoded = json.dumps(result, allow_nan=False, separators=(",", ":"))
+        return encoded if len(encoded) <= 12000 else None
+    except (
+        ArithmeticError,
+        ImportError,
+        KeyError,
+        RecursionError,
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+
 def route_from_intake_prompt(
     engineering_inventory: str,
     *,
@@ -124,6 +295,7 @@ def route_from_intake_prompt(
     deliverable_count: int = 0,
     model_api: str = "google-cloud/claude-opus-5-5",
     presolve_verified: bool = False,
+    instruction: str | None = None,
 ) -> dict[str, Any] | None:
     """Parse hamon.ple.intake.v1 metadata from intake_for_prompt output if present (zero extra exec calls)."""
     if not engineering_inventory:
@@ -139,8 +311,12 @@ def route_from_intake_prompt(
             fcount = rec.get("engineering_file_count")
             if not isinstance(fcount, int) or fcount < 0:
                 fcount = sum(int(v) for v in exts.values()) if exts else len(rec.get("files") or [])
-            pre_ok = bool(presolve_verified or rec.get("presolve_verified", False))
-            return route_task_budget(
+            certificate = _wave8_certificate(instruction, rec, mcp_server_count, deliverable_count)
+            # Legacy callers can supply a prior presolve. Live participant requests
+            # obtain a certificate from their own inline problem and observed inventory.
+            pre_ok = (bool(presolve_verified or rec.get("presolve_verified", False))
+                      if instruction is None else certificate is not None)
+            plan = route_task_budget(
                 by_extension=exts,
                 engineering_file_count=fcount,
                 mcp_server_count=mcp_server_count,
@@ -148,6 +324,9 @@ def route_from_intake_prompt(
                 model_api=model_api,
                 presolve_verified=pre_ok,
             )
+            if certificate is not None:
+                plan["presolve_result_json"] = certificate
+            return plan
     return None
 
 
