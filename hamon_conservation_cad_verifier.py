@@ -694,14 +694,28 @@ def _independent_source_value(tokens: List[str], frequency: float) -> Tuple[floa
     return dc[0], 0.0
 
 
+_LINEAR_GAIN = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?(?:meg|[fpnumkgt])?", re.I)
+_BEHAVIORAL_E = re.compile(r"^(?:poly(?:\(|$)|(?:value|vol|table|laplace|freq)(?:=|$))", re.I)
+
+
 def _parse_spice_netlist(netlist: str, frequency_override: Optional[float] = None) -> Tuple[List[Dict[str, Any]], float]:
     branches: List[Dict[str, Any]] = []
     source_clauses = []
     freq_hz = 0.0
     for idx, raw_line in enumerate(netlist.splitlines()):
         line = raw_line.split("*")[0].split(";")[0].split("$")[0].strip()
-        if not line or (idx == 0 and not re.match(r"^[RLCVIGrlcvig\.]", line)):
+        if not line:
             continue
+        if idx == 0 and not re.match(r"^[RLCVIGrlcvig\.]", line):
+            first = line.split()
+            # Keep ordinary titles beginning with E. Like existing R/V cards,
+            # accept an unambiguous numeric E card in the titleless extension.
+            is_e_card = first[0][0].upper() == "E" and (
+                (len(first) == 6 and _LINEAR_GAIN.fullmatch(first[5]))
+                or (len(first) >= 4 and _BEHAVIORAL_E.match(first[3]))
+            )
+            if not is_e_card:
+                continue
         if line.lower().startswith(".end"):
             break
         if line.lower().startswith(".ac"):
@@ -719,6 +733,11 @@ def _parse_spice_netlist(netlist: str, frequency_override: Optional[float] = Non
             branch = {"name": toks[0], "type": kind, "n_pos": toks[1], "n_neg": toks[2]}
             branches.append(branch)
             source_clauses.append((branch, toks[3:]))
+        elif kind == "E":
+            if len(toks) != 6 or _BEHAVIORAL_E.match(toks[3]) or not _LINEAR_GAIN.fullmatch(toks[5]):
+                raise ValueError("Expected a linear E source: name out+ out- ctrl+ ctrl- gain")
+            branches.append({"name": toks[0], "type": "E", "n_pos": toks[1], "n_neg": toks[2],
+                             "nc_pos": toks[3], "nc_neg": toks[4], "value": _parse_spice_num(toks[5])})
         elif kind == "G" and len(toks) >= 6:
             branches.append({"name": toks[0], "type": "G", "n_pos": toks[1], "n_neg": toks[2], "nc_pos": toks[3], "nc_neg": toks[4], "value": _parse_spice_num(toks[5])})
     if frequency_override is not None:
@@ -766,7 +785,7 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
     n_idx = {nm: i for i, nm in enumerate(nodes)}
     # An ideal inductor has zero terminal voltage at DC. Its current, like
     # the current of a voltage source, is an independent MNA unknown.
-    constraint_types = {"V", "L"} if freq_hz == 0 else {"V"}
+    constraint_types = {"V", "E", "L"} if freq_hz == 0 else {"V", "E"}
     voltage_constraints = [br for br in branches if str(br["type"]).upper() in constraint_types]
     dim = len(nodes) + len(voltage_constraints)
     mna = np.zeros((dim, dim), dtype=np.complex128)
@@ -781,7 +800,11 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
         value = float(vs["value"])
         if not math.isfinite(value):
             raise ValueError("Voltage-source and DC-inductor values must be finite")
-        if str(vs["type"]).upper() == "V":
+        if str(vs["type"]).upper() == "E":
+            icp, icm = ni(vs["nc_pos"]), ni(vs["nc_neg"])
+            if icp is not None: mna[row, icp] -= value
+            if icm is not None: mna[row, icm] += value
+        elif str(vs["type"]).upper() == "V":
             rhs[row] = cmath.rect(value, math.radians(float(vs.get("phase_deg", 0.0))))
 
     admittances = {}
@@ -828,6 +851,10 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
             expected_voltage = 0j
             if bt == "V":
                 expected_voltage = cmath.rect(float(br["value"]), math.radians(float(br.get("phase_deg", 0.0))))
+            elif bt == "E":
+                control = v_node.get(str(br["nc_pos"]), 0j) - v_node.get(str(br["nc_neg"]), 0j)
+                expected_voltage = float(br["value"]) * control
+            if bt in {"V", "E"}:
                 s_deliv += vd * (-ibr).conjugate()
             kvl_max = max(kvl_max, abs(vd - expected_voltage))
         elif bt == "I":
