@@ -326,6 +326,16 @@ def _passive_fin_fvm(length, m_len, axial, lateral, tip_loss, base):
     return flux, tip
 
 
+def _passive_fin_ratio(base_excess, conductance, reference):
+    if base_excess == 0.0:
+        return None, "undefined_zero_base_drive"
+    ratio = conductance / reference
+    try:
+        return _diagnostic_float(ratio), "finite"
+    except OverflowError:
+        return None, "below_float_range" if ratio < 1 else "above_float_range"
+
+
 def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "convective_fin_1d")).strip().lower()
 
@@ -376,8 +386,11 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             decay_x, decay_tip = math.exp(-x_m / 2), math.exp(-m_len / 2)
             theta_x = (theta_b * decay_x) * (decay_x * (boundary(remaining) / denom))
             theta_tip = (theta_b * decay_tip) * (decay_tip * (2.0 * a / denom))
-            q_fin = cap_m * ((a * -math.expm1(-2.0 * m_len) +
-                              b * (1.0 + math.exp(-2.0 * m_len))) / denom)
+            numerator = a * -math.expm1(-2.0 * m_len) + b * (1.0 + math.exp(-2.0 * m_len))
+            # Retain the accepted shape factors before applying the base drive.
+            # Only the ratio calculation needs the wider intermediate range.
+            conductance = Fraction(flux_scale) * Fraction(numerator) / Fraction(denom)
+            q_fin = cap_m * (numerator / denom)
         elif tip_bc == "prescribed_temp":
             theta_L = float(spec["t_tip_c"]) - t_inf
             # Two prescribed temperatures drive the base flux independently.
@@ -401,6 +414,7 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             decay_x, decay_tip = math.exp(-m * x_eval / 2), math.exp(-m_len / 2)
             theta_x = (theta_b * decay_x) * decay_x
             theta_tip = (theta_b * decay_tip) * decay_tip
+            conductance = Fraction(flux_scale)
             q_fin = cap_m
             tip_loss = flux_scale
         else:
@@ -444,8 +458,6 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             q_fvm, tip_fvm = _passive_fin_fvm(length, m_len, axial, lateral, tip_loss, theta_b)
 
         q_max = h * perim * length * theta_b + (tip_loss * theta_b if tip_bc == "convective" else 0.0)
-        eta_fin = (q_fin / (h * perim * length * theta_b)) if abs(theta_b) > 1e-12 else 1.0
-        eps_fin = (q_fin / (h * ac * theta_b)) if abs(theta_b) > 1e-12 else 0.0
         rel_q_err = abs(q_fvm - q_fin) / max(abs(q_fin), 1e-9)
         scaled_q_err = rel_q_err
         if tip_bc == "prescribed_temp":
@@ -455,6 +467,10 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             scaled_q_err = abs(q_fvm - q_fin) / scale
             eta_fin = q_fin / (h * perim * length * theta_b) if theta_b else None
             eps_fin = q_fin / (h * ac * theta_b) if theta_b else None
+        else:
+            eta_fin, eta_status = _passive_fin_ratio(
+                theta_b, conductance, Fraction(h) * Fraction(perim) * Fraction(length))
+            eps_fin, eps_status = _passive_fin_ratio(theta_b, conductance, Fraction(h) * Fraction(ac))
         tip_err = abs(tip_fvm - theta_tip)
         passed = (scaled_q_err < 1e-3) and (tip_err < max(1e-3, 1e-3 * abs(theta_b)))
 
@@ -477,6 +493,21 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             if (not theta_b and "claimed_value" in spec
                     and spec.get("claimed_field") in ("fin_efficiency", "fin_effectiveness")):
                 res.update(passed=False, reason="Fin normalization is undefined at zero base excess temperature")
+                return res
+        else:
+            res["fin_normalization"] = {
+                "method": "passive_unit_drive",
+                "efficiency_reference": "lateral_h_P_L",
+                "effectiveness_reference": "bare_base_h_A",
+                "length_reference": "provided_length_m",
+                "zero_drive_policy": "undefined_heat_rate_ratio",
+                "efficiency_float_status": eta_status,
+                "effectiveness_float_status": eps_status,
+            }
+            field = spec.get("claimed_field")
+            if "claimed_value" in spec and field in ("fin_efficiency", "fin_effectiveness") and res[field] is None:
+                reason = ("undefined at zero base excess temperature" if not theta_b else "outside the float range")
+                res.update(passed=False, reason=f"Cannot verify claimed {field}: {reason}")
                 return res
         _check_claimed(res, spec)
         return res
