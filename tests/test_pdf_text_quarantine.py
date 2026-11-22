@@ -25,6 +25,14 @@ class PopplerControlByteTests(unittest.TestCase):
         self.assertEqual([row["text"] for row in words if row["source_line_id"] == 1],
                          ["\ufffd"] * 6)
 
+    def test_unicode_and_utf16_preserve_word_inventory_input_semantics(self):
+        clean = layout([["CAFÉ".encode()]]).decode()
+        for payload in (clean, clean.encode("utf-16")):
+            with self.subTest(type=type(payload)):
+                self.assertEqual(drawing._word_inventory(payload, 10)[0][0]["text"], "CAFÉ")
+        damaged = clean.replace("É", "\x1e")
+        self.assertEqual(drawing._word_inventory(damaged, 10)[0][0]["text"], "\ufffd")
+
     def test_control_inside_a_number_or_a_caption_cannot_join_its_fragments(self):
         for words in ([b"1\x1e2", b"S4"], [b"DETAIL", b"9", b"FORT\x1dY", b"WALL"]):
             with self.subTest(words=words):

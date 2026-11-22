@@ -461,24 +461,34 @@ def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None
 
 def _poppler_text_xml(payload):
     """Keep an unreadable PDF text line out of reference matching."""
-    illegal = rb"[\x00-\x08\x0b\x0c\x0e-\x1f]"
-    if not re.search(illegal, payload):
+    try:
         return ET.fromstring(payload)
-    # A control inside markup must remain a parse error; only text between
-    # native word tags is eligible for replacement.
-    def quarantine(match):
-        value = match.group(2)
-        if re.search(illegal, value):
-            return match.group(1) + b"\xef\xbf\xbd" + match.group(3)
-        return match.group()
-    word = rb"(<word(?:\s[^<>]*)?>)([^<>]*)(</word>)"
-    root = ET.fromstring(re.sub(word, quarantine, payload))
+    except ET.ParseError:
+        # Valid UTF-16, declared legacy encodings and callers supplying Unicode
+        # keep ElementTree's original input semantics.
+        raw = not isinstance(payload, str)
+        illegal = r"[\x00-\x08\x0b\x0c\x0e-\x1f]"
+        word = r"(<word(?:\s[^<>]*)?>)([^<>]*)(</word>)"
+        if raw:
+            illegal, word = illegal.encode("ascii"), word.encode("ascii")
+        if not re.search(illegal, payload):
+            raise
+        marker = b"&#xFFFD;" if raw else "&#xFFFD;"
+
+        def quarantine(match):
+            if re.search(illegal, match.group(2)):
+                return match.group(1) + marker + match.group(3)
+            return match.group()
+
+        # Word contents alone are eligible. Invalid markup remains a parse error.
+        root = ET.fromstring(re.sub(word, quarantine, payload))
     for line in root.findall(".//{*}line"):
         words = line.findall("{*}word")
         if any(item.text and "\ufffd" in item.text for item in words):
             for item in words:
                 item.text = "\ufffd"
     return root
+
 
 def _word_inventory(data,max_words):
     root=_poppler_text_xml(data)
