@@ -1759,6 +1759,8 @@ def _caption_face():
 
 def _caption_line_geometry(region, vectors):
     """Separate the baseline immediately above the caption rule from dimension notes."""
+    if not vectors or "caption_box" not in region:
+        return None
     a, b, c, d = region["caption_box"]
     diameter = region["ring"]["box"][2]-region["ring"]["box"][0]
     visible = []
