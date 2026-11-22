@@ -680,7 +680,7 @@ def _resolved_nonzero(poly, lo, hi):
     return (low > 0 or high < 0) and (high-low) * (1 << 45) <= min(abs(low), abs(high))
 
 
-def _regular_roots(poly, exclude=(), nonzero_witnesses=()):
+def _regular_roots(poly, exclude=(), nonzero_witnesses=(), precision_bits=56):
     """Isolate distinct positive roots in rational intervals; remove exact pole/zero factors."""
     p = _primitive_poly(poly)
     while p and not p[0]:
@@ -719,7 +719,7 @@ def _regular_roots(poly, exclude=(), nonzero_witnesses=()):
             if not _poly_value(p, hi):
                 roots.append((hi, hi))
                 continue
-            if ((hi-lo) * (1 << 56) <= hi and _poly_value(p, lo)
+            if ((hi-lo) * (1 << precision_bits) <= hi and _poly_value(p, lo)
                     and all(_resolved_nonzero(q, lo, hi) for q in nonzero_witnesses)):
                 roots.append((lo, hi))
                 continue
@@ -734,6 +734,48 @@ def _jw_parts(coeffs):
     """Return A(x), B(x) for P(jw) = A(w²) + jw B(w²)."""
     cs = [Fraction(str(c)) for c in reversed(coeffs)]
     return tuple(_trim_poly([(-1)**i * c for i, c in enumerate(cs[k::2])]) for k in (0, 1))
+
+
+def _ordered_gain_roots(unity, imag, real, mag_d):
+    """Merge real-axis and off-axis crossings in certified squared-frequency order."""
+    axis = _poly_gcd(unity, imag)
+    off_axis_exclude = _poly_product(mag_d, axis)
+    bits = 56
+    while True:
+        on = _regular_roots(axis, mag_d, (real,), precision_bits=bits)
+        off = _regular_roots(unity, off_axis_exclude, (imag, mag_d), precision_bits=bits)
+        events = sorted([(i, True) for i in on] + [(i, False) for i in off])
+        # The real-axis factors were removed from the off-axis polynomial. All
+        # these roots are distinct, so disjoint isolation intervals exist.
+        if all(a[0][1] < b[0][0] for a, b in zip(events, events[1:])):
+            return events
+        bits *= 2
+
+
+def _bode_phase_margin(real, imag, squared_frequency, frequency):
+    """Phase margin of real + j*sqrt(x)*imag, including unrenderable frequencies."""
+    scale = max(abs(real), abs(imag))
+    if frequency is not None:
+        re = float(real / scale)
+        scaled_imag = float(imag / scale)
+        im = scaled_imag * frequency
+        # Preserve the established evaluation when both components are well
+        # scaled. Subnormal intermediate values can lose their relative size.
+        if ((not real or abs(re) >= sys.float_info.min)
+                and (not imag or abs(im) >= sys.float_info.min
+                     and abs(scaled_imag) >= sys.float_info.min)
+                and math.isfinite(im)):
+            return math.degrees(math.atan2(im, re)) % 360 - 180
+
+    real_sq, imag_sq = real * real, squared_frequency * imag * imag
+    if real_sq >= imag_sq:
+        re, im = 1.0, float(_scaled_sqrt(imag_sq / real_sq))
+    else:
+        re, im = float(_scaled_sqrt(real_sq / imag_sq)), 1.0
+    angle = math.degrees(math.atan2(-im if imag < 0 else im, -re if real < 0 else re))
+    # A very small negative angle can round to -0.0. Its side of the phase
+    # wrap still comes from the sign of the exact imaginary component.
+    return angle + 180 if imag < 0 else angle - 180
 
 
 def _bode_margins(num: Sequence[float], den: Sequence[float]) -> Dict[str, Any]:
@@ -771,36 +813,49 @@ def _bode_margins(num: Sequence[float], den: Sequence[float]) -> Dict[str, Any]:
         x = center(interval)
         exponent = (x.numerator.bit_length() - x.denominator.bit_length()) // 2
         scaled = x / (Fraction(2) ** (2*exponent))
-        return math.ldexp(math.sqrt(float(scaled)), exponent)
+        try:
+            value = math.ldexp(math.sqrt(float(scaled)), exponent)
+        except OverflowError:
+            value = None
+        if value is None:
+            status = "above_float_range"
+        elif value == 0.0:
+            value, status = None, "below_float_range"
+        else:
+            status = "finite"
+        return value, {"status": status, "squared_interval": [_fraction_text(v) for v in interval]}
 
     def open_intervals(boundaries, include):
-        runs = []
+        runs, evidence = [], []
         previous = None
         for following in [*boundaries, None]:
             lo = previous[1] if previous else Fraction(0)
             x = (lo + following[0])/2 if following else lo+1
             if include(x):
-                runs.append([frequency(previous) if previous else 0.0,
-                             frequency(following) if following else None])
+                left = (frequency(previous) if previous else
+                        (0.0, {"status": "zero", "squared_interval": ["0", "0"]}))
+                right = (frequency(following) if following else
+                         (None, {"status": "unbounded", "squared_interval": None}))
+                runs.append([left[0], right[0]])
+                evidence.append([left[1], right[1]])
             previous = following
-        return runs
+        return runs, evidence
 
     gain, phase = [], []
+    gain_evidence, phase_evidence = [], []
     if unity:
         # On the real axis, exact unit gain is +1 or -1. Evaluating a nearby
         # midpoint can choose the opposite side of the phase wrap at +1.
-        axis = _poly_gcd(unity, imag)
-        for interval in _regular_roots(axis, mag_d, (real,)):
-            pm = -180.0 if _poly_value(real, center(interval)) > 0 else 0.0
-            gain.append({"w_rad_s": frequency(interval), "phase_margin_deg": pm})
-        for interval in _regular_roots(unity, _poly_product(mag_d, axis), (imag, mag_d)):
+        for interval, on_axis in _ordered_gain_roots(unity, imag, real, mag_d):
             x = center(interval)
-            w = frequency(interval)
-            re, im = _poly_value(real, x), _poly_value(imag, x)
-            scale = max(abs(re), abs(im))
-            angle = math.degrees(math.atan2(float(im/scale)*w, float(re/scale)))
-            gain.append({"w_rad_s": w, "phase_margin_deg": angle % 360 - 180})
-        gain.sort(key=lambda entry: entry["w_rad_s"])
+            w, metadata = frequency(interval)
+            re = _poly_value(real, x)
+            if on_axis:
+                margin = -180.0 if re > 0 else 0.0
+            else:
+                margin = _bode_phase_margin(re, _poly_value(imag, x), x, w)
+            gain.append({"w_rad_s": w, "phase_margin_deg": margin})
+            gain_evidence.append(metadata)
     for interval in _regular_roots(imag, undefined, (real, mag_d)):
         x = center(interval)
         re = _poly_value(real, x)
@@ -811,21 +866,39 @@ def _bode_margins(num: Sequence[float], den: Sequence[float]) -> Dict[str, Any]:
                 db = 20 * math.log1p(float(ratio-1)) / math.log(10)
             else:
                 db = 20 * (math.log10(ratio.numerator) - math.log10(ratio.denominator))
-            phase.append({"w_rad_s": frequency(interval), "gain_margin_db": db})
+            w, metadata = frequency(interval)
+            phase.append({"w_rad_s": w, "gain_margin_db": db})
+            phase_evidence.append(metadata)
 
     # Constant unity magnitude and real-axis continua have no unique crossover frequency.
-    gain_intervals = open_intervals(denominator_zeros, lambda _: True) if not unity else []
-    phase_intervals = (open_intervals(_regular_roots(undefined), lambda x: _poly_value(real, x) < 0)
-                       if not imag and mag_n else [])
-    gc = min(gain, key=lambda v: abs(v["phase_margin_deg"]), default={})
-    pc = min(phase, key=lambda v: abs(v["gain_margin_db"]), default={})
+    gain_intervals, gain_endpoints = (open_intervals(denominator_zeros, lambda _: True)
+                                     if not unity else ([], []))
+    phase_intervals, phase_endpoints = (open_intervals(_regular_roots(undefined), lambda x: _poly_value(real, x) < 0)
+                                       if not imag and mag_n else ([], []))
+    selected_gain = min(range(len(gain)), key=lambda i: abs(gain[i]["phase_margin_deg"]), default=None)
+    selected_phase = min(range(len(phase)), key=lambda i: abs(phase[i]["gain_margin_db"]), default=None)
+    gc = gain[selected_gain] if selected_gain is not None else {}
+    pc = phase[selected_phase] if selected_phase is not None else {}
+    pole_frequencies = [frequency(i) for i in poles]
+    hole_frequencies = [frequency(i) for i in removable]
     return {"w_gc_rad_s": gc.get("w_rad_s"), "phase_margin_deg": gc.get("phase_margin_deg"),
             "w_pc_rad_s": pc.get("w_rad_s"), "gain_margin_db": pc.get("gain_margin_db"),
             "gain_crossovers": gain, "phase_crossovers": phase,
             "unity_gain_intervals_rad_s": gain_intervals,
             "negative_real_intervals_rad_s": phase_intervals,
-            "imaginary_axis_poles_rad_s": [frequency(i) for i in poles],
-            "removable_holes_rad_s": [frequency(i) for i in removable]}
+            "imaginary_axis_poles_rad_s": [w for w, _ in pole_frequencies],
+            "removable_holes_rad_s": [w for w, _ in hole_frequencies],
+            "bode_frequency_evidence": {
+                "coordinate": "omega_squared_rad2_per_s2",
+                "rendering_basis": "isolating_interval_midpoint",
+                "selected_gain_index": selected_gain,
+                "selected_phase_index": selected_phase,
+                "gain_crossovers": gain_evidence,
+                "phase_crossovers": phase_evidence,
+                "unity_gain_intervals_rad_s": gain_endpoints,
+                "negative_real_intervals_rad_s": phase_endpoints,
+                "imaginary_axis_poles_rad_s": [meta for _, meta in pole_frequencies],
+                "removable_holes_rad_s": [meta for _, meta in hole_frequencies]}}
 
 
 def _fraction_text(value):

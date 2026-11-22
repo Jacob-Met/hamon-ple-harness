@@ -1,0 +1,424 @@
+{
+  "schema": "ple.control.bode-frequency-range-v1",
+  "source_base": "17a68fe70859fbdf5b807db9db7d0f286bfb1d34",
+  "source_base_tree": "2cd1aac955ee60bf4fbcc0e671f3d1452913b676",
+  "source_solver_sha256": "03b5a98c97a4f0e83f9d7038fc659876469dce9049b45a8a20936703e5c60a9a",
+  "candidate_solver_sha256": "7bb044f6fbcd1c2cac363f2c09524ee7bd5b47b146a4052bf7a4836323e59081",
+  "independent_receiver_sha256": "fa76d3c710a1ef0098960f647c6e572308b7740adc0494d318dd1ebc9427c270",
+  "registered_receiver_sha256": "dc19cd95cd40ac51dae59c1568812736a5d4fe5e82eb96f90cb973ed593dde1a",
+  "question": "Can Bode evidence and exact control certificates remain available when an isolated positive frequency cannot be rendered as a positive finite float, without losing its margin, physical order, or distinction from zero, no crossing, and infinity?",
+  "input_semantics": [
+    "Preserve the existing Bode convention: each transported coefficient is interpreted through Fraction(str(c)). Construct each fixture coefficient exactly in Decimal before float conversion, avoiding extra float multiplication rounding.",
+    "The exact transfer stability certificates keep their separately documented accepted-binary64 rational interpretation. This repair does not silently unify those two existing conventions.",
+    "The frequency coordinate is x=omega^2 in rad^2/s^2. Existing exact rational polynomial construction, pole/hole exclusions, and positive-root isolation remain the basis of Bode event detection.",
+    "All eleven fixture coefficient arrays contain finite floats. Nonzero exact denominator poles remain excluded from the original transfer response, including removable holes.",
+    "The identically zero formal feedback fixture still refuses overall verification but must retain its well-defined original open-loop Bode evidence."
+  ],
+  "sidecar_contract": {
+    "name": "bode_frequency_evidence",
+    "coordinate": "omega_squared_rad2_per_s2",
+    "rendering_basis": "isolating_interval_midpoint",
+    "selected_gain_index": "Integer index into gain_crossovers, or null when no isolated gain crossing exists.",
+    "selected_phase_index": "Integer index into phase_crossovers, or null when no isolated negative-real crossing exists.",
+    "aligned_collections": [
+      "gain_crossovers",
+      "phase_crossovers",
+      "unity_gain_intervals_rad_s",
+      "negative_real_intervals_rad_s",
+      "imaginary_axis_poles_rad_s",
+      "removable_holes_rad_s"
+    ],
+    "positive_event": {
+      "squared_interval": "Two exact positive rational strings [lo,hi] enclosing the relevant positive root in x.",
+      "status": [
+        "finite",
+        "below_float_range",
+        "above_float_range"
+      ],
+      "finite": "The midpoint frequency has a finite positive float rendering, including positive subnormals.",
+      "below_float_range": "The midpoint frequency would round to zero; legacy frequency output is null.",
+      "above_float_range": "The midpoint frequency conversion overflows; legacy frequency output is null."
+    },
+    "origin_endpoint": {
+      "status": "zero",
+      "squared_interval": [
+        "0",
+        "0"
+      ],
+      "legacy_value": 0
+    },
+    "unbounded_endpoint": {
+      "status": "unbounded",
+      "squared_interval": null,
+      "legacy_value": null
+    },
+    "intervals": "Each continuum entry has two endpoint records aligned with its two legacy endpoints. A finite but unrenderable endpoint has positive rational bounds, so it is distinct from a true unbounded endpoint despite both legacy values being null.",
+    "selection": "A selected unrenderable frequency retains its valid event index and finite phase/gain margin. An absent isolated crossing has a null selected index and null scalar frequency/margin.",
+    "order": "Isolated gain events from separately isolated real-axis and off-axis factors are merged only when consecutive exact intervals are disjoint and physically ordered. Refine overlapping intervals; never sort null or rounded-equal floats.",
+    "range_scope": "Statuses describe midpoint rendering. Exact isolating bounds are retained. This is not a claim that every root near a binary64 conversion boundary has a separately certified above/below classification."
+  },
+  "phase_algorithm": [
+    "Keep the existing phase formula when the rendered frequency is positive and finite, and its nonzero normalized components and product are finite and normal.",
+    "Otherwise write the relevant complex quantity as r+j*sqrt(x)*i. Compare r^2 and x*i^2 exactly and normalize by the dominant component.",
+    "If r^2 >= x*i^2, use signed components (1,sqrt(x*i^2/r^2)); otherwise use (sqrt(r^2/(x*i^2)),1). Apply original signs and atan2.",
+    "Compute the square root of the bounded rational ratio through the existing scaled square-root helper before float conversion, avoiding underflow of a square whose root is renderable.",
+    "For a nonzero exact imaginary component, use its sign to preserve the phase-wrap side even when atan2 rounds to signed zero. Exact positive-real unity points retain margin -180 degrees; exact negative-real unity points retain zero."
+  ],
+  "cases": [
+    {
+      "name": "one-pole/high",
+      "family": "5B/(4As+3B)",
+      "A": "1e-140",
+      "B": "1e200",
+      "gain_x": [
+        "1e680"
+      ],
+      "phase_margin_deg": [
+        "180-degrees(atan2(4,3))"
+      ],
+      "gain_status": [
+        "above_float_range"
+      ],
+      "selected_gain": 0,
+      "phase_x": [],
+      "dc": "5/3"
+    },
+    {
+      "name": "one-pole/low",
+      "family": "5B/(4As+3B)",
+      "A": "1e200",
+      "B": "1e-140",
+      "gain_x": [
+        "1e-680"
+      ],
+      "phase_margin_deg": [
+        "180-degrees(atan2(4,3))"
+      ],
+      "gain_status": [
+        "below_float_range"
+      ],
+      "selected_gain": 0,
+      "phase_x": [],
+      "dc": "5/3"
+    },
+    {
+      "name": "one-pole/unit",
+      "family": "5B/(4As+3B)",
+      "A": "1",
+      "B": "1",
+      "gain_x": [
+        "1"
+      ],
+      "phase_margin_deg": [
+        "180-degrees(atan2(4,3))"
+      ],
+      "gain_status": [
+        "finite"
+      ],
+      "selected_gain": 0,
+      "phase_x": [],
+      "dc": "5/3"
+    },
+    {
+      "name": "phase/high",
+      "family": "s(As-B)/(As+B)",
+      "A": "1e-140",
+      "B": "1e200",
+      "gain_x": [
+        "1"
+      ],
+      "phase_margin_deg": [
+        "90"
+      ],
+      "gain_status": [
+        "finite"
+      ],
+      "selected_gain": 0,
+      "phase_x": [
+        "1e680"
+      ],
+      "gain_margin_db": [
+        "-6800"
+      ],
+      "phase_status": [
+        "above_float_range"
+      ],
+      "selected_phase": 0,
+      "dc": "0"
+    },
+    {
+      "name": "phase/low",
+      "family": "s(As-B)/(As+B)",
+      "A": "1e200",
+      "B": "1e-140",
+      "gain_x": [
+        "1"
+      ],
+      "phase_margin_deg": [
+        "-90"
+      ],
+      "gain_status": [
+        "finite"
+      ],
+      "selected_gain": 0,
+      "phase_x": [
+        "1e-680"
+      ],
+      "gain_margin_db": [
+        "6800"
+      ],
+      "phase_status": [
+        "below_float_range"
+      ],
+      "selected_phase": 0,
+      "dc": "0"
+    },
+    {
+      "name": "phase/unit",
+      "family": "s(As-B)/(As+B)",
+      "A": "1",
+      "B": "1",
+      "gain_x": [
+        "1"
+      ],
+      "phase_margin_deg": [
+        "0"
+      ],
+      "gain_status": [
+        "finite"
+      ],
+      "selected_gain": 0,
+      "phase_x": [
+        "1"
+      ],
+      "gain_margin_db": [
+        "0"
+      ],
+      "phase_status": [
+        "finite"
+      ],
+      "selected_phase": 0,
+      "dc": "0"
+    },
+    {
+      "name": "resonance/high",
+      "family": "(B/2)/(As^2+B)",
+      "A": "1e-320",
+      "B": "1e308",
+      "gain_x": [
+        "1e628/2",
+        "3e628/2"
+      ],
+      "phase_margin_deg": [
+        "-180",
+        "0"
+      ],
+      "gain_status": [
+        "above_float_range",
+        "above_float_range"
+      ],
+      "selected_gain": 1,
+      "phase_x": [],
+      "pole_x": [
+        "1e628"
+      ],
+      "negative_x_intervals": [
+        [
+          "1e628",
+          null
+        ]
+      ],
+      "dc": "1/2"
+    },
+    {
+      "name": "resonance/subnormal",
+      "family": "(B/2)/(As^2+B)",
+      "A": "1e308",
+      "B": "1e-320",
+      "gain_x": [
+        "1e-628/2",
+        "3e-628/2"
+      ],
+      "phase_margin_deg": [
+        "-180",
+        "0"
+      ],
+      "gain_status": [
+        "finite",
+        "finite"
+      ],
+      "selected_gain": 1,
+      "phase_x": [],
+      "pole_x": [
+        "1e-628"
+      ],
+      "negative_x_intervals": [
+        [
+          "1e-628",
+          null
+        ]
+      ],
+      "dc": "1/2"
+    },
+    {
+      "name": "removable/undefined-feedback",
+      "family": "-D/D, D=1e-320*s^2+1e308",
+      "gain_x": [],
+      "phase_x": [],
+      "pole_x": [],
+      "hole_x": [
+        "1e628"
+      ],
+      "unity_x_intervals": [
+        [
+          "0",
+          "1e628"
+        ],
+        [
+          "1e628",
+          null
+        ]
+      ],
+      "negative_x_intervals": [
+        [
+          "0",
+          "1e628"
+        ],
+        [
+          "1e628",
+          null
+        ]
+      ],
+      "dc": "-1",
+      "defined_feedback": false
+    },
+    {
+      "name": "constant/absent",
+      "family": "2(s+1)/(s+1)",
+      "gain_x": [],
+      "phase_x": [],
+      "pole_x": [],
+      "hole_x": [],
+      "dc": "2"
+    },
+    {
+      "name": "phase-wrap/approach-from-below",
+      "family": "-s^2(B-As)/(B+As)",
+      "A": "1e-140",
+      "B": "1e200",
+      "num": [
+        "A",
+        "-B",
+        "0",
+        "0"
+      ],
+      "den": [
+        "A",
+        "B"
+      ],
+      "gain_x": [
+        "1"
+      ],
+      "phase_margin_deg": [
+        "180"
+      ],
+      "gain_status": [
+        "finite"
+      ],
+      "selected_gain": 0,
+      "phase_x": [],
+      "dc": "0",
+      "basis": "|G(jw)|=w^2. At w=1, G=(B-iA)/(B+iA); phase=-2atan(A/B)<0 and correctly rounded margin is +180, preserving the one-sided limit."
+    }
+  ],
+  "defaults": {
+    "defined_feedback": true,
+    "selected_phase": null,
+    "pole_x": [],
+    "hole_x": [],
+    "unity_x_intervals": [],
+    "negative_x_intervals": []
+  },
+  "system_count": 11,
+  "unclaimed_route_count": 11,
+  "unclaimed_approvals": 10,
+  "unclaimed_refusals": 1,
+  "claim_count": 34,
+  "expected_claim_approvals": 12,
+  "expected_claim_refusals": 22,
+  "total_route_calls": 45,
+  "claims": {
+    "zero_frequency": "For every system, claim w_gc_rad_s=0 and w_pc_rad_s=0 with atol=0 and rtol=0. All 22 must refuse, including genuinely positive subnormals and absent/unrenderable frequencies.",
+    "truthful_phase_margins": "Claim the selected phase_margin_deg for the three one-pole, three phase, two resonance, and signed-wrap systems: nine approvals.",
+    "truthful_gain_margins": "Claim gain_margin_db for the three phase systems: three approvals.",
+    "positive_claim_tolerance": "atol=1e-10, rtol=0; additionally inspect margin values using abs_tol=1e-10 and rel_tol=1e-13.",
+    "call_completion": "All 45 calls must complete and be recorded before the aggregate assertion. Preserve exceptions and decision outcomes, including partial stock evidence."
+  },
+  "oracle": [
+    "Derive every squared frequency from the independent rational transfer families: (B/A)^2, 1, B/(2A), 3B/(2A), or B/A. Do not obtain expected roots from the producer's polynomial isolator.",
+    "Require exact rational interval containment and disjoint order of consecutive isolated roots. Check every sidecar collection, selected index, matching scalar, endpoint sentinel, pole/hole distinction, and strict JSON serialization.",
+    "Compute a 100-digit Decimal square root of the exact rational x, convert once to binary64, and allow at most one math.ulp(reference) for a finite positive renderer. This includes the positive 1e-314 subnormal pole; no relative tolerance may hide a zero.",
+    "A positive event outside float range must render null with its exact interval and correct midpoint-render status. An absent scalar has a null selected index; a present unrenderable scalar has an integer selected index and its finite margin.",
+    "The independent receiver checks interval containment and disjoint ordering, not a universal maximum interval width. Representative real Pi fixtures additionally require the existing 2^-56 relative interval-width bound.",
+    "Twenty-four actual registered Pi calls cover six fixtures: high gain, tiny gain, high phase, high pole, negative-unity hole, and signed phase wrap. Six are unclaimed, twelve make exact-zero frequency claims, and six make truthful margin claims. Both unittest and pytest exercise them.",
+    "Retain all inherited exact transfer 20/80, state-space rank 49/196, Lyapunov 32/128, characteristic diagnostics 17/68, and all other maintained CI gates."
+  ],
+  "legacy_projection_fields": [
+    "w_gc_rad_s",
+    "phase_margin_deg",
+    "w_pc_rad_s",
+    "gain_margin_db",
+    "gain_crossovers",
+    "phase_crossovers",
+    "unity_gain_intervals_rad_s",
+    "negative_real_intervals_rad_s",
+    "imaginary_axis_poles_rad_s",
+    "removable_holes_rad_s",
+    "dc_gain",
+    "dc_gain_status"
+  ],
+  "paired_projection_rule": {
+    "required_unchanged_new_controls": [
+      "one-pole/unit",
+      "phase/unit",
+      "resonance/subnormal",
+      "constant/absent"
+    ],
+    "required_unchanged_inherited": "All 19 valid transfer-course Bode/DC payloads and the invalid empty payload from the original 20-system transfer course must retain their paired digests.",
+    "anticipated_repairs": [
+      "one-pole/low",
+      "phase/low",
+      "phase-wrap/approach-from-below"
+    ],
+    "exceptions": "Retain every stock abort. Do not claim paired output equivalence where stock never returned. Investigate any other unexpected legacy-projection change before integration.",
+    "aggregate": "Record per-case field count, digest, and ordered aggregate digest. A different aggregate caused by repaired fields or previously absent outputs is not by itself a regression."
+  },
+  "decision": "Require 11 complete systems, 45 completed route calls, 34 correct claims with 12 approvals and 22 refusals, 10 passing unclaimed and one explicit undefined-feedback refusal, zero solver/JSON errors, all required legacy-projection equalities, real Pi success, and every maintained CI gate. No case, coefficient, tolerance, or expectation changes after first execution.",
+  "execution": "Native source-only preparation, followed by one frozen matched stock/candidate pair in the maintained repository PR workflow as the first numerical execution. Tests/protocol identical between branches, only solver differs. Preserve original logs and failures. No organizer, dev-set, scored, paid-model, or alternate test dispatch.",
+  "integration": "Base 17a68fe70859fbdf5b807db9db7d0f286bfb1d34 combines the qualified TF repair with concurrent PR166 AC changes. This substantive Bode candidate's full maintained CI qualifies that combined base. Compare actual CI and actual landed trees separately; concurrent merges are not assumed absent.",
+  "preflight_history": "Before any execution, the 10-system draft gained one independently derived signed-zero phase-wrap fixture. The registered receiver also gained explicit claim tolerances. Earlier source drafts remain preserved; the final frozen inventory is the 11-system, 45-call and 24-Pi-call course.",
+  "limitations": [
+    "Exact rational x enclosures do not make displayed frequencies or trigonometric/logarithmic margins exact. The status explicitly identifies midpoint rendering.",
+    "There is no general claim of correct rounding at every binary64 boundary, physical feedback well-posedness, uniform runtime, or benchmark-score improvement.",
+    "The distinct Bode decimal-string and exact stability accepted-binary64 conventions remain explicit and unchanged.",
+    "The source-only lower-bound argument for positive true-axis poles is not used as a universal implementation gate; the frozen course uses a representable subnormal pole rather than inventing a zero-rounded pole."
+  ],
+  "references": [
+    {
+      "url": "https://docs.python.org/3.12/library/math.html",
+      "sections": [
+        "ldexp",
+        "atan2",
+        "ulp",
+        "floating remainder and signed-zero behavior"
+      ]
+    },
+    {
+      "url": "https://docs.python.org/3.12/library/sys.html#sys.float_info",
+      "sections": [
+        "float_info.min is the smallest positive normalized float",
+        "math.ulp(0.0) identifies the smallest positive subnormal"
+      ]
+    }
+  ]
+}

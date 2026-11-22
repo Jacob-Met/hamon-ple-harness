@@ -136,6 +136,18 @@ TRANSFER_CASES = [
 ]
 
 
+# Decimal literals correspond to the Bode solver's existing decimal-string
+# interpretation. Use them directly so precomputing 3B or B/2 cannot round them.
+BODE_RANGE_CASES = [
+    ("high-gain", [5e200], [4e-140, 3e200], 126.86989764584402),
+    ("tiny-gain", [5e-140], [4e200, 3e-140], 126.86989764584402),
+    ("high-phase", [1e-140, -1e200, 0], [1e-140, 1e200], 90.0),
+    ("high-pole", [5e307], [1e-320, 0, 1e308], 0.0),
+    ("negative-unity-hole", [-1e-320, 0, -1e308], [1e-320, 0, 1e308], None),
+    ("signed-zero-wrap", [1e-140, -1e200, 0, 0], [1e-140, 1e200], 180.0),
+]
+
+
 @pytest.fixture(scope="module")
 def routed(tmp_path_factory):
     workdir = tmp_path_factory.mktemp("registered-engineering")
@@ -208,6 +220,19 @@ def routed(tmp_path_factory):
             for claim in (False, True):
                 calls.append({"id": f"{case}-{field}-{claim}", "mode": "control",
                               "spec": {**spec, "claimed_field": field, "claimed_value": claim}})
+    for case, num, den, pm in BODE_RANGE_CASES:
+        spec = {"mode": "transfer_function", "num": num, "den": den}
+        calls.append({"id": "bode-" + case, "mode": "control", "spec": spec})
+        claims = [("w_gc_rad_s", 0), ("w_pc_rad_s", 0)]
+        if pm is not None:
+            claims.append(("phase_margin_deg", pm))
+        if case == "high-phase":
+            claims.append(("gain_margin_db", -6800))
+        for field, value in claims:
+            atol = 0 if field in ("w_gc_rad_s", "w_pc_rad_s") else 1e-10
+            calls.append({"id": f"bode-{case}-{field}", "mode": "control",
+                          "spec": {**spec, "claimed_field": field, "claimed_value": value,
+                                   "atol": atol, "rtol": 0}})
     source = r"""
 import registerTaskTools, { PLE_DOMAIN_TOOL_NAMES } from './task-tools.ts';
 const tools = new Map();
@@ -511,6 +536,102 @@ def test_registered_transfer_hurwitz(routed, case, den, num, open_counts, closed
                 assert check["actual"] == float(details[field]) and check["within_tolerance"] is (claim is details[field])
 
 
+def check_pi_frequency(metadata, status, expected_x):
+    assert metadata["status"] == status
+    if expected_x is None:
+        assert status == "unbounded" and metadata["squared_interval"] is None
+        return
+    bounds = metadata["squared_interval"]
+    assert isinstance(bounds, list) and len(bounds) == 2 and all(type(x) is str for x in bounds)
+    lo, hi = (Fraction(x) for x in bounds)
+    if status == "zero":
+        assert lo == hi == expected_x == 0
+    else:
+        assert 0 < lo <= expected_x <= hi and (hi - lo) * 2**56 <= hi
+
+
+@pytest.mark.parametrize("case,num,den,pm", BODE_RANGE_CASES, ids=[row[0] for row in BODE_RANGE_CASES])
+def test_registered_bode_frequency_range(routed, case, num, den, pm):
+    reply = routed["bode-" + case]
+    assert reply["completed"], reply
+    details = reply["details"]
+    assert details["mode"] == "transfer_function" and details["domain"] == "control"
+    assert details["passed"] is (case != "negative-unity-hole")
+    evidence = details["bode_frequency_evidence"]
+    assert evidence["coordinate"] == "omega_squared_rad2_per_s2"
+    assert evidence["rendering_basis"] == "isolating_interval_midpoint"
+    gain_index = {"high-gain": 0, "tiny-gain": 0, "high-phase": 0, "high-pole": 1,
+                  "negative-unity-hole": None, "signed-zero-wrap": 0}[case]
+    phase_index = 0 if case == "high-phase" else None
+    assert evidence["selected_gain_index"] == gain_index and evidence["selected_phase_index"] == phase_index
+    for group in ("gain_crossovers", "phase_crossovers", "unity_gain_intervals_rad_s",
+                  "negative_real_intervals_rad_s", "imaginary_axis_poles_rad_s", "removable_holes_rad_s"):
+        assert len(details[group]) == len(evidence[group])
+
+    # Squared frequencies here are derived from the decimal wire coefficients.
+    pole_x = 10**628
+    gain_xs = {"high-gain": [10**680], "tiny-gain": [Fraction(1, 10**680)], "high-phase": [1],
+               "high-pole": [Fraction(pole_x, 2), Fraction(3 * pole_x, 2)],
+               "negative-unity-hole": [], "signed-zero-wrap": [1]}[case]
+    status = {"high-gain": "above_float_range", "tiny-gain": "below_float_range",
+              "high-phase": "finite", "high-pole": "above_float_range", "signed-zero-wrap": "finite"}.get(case)
+    assert len(evidence["gain_crossovers"]) == len(gain_xs)
+    for i, x in enumerate(gain_xs):
+        check_pi_frequency(evidence["gain_crossovers"][i], status, x)
+        assert details["gain_crossovers"][i]["w_rad_s"] == (1.0 if case in ("high-phase", "signed-zero-wrap") else None)
+    assert details["w_gc_rad_s"] == (1.0 if case in ("high-phase", "signed-zero-wrap") else None)
+    assert details["w_pc_rad_s"] is None
+    assert len(evidence["phase_crossovers"]) == int(case == "high-phase")
+    if pm is not None:
+        assert math.isclose(details["phase_margin_deg"], pm, rel_tol=1e-12, abs_tol=0)
+        assert details["phase_margin_deg"] == details["gain_crossovers"][gain_index]["phase_margin_deg"]
+    else:
+        assert details["phase_margin_deg"] is None
+    if case == "high-phase":
+        check_pi_frequency(evidence["phase_crossovers"][0], "above_float_range", 10**680)
+        assert details["phase_crossovers"][0]["w_rad_s"] is None
+        assert math.isclose(details["gain_margin_db"], -6800, rel_tol=1e-12)
+    else:
+        assert details["gain_margin_db"] is None
+
+    if case == "signed-zero-wrap":
+        # At w=1 the exact imaginary part of (B-iA)/(B+iA) is negative.
+        # Its angle rounds to -0.0, so the wrapped margin must round to +180.
+        assert details["dc_gain"] == 0.0
+        assert details["phase_margin_deg"] == 180.0
+        assert details["phase_crossovers"] == [] and details["negative_real_intervals_rad_s"] == []
+    if case == "high-pole":
+        assert [v["phase_margin_deg"] for v in details["gain_crossovers"]] == [-180, 0]
+        assert details["imaginary_axis_poles_rad_s"] == [None] and details["removable_holes_rad_s"] == []
+        check_pi_frequency(evidence["imaginary_axis_poles_rad_s"][0], "above_float_range", pole_x)
+        assert details["negative_real_intervals_rad_s"] == [[None, None]]
+        left, right = evidence["negative_real_intervals_rad_s"][0]
+        check_pi_frequency(left, "above_float_range", pole_x)
+        check_pi_frequency(right, "unbounded", None)
+    if case == "negative-unity-hole":
+        assert details["closed_loop_hurwitz_stable"] is None
+        assert details["removable_holes_rad_s"] == [None] and details["imaginary_axis_poles_rad_s"] == []
+        check_pi_frequency(evidence["removable_holes_rad_s"][0], "above_float_range", pole_x)
+        for key in ("unity_gain_intervals_rad_s", "negative_real_intervals_rad_s"):
+            assert details[key] == [[0.0, None], [None, None]]
+            first, second = evidence[key]
+            check_pi_frequency(first[0], "zero", 0)
+            check_pi_frequency(first[1], "above_float_range", pole_x)
+            check_pi_frequency(second[0], "above_float_range", pole_x)
+            check_pi_frequency(second[1], "unbounded", None)
+
+    for field in ("w_gc_rad_s", "w_pc_rad_s"):
+        claimed = routed[f"bode-{case}-{field}"]
+        assert claimed["completed"] and claimed["details"]["passed"] is False, claimed
+        assert claimed["details"]["reason"]
+    for field, truth in (("phase_margin_deg", pm), ("gain_margin_db", -6800 if case == "high-phase" else None)):
+        if truth is not None:
+            claimed = routed[f"bode-{case}-{field}"]
+            assert claimed["completed"] and claimed["details"]["passed"] is True, claimed
+            check = claimed["details"]["claim_check"]
+            assert check["field"] == field and check["claimed"] == truth and check["within_tolerance"] is True
+
+
 class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -560,3 +681,8 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
         for args in TRANSFER_CASES:
             with self.subTest(case=args[0]):
                 test_registered_transfer_hurwitz(self.routed_data, *args)
+
+    def test_registered_bode_frequency_range(self):
+        for args in BODE_RANGE_CASES:
+            with self.subTest(case=args[0]):
+                test_registered_bode_frequency_range(self.routed_data, *args)
