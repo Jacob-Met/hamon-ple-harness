@@ -472,24 +472,40 @@ def _constant_top_rectangle(width, height, x, y, top):
             return (2.0 / math.pi) * math.atan2(2.0 * math.exp(-p) * sine, -math.expm1(-2.0 * p))
 
         aspect, d = height / width, depth / width
-        exact = strip(d) - strip(aspect + y / width)
-        for k in range(1, 8):
-            exact += strip(2 * k * aspect + d) - strip(2 * k * aspect + aspect + y / width)
+        if y <= height * 0.5:
+            # Here the odd-mode series decays by at least exp(-pi/2)
+            # per mode. Retain y itself even if height-y rounds to height.
+            exact = 0.0
+            for n in range(1, 33, 2):
+                k = n * math.pi
+                ratio = math.exp(-k * d) * -math.expm1(-2 * k * (y / width)) / -math.expm1(-2 * k * aspect)
+                exact += 4.0 * math.sin(k * (near / width)) * ratio / k
+        else:
+            exact = strip(d) - strip(aspect + y / width)
+            for k in range(1, 8):
+                exact += strip(2 * k * aspect + d) - strip(2 * k * aspect + aspect + y / width)
     else:
         # Subtract the two cold-side corrections from the linear y/height
         # profile. This orientation converges even on an arbitrarily wide plate.
         z, d = y / height, depth / height
-        sine = math.sin(math.pi * min(z, d))
-        one_plus_cos = 2.0 * math.sin(0.5 * math.pi * d) ** 2
-        def side(z_distance):
-            p = math.pi * z_distance
-            r = math.exp(-p)
-            return (2.0 / math.pi) * math.atan2(r * sine, -math.expm1(-p) + r * one_plus_cos)
-
-        left, right, aspect = near / height, (width - near) / height, width / height
-        exact = z - side(left) - side(right)
+        left, aspect = near / height, width / height
+        p = math.pi * left
+        r = math.exp(-p)
+        # Write z minus the nearest-side angle as one angle; group the
+        # remaining images in opposite-sign pairs that vanish at x=0.
+        exact = (2.0 / math.pi) * math.atan2(
+            -math.expm1(-p) * math.sin(0.5 * math.pi * z),
+            (1.0 + r) * math.sin(0.5 * math.pi * d),
+        )
+        sine, cosine = math.sin(math.pi * min(z, d)), math.cos(math.pi * z)
         for k in range(1, 16):
-            exact += (-1 if k % 2 == 0 else 1) * (side(k * aspect + left) + side(k * aspect + right))
+            # (width-near)/height stays well defined when aspect and left overflow.
+            a = (width - near) / height if k == 1 else (k - 1) * aspect + (width - near) / height
+            ra = math.exp(-math.pi * a)
+            rb = ra * math.exp(-2.0 * p)
+            pair = (2.0 / math.pi) * math.atan2(
+                ra * -math.expm1(-2.0 * p) * sine, 1.0 + (ra + rb) * cosine + ra * rb)
+            exact += pair if k % 2 == 0 else -pair
 
     # In short-side units, boundary influence beyond 16 widths is O(exp(-16*pi)).
     # Keep the nearest hot corners and cold wall. On a wide plate fold the
@@ -527,12 +543,35 @@ def _constant_top_rectangle(width, height, x, y, top):
             break
     else:
         raise ValueError("2D Laplace constant-edge SOR did not converge")
+    cold_fraction = 1.0
+    if height / scale <= 16.0 and y / scale < dy:
+        # Interpolate the full field from its zero trace, keeping the input
+        # distance to the bottom instead of subtracting two nearly equal y's.
+        cold_fraction = (y / scale) / dy
+        qd = h - dy
     fx, fy = qx / dx, qd / dy
     i, j = min(int(fx), nx - 1), min(int(fy), ny - 1)
     tx, ty = fx - i, fy - j
-    residual = ((1 - tx) * ((1 - ty) * grid[i][j] + ty * grid[i][j+1])
-                + tx * ((1 - ty) * grid[i+1][j] + ty * grid[i+1][j+1]))
-    return top * exact, top * (wedge(qx, qd) + residual)
+    right = (1 - ty) * grid[i+1][j] + ty * grid[i+1][j+1]
+    if i == 0:
+        # Use the exact cold sidewall and the angle-difference identity to
+        # retain temperatures proportional to very small x.
+        wedge_delta = (2.0 / math.pi) * (
+            math.atan2(qx, qd) - math.atan2(qd*qx, w*(w-qx) + qd*qd))
+        numerical = wedge_delta + tx * (right + wedge(0.0, qd))
+        # Recover the smooth residual's one-sided wall gradient using the
+        # two interior columns and its known sidewall value.
+        second = (1 - ty) * grid[2][j] + ty * grid[2][j+1]
+        numerical += 0.5 * tx * (tx - 1.0) * (second - 2.0 * right - wedge(0.0, qd))
+        if cold_fraction < 1.0:
+            # Both adjacent traces vanish. Approach the bilinear x*y limit
+            # continuously as the query tends to their intersection.
+            bilinear = tx * (wedge(dx, qd) + right)
+            numerical = cold_fraction * numerical + (1 - cold_fraction) * bilinear
+    else:
+        left = (1 - ty) * grid[i][j] + ty * grid[i][j+1]
+        numerical = wedge(qx, qd) + (1 - tx)*left + tx*right
+    return top * exact, top * (cold_fraction * numerical)
 
 
 def _sine_laplace_rectangle(width, height, x, y, top):

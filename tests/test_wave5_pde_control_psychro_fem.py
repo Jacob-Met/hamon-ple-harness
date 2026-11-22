@@ -105,6 +105,19 @@ class TestWave5PDEControlPsychroFEM(unittest.TestCase):
         self.assertFalse(w5.verify_wave5_engineering(dict(
             spec, claimed_field="t_fdm_sor", claimed_value=0.))["passed"])
 
+    def test_constant_edge_retains_tiny_distances_to_cold_walls(self):
+        # Ordinary odd modes and their derivatives at a square's cold edges.
+        # Multiplication by a large finite boundary temperature exposes lost y/x.
+        for x, y, top, expected in ((.5, 1e-17, 1e20, 345.7137573420231),
+                                    (1e-17, .5, 1e20, 834.6268416740731),
+                                    (1e-17, 1e-17, 1e34, 1.0942198076132388)):
+            result = w5.verify_wave5_engineering(dict(
+                mode="laplace_2d_rect", top_profile="constant", width_m=1., height_m=1.,
+                x_eval_m=x, y_eval_m=y, t_top=top))
+            self.assertTrue(result["passed"])
+            self.assertAlmostEqual(result["t_exact"], expected, delta=1e-11*expected)
+            self.assertAlmostEqual(result["t_fdm_sor"], expected, delta=.01*expected)
+
     def test_rectangular_sine_boundary_layer_across_aspect_and_units(self):
         for height, width, temperature in ((40, 1., 100.), (230, 1., -50.),
                                             (1000, 1e100, 25.), (1000, 1e-100, 25.)):
