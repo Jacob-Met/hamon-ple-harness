@@ -955,7 +955,7 @@ def _dew_point_from_pw(pw_pa: float) -> float:
     return 0.5 * (lo + hi)
 
 
-def _w_from_twb(t_db_c: float, t_wb_c: float, p_atm_pa: float, *, ice_below_c: float = 0.0) -> float:
+def _signed_w_from_twb(t_db_c: float, t_wb_c: float, p_atm_pa: float, *, ice_below_c: float = 0.0) -> float:
     pws_wb = _pws_ashrae_pa(t_wb_c, ice_below_c=ice_below_c)
     ws_wb = 0.621945 * pws_wb / (p_atm_pa - pws_wb)
     if t_wb_c >= 0.0:
@@ -964,14 +964,19 @@ def _w_from_twb(t_db_c: float, t_wb_c: float, p_atm_pa: float, *, ice_below_c: f
     else:
         num = (2830.0 - 0.24 * t_wb_c) * ws_wb - 1.006 * (t_db_c - t_wb_c)
         den = 2830.0 + 1.86 * t_db_c - 2.1 * t_wb_c
-    return max(0.0, num / den)
+    return num / den
+
+
+def _w_from_twb(t_db_c: float, t_wb_c: float, p_atm_pa: float, *, ice_below_c: float = 0.0) -> float:
+    return max(0.0, _signed_w_from_twb(t_db_c, t_wb_c, p_atm_pa, ice_below_c=ice_below_c))
 
 
 def _wet_bulb_from_state(t_db_c: float, w: float, p_atm_pa: float) -> float:
     lo, hi = -60.0, t_db_c
     for _ in range(70):
         mid = 0.5 * (lo + hi)
-        if _w_from_twb(t_db_c, mid, p_atm_pa) < w:
+        # Clipping negative trial ratios would erase the crossing at exactly dry air.
+        if _signed_w_from_twb(t_db_c, mid, p_atm_pa) < w:
             lo = mid
         else:
             hi = mid
