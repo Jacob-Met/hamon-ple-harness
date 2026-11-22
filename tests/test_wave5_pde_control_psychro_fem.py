@@ -72,6 +72,44 @@ class TestWave5PDEControlPsychroFEM(unittest.TestCase):
         self.assertAlmostEqual(r_lap["t_exact"], exact_mid, places=6)
         self.assertAlmostEqual(r_lap["t_fdm_sor"], exact_mid, delta=0.2)
 
+    def test_high_heat_modes_are_verified_between_nodes(self):
+        for n, decay, x in ((120, 0., 1/240), (240, 0.3, 1/480), (241, 0., 0.373)):
+            with self.subTest(n=n):
+                spec = dict(mode="heat_1d_transient", length_m=1., alpha_m2_s=1e-5,
+                            t_eval_s=decay / (1e-5 * (n * math.pi) ** 2), x_eval_m=x,
+                            modes=[{"n": n, "amplitude": 100.}])
+                result = w5.verify_wave5_engineering(spec)
+                expected = 100 * math.sin(n * math.pi * x) * math.exp(-decay)
+                self.assertTrue(result["passed"])
+                self.assertLessEqual(abs(result["u_crank_nicolson"] - expected), result["linf_error"] + 1e-10)
+                self.assertLessEqual(result["linf_error"], 0.3)
+                self.assertFalse(w5.verify_wave5_engineering({
+                    **spec, "claimed_field": "u_crank_nicolson", "claimed_value": 0.,
+                })["passed"])
+
+    def test_modal_heat_step_matches_tridiagonal_crank_nicolson(self):
+        spec = dict(mode="heat_1d_transient", length_m=1., alpha_m2_s=0.001, t_eval_s=1.,
+                    x_eval_m=0.373, modes=[{"n": 2, "amplitude": 80.}, {"n": 7, "amplitude": -25.}])
+        result = w5.verify_wave5_engineering(spec)
+        cells, steps = result["spatial_cells"], result["time_steps"]
+        r = spec["alpha_m2_s"] * spec["t_eval_s"] * cells**2 / (2 * steps)
+        temperature = [sum(m["amplitude"] * math.sin(m["n"] * math.pi * i / cells)
+                           for m in spec["modes"]) for i in range(cells + 1)]
+        temperature[0] = temperature[-1] = 0.
+        for _ in range(steps):
+            rhs = [r*temperature[i-1] + (1-2*r)*temperature[i] + r*temperature[i+1]
+                   for i in range(1, cells)]
+            temperature = [0.] + w5._thomas_solve(
+                [0.] + [-r]*(cells-2), [1+2*r]*(cells-1), [-r]*(cells-2) + [0.], rhs,
+            ) + [0.]
+        location = spec["x_eval_m"] * cells
+        i = int(location)
+        at_query = temperature[i] + (location-i) * (temperature[i+1]-temperature[i])
+        self.assertAlmostEqual(result["u_crank_nicolson"], at_query, places=9)
+        for x in (0., 1.):
+            at_end = w5.verify_wave5_engineering({**spec, "x_eval_m": x})
+            self.assertEqual((at_end["u_exact"], at_end["u_crank_nicolson"]), (0., 0.))
+
     def test_control_routh_hurwitz_and_bode_margins(self):
         r_tf = w5.verify_control_system({
             "mode": "transfer_function",
