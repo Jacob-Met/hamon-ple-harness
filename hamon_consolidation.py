@@ -61,10 +61,12 @@ def primary_settlement(h, e0, cc, initial, load, pc, cr):
     """One-dimensional compression with fixed solid volume and nonnegative void space."""
     if not all(math.isfinite(x) for x in (h, e0, cc, initial, load, pc, cr)):
         raise ValueError("Layer properties and effective stresses must be finite")
-    if h <= 0 or initial <= 0 or cc <= 0 or min(e0, load) < 0:
+    if h <= 0 or initial <= 0 or cc < 0 or min(e0, load) < 0:
         raise ValueError("Invalid layer, void ratio, compression index, or stress increment")
     if pc < initial or not 0 <= cr <= cc:
         raise ValueError("Require preconsolidation stress >= initial effective stress and 0 <= Cr <= Cc")
+    if cc == 0:
+        return settlement_from_void_loss(h, e0, 0.0)
     recompression = min(load, pc - initial)
     virgin = load - recompression
     loss = (cr * math.log1p(recompression / initial)
@@ -101,8 +103,8 @@ def verify_consolidation_1d(spec):
         cv = _number(spec, "cv_m2_s")
         elapsed = _number(spec, "time_s")
         drainage = spec["drainage"]
-        if cv <= 0 or elapsed < 0:
-            raise ValueError("Require positive Cv and nonnegative elapsed time")
+        if cv <= 0 or elapsed < 0 or cc <= 0:
+            raise ValueError("Require positive Cv and Cc and nonnegative elapsed time")
         if drainage not in ("single", "double"):
             raise ValueError("drainage must be single or double")
         pc = _number(spec, "sigma_preconsolidation_Pa") if "sigma_preconsolidation_Pa" in spec else initial
