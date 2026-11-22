@@ -453,6 +453,66 @@ def _passive_fin_ratio(base_excess, conductance, reference):
         return None, "below_float_range" if ratio < 1 else "above_float_range"
 
 
+def _sine_laplace_rectangle(width, height, x, y, top):
+    """Continuum harmonic and independent finite-difference SOR on its horizontal grid mode."""
+    from bisect import bisect_right
+
+    aspect = height / width
+    if not 0.0 < aspect < math.inf:
+        raise ValueError("Unrepresentable 2D Laplace aspect ratio")
+    depth = (height - y) / width
+    x_fraction = x / width
+    exact_mode = math.exp(-math.pi * depth) * (
+        -math.expm1(-2.0 * math.pi * (y / width)) / -math.expm1(-2.0 * math.pi * aspect)
+    )
+    sine = 0.0 if x in (0.0, width) else math.sin(math.pi * x_fraction)
+
+    # Scale lengths by width. The hot boundary layer keeps the same mesh
+    # spacing as the lateral grid regardless of the full plate height.
+    nx = 40
+    step = min(1.0 / nx, aspect / 20.0) or aspect
+    nodes = [0.0]
+    while nodes[-1] < aspect:
+        z = nodes[-1]
+        if z >= 2.0:
+            step *= 1.25
+        nodes.append(aspect if aspect - z <= 1.5 * step else z + step)
+
+    # On a uniform x grid the sampled sine is an eigenvector of the exact
+    # second-difference operator. Its amplitudes satisfy the same five-point
+    # equations as the 2D mesh, with unequal adjacent vertical spacings.
+    eigenvalue = (2.0 * nx * math.sin(math.pi / (2.0 * nx))) ** 2
+    stencil = []
+    for left, center, right in zip(nodes, nodes[1:], nodes[2:]):
+        h0, h1 = center - left, right - center
+        ratio = h0 / h1
+        scale = 1.0 / (1.0 + 0.5 * eigenvalue * h0 * h1)
+        lower = scale / (1.0 + ratio)
+        stencil.append((lower, scale - lower))
+    amplitudes = [1.0] + [0.0] * (len(nodes) - 1)
+    for _ in range(4000):
+        largest = 0.0
+        for j, (lower, upper) in enumerate(stencil, 1):
+            residual = lower * amplitudes[j - 1] + upper * amplitudes[j + 1] - amplitudes[j]
+            update = 1.72 * residual
+            amplitudes[j] += update
+            largest = max(largest, abs(update))
+        if largest < 1e-11:
+            break
+    else:
+        raise ValueError("2D Laplace sine-mode SOR did not converge")
+
+    j = min(bisect_right(nodes, depth) - 1, len(nodes) - 2)
+    fy = (depth - nodes[j]) / (nodes[j + 1] - nodes[j])
+    vertical = (1.0 - fy) * amplitudes[j] + fy * amplitudes[j + 1]
+    fx = nx * x_fraction
+    i = min(int(fx), nx - 1)
+    left = math.sin(math.pi * i / nx)
+    right = 0.0 if i + 1 == nx else math.sin(math.pi * (i + 1) / nx)
+    horizontal = (1.0 - (fx - i)) * left + (fx - i) * right
+    return top * (sine * exact_mode), top * (horizontal * vertical)
+
+
 def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "convective_fin_1d")).strip().lower()
 
@@ -655,11 +715,14 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         top_profile = str(spec.get("top_profile", "sine")).strip().lower()
         xq = float(spec.get("x_eval_m", 0.5 * a_len))
         yq = float(spec.get("y_eval_m", 0.5 * b_len))
-        if a_len <= 0.0 or b_len <= 0.0 or not (0.0 <= xq <= a_len) or not (0.0 <= yq <= b_len):
+        if not all(map(math.isfinite, (a_len, b_len, t_top, xq, yq))) or a_len <= 0.0 or b_len <= 0.0 or not (0.0 <= xq <= a_len) or not (0.0 <= yq <= b_len):
             return {"passed": False, "domain": "pde", "mode": mode, "reason": "Invalid 2D Laplace domain or query point"}
 
         if top_profile == "sine":
-            t_exact = t_top * math.sin(math.pi * xq / a_len) * (math.sinh(math.pi * yq / a_len) / math.sinh(math.pi * b_len / a_len))
+            try:
+                t_exact, t_fdm = _sine_laplace_rectangle(a_len, b_len, xq, yq, t_top)
+            except ValueError as exc:
+                return {"passed": False, "domain": "pde", "mode": mode, "reason": str(exc)}
         else:
             t_exact = 0.0
             for k_odd in range(1, 120, 2):
@@ -669,44 +732,43 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
                 ratio = math.exp(arg_y - arg_b) * (1.0 - math.exp(-2.0 * arg_y)) / (1.0 - math.exp(-2.0 * arg_b))
                 t_exact += bn * math.sin(k_odd * math.pi * xq / a_len) * ratio
 
-        nx = 40
-        ny = max(20, int(round(nx * b_len / a_len)))
-        ny = min(ny, 60)
-        dx = a_len / nx
-        dy = b_len / ny
-        grid = [[0.0] * (ny + 1) for _ in range(nx + 1)]
-        for i in range(1, nx):
-            xi = i * dx
-            grid[i][ny] = t_top * math.sin(math.pi * xi / a_len) if top_profile == "sine" else t_top
-
-        dx2 = dx * dx
-        dy2 = dy * dy
-        denom = 2.0 * (dx2 + dy2)
-        omega = 1.72
-        for _ in range(900):
-            max_upd = 0.0
+            nx = 40
+            ny = max(20, int(round(nx * b_len / a_len)))
+            ny = min(ny, 60)
+            dx = a_len / nx
+            dy = b_len / ny
+            grid = [[0.0] * (ny + 1) for _ in range(nx + 1)]
             for i in range(1, nx):
-                for j in range(1, ny):
-                    gs = ((grid[i + 1][j] + grid[i - 1][j]) * dy2 + (grid[i][j + 1] + grid[i][j - 1]) * dx2) / denom
-                    upd = omega * (gs - grid[i][j])
-                    grid[i][j] += upd
-                    if abs(upd) > max_upd:
-                        max_upd = abs(upd)
-            if max_upd < 1e-8 * max(abs(t_top), 1.0):
-                break
+                grid[i][ny] = t_top
 
-        fx = xq / dx
-        fy = yq / dy
-        i0 = min(int(math.floor(fx)), nx - 1)
-        j0 = min(int(math.floor(fy)), ny - 1)
-        tx = fx - i0
-        ty = fy - j0
-        t_fdm = (
-            (1 - tx) * (1 - ty) * grid[i0][j0]
-            + tx * (1 - ty) * grid[i0 + 1][j0]
-            + (1 - tx) * ty * grid[i0][j0 + 1]
-            + tx * ty * grid[i0 + 1][j0 + 1]
-        )
+            dx2 = dx * dx
+            dy2 = dy * dy
+            denom = 2.0 * (dx2 + dy2)
+            omega = 1.72
+            for _ in range(900):
+                max_upd = 0.0
+                for i in range(1, nx):
+                    for j in range(1, ny):
+                        gs = ((grid[i + 1][j] + grid[i - 1][j]) * dy2 + (grid[i][j + 1] + grid[i][j - 1]) * dx2) / denom
+                        upd = omega * (gs - grid[i][j])
+                        grid[i][j] += upd
+                        if abs(upd) > max_upd:
+                            max_upd = abs(upd)
+                if max_upd < 1e-8 * max(abs(t_top), 1.0):
+                    break
+
+            fx = xq / dx
+            fy = yq / dy
+            i0 = min(int(math.floor(fx)), nx - 1)
+            j0 = min(int(math.floor(fy)), ny - 1)
+            tx = fx - i0
+            ty = fy - j0
+            t_fdm = (
+                (1 - tx) * (1 - ty) * grid[i0][j0]
+                + tx * (1 - ty) * grid[i0 + 1][j0]
+                + (1 - tx) * ty * grid[i0][j0 + 1]
+                + tx * ty * grid[i0 + 1][j0 + 1]
+            )
         err = abs(t_fdm - t_exact)
         passed = err <= max(1e-3, 1.5e-2 * abs(t_top))
         res = {

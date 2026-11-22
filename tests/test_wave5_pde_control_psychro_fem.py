@@ -72,6 +72,31 @@ class TestWave5PDEControlPsychroFEM(unittest.TestCase):
         self.assertAlmostEqual(r_lap["t_exact"], exact_mid, places=6)
         self.assertAlmostEqual(r_lap["t_fdm_sor"], exact_mid, delta=0.2)
 
+    def test_rectangular_sine_boundary_layer_across_aspect_and_units(self):
+        for height, width, temperature in ((40, 1., 100.), (230, 1., -50.),
+                                            (1000, 1e100, 25.), (1000, 1e-100, 25.)):
+            with self.subTest(height=height, width=width, temperature=temperature):
+                spec = dict(mode="laplace_2d_rect", top_profile="sine", width_m=width,
+                            height_m=height*width, t_top=temperature, x_eval_m=0.375*width,
+                            y_eval_m=(height-0.05)*width)
+                result = w5.verify_pde_system(spec)
+                # The reflected lower boundary is below 2e-108 on this panel.
+                native_depth = (spec["height_m"] - spec["y_eval_m"]) / width
+                expected = temperature * math.sin(0.375*math.pi) * math.exp(-math.pi*native_depth)
+                self.assertTrue(result["passed"])
+                self.assertAlmostEqual(result["t_exact"], expected, places=12)
+                self.assertAlmostEqual(result["t_fdm_sor"], expected, delta=0.0002*abs(temperature))
+                self.assertFalse(w5.verify_pde_system({
+                    **spec, "claimed_field": "t_exact", "claimed_value": 0.,
+                })["passed"])
+
+        for x, y, expected in ((0., 999.9, 0.), (1., 999.9, 0.), (.5, 0., 0.), (.5, 1000., 100.)):
+            result = w5.verify_pde_system(dict(mode="laplace_2d_rect", width_m=1., height_m=1000.,
+                                              x_eval_m=x, y_eval_m=y, t_top=100.))
+            self.assertTrue(result["passed"])
+            for field in ("t_exact", "t_fdm_sor"):
+                self.assertAlmostEqual(result[field], expected, places=10)
+
     def test_high_heat_modes_are_verified_between_nodes(self):
         for n, decay, x in ((120, 0., 1/240), (240, 0.3, 1/480), (241, 0., 0.373)):
             with self.subTest(n=n):
