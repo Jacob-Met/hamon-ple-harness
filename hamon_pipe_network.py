@@ -1,6 +1,7 @@
 """Steady, fixed-demand Darcy–Weisbach flow in a connected passive water network."""
 
 import math
+from bisect import bisect_left
 
 import numpy as np
 from scipy.linalg import null_space
@@ -29,12 +30,12 @@ def identifiers(rows, label):
     return labels
 
 
-def pipe_law(length, diameter, roughness, minor, viscosity):
+def pipe_law(length, diameter, roughness, minor, viscosity, gravity=9.80665):
     """Signed loss in m and positive derivative in m per (m³/s)."""
     area = np.pi * diameter**2 / 4
     re_per_flow = diameter / (viscosity * area)
     geometry = length / diameter
-    scale = 1 / (2 * 9.80665 * area**2)
+    scale = 1 / (2 * gravity * area**2)
     laminar_slope = scale * geometry * 64 / re_per_flow
     relative = roughness / diameter / 3.7
     log_scale = 2 / math.log(10)
@@ -321,3 +322,93 @@ def verify_pipe_network(spec):
             calculation="pipe_network",
             reason=str(exc),
         )
+
+
+def equipped_branch_head(branch, flow_per_pump):
+    """Common stage head at total flow plus one parallel path's hose and strainer."""
+    fields = {"common_head_m", "hose_length_m", "hose_diameter_m", "hose_roughness_m",
+              "kinematic_viscosity_m2_s", "strainer_reference_flow_m3_s",
+              "strainer_reference_head_m"}
+    if not isinstance(branch, dict) or branch.keys() - {"gravity_m_s2"} != fields:
+        raise ValueError("Supply the common head, hose geometry, viscosity and strainer rating")
+    common = number(branch["common_head_m"])
+    length = number(branch["hose_length_m"])
+    diameter = number(branch["hose_diameter_m"])
+    roughness = number(branch["hose_roughness_m"])
+    viscosity = number(branch["kinematic_viscosity_m2_s"])
+    gravity = number(branch.get("gravity_m_s2", 9.80665))
+    reference_flow = number(branch["strainer_reference_flow_m3_s"])
+    reference_head = number(branch["strainer_reference_head_m"])
+    if min(length, diameter, viscosity, gravity, reference_flow) <= 0:
+        raise ValueError("Hose dimensions, viscosity, gravity and reference flow must be positive")
+    if not 0 <= roughness < diameter or min(common, reference_head) < 0:
+        raise ValueError("Require nonnegative head and roughness less than the hose diameter")
+    with np.errstate(over="raise", invalid="raise", divide="raise"):
+        law, _, _ = pipe_law(length, diameter, roughness, 0, viscosity, gravity)
+        hose = float(law(flow_per_pump)[0])
+        strainer = reference_head * (flow_per_pump / reference_flow) ** 2
+        required = number(common + hose + strainer)
+    return {"common_head_m": common, "hose_head_loss_m": hose,
+            "strainer_head_loss_m": strainer, "required_head_m": required}
+
+
+def verify_pump_duty(spec):
+    """Check a prescribed duty against one tabulated curve for identical parallel pumps."""
+    result = {"calculation": "pump_duty", "mode": "thermal_fluid",
+              "tool": "hamon_conservation_cad_verifier", "ok": False, "duty_verified": False}
+    try:
+        fields = {"mode", "calculation", "curve", "total_flow_m3_s", "required_head_m",
+                  "identical_pumps", "per_pump_input_W", "available_panel_W", "equipped_branch"}
+        if spec.keys() - fields:
+            raise ValueError("Unsupported inputs for fixed-speed identical parallel pump duty")
+        count = spec.get("identical_pumps", 1)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise ValueError("identical_pumps must be a positive integer")
+        flow = number(spec["total_flow_m3_s"])
+        if flow < 0:
+            raise ValueError("Expected nonnegative design flow")
+        if ("required_head_m" in spec) == ("equipped_branch" in spec):
+            raise ValueError("Supply exactly one of required_head_m and equipped_branch")
+        per_pump = flow / count
+        result["flow_per_pump_m3_s"] = per_pump
+        if "equipped_branch" in spec:
+            result.update(equipped_branch_head(spec["equipped_branch"], per_pump))
+            required = result["required_head_m"]
+        else:
+            required = number(spec["required_head_m"])
+            if required < 0:
+                raise ValueError("Expected nonnegative required head")
+        curve = spec["curve"]
+        if not isinstance(curve, list) or len(curve) < 2:
+            raise ValueError("The pump curve needs at least two tabulated points")
+        flows, heads = [], []
+        for point in curve:
+            if not isinstance(point, dict) or point.keys() != {"flow_m3_s", "head_m"}:
+                raise ValueError("Each curve point must specify flow_m3_s and head_m")
+            q, h = number(point["flow_m3_s"]), number(point["head_m"])
+            if q < 0 or h < 0 or (flows and q <= flows[-1]):
+                raise ValueError("Curve points require increasing nonnegative flow and nonnegative head")
+            flows.append(q)
+            heads.append(h)
+        checks = {}
+        if "per_pump_input_W" in spec or "available_panel_W" in spec:
+            draw = number(spec["per_pump_input_W"])
+            capacity = number(spec["available_panel_W"])
+            if min(draw, capacity) < 0:
+                raise ValueError("Electrical inputs must be nonnegative")
+            total_draw = count * draw
+            if not math.isfinite(total_draw):
+                raise ValueError("Total electrical draw exceeds the numerical range")
+            result.update(total_input_W=total_draw, panel_margin_W=capacity - total_draw)
+            checks["panel_adequate"] = total_draw <= capacity
+        if not flows[0] <= per_pump <= flows[-1]:
+            raise ValueError("Flow per pump is outside the tabulated curve")
+        i = min(bisect_left(flows, per_pump, lo=1), len(flows) - 1)
+        fraction = (per_pump - flows[i - 1]) / (flows[i] - flows[i - 1])
+        head = (1.0 - fraction) * heads[i - 1] + fraction * heads[i]
+        margin = head - required
+        checks["head_adequate"] = margin >= 0
+        return {**result, "ok": True, "checks": checks,
+                "available_head_m": head, "head_margin_m": margin, "duty_verified": all(checks.values())}
+    except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+        return {**result, "reason": str(exc)}
