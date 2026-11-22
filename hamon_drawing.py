@@ -1306,7 +1306,7 @@ def _frame_detail_digits(pgm):
     return f"P5\n{w} {h}\n255\n".encode() + frame
 
 
-def _read_ruled_detail(source, page, region):
+def _read_ruled_detail(source, page, region, *, record_number_only=False):
     recognized = []
     views = []
     for scale, mode, digits_only in ((4, 8, True), (6, 10, False)):
@@ -1331,10 +1331,12 @@ def _read_ruled_detail(source, page, region):
                 return None
             recognized.append(words[0])
     title=_read_caption_words(_caption_raster(source,page,region["caption_box"],3),7)
-    if sum(bool(re.search(r"[A-Za-z]{2}",word)) and confidence>=70 for word,confidence in title)<2:
-        return None
-    return dict(region,detail=recognized[0][0],digit_confidences=[x[1]for x in recognized],
-                caption=" ".join(word for word,confidence in title),page=page)
+    label = dict(region, detail=detail, digit_confidences=[x[1] for x in recognized], page=page)
+    if sum(bool(re.search(r"[A-Za-z]{2}", word)) and confidence >= 70
+           for word, confidence in title) < 2:
+        # A printed number can veto uniqueness without qualifying its caption as a destination.
+        return label if record_number_only else None
+    return dict(label, caption=" ".join(word for word, confidence in title))
 
 
 def _resolve_rendered_stacked(result, target, source, directory):
@@ -1372,6 +1374,7 @@ def _resolve_rendered_stacked(result, target, source, directory):
     if not 2<=len(regions)<=64:
         return
     identified={}
+    unconfirmed={}
     ink=_ink_window(source,target_page,[reg["ring"] for reg in regions])
     for region in regions:
         visible=_printed_mark(ink,region["ring"],right_rule=True)
@@ -1379,17 +1382,21 @@ def _resolve_rendered_stacked(result, target, source, directory):
             continue
         region=dict(region,visible_ink=visible)
         try:
-            evidence=_read_ruled_detail(source,target_page,region)
+            evidence=_read_ruled_detail(source,target_page,region,record_number_only=True)
         except (OSError, ValueError, subprocess.TimeoutExpired):
             continue
         if evidence:
-            identified.setdefault(evidence["detail"],[]).append(evidence)
+            pool = identified if "caption" in evidence else unconfirmed
+            pool.setdefault(evidence["detail"], []).append(evidence)
     for ref in verified:
         hits=identified.get(ref["target_detail"],[])
         if hits:
             ref["rendered_caption_evidence"]=hits
             # Optical recognition is explicitly a review candidate; the original native-text proofs stay authoritative.
-            if len(hits)>1:
+            conflicts = unconfirmed.get(ref["target_detail"], [])
+            if conflicts:
+                ref["rendered_number_conflicts"] = conflicts
+            if len(hits)>1 or conflicts:
                 ref["status"]="ambiguous_detail"
             elif ref["status"]=="sheet_only":
                 ref["status"]="candidate_detail"

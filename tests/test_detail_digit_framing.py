@@ -34,6 +34,29 @@ class DetailDigitFramingTest(unittest.TestCase):
     def test_blank_raster_stays_blank(self):
         self.assertIsNone(drawing._frame_detail_digits(b'P5\n20 20\n255\n' + b'\xff' * 400))
 
+    def test_number_only_vetoes_uniqueness_without_creating_a_link(self):
+        source = {'source': {'page': 1}, 'target_sheet': 'A5.1', 'target_detail': '6',
+                  'reference_form': 'stacked_text_candidate', 'status': 'sheet_only'}
+        target = {'A5.1': [{'sheet_ids_on_page': ['A5.1'], 'page': 2}]}
+        region = {'ring': {'box': [0, 0, 20, 20]}}
+        for reads, expected in [
+            ([{'detail': '6', 'caption': 'WALL SECTION'}, {'detail': '6'}], 'ambiguous_detail'),
+            ([{'detail': '6'}, {'detail': '6'}], 'sheet_only'),
+            ([{'detail': '6', 'caption': 'WALL SECTION'}, {'detail': '8'}], 'candidate_detail'),
+        ]:
+            ref = dict(source)
+            with mock.patch.object(drawing, '_detail_symbol_inventory', return_value=([], [])), \
+                    mock.patch.object(drawing, '_divided_source_mark', return_value=region), \
+                    mock.patch.object(drawing, '_ink_window', return_value=True), \
+                    mock.patch.object(drawing, '_printed_mark', return_value=True), \
+                    mock.patch.object(drawing, '_printed_source_tokens', return_value=True), \
+                    mock.patch.object(drawing, '_ruled_detail_regions', return_value=[region, region]), \
+                    mock.patch.object(drawing.shutil, 'which', return_value='tool'), \
+                    mock.patch.object(drawing, '_read_ruled_detail', side_effect=reads):
+                drawing._resolve_rendered_stacked({'references': [ref], 'sheets': target}, 'A5.1', 'page.pdf', '.')
+            self.assertEqual(ref['status'], expected)
+            self.assertEqual(bool(ref.get('rendered_number_conflicts')), expected == 'ambiguous_detail')
+
 
 if __name__ == '__main__':
     unittest.main()
