@@ -89,10 +89,15 @@ def test_router_dispatch_step_hygiene_and_zero_write_relay():
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8"))
-                relay_ops.append(req.get("op"))
+                relay_ops.append(self.path)
                 target = (wdir / req.get("path", "")).resolve()
-                body = json.dumps({"ok": True, "content_b64": base64.b64encode(target.read_bytes()).decode("ascii")}) if (req.get("op") == "read_file_b64" and target.is_file()) else json.dumps({"ok": False})
-                raw = body.encode("utf-8")
+                if self.path == "/read_file" and target.is_file() and target.is_relative_to(wdir):
+                    data = target.read_bytes()
+                    body = {"ok": True, "content_b64": base64.b64encode(data).decode("ascii"),
+                            "size": len(data), "truncated": False}
+                else:
+                    body = {"ok": False, "error": "unexpected task relay request"}
+                raw = json.dumps(body).encode("utf-8")
                 self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
             def log_message(self, *a): pass
         srv = HTTPServer(("127.0.0.1", 0), Handler)
@@ -102,6 +107,6 @@ def test_router_dispatch_step_hygiene_and_zero_write_relay():
             proc = subprocess.run(["node", "--experimental-strip-types", "--input-type=module", "-e", "import registerTaskTools from './task-tools.ts'; const reg={}; registerTaskTools({registerTool(t){reg[t.name]=t;},on(){}}); const r=await reg['hamon_conservation_cad_verifier'].execute('1',{path:'part.step',spec:{density_kg_m3:7850}}); console.log(JSON.stringify(r.details));"], cwd=str(here), env=env, text=True, capture_output=True)
             assert proc.returncode == 0, proc.stderr
             assert json.loads(proc.stdout.strip().splitlines()[-1])["conservation_verified"] is True
-            assert "write_file" not in relay_ops
+            assert relay_ops == ["/read_file"]
         finally:
             srv.shutdown()
