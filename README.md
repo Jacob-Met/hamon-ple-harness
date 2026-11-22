@@ -38,6 +38,8 @@ Inside the isolated task container, Pi can run `python3 /tmp/hamon-engineering-t
 
 The `dual-verify` command also computes passive transformer voltage regulation, operating efficiency and the conditions under which a finite optimal load exists. See the [transformer efficiency contract](docs/transformer_efficiency.md).
 
+The [pile-group compression contract](docs/pile_group_capacity.md) gives the `pile_group_capacity` inputs, the two competing resistance calculations and the scope of the load check.
+
 ## Files
 
 | File | Purpose |
