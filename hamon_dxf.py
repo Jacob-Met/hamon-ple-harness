@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import math
+import re
 from pathlib import Path
 
 _UNITS={1:"inch",2:"foot",4:"mm",5:"cm",6:"m",7:"km",10:"yard"}
@@ -141,32 +142,51 @@ def _dimension_picture_sweep(picture, center, height, pointer, rays, kind):
     return matches[0] if len(matches) == 1 else None
 
 
+def _block_records(data, names, block_name):
+    """Yield the header and entities of referenced blocks, including duplicate definitions."""
+    section = block = entity = None
+    groups = []
+    it = iter(_groups(data))
+    for _, code, value in it:
+        if code != 0:
+            if section == "BLOCKS" and (entity == "BLOCK" or block):
+                groups.append((code, value))
+            continue
+        if section == "BLOCKS":
+            if entity == "BLOCK":
+                name = block_name(groups)
+                block = name if name in names else None
+            elif entity == "ENDBLK":
+                block = None
+            if block:
+                yield block, entity, groups
+        entity, groups = value.upper(), []
+        if entity == "SECTION":
+            _, key, section = next(it)
+            if key != 2:
+                raise ValueError("invalid DXF section marker")
+            section, block = section.upper(), None
+        elif entity in ("ENDSEC", "EOF"):
+            section = block = None
+
+
 def _dimension_pictures(data, names):
     """Read bounded native dimension-block witnesses. Never use annotation text as geometry."""
     pictures = {}
-    section = block = entity = None
-    groups = []
-    def finish():
-        nonlocal block
-        if entity == 'BLOCK':
-            name = _get(groups, 2)
-            block = name if name in names else None
-            if block:
-                # An anonymous dimension reference uses the model coordinates directly.
-                if (block in pictures or not block.upper().startswith('*D') or
-                        _point(groups,10,20,30) != [0.,0.,0.]):
-                    pictures[block] = None
-                else:
-                    pictures[block] = {'arcs': [], 'arrows': []}
-        elif entity == 'ENDBLK':
-            block = None
-        elif block and pictures.get(block) is not None:
+    for block, entity, groups in _block_records(data, names, lambda g: _get(g, 2)):
+        if entity == "BLOCK":
+            if (block in pictures or not block.upper().startswith('*D') or
+                    _point(groups,10,20,30) != [0.,0.,0.]):
+                pictures[block] = None
+            else:
+                pictures[block] = {'arcs': [], 'arrows': []}
+        elif pictures.get(block) is not None:
             p = pictures[block]
             if entity in ('ARC','SOLID'):
                 normal = [_float(groups,c,v) for c,v in ((210,0.),(220,0.),(230,1.))]
                 if normal != [0.,0.,1.] or len(p['arcs'])+len(p['arrows']) >= 128:
                     pictures[block] = None
-                    return
+                    continue
                 if entity == 'ARC':
                     arc = [_point(groups,10,20,30),_float(groups,40),_float(groups,50),_float(groups,51)]
                     if None in arc or arc[1] <= 0:
@@ -181,22 +201,55 @@ def _dimension_pictures(data, names):
                         p['arrows'].append(corners)
             elif entity not in ('LINE','TEXT','MTEXT','POINT'):
                 pictures[block] = None
-    it = iter(_groups(data))
-    for _,code,value in it:
-        if code == 0:
-            if section == 'BLOCKS':
-                finish()
-            entity, groups = value.upper(), []
-            if entity == 'SECTION':
-                _,key,section = next(it)
-                if key != 2:
-                    raise ValueError('invalid DXF section marker')
-                section, block = section.upper(), None
-            elif entity in ('ENDSEC','EOF'):
-                section = block = None
-        elif section == 'BLOCKS' and (entity == 'BLOCK' or block):
-            groups.append((code,value))
     return pictures
+
+
+def _single_group(groups, code):
+    values = [v for c, v in groups if c == code]
+    return values[0] if len(values) == 1 else None
+
+
+def _annotation_blocks(data, names):
+    """Index one literal text or one anonymous insert in each requested block."""
+    blocks = {}
+    for block, entity, groups in _block_records(data, names, lambda g: (_single_group(g, 2) or "").upper()):
+        if entity == "BLOCK":
+            blocks[block] = None if block in blocks else {}
+        elif blocks[block] is not None:
+            if entity in ("LINE", "POINT", "ARC", "SOLID", "CIRCLE", "LWPOLYLINE"):
+                continue
+            # A second label, an insert array or an unknown text-bearing entity is ambiguous.
+            entry = None
+            if (not blocks[block] and _get(groups, 60) in (None, "0")
+                    and all(code != 102 for code, _ in groups)):
+                if entity in ("TEXT", "MTEXT"):
+                    value = _single_group(groups, 1)
+                    if (value and len(value) <= 120 and _get(groups, 3) is None
+                            and re.fullmatch(r"[+-]?(?:[0-9]+(?:[.,][0-9]+)?|[.,][0-9]+)", value)):
+                        entry = {"text": value, "text_handle": _single_group(groups, 5)}
+                elif entity == "INSERT":
+                    name = (_single_group(groups, 2) or "").upper()
+                    if (re.fullmatch(r"\*U[0-9]+", name)
+                            and all(_get(groups, code) in (None, "1") for code in (70, 71))):
+                        entry = {"insert": name}
+            blocks[block] = entry
+
+    return blocks
+
+
+def _ordinate_annotations(data, names):
+    roots = _annotation_blocks(data, names)
+    children = {entry["insert"] for entry in roots.values() if entry and "insert" in entry}
+    nested = _annotation_blocks(data, children) if children else {}
+    labels = {}
+    for name, entry in roots.items():
+        path = [name]
+        if entry and "insert" in entry:
+            path.append(entry["insert"])
+            entry = nested.get(path[-1])
+        if entry and "text" in entry:
+            labels[name] = {"block_path": path, **entry}
+    return labels
 
 
 def _angular_sector(groups, kind, picture=None):
@@ -377,10 +430,15 @@ def scan_dxf(filename,limit=1000):
     data=p.read_bytes()
     section=None;var=None;units=None;entity=None;offset=0;groups=[]
     results=[];angular_rows=[];seen=0;excluded=0
+    ordinate_rows = []
+    block_uses = {}
     def flush():
         nonlocal seen,excluded
         if entity!="DIMENSION":return
         seen+=1
+        block = (_single_group(groups, 2) or "").upper()
+        for name in {v.upper() for code, v in groups if code == 2 and re.fullmatch(r"\*[Dd][0-9]+", v)}:
+            block_uses[name] = block_uses.get(name, 0) + 1
         if not _model_space(groups):
             excluded+=1
             return
@@ -388,6 +446,8 @@ def scan_dxf(filename,limit=1000):
             row = _dimension(groups,seen,offset)
             if "angular" in row and _get(groups,2):
                 angular_rows.append((len(results),groups,seen,offset,_get(groups,2)))
+            if row["kind"] == "ordinate":
+                ordinate_rows.append((len(results), block))
             results.append(row)
     it=iter(_groups(data))
     for idx,code,value in it:
@@ -421,6 +481,10 @@ def scan_dxf(filename,limit=1000):
         for index, record, ordinal, group_offset, name in angular_rows:
             if name in pictures:
                 results[index] = _dimension(record,ordinal,group_offset,pictures[name] or {"invalid": True})
+    names = {name for _, name in ordinate_rows if block_uses.get(name) == 1}
+    annotations = _ordinate_annotations(data, names) if names else {}
+    for index, name in ordinate_rows:
+        results[index]["ordinate"]["stored_block_annotation"] = annotations.get(name)
     return {"kind":"dxf-native-dimension-evidence",
       "schema":"hamon.dxf.native-dimensions.v1",
       "file":str(p),"source_sha256":hashlib.sha256(data).hexdigest(),
