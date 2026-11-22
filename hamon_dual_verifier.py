@@ -1684,43 +1684,95 @@ def solve_ac_phasor_rlc_dual(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def solve_transformer_dual(spec: dict[str, Any]) -> dict[str, Any]:
-    """Dual-solve transformer exact phasor voltage regulation and loss efficiency."""
-    s_va = float(spec["S_rated_VA"])
-    v2 = float(spec["V_sec_rated_V"])
-    r_eq = float(spec["R_eq_ohm"])
-    x_eq = float(spec["X_eq_ohm"])
-    p_core = float(spec["P_core_W"])
-    lf = float(spec.get("load_fraction", 1.0))
-    pf = float(spec["pf"])
-    leading = str(spec.get("pf_mode", "lagging")).lower() == "leading"
+    """Single-phase passive-load phasor and real-power efficiency at fixed terminal V."""
+    def number(key, default=None):
+        value = spec.get(key, default)
+        try:
+            if isinstance(value, bool):
+                raise ValueError
+            result = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"{key} must be a finite number") from exc
+        if not math.isfinite(result):
+            raise ValueError(f"{key} must be a finite number")
+        return result
 
-    i_rated = s_va / v2
-    i_mag = lf * i_rated
-    sin_p = math.sqrt(max(0.0, 1.0 - pf * pf))
-    i_phasor = complex(i_mag * pf, i_mag * sin_p if leading else -i_mag * sin_p)
-    e2_phasor = complex(v2, 0.0) + i_phasor * complex(r_eq, x_eq)
+    s_va = number("S_rated_VA")
+    v2 = number("V_sec_rated_V")
+    r_eq = number("R_eq_ohm")
+    x_eq = number("X_eq_ohm")
+    p_core = number("P_core_W")
+    lf = number("load_fraction", 1.0)
+    pf = number("pf")
+    mode = str(spec.get("pf_mode", "lagging")).lower()
+    if s_va <= 0 or v2 <= 0 or min(r_eq, p_core, lf) < 0:
+        raise ValueError("Ratings must be positive, and resistance, core loss and load fraction nonnegative")
+    if not 0 <= pf <= 1 or mode not in ("leading", "lagging"):
+        raise ValueError("Require a power-factor magnitude in [0,1] and pf_mode leading or lagging")
+
+    # Form the watt ratios before converting to binary64. Even when a current
+    # squared or the sum of input powers overflows binary64, efficiency can be finite.
+    with localcontext() as ctx:
+        ctx.prec = 60
+        rated_va, terminal_v, resistance, reactance, core_w, load, power_factor = (
+            Decimal.from_float(x) for x in (s_va, v2, r_eq, x_eq, p_core, lf, pf)
+        )
+        rated_current = rated_va / terminal_v
+        current = load * rated_current
+        copper_w = current * current * resistance
+        output_w = load * rated_va * power_factor
+        input_w = output_w + copper_w + core_w
+        eta = float(output_w / input_w) if input_w else None
+        resistive_drop = float(current * resistance)
+        reactive_drop = float(current * reactance)
+        p_cu = float(copper_w)
+
+        # eta(lambda)=A lambda/(A lambda+C+B lambda²), with A=S pf,
+        # C=core loss and B=rated copper loss. Where defined, the derivative
+        # has the sign of A(C-B lambda²). No upper load limit is specified.
+        lf_opt = None
+        if power_factor == 0 and core_w == 0 and resistance == 0:
+            optimum = "undefined_at_all_loads"
+        elif power_factor == 0 or (core_w == 0 and resistance == 0):
+            optimum = "all_loads_with_defined_efficiency"
+        elif resistance == 0:
+            optimum = "supremum_as_load_increases"
+        elif core_w == 0:
+            optimum = "supremum_as_load_approaches_zero"
+        else:
+            optimum = "unique"
+            lf_opt = float((core_w / resistance).sqrt() / rated_current)
+            if not math.isfinite(lf_opt) or lf_opt == 0:
+                lf_opt = None
+                optimum = "unique_outside_float_range"
+
+    if not all(math.isfinite(x) for x in (resistive_drop, reactive_drop, p_cu)):
+        raise ValueError("Transformer operating result exceeds finite numeric range")
+    sin_p = math.sqrt((1.0 - pf) * (1.0 + pf))
+    current_direction = complex(pf, sin_p if mode == "leading" else -sin_p)
+    e2_phasor = complex(v2, 0) + current_direction * complex(resistive_drop, reactive_drop)
     e2_mag = abs(e2_phasor)
 
-    # Path A: Trig algebraic cross-check
-    phi_signed = -sin_p if leading else sin_p
-    re_alg = v2 + i_mag * (r_eq * pf + x_eq * phi_signed)
-    im_alg = i_mag * (x_eq * pf - r_eq * phi_signed)
+    phi_signed = -sin_p if mode == "leading" else sin_p
+    re_alg = v2 + (resistive_drop * pf + reactive_drop * phi_signed)
+    im_alg = reactive_drop * pf - resistive_drop * phi_signed
     e2_alg = math.hypot(re_alg, im_alg)
+    regulation = ((e2_mag - v2) / v2) * 100.0
+    if not all(math.isfinite(x) for x in (e2_mag, e2_alg, regulation)):
+        raise ValueError("Transformer voltage result exceeds finite numeric range")
     disc = _rel_diff(e2_mag, e2_alg)
     if disc > 1e-12:
         raise ValueError("transformer phasor vs algebraic discrepancy")
 
-    v_reg_pct = 100.0 * (e2_mag - v2) / v2
-    p_out = lf * s_va * pf
-    p_cu = (i_mag ** 2) * r_eq
-    eta = p_out / (p_out + p_core + p_cu)
-    lf_opt = math.sqrt(p_core / ((i_rated ** 2) * r_eq))
     return {
         "E2_no_load_V": e2_mag,
-        "voltage_regulation_pct": v_reg_pct,
+        "voltage_regulation_pct": regulation,
         "P_copper_W": p_cu,
         "efficiency": eta,
+        "efficiency_status": "defined" if eta is not None else "undefined_zero_input_real_power",
         "optimal_load_fraction": lf_opt,
+        "optimal_load_fraction_status": optimum,
+        "optimal_load_domain": "nonnegative_load_fraction_without_upper_bound",
         "dual_rel_discrepancy": disc,
         "dual_verified": True,
     }
