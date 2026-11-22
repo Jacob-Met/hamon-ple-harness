@@ -412,7 +412,10 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
 
         row_sum_err = float(np.max(np.abs(np.sum(f_mat, axis=1) - 1.0)))
         af = areas[:, None] * f_mat
-        recip_err = float(np.max(np.abs(af - af.T)) / max(float(np.max(areas)), 1e-12))
+        # Reciprocity is local to a pair of surfaces. Express the mismatch
+        # as a view-factor error on the smaller surface of each pair.
+        pair_area = np.minimum(areas[:, None], areas[None, :])
+        recip_err = float(np.max(np.abs(af - af.T) / pair_area))
         if row_sum_err > 1e-5 or recip_err > 1e-5:
             return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "view_factor_enclosure_or_reciprocity_violation"}
 
