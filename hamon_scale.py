@@ -56,29 +56,103 @@ def _segment(row, vectors):
             _resolve_point(row.get("to"), vectors))
 
 
-def _source_text(words, label):
+def _word_lines(words):
+    """Index complete token runs back to half-open spans of original page words."""
+    tokenize = re.compile(r"\d+|[^\W\d_]+|[^\s]").findall
+    lines = []
+    for _, line in groupby(enumerate(words), key=lambda item: item[1].get("source_line_id")):
+        tokens, starts, ends = [], {}, {}
+        for index, word in line:
+            parts = tokenize(word.get("text", "").casefold())
+            if parts:
+                starts[len(tokens)] = index
+                tokens.extend(parts)
+                ends[len(tokens)] = index + 1
+        lines.append((tokens, starts, ends))
+    return tokenize, lines
+
+
+def _source_text(index, label):
     if not isinstance(label, str) or not 2 <= len(label) <= 100:
         raise ValueError("source_label must be 2..100 characters")
-    # Keep numeric and alphabetic runs intact, while allowing a value and its
-    # unit to appear in one PDF word or in two words on the same source line.
-    tokenize = re.compile(r"\d+|[^\W\d_]+|[^\s]").findall
+    tokenize, lines = index
     wanted = tokenize(label.casefold())
-    starts = []
-    offset = 0
-    for _, line in groupby(words, key=lambda word: word.get("source_line_id")):
-        tokens = []
-        boundaries = {0}
-        for word in line:
-            tokens.extend(tokenize(word.get("text", "").casefold()))
-            boundaries.add(len(tokens))
-        for start in boundaries:
+    spans = []
+    for tokens, starts, ends in lines:
+        for start, word in starts.items():
             end = start + len(wanted)
-            if wanted and end in boundaries and tokens[start:end] == wanted:
-                starts.append(offset + start)
-        offset += len(tokens)
-    if starts:
-        return tuple(wanted), min(starts) + len(wanted), max(starts)
-    raise ValueError(f"dimension source_label {label!r} not found in PDF page words")
+            if wanted and end in ends and tokens[start:end] == wanted:
+                spans.append((word, ends[end]))
+    if not spans:
+        raise ValueError(f"dimension source_label {label!r} not found in PDF page words")
+    return tuple(wanted), spans
+
+
+def _independent_word_spans(domains):
+    """Choose one whole occurrence per reference, disjoint on the actual page."""
+    from bisect import bisect_left
+
+    def assign(remaining):
+        if not remaining:
+            return {}
+        # Greedy interval stabbing partitions the spans into cliques. Every span
+        # assigned to a point contains that word, so a distinct point for each
+        # label is necessary. Spans from different cliques may still overlap.
+        points = []
+        for start, end in sorted({span for spans in remaining.values() for span in spans},
+                                 key=lambda span: (span[1], span[0])):
+            if not points or start > points[-1]:
+                points.append(end - 1)
+        if len(points) < len(remaining):
+            return None
+        slots = {}
+        for label, spans in remaining.items():
+            options = {}
+            for span in spans:
+                options.setdefault(bisect_left(points, span[0]), span)
+            slots[label] = options
+
+        owners = {}
+        def place(label, seen):
+            for slot in slots[label]:
+                if slot in seen:
+                    continue
+                seen.add(slot)
+                if slot not in owners or place(owners[slot], seen):
+                    owners[slot] = label
+                    return True
+            return False
+
+        for label in sorted(slots, key=lambda key: (len(slots[key]), key)):
+            if not place(label, set()):
+                return None
+        proposed = {label: slots[label][slot] for slot, label in owners.items()}
+        ordered = sorted(proposed, key=proposed.get)
+        for left, right in zip(ordered, ordered[1:]):
+            if proposed[left][1] > proposed[right][0]:
+                break
+        else:
+            return proposed
+
+        # Resolve an actual collision exactly. Every valid assignment must use
+        # one of this label's occurrences. Each branch removes one entire label.
+        choice = min((left, right), key=lambda label: (len(remaining[label]), label))
+        for start, end in remaining[choice]:
+            available = {
+                label: [span for span in spans if span[1] <= start or end <= span[0]]
+                for label, spans in remaining.items() if label != choice
+            }
+            if all(available.values()):
+                solved = assign(available)
+                if solved is not None:
+                    solved[choice] = (start, end)
+                    return solved
+        return None
+
+    witness = assign(domains)
+    if witness is None:
+        raise ValueError("independent source_label required per reference: no simultaneous disjoint printed word spans")
+    return witness
 
 
 def calibrate_inventory(page, spec, quantity, metre):
@@ -130,6 +204,7 @@ def calibrate_inventory(page, spec, quantity, metre):
     metre_value = metre.val
     direction_vectors = []
     observations = []
+    word_index = _word_lines(page['words'])
     source_labels = {}
     for i, reference in enumerate(references):
         a, b = _segment(reference, vectors)
@@ -144,20 +219,20 @@ def calibrate_inventory(page, spec, quantity, metre):
                 or physical.val <= 0:
             raise ValueError(f"reference {i}: positive physical length required")
         label = reference.get("source_label")
-        label_key, earliest_end, latest_start = _source_text(page["words"], label)
-        # Two labels can use separate printed words exactly when an occurrence
-        # of either label can end before the other starts (adjacency is valid).
-        forced_overlap = any(earliest_end > start and end > latest_start
-                             for end, start in source_labels.values())
-        if label_key in source_labels or forced_overlap:
+        label_key, spans = _source_text(word_index, label)
+        if label_key in source_labels:
             raise ValueError("independent source_label required per reference")
-        source_labels[label_key] = earliest_end, latest_start
+        source_labels[label_key] = spans
         length_m = float(physical.val / metre_value)
         direction_vectors.append(((b[0] - a[0]) / width,
                                   (b[1] - a[1]) / width))
         observations.append({"source_label": label, "svg_units": width,
                              "physical_m": length_m, "source_vector_ids":
                              [reference["from"]["vector"], reference["to"]["vector"]]})
+
+    witness = _independent_word_spans(source_labels)
+    for label_key, row in zip(source_labels, observations):
+        row["source_word_span"] = list(witness[label_key])
 
     # Two independent and materially nonparallel dimension baselines are the
     # minimum check against misleading anisotropic PDF exports. Parallel
