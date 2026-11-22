@@ -262,6 +262,85 @@ def _heat_sine_phase(numerator, denominator):
     return sign * math.sin(math.pi * (reduced / denominator))
 
 
+def _heat_positive_normal(value):
+    return sys.float_info.min <= value <= sys.float_info.max
+
+
+def _heat_ordinary_time(alpha, length, time):
+    if time == 0:
+        return 0.0
+    product = alpha * time
+    try:
+        square = length ** 2
+    except OverflowError:
+        return None
+    if _heat_positive_normal(product) and _heat_positive_normal(square):
+        scaled_time = product / square
+        if _heat_positive_normal(scaled_time):
+            return scaled_time
+    return None
+
+
+def _heat_continuous_decay(n, scaled_time, represented_exponent):
+    if n == 0 or scaled_time == 0:
+        return 1.0
+    if scaled_time is not None:
+        try:
+            square = (n * math.pi) ** 2
+            exponent = scaled_time * square
+            if _heat_positive_normal(square) and _heat_positive_normal(exponent):
+                return math.exp(-exponent)
+        except OverflowError:
+            pass
+    try:
+        exponent = float(represented_exponent(n))
+    except OverflowError:
+        return 0.0
+    return math.exp(-exponent)
+
+
+def _heat_grid_rate(n, cells, scaled_time, represented_exponent):
+    if n == 0:
+        return 0.0, 0.0
+    if scaled_time is not None:
+        try:
+            angle = math.pi * n / cells
+            if _heat_positive_normal(abs(angle)):
+                if scaled_time == 0:
+                    return angle, 0.0
+                square = (2 * cells * math.sin(angle / 2)) ** 2
+                rate = scaled_time * square
+                if _heat_positive_normal(square) and _heat_positive_normal(rate):
+                    return angle, rate
+        except OverflowError:
+            pass
+    angle = math.pi * (n / cells)
+    if scaled_time == 0:
+        return angle, 0.0
+    # K = S*pi^2*sinc(y)^2, y=|n|*pi/(2C). Below this threshold the
+    # sinc correction is at most y²/6, less than half a spacing below one.
+    y = abs(angle) / 2
+    sinc = 1.0 if y <= 2.0 ** -27 else math.sin(y) / y
+    rate = float(represented_exponent(n) * Fraction(sinc) ** 2)
+    return angle, rate
+
+
+def _heat_cn_decay(rate, steps):
+    if rate == 0:
+        return 1.0
+    try:
+        ratio = rate / (2 * steps)
+        if _heat_positive_normal(ratio):
+            return math.exp(steps * (math.log1p(-ratio) - math.log1p(ratio)))
+    except OverflowError:
+        # The integer 2*steps can exceed binary64 even when rate is finite.
+        ratio = float(Fraction(rate) / (2 * steps))
+    # The same log amplification is -rate*atanh(ratio)/ratio. Its relative
+    # correction to -rate is at most ratio²/(3*(1-ratio²)).
+    correction = 1.0 if ratio <= 2.0 ** -27 else math.atanh(ratio) / ratio
+    return math.exp(-rate * correction)
+
+
 def _transient_heat_modes(alpha, length, time, position, modes):
     """Diagonalize the finite-difference CN step on the rod's Dirichlet sine basis."""
     harmonics = []
@@ -275,19 +354,25 @@ def _transient_heat_modes(alpha, length, time, position, modes):
     tolerance = max(1e-4, 3e-3 * max(abs(amplitude) for _, amplitude in harmonics))
     cells = max(120, 2 * max(abs(n) for n, _ in harmonics))
     minimum_steps = 120
-    scaled_time = alpha * time / length ** 2
-    exact_decay = [math.exp(-scaled_time * (n * math.pi) ** 2) for n, _ in harmonics]
+    scaled_time = _heat_ordinary_time(alpha, length, time)
+    exponents = {}
+
+    def represented_exponent(n):
+        # Keep the dimensional products and n² together for exceptional modes.
+        key = abs(n)
+        if key not in exponents:
+            scale = Fraction(alpha) * Fraction(time) * key ** 2 / Fraction(length) ** 2
+            exponents[key] = scale * Fraction(math.pi) ** 2
+        return exponents[key]
+
+    exact_decay = [_heat_continuous_decay(n, scaled_time, represented_exponent) for n, _ in harmonics]
     for _ in range(16):
-        angles = [math.pi * n / cells for n, _ in harmonics]
         # These are the eigenvalues of the centered second difference, not those
         # of the continuous Laplacian. Each CN time step applies its Cayley factor.
-        rates = [scaled_time * (2 * cells * math.sin(angle / 2)) ** 2 for angle in angles]
+        angles, rates = zip(*(_heat_grid_rate(n, cells, scaled_time, represented_exponent)
+                              for n, _ in harmonics))
         steps = max(minimum_steps, math.ceil(max(rates)))
-        ratios = [rate / (2 * steps) for rate in rates]
-        numerical_decay = [
-            math.exp(steps * (math.log1p(-ratio) - math.log1p(ratio)))
-            for ratio in ratios
-        ]
+        numerical_decay = [_heat_cn_decay(rate, steps) for rate in rates]
         # Linear interpolation on a cell of width dx incurs at most
         # dx² max|u''|/8. Add the modal damping differences, even at nodes
         # where different harmonics cancel. The sum bounds the whole rod.
