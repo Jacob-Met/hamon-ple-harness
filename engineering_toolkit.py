@@ -909,8 +909,11 @@ def run(argv=None):
     links=sub.add_parser("pdf-detail-links",help="Resolve printed detail references across drawing sheets")
     links.add_argument("file")
     links.add_argument("--target-sheet", help="Return references to this printed sheet ID after indexing the entire document")
-    eagle=sub.add_parser("pdf-eagle-connectivity",help="Read page-local wire connectivity evidence from a two-color EAGLE schematic")
-    eagle.add_argument("file");eagle.add_argument("--page",type=int,default=1)
+    eagle=sub.add_parser("pdf-eagle-connectivity",help="Read wire connectivity evidence from a two-color EAGLE schematic")
+    eagle.add_argument("file")
+    scope=eagle.add_mutually_exclusive_group()
+    scope.add_argument("--page",type=int,default=1)
+    scope.add_argument("--flat-document",action="store_true",help="Link matching printed net anchors across sheets of one flat EAGLE design")
     dv=sub.add_parser("pdf-vector",help="Multi-sheet native PDF vector and printed-scale inventory")
     dv.add_argument("file");dv.add_argument("--from-page",type=int,default=1)
     dv.add_argument("--to-page",type=int,default=None)
@@ -968,7 +971,10 @@ def run(argv=None):
             out=hamon_drawing.detail_links(args.file, args.target_sheet)
         elif args.cmd=="pdf-eagle-connectivity":
             import hamon_eagle_schematic
-            out=hamon_eagle_schematic.page_connectivity(args.file,args.page)
+            if args.flat_document:
+                out=hamon_eagle_schematic.document_connectivity(args.file)
+            else:
+                out=hamon_eagle_schematic.page_connectivity(args.file,args.page)
         elif args.cmd=="pdf-vector":
             import hamon_drawing
             out=hamon_drawing.scan_pdf(

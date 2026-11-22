@@ -1,6 +1,6 @@
 # EAGLE schematic wire connectivity
 
-The task-container command reads one page of a two-color EAGLE vector schematic.
+The default task-container command reads one page of a two-color EAGLE vector schematic.
 
 ```sh
 python3 /tmp/hamon-engineering-toolkit.py pdf-eagle-connectivity SCHEMATIC.pdf --page 1
@@ -31,3 +31,18 @@ python3 ship/verify_eagle_schematic.py MEGA2560_Rev3e_sch.pdf MEGA2560_Rev3e-ref
 ```
 
 The replay verifies the vendor hashes, invokes the public command for both sheets before opening the CAD, checks a one-to-one geometric correspondence, and recounts sheet and design membership.
+
+
+## Flat multi-sheet designs
+
+For a PDF containing **one flat EAGLE schematic**, use the document mode.
+
+```sh
+python3 /tmp/hamon-engineering-toolkit.py pdf-eagle-connectivity SCHEMATIC.pdf --flat-document
+```
+
+The outer index of `document_wire_groups` follows the sheets in `pages`. Each inner index follows that sheet’s `wires`. Equal document IDs identify a proposed connection. `inter_sheet_anchors` records which named sheet-local groups contributed to each join. Use page mode for hierarchical designs and collections of unrelated drawings because signal names can repeat in different scopes.
+
+A join requires the same exact name on two or more sheets, one component per participating sheet, and one printed name per participating component. Recognized power and ground names also require a corresponding glyph on each participating sheet. Unsupported sheets leave whole-document membership unresolved.
+
+On the same two-sheet Mega comparison, the four qualifying names were +5V, PE0, PE1 and USBVCC. Joining their components recovered **106 of 111** complete native nets and reduced false separations from **2,040 to 854**. False joins stayed at zero. GND accounts for 755 of the remaining separated pairs and RESET for 78. This comparison measures the overlap with one public native schematic.
