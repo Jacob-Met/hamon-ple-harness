@@ -109,13 +109,16 @@ class OfficialProtocolRoundtrip(unittest.TestCase):
                 self.assertEqual(record["stdin"],b"Determine MEP clashes and stress values")
                 self.assertEqual(len(record["commands"]),1)
                 self.assertIn("python3 -c",record["commands"][0])
-                self.assertEqual(list(record["writes"]),["/tmp/hamon_geometry.py","/tmp/hamon_drawing.py","/tmp/hamon_scale.py","/tmp/hamon_affine_metric.py","/tmp/hamon_callout.py","/tmp/hamon_dxf.py","/tmp/hamon_dual_verifier.py","/tmp/hamon_cad_takeoff.py","/tmp/hamon_pareto.py","/tmp/hamon-engineering-toolkit.py"])
+                self.assertEqual(list(record["writes"]),["/tmp/hamon_geometry.py","/tmp/hamon_drawing.py","/tmp/hamon_scale.py","/tmp/hamon_affine_metric.py","/tmp/hamon_callout.py","/tmp/hamon_dxf.py","/tmp/hamon_consolidation.py","/tmp/hamon_pipe_network.py","/tmp/hamon_dual_verifier.py","/tmp/hamon_cad_takeoff.py","/tmp/hamon_pareto.py","/tmp/hamon-engineering-toolkit.py"])
                 self.assertEqual(record["writes"]["/tmp/hamon_drawing.py"],
                                  (Path(engineering_toolkit.__file__).parent/"hamon_drawing.py").read_bytes())
                 self.assertEqual(record["writes"]["/tmp/hamon_geometry.py"],
                                  (Path(engineering_toolkit.__file__).parent/"hamon_geometry.py").read_bytes())
                 self.assertEqual(record["writes"]["/tmp/hamon_callout.py"],
                                  (Path(engineering_toolkit.__file__).parent/"hamon_callout.py").read_bytes())
+                for module in ("hamon_consolidation.py", "hamon_pipe_network.py"):
+                    self.assertEqual(record["writes"]["/tmp/" + module],
+                                     (Path(engineering_toolkit.__file__).parent / module).read_bytes())
                 self.assertEqual(record["writes"]["/tmp/hamon_dxf.py"],
                                  (Path(engineering_toolkit.__file__).parent/"hamon_dxf.py").read_bytes())
                 self.assertEqual(record["writes"]["/tmp/hamon-engineering-toolkit.py"],
