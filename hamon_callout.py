@@ -628,3 +628,142 @@ def auto_measure_pdf(pdf_file,spec_file,quantity,metre):
     out["source_pdf_sha256"]=hashlib.sha256(Path(pdf_file).read_bytes()).hexdigest()
     out["auto_spec_sha256"]=hashlib.sha256(source.read_bytes()).hexdigest()
     return out
+
+
+from collections import defaultdict
+
+EPS = 0.035  # PDF points, above Poppler's quantization.
+REG_TOL = 0.08
+
+
+def _marker_coordinate(p):
+    return tuple(round(x, 4) for x in p)
+
+
+def _marker_axes(page):
+    data = page['reported_vectors']
+    if page['vector_limit_hit'] or len(data) > 1000:
+        return []
+    lines = []
+    triangles = []
+    for row in data:
+        pts = row.get('svg_points') or []
+        if row.get('stroke') and len(pts) == 2:
+            lines.append((row['id'], *map(tuple, pts)))
+        if row.get('stroke') or not row.get('d') or 'Z' not in row['d'].upper():
+            continue
+        corners = list(dict.fromkeys(map(tuple, pts)))
+        if len(corners) == 3:
+            triangles.append((row['id'], corners))
+    out = []
+    for shaft, a, b in lines:
+        axis = 0 if abs(a[1]-b[1]) < EPS else 1 if abs(a[0]-b[0]) < EPS else None
+        if axis is None or math.dist(a, b) < 10:
+            continue
+        perp = 1-axis
+        a, b = sorted((a,b),key=lambda p:p[axis])
+        ends = []
+        for end, outward in [(a,-1),(b,1)]:
+            options = []
+            for ident, corners in triangles:
+                for k, tip in enumerate(corners):
+                    c, d = corners[(k+1)%3], corners[(k+2)%3]
+                    center = tuple((x+y)/2 for x,y in zip(c,d))
+                    size = outward*(tip[axis]-center[axis])
+                    if (math.dist(end,center)<EPS and abs(tip[perp]-end[perp])<EPS
+                            and abs(c[axis]-d[axis])<EPS and 1<size<25
+                            and .08*size<math.dist(c,d)<size):
+                        options.append((tip,ident,'arrow_tip'))
+            for ident,c,d in lines:
+                if abs(c[axis]-d[axis])<1 or abs(c[perp]-d[perp])<1:
+                    continue
+                if not 2<math.dist(c,d)<30:
+                    continue
+                center=tuple((x+y)/2 for x,y in zip(c,d))
+                if (abs(center[perp]-end[perp])<EPS and
+                        abs(min(outward*(end[axis]-c[axis]),outward*(end[axis]-d[axis])))<EPS):
+                    options.append((center,ident,'tick_intersection'))
+            witnessed=[]
+            for pt,marker,kind in options:
+                for ext,c,d in lines:
+                    if (abs(c[axis]-d[axis])<EPS and abs(c[axis]-pt[axis])<EPS
+                        and min(c[perp],d[perp])+EPS < pt[perp] < max(c[perp],d[perp])-EPS):
+                        witnessed.append((_marker_coordinate(pt),marker,kind,ext))
+            locations={(w[0],w[2]) for w in witnessed}
+            if len(locations)!=1:break
+            ends.append(sorted(witnessed)[0])
+        if len(ends)==2 and ends[0][2]==ends[1][2] and ends[0][1]!=ends[1][1]:
+            pp=[w[0] for w in ends]
+            out.append(dict(axis=axis,points=pp,shaft=shaft,witnesses=ends,span=math.dist(*pp),
+                            pdf_literal_value=None))
+    return out
+
+
+def _sidecar_axes(rows):
+    answer=[]
+    for d in rows:
+        if d['kind']!='rotated_linear' or not d.get('axis_origin') or d['usable_qualified_value'] is None:
+            continue
+        angle=d['angle_degrees']%180
+        if min(angle,180-angle)<1e-7:axis=0
+        elif abs(angle-90)<1e-7:axis=1
+        else:continue
+        c=d['axis_origin']
+        points=[(p[0],-c[1]) if axis==0 else (c[0],-p[1]) for p in d['definition_points']]
+        answer.append(dict(axis=axis,points=sorted(points,key=lambda p:p[axis]),span=d['usable_qualified_value'],handle=d['handle']))
+    return answer
+
+
+def _register_axes(pdf,native):
+    if not pdf or not native or len(pdf)*len(native)>1600:return []
+    candidates=defaultdict(list)
+    for i,p in enumerate(pdf):
+        for j,n in enumerate(native):
+            if p['axis']!=n['axis']:continue
+            scale=p['span']/n['span']
+            t=tuple(x-y*scale for x,y in zip(p['points'][0],n['points'][0]))
+            if not 1e-6<scale<1e6:continue
+            by_p=defaultdict(list);by_n=defaultdict(list)
+            for k,q in enumerate(pdf):
+                for h,m in enumerate(native):
+                    if q['axis']!=m['axis'] or abs(q['span']-m['span']*scale)>2*REG_TOL:continue
+                    err=max(math.dist(v,[y*scale+z for y,z in zip(w,t)]) for v,w in zip(q['points'],m['points']))
+                    if err<=REG_TOL:by_p[k].append(h);by_n[h].append(k)
+            pairs=tuple((k,v[0]) for k,v in sorted(by_p.items()) if len(v)==1 and len(by_n[v[0]])==1)
+            if len(pairs)<5 or len({pdf[k]['axis'] for k,h in pairs})<2:continue
+            if len({round(native[h]['span'],5) for k,h in pairs})<3:continue
+            candidates[pairs].append((scale,t))
+    if not candidates:return []
+    best=max(candidates,key=len)
+    # Distinct, near-equally supported placements may not borrow one another's assignments.
+    if any(len(other)>=len(best)-1 and not set(other)<=set(best) for other in candidates):return []
+    return [dict(pdf=pdf[k],native=native[h]) for k,h in best]
+
+def associate_sidecar(pdf_file, dxf_file, page_number=1):
+    """Signed source geometry correspondence. PDF literal values remain unknown."""
+    import hamon_dxf
+    pdf = Path(pdf_file)
+    # Couple the returned digest to exactly the bytes used by Poppler.
+    import tempfile
+    with pdf.open("rb") as stream:
+        raw = stream.read(50_000_001)
+    if len(raw) > 50_000_000:
+        raise ValueError("PDF exceeds 50 MB inspection bound")
+    with tempfile.TemporaryDirectory() as work:
+        snapshot = Path(work) / "drawing.pdf"
+        snapshot.write_bytes(raw)
+        inventory = hamon_drawing.scan_pdf(snapshot, first=page_number, last=page_number,
+                                            limit_paths=5000, limit_words=5000)
+    page = inventory["pages"][0]
+    dxf = hamon_dxf.scan_dxf(dxf_file, limit=5000)
+    eligible = page.get("flat_opaque_marker_page") and not page.get("embedded_images") and not page["words"]
+    axes = _marker_axes(page) if eligible else []
+    native = _sidecar_axes(dxf["dimensions"]) if dxf["declared_unit"] and not dxf["dimension_limit_hit"] else []
+    joins = _register_axes(axes, native)
+    return {"kind":"pdf-native-sidecar-axis-correspondence-v1","page":page_number,
+            "pdf_sha256":hashlib.sha256(raw).hexdigest(),"dxf_sha256":dxf["source_sha256"],
+            "status":"registered" if joins else "unknown","native_unit":dxf["declared_unit"],
+            "native_unit_provenance":"DXF $INSUNITS","pdf_text_status":"unknown",
+            "pdf_literal_equivalence_verified":False,"geometry_correspondences":joins,
+            "unmatched_pdf_axis_count":len(axes)-len(joins),
+            "scope":"Axis-aligned uniform-scale model-space registration; numeric spans derive from native geometric definition points only."}

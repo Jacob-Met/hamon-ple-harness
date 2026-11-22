@@ -373,6 +373,20 @@ def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None
     dims=[float(t) for t in _NUMBER.findall(root.attrib.get("viewBox",""))]
     if len(dims)!=4 or dims[2]<=0 or dims[3]<=0:
         raise ValueError("SVG viewBox absent or invalid")
+    # Only a flattened, opaque monochrome page can supply sidecar marker evidence.
+    # Poppler emits the paper background before every painted path.
+    children = list(root)
+    solid_black = {"black", "#000", "#000000", "rgb(0%, 0%, 0%)"}
+    flat = bool(children) and all(
+        local(node.tag) == "path" and not list(node)
+        and all(k in {"d","fill","fill-rule","stroke","stroke-width","fill-opacity",
+                      "stroke-opacity","stroke-linecap","stroke-linejoin","stroke-miterlimit",
+                      "transform"} for k in node.attrib)
+        and node.attrib.get("fill","black") in solid_black | {"none"}
+        and node.attrib.get("stroke","none") in solid_black | {"none"}
+        and node.attrib.get("fill-opacity","1") == node.attrib.get("stroke-opacity","1") == "1"
+        for node in children[1:])
+    flat = flat and local(children[0].tag) == "rect" and children[0].get("fill") == "rgb(100%, 100%, 100%)"
     stats=Counter();out=[];unlocalized=0
     stack=[(root,_ID)]
     shape_tags={"path","line","rect","polyline","polygon","circle","ellipse"}
@@ -420,7 +434,7 @@ def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None
                     row["stroke_width"]=node.attrib["stroke-width"][:40]
                 out.append(row)
         stack.extend((child,matrix) for child in reversed(list(node)))
-    return {"viewbox_svg_units":dims,"vector_primitives":stats["vector_primitives"],
+    return {"flat_opaque_marker_page":flat,"viewbox_svg_units":dims,"vector_primitives":stats["vector_primitives"],
             "reported_vectors":out,"unlocalized_vectors":unlocalized,
             "embedded_images":stats["embedded_images"],
             "text_glyph_instances":stats["text_glyph_uses"],

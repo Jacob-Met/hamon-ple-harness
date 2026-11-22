@@ -71,6 +71,7 @@ def _dimension(groups,ordinal,offset):
     return {"ordinal":ordinal,"group_offset":offset,
       "handle":_get(groups,5),"layer":_get(groups,8),
       "kind":kind,"geometry_status":status,
+      "axis_origin":_point(groups,10,20,30) if kind=="rotated_linear" else None,
       "definition_points":[p1,p2] if p1 and p2 else None,
       "angle_degrees":_float(groups,50) if kind=="rotated_linear" else None,
       "computed_model_units":calculated,"cad_measurement_model_units":stored,
