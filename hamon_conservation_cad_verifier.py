@@ -874,6 +874,9 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def verify_civil_geotech_balance(spec: Dict[str, Any]) -> Dict[str, Any]:
+    if spec.get("calculation") == "at_rest_plane_stress":
+        from hamon_rankine import verify_at_rest_plane_stress
+        return verify_at_rest_plane_stress(spec)
     if spec.get("calculation") == "rankine_layers":
         from hamon_rankine import verify_rankine_layers
         return verify_rankine_layers(spec)
@@ -881,11 +884,17 @@ def verify_civil_geotech_balance(spec: Dict[str, Any]) -> Dict[str, Any]:
         from hamon_consolidation import verify_consolidation_1d
         return verify_consolidation_1d(spec)
     out: Dict[str, Any] = {"ok": True, "tool": "hamon_conservation_cad_verifier", "mode": "civil_geotech"}
+    if spec.get("calculation") not in (None, "bearing_capacity"):
+        out.update(ok=False, conservation_verified=False, reason="Unsupported civil/geotechnical calculation")
+        return out
+    evaluated = False
     ok = True
     if "cut_bank_m3" in spec or "fill_compacted_m3" in spec:
+        evaluated = True
         cut_b, sh, fill_c = float(spec.get("cut_bank_m3", 0.0)), float(spec.get("shrink_factor", 0.90)), float(spec.get("fill_compacted_m3", 0.0))
         out["net_compacted_surplus_m3"] = cut_b * sh - fill_c
     if "footing_B_m" in spec or spec.get("calculation") == "bearing_capacity":
+        evaluated = True
         from hamon_bearing_capacity import verify_bearing_capacity
         bearing = verify_bearing_capacity(spec)
         out.update(bearing)
@@ -904,12 +913,17 @@ def verify_civil_geotech_balance(spec: Dict[str, Any]) -> Dict[str, Any]:
                 out.update(ok=False, reason=str(exc))
                 ok = False
     if "channel_B_m" in spec and "y1_m" in spec and "y2_m" in spec:
+        evaluated = True
         g = 9.80665
         b_c, q_f, y1, y2 = float(spec["channel_B_m"]), float(spec["Q_m3_s"]), float(spec["y1_m"]), float(spec["y2_m"])
         v1, v2 = q_f / (b_c * y1), q_f / (b_c * y2)
         hl = (float(spec.get("z1_m", 0.0)) + y1 + v1 * v1 / (2.0 * g)) - (float(spec.get("z2_m", 0.0)) + y2 + v2 * v2 / (2.0 * g))
         out["head_loss_m"] = hl
         ok = ok and (hl >= -1e-9)
+    if not evaluated:
+        out.update(ok=False, conservation_verified=False,
+                   reason="No recognized civil/geotechnical calculation was evaluated")
+        return out
     out["conservation_verified"] = bool(ok)
     return out
 
@@ -1150,7 +1164,7 @@ def run_router_conservation_cad_verifier(payload: Dict[str, Any]) -> Dict[str, A
         elif spec.get("netlist") or spec.get("branches") or fname.endswith((".cir", ".sp", ".spice", ".net")): mode = "circuit"
         elif "lhs" in spec and "rhs" in spec: mode = "dimensional"
         elif spec.get("calculation") == "diaphragm_membrane" or ("span_m" in spec and "E_Pa" in spec): mode = "structural"
-        elif spec.get("calculation") in ("consolidation_1d", "rankine_layers", "bearing_capacity") or any(k in spec for k in ("cut_bank_m3", "footing_B_m", "channel_B_m")): mode = "civil_geotech"
+        elif spec.get("calculation") in ("consolidation_1d", "rankine_layers", "at_rest_plane_stress", "bearing_capacity") or any(k in spec for k in ("cut_bank_m3", "footing_B_m", "channel_B_m")): mode = "civil_geotech"
         elif any(k in spec for k in ("inlets", "outlets", "pipe_D_m", *_HX_INPUTS, "UA_W_K")): mode = "thermal_fluid"
         elif spec.get("file_b64"):
             mode = "step_cad" if "ISO-10303-21" in base64.b64decode(spec["file_b64"])[:512].decode("utf-8", errors="replace") else "circuit"
