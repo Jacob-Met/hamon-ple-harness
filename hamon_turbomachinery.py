@@ -29,11 +29,12 @@ def station(data, omega):
     radius = positive(data, "radius_m")
     meridional = positive(data, "meridional_velocity_m_s")
     speed = omega * radius
-    alternatives = {}
+    alternatives = []
     if "absolute_tangential_velocity_m_s" in data:
-        alternatives["absolute_tangential_velocity_m_s"] = finite(
+        direct = finite(
             data["absolute_tangential_velocity_m_s"], "absolute_tangential_velocity_m_s"
         )
+        alternatives.append((direct, math.ulp(direct)))
     for angle, offset in (
         ("absolute_flow_angle_deg", 0),
         ("relative_flow_angle_deg", speed),
@@ -44,14 +45,30 @@ def station(data, omega):
                 raise ValueError(
                     f"{angle} must lie strictly between -90 and 90 degrees"
                 )
-            alternatives[angle] = offset + meridional * math.tan(math.radians(degrees))
+            radians = math.radians(degrees)
+            tangent = math.tan(radians)
+            component = meridional * tangent
+            value = offset + component
+            # A relative velocity angle can nearly cancel a large blade speed.
+            # Propagate angle resolution through d(tan θ)/dθ = 1 + tan²θ.
+            angle_error = math.radians(math.ulp(degrees)) + math.ulp(radians)
+            tangent_error = (1 + tangent * tangent) * angle_error + math.ulp(tangent)
+            roundoff = 4 * (
+                meridional * tangent_error
+                + math.ulp(component)
+                + math.ulp(offset)
+                + math.ulp(value)
+            )
+            alternatives.append((value, roundoff))
     if not alternatives:
         raise ValueError(
             "Supply an absolute tangential velocity or a signed flow angle at each station"
         )
-    tangential = next(iter(alternatives.values()))
-    if max(abs(other - tangential) for other in alternatives.values()) >= 1e-6:
-        raise ValueError("Conflicting station velocity and flow-angle measurements")
+    tangential, reference_error = min(alternatives, key=lambda item: item[1])
+    for value, roundoff in alternatives:
+        tolerance = min(1e-6, 1e-7 * abs(tangential) + reference_error + roundoff)
+        if abs(value - tangential) > tolerance:
+            raise ValueError("Conflicting station velocity and flow-angle measurements")
     relative = tangential - speed
     result = {
         "blade_speed_m_s": speed,
