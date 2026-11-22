@@ -518,6 +518,17 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
             # Let another supplied measurement size the exchanger if it is informative.
             driver = next((key for key in ("effectiveness", "Q", "T_h_out", "T_c_out")
                            if key in observed and bounds[key][0] < observed[key] < bounds[key][1]), None)
+            # With a nonzero inlet span, exact zero duty uniquely gives UA=0.
+            # Prefer an interior measurement if a sensible outlet merely rounds
+            # to its inlet. A phase-changing outlet stays fixed at every UA.
+            zero_values = {"effectiveness": 0.0, "Q": 0.0}
+            if arr != "condenser":
+                zero_values["T_h_out"] = t_hi
+            if arr != "boiler":
+                zero_values["T_c_out"] = t_ci
+            if driver is None:
+                driver = next((key for key, zero in zero_values.items()
+                               if observed.get(key) == zero), None)
             if driver is None:
                 return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False,
                         "error": "second_law_crossover_or_unreachable_effectiveness" if observed else "missing_rating_or_sizing_spec"}
@@ -530,7 +541,9 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
                 eps_target = c_h * (t_hi - reading) / q_max
             else:
                 eps_target = c_c * (reading - t_ci) / q_max
-            if arr == "crossflow_unmixed":
+            if reading == zero_values[driver]:
+                ntu = 0.0
+            elif arr == "crossflow_unmixed":
                 if not 0.0 < eps_target < 1.0:
                     return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False,
                             "error": "unresolved_effectiveness"}
