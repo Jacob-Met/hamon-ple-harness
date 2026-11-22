@@ -71,6 +71,8 @@ def primary_settlement(h, e0, cc, initial, load, pc, cr):
             + cc * math.log1p(virgin / (initial + recompression))) / math.log(10.0)
     # e is the ratio of void to solid volume. No compression history can
     # consume more than the initial voids (USACE EM 1110-2-1906, App. VIII).
+    if not math.isfinite(loss):
+        raise ValueError("Compression curve exceeds finite numerical range")
     if loss > e0 and not math.isclose(loss, e0, rel_tol=8 * math.ulp(1.0)):
         raise ValueError("Compression curve predicts a negative final void ratio")
     loss = min(loss, e0)
@@ -113,9 +115,13 @@ def verify_consolidation_1d(spec):
             raise ValueError("Nonfinite consolidation response")
         residual = abs(degree - cn)
         valid = 0 <= degree <= 1 and abs(max(0.0, min(1.0, cn)) - cn) < 1e-6 and residual < 1e-6
-        for key, predicted in (("proposed_degree_consolidation", degree), ("proposed_settlement_m", settlement)):
-            if key in spec and abs(_number(spec, key) - predicted) > 1e-6:
-                valid = False
+        for key, predicted, upper in (("proposed_degree_consolidation", degree, 1.0),
+                                      ("proposed_settlement_m", settlement, compression["initial_void_height_m"])):
+            if key in spec:
+                proposed = _number(spec, key)
+                exceeds_upper = proposed > upper and not math.isclose(proposed, upper, rel_tol=8 * math.ulp(1.0))
+                if proposed < 0 or exceeds_upper or abs(proposed - predicted) > 1e-6:
+                    valid = False
         result.update(ok=True, conservation_verified=valid, drainage_path_m=path, time_factor=tv,
                       degree_consolidation=degree, degree_consolidation_cn=cn,
                       dual_solver_abs_residual=residual, **compression,
