@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -29,6 +30,15 @@ SHA_RE = re.compile(r"^(?:100644|100755|100664) ([0-9a-f]{40})$")
 
 def blob_sha(contents: bytes) -> str:
     return hashlib.sha1(b"blob " + str(len(contents)).encode() + b"\0" + contents).hexdigest()
+
+
+def _kit_python(kit_root: Path) -> str:
+    if all(importlib.util.find_spec(m) is not None for m in ("yaml", "dotenv", "huggingface_hub")):
+        return sys.executable
+    for cand in (kit_root / ".venv" / "bin" / "python", Path("/tmp/ple-harness-venv/bin/python")):
+        if cand.is_file():
+            return str(cand)
+    return sys.executable
 
 
 def evaluate(root: Path) -> dict:
@@ -69,7 +79,15 @@ def evaluate(root: Path) -> dict:
             continue
         if name.endswith((".py",".ts",".js",".json")) and not (root/name).exists():
             removed.append(name)
-    status="fresh" if not (missing or diverged or unsafe or removed) else "stale"
+    tasks_map = manifest.get("tasks")
+    empty_file_tasks = []
+    if isinstance(tasks_map, dict):
+        for tid, trec in sorted(tasks_map.items()):
+            if isinstance(trec, dict) and not (trec.get("files") or {}):
+                traj = root / "artifacts" / tid / "trajectory.json"
+                if traj.is_file() and ".zip" in traj.read_text(encoding="utf8", errors="ignore").lower():
+                    empty_file_tasks.append(tid)
+    status="fresh" if not (missing or diverged or unsafe or removed or empty_file_tasks) else "stale"
     return {"schema":"hamon.ple.provenance.v1","status":status,
             "manifest_run_commit":harness.get("commit"),
             "manifest_harness_tree":harness.get("tree"),
@@ -79,6 +97,7 @@ def evaluate(root: Path) -> dict:
             "diverged":diverged,
             "unsafe":unsafe,
             "removed_executable":removed,
+            "empty_archive_tasks":empty_file_tasks,
             "note":"Fresh source hashes are necessary, not sufficient: dev-run provenance, organizer eligibility and real scores must be verified separately."}
 
 
@@ -89,7 +108,7 @@ def evaluate_official(root: Path, kit_root: Path) -> dict:
     if not (kit_root / "eval" / "dev_set.yaml").is_file():
         raise ValueError("organizer checkout lacks eval/dev_set.yaml")
     result = subprocess.run(
-        [sys.executable, "-m", "kit", "artifacts", "--json", str(root.resolve())],
+        [_kit_python(kit_root), "-m", "kit", "artifacts", "--json", str(root.resolve())],
         cwd=kit_root, text=True, capture_output=True, check=False,
     )
     try:
@@ -116,17 +135,22 @@ def evaluate_official(root: Path, kit_root: Path) -> dict:
         task["id"] for task in tasks
         if task.get("status") == "ok" and "not in manifest.json" in task.get("warnings", [])
     ]
+    empty_tasks = [task["id"] for task in tasks if task.get("status") == "empty"]
+    missing_tasks = [task["id"] for task in tasks if task.get("status") in ("missing", "refused")]
     # The organizer explicitly accepts docs-only drift as the same runtime.
-    # Missing or empty tasks are reported by the kit, independently of source.
+    # Require zero empty/missing/refused worlds for fresh certification.
     fresh = (accepted and provenance.get("manifest") == "ok"
              and provenance.get("dev_set") == "same"
              and provenance.get("harness") in ("same", "docs-only")
-             and provenance.get("edited") == [] and not unrecorded)
+             and provenance.get("edited") == [] and not unrecorded
+             and not empty_tasks and not missing_tasks)
     return {
         "schema": "hamon.ple.official-provenance.v1",
         "status": "fresh" if fresh else "stale",
         "kit_exit": result.returncode,
         "unrecorded_usable_tasks": unrecorded,
+        "empty_tasks": empty_tasks,
+        "missing_tasks": missing_tasks,
         "kit_review": report,
     }
 

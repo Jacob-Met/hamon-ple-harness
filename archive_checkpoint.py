@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import zipfile
 
@@ -31,6 +32,20 @@ def verify(archive: Path, names: list[str]) -> None:
                 with z.open(name) as f, io.TextIOWrapper(f, encoding="utf-8-sig") as text:
                     if not next(csv.reader(text), None):
                         raise ValueError(f"missing CSV header in {name}")
+            elif suffix == ".pdf":
+                with z.open(name) as f:
+                    head = f.read(8)
+                    if not head.startswith(b"%PDF-"):
+                        raise ValueError(f"invalid PDF header in {name}")
+            elif suffix == ".dxf":
+                with z.open(name) as f:
+                    raw = f.read().decode("utf-8", errors="strict")
+                    if "EOF" not in raw:
+                        raise ValueError(f"truncated DXF in {name}")
+            elif suffix == ".md":
+                with z.open(name) as f:
+                    if not f.read().decode("utf-8", errors="strict").strip():
+                        raise ValueError(f"blank Markdown in {name}")
 
 
 def verify_checkpoint(stage: Path, target: Path, names: list[str]) -> None:
@@ -46,13 +61,34 @@ def verify_checkpoint(stage: Path, target: Path, names: list[str]) -> None:
                     raise ValueError(f"staged and published versions differ for {name}")
 
 
+def _valid_regular_file(path: Path) -> bool:
+    return not path.is_symlink() and path.is_file() and path.stat().st_size > 0
+
+
+def _hydrate_stage_from_output_dir(stage: Path, output_dir: Path, names: list[str]) -> None:
+    if not output_dir.is_dir() or output_dir.is_symlink():
+        return
+    if stage.exists() and stage.is_symlink():
+        return
+    if not all(_valid_regular_file(stage / n) or _valid_regular_file(output_dir / n) for n in names):
+        return
+    stage.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        dst = stage / n
+        src = output_dir / n
+        if not _valid_regular_file(dst) and _valid_regular_file(src):
+            shutil.copy2(src, dst)
+
+
 def publish(stage: Path, target: Path, names: list[str]) -> None:
     if not names or len(names) != len(set(names)) or any(
         not n or n in {".", ".."} or "/" in n or "\\" in n for n in names
     ):
         raise ValueError("expected distinct root filenames")
+    if not target.exists():
+        _hydrate_stage_from_output_dir(stage, target.parent, names)
     sources = [stage / n for n in names]
-    if any(p.is_symlink() or not p.is_file() or p.stat().st_size == 0 for p in sources):
+    if any(not _valid_regular_file(p) for p in sources):
         raise ValueError("required staged members are missing or empty")
     def stamp(p):
         st = p.stat()
