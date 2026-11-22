@@ -906,6 +906,9 @@ def run(argv=None):
     x.add_argument("file")
     f=sub.add_parser("pdf-words",help="Extract PDF word boxes on one page (not drawing scale)")
     f.add_argument("file");f.add_argument("--page",type=int,default=1);f.add_argument("--limit",type=int,default=250)
+    links=sub.add_parser("pdf-detail-links",help="Resolve printed detail references across drawing sheets")
+    links.add_argument("file")
+    links.add_argument("--target-sheet", help="Return references to this printed sheet ID after indexing the entire document")
     dv=sub.add_parser("pdf-vector",help="Multi-sheet native PDF vector and printed-scale inventory")
     dv.add_argument("file");dv.add_argument("--from-page",type=int,default=1)
     dv.add_argument("--to-page",type=int,default=None)
@@ -958,6 +961,9 @@ def run(argv=None):
             import hamon_drawing
             out=hamon_drawing.render_window(args.file,args.output,args.page,args.region,
                                            args.dpi,args.limit_paths)
+        elif args.cmd=="pdf-detail-links":
+            import hamon_drawing
+            out=hamon_drawing.detail_links(args.file, args.target_sheet)
         elif args.cmd=="pdf-vector":
             import hamon_drawing
             out=hamon_drawing.scan_pdf(

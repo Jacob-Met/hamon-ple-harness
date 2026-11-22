@@ -308,6 +308,8 @@ async def provision_engineering_cli(session: Any) -> str:
         "\n  python3 /tmp/hamon-engineering-toolkit.py xlsx-audit FILE.xlsx"
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-words DRAWING.pdf --page 1"
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-vector DRAWING.pdf --from-page 1 --to-page 3"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-detail-links DRAWING.pdf [--target-sheet S4]"
+        "\nFollow the printed sheet/detail evidence. sheet_only locates the sheet; inspect the target graphic before using it."
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-window DRAWING.pdf --page 1 --output /tmp/drawing-window.png"
         "\nPDF WINDOW: use the read tool on the emitted PNG to inspect the actual"
         " marks, including outlined or scanned text. For detail, pass --region"

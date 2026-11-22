@@ -5,6 +5,7 @@ viewBox coordinates. Any physical drawing scale is an unverified annotation,
 never automatically applied to measurements. No OCR or network calls.
 """
 from __future__ import annotations
+from bisect import bisect_left, bisect_right
 from collections import Counter
 import hashlib
 import math
@@ -790,3 +791,271 @@ def render_window(filename, output, page=1, region=None, dpi=120, limit_paths=12
         "physical_drawing_scale_verified": False,
         "warning": "Read the emitted PNG to inspect the actual marks. Pixel-to-SVG mapping is page geometry, not physical calibration. This raster window does not establish a dimension label, OCR result, engineering measurement or code approval.",
     }
+
+
+# Explicit detail references and headings use different namespaces. An unlabelled
+# number on a target sheet, including a grid mark, is never a detail definition.
+_SHEET_ID = r"[A-Z]{1,4}[-.]?\d{1,4}(?:[.-]\d{1,3})?[A-Z]?"
+_DETAIL_ID = r"\d{1,3}[A-Z]?"
+_DETAIL_LIST = rf"{_DETAIL_ID}(?:\s*(?:&|,|AND)\s*{_DETAIL_ID})*"
+_SHEET_LABEL = re.compile(rf"SHEET\s+(?:NO\.?|NUMBER|ID|#)\s*:?\s*({_SHEET_ID})?", re.I)
+_DETAIL_REF = re.compile(
+    rf"\bDETAILS?\s+({_DETAIL_LIST})\s*(?:/|(?:ON\s+)?SHEET\s+)\s*({_SHEET_ID})(?!\w|[.\-]\w)", re.I)
+_BUBBLE_TEXT = re.compile(rf"({_DETAIL_ID})\s*/\s*({_SHEET_ID})", re.I)
+_DETAIL_HEADING = re.compile(rf"DETAIL\s+({_DETAIL_ID})\s*[:–—-]\s*(\S.+)", re.I)
+
+
+def _drawing_text_lines(page, page_no):
+    rows = []
+    for line in page.findall(".//{*}line"):
+        text = " ".join(word.text or "" for word in line.findall("{*}word")).strip()
+        box = [float(line.attrib[k]) for k in ("xMin", "yMin", "xMax", "yMax")]
+        if not all(math.isfinite(v) for v in box) or box[0] >= box[2] or box[1] >= box[3]:
+            continue
+        if text:
+            rows.append({"page": page_no, "line": len(rows) + 1, "text": text, "box": box})
+    return rows
+
+
+def _sheet_stamps(rows):
+    """Accept an explicit inline label or a nearby standalone printed identifier."""
+    ids = [row for row in rows if re.fullmatch(_SHEET_ID, row["text"], re.I)]
+    stamps = {}
+    for row in rows:
+        label = _SHEET_LABEL.fullmatch(row["text"])
+        if not label:
+            continue
+        if label[1]:
+            stamps.setdefault(label[1].upper(), []).append([row])
+            continue
+        x0, y0, x1, y1 = row["box"]
+        height = y1 - y0
+        for value in ids:
+            left, top, right, bottom = value["box"]
+            if (y0 - height / 2 <= top <= y1 + 2 * height and
+                    x0 - height <= left <= x1 + 5 * height and bottom >= y0):
+                stamps.setdefault(value["text"].upper(), []).append([row, value])
+    return stamps
+
+
+def _stacked_detail_candidates(rows, stamps):
+    stamp_lines = {r["line"] for witnesses in stamps.values() for pair in witnesses for r in pair}
+    numbers = sorted((((r["box"][0] + r["box"][2]) / 2, r["line"], r) for r in rows
+                      if re.fullmatch(_DETAIL_ID, r["text"], re.I)))
+    centers = [n[0] for n in numbers]
+    candidates, numerator_uses = [], Counter()
+    for row in rows:
+        if row["line"] in stamp_lines or not re.fullmatch(_SHEET_ID, row["text"], re.I):
+            continue
+        left, top, right, bottom = row["box"]
+        h = bottom - top
+        center = (left + right) / 2
+        choices = []
+        for _, _, number in numbers[bisect_left(centers, center - .35*h):bisect_right(centers, center + .35*h)]:
+            x0, y0, x1, y1 = number["box"]
+            if .75*h <= y1-y0 <= 1.3*h and -.1*h <= top-y1 <= .8*h:
+                choices.append(number)
+                numerator_uses[number["line"]] += 1
+        if choices:
+            candidates.append((row, choices))
+    for row, choices in candidates:
+        unique = len(choices) == 1 and numerator_uses[choices[0]["line"]] == 1
+        yield {"source": row, "source_sheet_ids": sorted(stamps),
+               "reference_form": "stacked_text_candidate", "numerator_evidence": choices,
+               "target_sheet": row["text"].upper(),
+               "target_detail": choices[0]["text"].upper() if unique else None}
+
+
+def _detail_graph(pages):
+    sheet_pages = {}
+    headings = {}
+    requested = []
+    for number, rows in enumerate(pages, 1):
+        stamps = _sheet_stamps(rows)
+        for sheet, evidence in stamps.items():
+            sheet_pages.setdefault(sheet, []).append(
+                {"page": number, "sheet_ids_on_page": sorted(stamps), "stamp_evidence": evidence})
+        for row in rows:
+            line = row["text"]
+            references = list(_DETAIL_REF.finditer(line))
+            bubble = _BUBBLE_TEXT.fullmatch(line)
+            if bubble:
+                references.append(bubble)
+            for ref in references:
+                for detail in re.findall(_DETAIL_ID, ref[1], re.I):
+                    requested.append({"source": row, "source_sheet_ids": sorted(stamps),
+                                      "reference_form": "explicit_text",
+                                      "reference_span": list(ref.span()), "target_sheet": ref[2].upper(),
+                                      "target_detail": detail.upper()})
+            heading = _DETAIL_HEADING.fullmatch(line)
+            if heading and not references:
+                headings.setdefault((number, heading[1].upper()), []).append(row)
+        requested.extend(_stacked_detail_candidates(rows, stamps))
+
+    for ref in requested:
+        destinations = sheet_pages.get(ref["target_sheet"], [])
+        ref["candidate_pages"] = [d["page"] for d in destinations]
+        if ref["target_detail"] is None:
+            ref["status"] = "ambiguous_stacked_source"
+        elif not destinations:
+            ref["status"] = "sheet_not_found"
+        elif len(destinations) != 1 or len(destinations[0]["sheet_ids_on_page"]) != 1:
+            ref["status"] = "ambiguous_sheet"
+        else:
+            candidates = headings.get((destinations[0]["page"], ref["target_detail"]), [])
+            ref["detail_evidence"] = candidates
+            ref["status"] = ("resolved_detail" if len(candidates) == 1 else
+                             "ambiguous_detail" if candidates else "sheet_only")
+            if ref["status"] == "resolved_detail" and ref["reference_form"] == "stacked_text_candidate":
+                ref["status"] = "candidate_detail"
+    return {"sheets": sheet_pages, "references": requested}
+
+
+def _numbered_caption_candidates(rows, detail):
+    """Find a separate printed number and heading positioned for a ruled caption."""
+    for number in rows:
+        if number["text"].upper() != detail:
+            continue
+        x0, y0, x1, y1 = number["box"]
+        height = y1 - y0
+        for title in rows:
+            left, top, right, bottom = title["box"]
+            if (0 < left-x1 < 3*height and -.15*height < bottom-y0 < .65*height
+                    and .8*height < bottom-top < 1.2*height and right-left > 2*height
+                    and title["text"].isupper() and len(title["text"].split()) >= 2):
+                yield number, title
+
+
+def _round_marker(vector):
+    if vector["type"] in ("circle", "ellipse"):
+        return True
+    # Poppler commonly emits a circular view label as four cubic quadrants.
+    path = vector.get("d", "")
+    if not re.fullmatch(r"MCCCCZ?", "".join(re.findall(r"[MmLlHhVvCcSsQqTtAaZz]", path))):
+        return False
+    coords = [float(x) for x in _NUMBER.findall(path)]
+    if len(coords) != 26:
+        return False
+    ends = [tuple(coords[i:i+2]) for i in (0, 6, 12, 18, 24)]
+    cx = (ends[0][0] + ends[2][0]) / 2
+    cy = (ends[0][1] + ends[2][1]) / 2
+    tol = .015 * max(math.dist(ends[0], ends[2]), math.dist(ends[1], ends[3]))
+    if not tol or math.dist(ends[0], ends[4]) > tol:
+        return False
+    axis = [abs(x-cx) < tol for x, y in ends[:4]]
+    if axis not in ([True, False, True, False], [False, True, False, True]):
+        return False
+    # Elliptic quarter-arc cubic controls lie on the endpoint tangents.
+    for i, vertical in enumerate(axis):
+        x, y = ends[i]
+        nx, ny = ends[i+1]
+        dx, dy = nx-x, ny-y
+        if abs(dx) < tol or abs(dy) < tol or (abs(y-cy) < tol) == vertical:
+            return False
+        c1, c2 = coords[2+6*i:4+6*i], coords[4+6*i:6+6*i]
+        k = .55228475
+        expected1 = (x+k*dx, y) if vertical else (x, y+k*dy)
+        expected2 = (nx, ny-k*dy) if vertical else (nx-k*dx, ny)
+        if math.dist(c1, expected1) > tol or math.dist(c2, expected2) > tol:
+            return False
+    return True
+
+
+def _caption_geometry(vectors, number, title):
+    x0, y0, x1, y1 = number["box"]
+    height = y1-y0
+    left, top, right, bottom = title["box"]
+    markers, rules = [], []
+    for vector in vectors:
+        if vector.get("stroke") in (None, "none") or not vector["bbox_exact_for_centerline"]:
+            continue
+        a, b, c, d = vector["svg_bbox"]
+        if (a < x0 < x1 < c and b < y0 < y1 < d and 1.25*height < c-a < 2.5*height
+                and abs(c-a-(d-b)) < .1*height and abs(a+c-x0-x1) < .4*height
+                and abs(b+d-y0-y1) < .5*height and _round_marker(vector)):
+            markers.append(vector)
+        if (vector.get("svg_segment_vertex_pairs") == [[0, 1]] and abs(b-d) < .05*height
+                and bottom-.15*height <= b <= bottom+.3*height and c >= right and a < left):
+            rules.append(vector)
+    pairs = [(m, r) for m in markers for r in rules
+             if abs(m["svg_bbox"][2]-r["svg_bbox"][0]) < .2*height
+             and abs((m["svg_bbox"][1]+m["svg_bbox"][3])/2-r["svg_bbox"][1]) < .2*height]
+    if len(pairs) != 1:
+        return None
+    return {"number": number, "caption": title,
+            "vectors": [{"id": v["id"], "box": v["svg_bbox"]} for v in pairs[0]]}
+
+
+def _resolve_ruled_captions(result, pages, target, source, directory):
+    destinations = result["sheets"].get(target, [])
+    if len(destinations) != 1 or destinations[0]["sheet_ids_on_page"] != [target]:
+        return
+    page = destinations[0]["page"]
+    refs = [r for r in result["references"] if r["target_sheet"] == target
+            and r["target_detail"] is not None]
+    if not refs:
+        return
+    vectors = None
+    for detail in sorted({r["target_detail"] for r in refs}):
+        candidates = list(_numbered_caption_candidates(pages[page-1], detail))
+        if not candidates:
+            continue
+        if vectors is None:
+            inventory = _svg_inventory(_page_svg(source, page, directory), 30000)
+            if inventory["vector_limit_hit"] or inventory["unlocalized_vectors"]:
+                return
+            vectors = inventory["reported_vectors"]
+        matches = [proof for n, t in candidates if (proof := _caption_geometry(vectors, n, t))]
+        if not matches:
+            continue
+        for ref in (r for r in refs if r["target_detail"] == detail):
+            ref["ruled_caption_evidence"] = matches
+            if len(matches) != 1 or ref.get("detail_evidence"):
+                ref["status"] = "ambiguous_detail"
+            else:
+                ref["status"] = ("resolved_detail" if ref["reference_form"] == "explicit_text"
+                                 else "candidate_detail")
+
+
+def detail_links(filename, target_sheet=None):
+    """Document-wide native text index. All boxes refer to Poppler crop-box text coordinates."""
+    source = pathlib.Path(filename)
+    with source.open("rb") as stream:
+        data = stream.read(50_000_001)
+    if len(data) > 50_000_000:
+        raise ValueError("PDF exceeds 50 MB task-container inspection bound")
+    exe = shutil.which("pdftotext")
+    if not exe:
+        raise RuntimeError("pdftotext required (Poppler)")
+    # Hash and extract precisely the same bytes even if the supplied path changes.
+    with tempfile.TemporaryDirectory(prefix="hamon-detail-") as directory:
+        frozen = pathlib.Path(directory) / "source.pdf"
+        layout = frozen.with_suffix(".xml")
+        frozen.write_bytes(data)
+        total, _ = _page_geometry(frozen, 1, 1)
+        if not 1 <= total <= 256:
+            raise ValueError("document-wide detail index supports at most 256 pages")
+        extract = subprocess.run([exe, "-cropbox", "-bbox-layout", str(frozen), str(layout)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=45)
+        if extract.returncode:
+            raise ValueError("pdftotext failed to extract the document's native sheet text")
+        if layout.stat().st_size > 64_000_000:
+            raise ValueError("PDF native text layout exceeds 64 MB")
+        pages = ET.parse(layout).findall(".//{*}page")
+        if len(pages) != total:
+            raise ValueError("incomplete native page index")
+        rows = [_drawing_text_lines(page, n) for n, page in enumerate(pages, 1)]
+        result = _detail_graph(rows)
+        if target_sheet is not None:
+            _resolve_ruled_captions(result, rows, target_sheet.upper(), frozen, directory)
+    result.update(kind="pdf-detail-links", source_sha256=hashlib.sha256(data).hexdigest(),
+                  page_count=total, coordinate_frame="Poppler pdftotext -cropbox -bbox-layout",
+                  coverage="Native text references and titled detail headings. A selected target sheet is also checked for numbered vector captions. Stacked source pairs are candidates; raster-only details need visual review.")
+    if target_sheet is not None:
+        target = target_sheet.upper()
+        selected = [r for r in result["references"] if r["target_sheet"] == target]
+        needed = {target} | {s for r in selected for s in r["source_sheet_ids"]}
+        result["references"] = selected
+        result["sheets"] = {s: pages for s, pages in result["sheets"].items() if s in needed}
+        result["target_sheet_filter"] = target
+    return result
