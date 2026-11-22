@@ -16,7 +16,19 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 import numpy as np
 from _scipy_compat import HAS_SCIPY, integrate, optimize
-import sympy as sp
+from decimal import Decimal, getcontext
+try:
+    import sympy as sp
+    HAS_SYMPY = True
+except ImportError:
+    class _DecimalSympyShim:
+        pi = Decimal('3.14159265358979323846264338327950288419716939937510582097494')
+        @staticmethod
+        def Float(val, prec=50):
+            getcontext().prec = max(60, int(prec) + 10)
+            return Decimal(str(val))
+    sp = _DecimalSympyShim()
+    HAS_SYMPY = False
 
 WAVE6_DOMAINS: Tuple[str, ...] = (
     "compressible_acoustics",
