@@ -290,6 +290,15 @@ def scan_dxf_takeoff(filename: str | Path) -> dict[str, Any]:
             if closed and area > 0:
                 poly_area_by_layer[layer] = poly_area_by_layer.get(layer, 0.0) + area
             poly_perim_by_layer[layer] = poly_perim_by_layer.get(layer, 0.0) + perim
+        elif etype == "SOLID":
+            coords = {c: float(v) for c, v in groups if 10 <= c <= 13 or 20 <= c <= 23}
+            if len(coords) == 8:
+                # DXF stores the opposite corners third and fourth, in face-local coordinates.
+                outline = [(coords[c], coords[c + 10]) for c in (10, 11, 13, 12)]
+                area, perimeter = shoelace_area_and_perimeter(outline, closed=True)
+                if area > 0.0:
+                    poly_area_by_layer[layer] = poly_area_by_layer.get(layer, 0.0) + area
+                    poly_perim_by_layer[layer] = poly_perim_by_layer.get(layer, 0.0) + perimeter
         elif etype == "CIRCLE":
             rad = next((float(v) for c, v in groups if c == 40), 0.0)
             if rad > 0.0:
