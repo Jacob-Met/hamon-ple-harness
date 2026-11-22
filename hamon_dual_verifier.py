@@ -1530,93 +1530,75 @@ def _seg_aabb_dist_3d_dual(
 
 
 def solve_continuous_beam_2span_dual(spec: dict[str, Any]) -> dict[str, Any]:
-    """Dual-solve 2-span continuous Euler-Bernoulli beam:
-    Path A: Clapeyron's analytical Three-Moment Equation
-    Path B: 96-element Hermite cubic 3-support Beam FEM.
-    """
-    L1 = eval_quantity(str(spec["span1"])).val
-    L2 = eval_quantity(str(spec["span2"])).val
-    q1 = eval_quantity(str(spec.get("udl1", "0*N/m"))).val
-    q2 = eval_quantity(str(spec.get("udl2", "0*N/m"))).val
-    E = eval_quantity(str(spec.get("E", "200*GPa"))).val
-    I = eval_quantity(str(spec.get("I", "1e-4*m**4"))).val
-    EI = E * I
+    """Cross-check three-moment statics against two prismatic Hermite beam elements."""
+    # Preserve the numerical SI values supplied by the existing quantity parser.
+    L1 = Fraction(eval_quantity(str(spec["span1"])).val)
+    L2 = Fraction(eval_quantity(str(spec["span2"])).val)
+    q1 = Fraction(eval_quantity(str(spec.get("udl1", "0*N/m"))).val)
+    q2 = Fraction(eval_quantity(str(spec.get("udl2", "0*N/m"))).val)
+    E = Fraction(eval_quantity(str(spec.get("E", "200*GPa"))).val)
+    I = Fraction(eval_quantity(str(spec.get("I", "1e-4*m**4"))).val)
+    if min(L1, L2, E, I) <= 0:
+        raise ValueError("two-span beam requires positive span lengths, modulus and inertia")
 
-    # Path A: Clapeyron Three-Moment Equation with pinned outer ends (M_A = M_C = 0):
-    # 2 * M_B * (L1 + L2) = -q1 * L1^3 / 4 - q2 * L2^3 / 4
-    M_B_signed = -(q1 * L1**3 + q2 * L2**3) / (8.0 * (L1 + L2))
-    R_A_ana = 0.5 * q1 * L1 + M_B_signed / L1
-    R_C_ana = 0.5 * q2 * L2 + M_B_signed / L2
-    R_B_ana = (q1 * L1 + q2 * L2) - R_A_ana - R_C_ana
+    # Path A: Clapeyron's three-moment relation for pinned outer ends.
+    middle_moment = -(q1 * L1**3 + q2 * L2**3) / (8 * (L1 + L2))
+    left = q1 * L1 / 2 + middle_moment / L1
+    right = q2 * L2 / 2 + middle_moment / L2
+    middle = q1 * L1 + q2 * L2 - left - right
 
-    # Path B: 96-element Hermite cubic FEM with nodes at x = 0, L1, L1 + L2
-    n1, n2 = 48, 48
-    nodes = [i * (L1 / n1) for i in range(n1)] + [L1 + j * (L2 / n2) for j in range(n2 + 1)]
-    n_nd = len(nodes)
-    ndof = 2 * n_nd
-    K = [[0.0] * ndof for _ in range(ndof)]
-    F = [0.0] * ndof
-    for e in range(n_nd - 1):
-        le = nodes[e + 1] - nodes[e]
-        qe = q1 if e < n1 else q2
-        c = EI / (le**3)
-        ke = [
-            [12 * c, 6 * le * c, -12 * c, 6 * le * c],
-            [6 * le * c, 4 * le**2 * c, -6 * le * c, 2 * le**2 * c],
-            [-12 * c, -6 * le * c, 12 * c, -6 * le * c],
-            [6 * le * c, 2 * le**2 * c, -6 * le * c, 4 * le**2 * c],
-        ]
-        fe = [-0.5 * qe * le, -(qe * le**2) / 12.0, -0.5 * qe * le, +(qe * le**2) / 12.0]
-        dofs = [2 * e, 2 * e + 1, 2 * (e + 1), 2 * (e + 1) + 1]
-        for ia, ga in enumerate(dofs):
-            F[ga] += fe[ia]
-            for ib, gb in enumerate(dofs):
-                K[ga][gb] += ke[ia][ib]
+    # Path B: all three transverse displacements are prescribed. For constant EI
+    # and uniform load in each span, cubic Hermite stiffness plus consistent
+    # nodal loads gives exact end forces. The quartic load field missing inside
+    # the element has zero displacement AND rotation at both ends.
+    spans = ((L1, q1), (L2, q2))
+    diagonal = [Fraction(0) for _ in range(3)]
+    off_diagonal = []
+    moments = [Fraction(0) for _ in range(3)]
+    for i, (length, load) in enumerate(spans):
+        stiffness = E * I / length
+        diagonal[i] += 4 * stiffness
+        diagonal[i + 1] += 4 * stiffness
+        off_diagonal.append(2 * stiffness)
+        end_load = load * length**2 / 12
+        moments[i] -= end_load
+        moments[i + 1] += end_load
 
-    fixed = {0, 2 * n1, 2 * (n_nd - 1)}
-    free = [idx_d for idx_d in range(ndof) if idx_d not in fixed]
-    K_ff = [[K[i][j] for j in free] for i in free]
-    F_f = [F[i] for i in free]
-    if HAS_SCIPY:
-        u_free = [float(v) for v in _spla.solve(_np.array(K_ff, dtype=float), _np.array(F_f, dtype=float), assume_a="gen")]
-    else:
-        u_free = [float(v) for v in dual_solve_linear(K_ff, F_f, rtol=1e-5)["solution"]]
-    u = [0.0] * ndof
-    for kf, dof in enumerate(free):
-        u[dof] = u_free[kf]
-    R_vec = [sum(K[i][j] * u[j] for j in range(ndof)) - F[i] for i in range(ndof)]
-    R_A_fem = R_vec[0]
-    R_B_fem = R_vec[2 * n1]
-    R_C_fem = R_vec[2 * (n_nd - 1)]
-    M_B_hog_ana = abs(M_B_signed)
-    # Exact hogging moment at interior support from left span equilibrium
-    M_B_hog_fem = abs(R_A_fem * L1 - 0.5 * q1 * L1**2)
+    # Solve the symmetric positive-definite tridiagonal rotation equations.
+    # Keeping the three unknowns rational also preserves vanishing end forces.
+    for i in range(2):
+        factor = off_diagonal[i] / diagonal[i]
+        diagonal[i + 1] -= factor * off_diagonal[i]
+        moments[i + 1] -= factor * moments[i]
+    rotation = [Fraction(0) for _ in range(3)]
+    rotation[2] = moments[2] / diagonal[2]
+    for i in (1, 0):
+        rotation[i] = (moments[i] - off_diagonal[i] * rotation[i + 1]) / diagonal[i]
 
-    disc = max(
-        _rel_diff(R_A_ana, R_A_fem),
-        _rel_diff(R_B_ana, R_B_fem),
-        _rel_diff(R_C_ana, R_C_fem),
-        _rel_diff(M_B_hog_ana, M_B_hog_fem) if M_B_hog_ana > 1e-6 else 0.0,
-    )
-    if disc > 1e-5:
-        raise ValueError(f"2-span continuous beam Three-Moment vs FEM discrepancy {disc:.3e}")
+    reactions = [Fraction(0) for _ in range(3)]
+    for i, (length, load) in enumerate(spans):
+        shear = 6 * E * I * (rotation[i] + rotation[i + 1]) / length**2
+        reactions[i] += load * length / 2 + shear
+        reactions[i + 1] += load * length / 2 - shear
+    end_moment = (2 * rotation[0] + 4 * rotation[1]) * E * I / L1 - q1 * L1**2 / 12
+    if reactions != [left, middle, right] or end_moment != middle_moment:
+        raise ValueError("2-span continuous beam Three-Moment vs FEM discrepancy")
 
-    # The outer pins have zero moment. Check the middle support and every
-    # interior zero-shear section, including hogging under an upward load.
-    M_max = M_B_hog_ana
-    for span, reaction, load in ((L1, R_A_ana, q1), (L2, R_C_ana, q2)):
+    # Check the middle support and all interior zero-shear sections, including uplift.
+    peak_moment = abs(middle_moment)
+    for length, reaction, load in ((L1, left, q1), (L2, right, q2)):
         if load:
             x = reaction / load
-            if 0.0 < x < span:
-                M_max = max(M_max, abs(0.5 * reaction * x))
+            if 0 < x < length:
+                peak_moment = max(peak_moment, abs(reaction * x / 2))
     return {
-        "R_A_N": R_A_ana,
-        "R_B_N": R_B_ana,
-        "R_C_N": R_C_ana,
-        "M_B_hogging_Nm": M_B_hog_ana,
-        "M_max_Nm": M_max,
-        "equilibrium_residual_N": abs((R_A_fem + R_B_fem + R_C_fem) - (q1 * L1 + q2 * L2)),
-        "dual_rel_discrepancy": disc,
+        "R_A_N": float(left),
+        "R_B_N": float(middle),
+        "R_C_N": float(right),
+        "M_B_hogging_Nm": float(abs(middle_moment)),
+        "M_max_Nm": float(peak_moment),
+        "equilibrium_residual_N": float(abs(sum(reactions) - q1 * L1 - q2 * L2)),
+        "dual_rel_discrepancy": 0.0,
         "dual_verified": True,
     }
 
