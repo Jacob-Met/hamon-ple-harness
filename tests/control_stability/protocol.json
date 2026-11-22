@@ -1,0 +1,296 @@
+{
+  "schema": "ple.control.exact-lyapunov-v1",
+  "source_base": "4c8bf73ef4676291b60984f36ec04add92f68bd0",
+  "source_solver_sha256": "16ed8ee066789311ff0e1a26e0587986499fb31204fddf96e4a8a55a4de43c3d",
+  "question": "Does the registered state-space verifier establish strict continuous-time Hurwitz stability and solve the actual requested symmetric Lyapunov equation independently of numerical time scales and the sign of Q?",
+  "input_semantics": "Existing float parsing followed by exact rational interpretation of the accepted finite binary64 values. B/C, rank arithmetic and transfer-function mode stay outside this repair.",
+  "output_contract": {
+    "hurwitz_stable": "Exact identity-Q Lyapunov criterion: true iff its symmetric solution is unique and strictly positive definite.",
+    "lyapunov_solution_status": [
+      "unique",
+      "inconsistent",
+      "nonunique"
+    ],
+    "lyapunov_P_exact": "Matrix of exact rational strings for a unique requested-Q solution; null otherwise.",
+    "lyapunov_P": "Matrix of floats if all exact entries have finite non-underflowed float representations; null otherwise.",
+    "lyapunov_float_status": [
+      "finite",
+      "outside_float_range",
+      "not_unique_solution"
+    ],
+    "lyapunov_pd": "Exact strict positive definiteness for a unique requested solution; null for inconsistent/nonunique equations.",
+    "lyapunov_residual_exact": "True for a unique solution independently satisfying every exact equation entry; null otherwise.",
+    "stability_certificate": {
+      "solution_status": "unique/inconsistent/nonunique",
+      "P_exact": "Identity-Q rational solution matrix or null",
+      "positive_definite": "bool or null",
+      "residual_exact": "true or null"
+    },
+    "passed": "Valid systems with a verified unique/inconsistent/nonunique requested equation can pass without requiring stability or positive requested P. Retain existing characteristic-polynomial residual check. Invalid Q explicitly refuses.",
+    "undefined_pd_claim": "Either Boolean claimed value explicitly refuses with a reason; never float(null), never treat an undefined PD flag as false.",
+    "invalid_Q": "Wrong shape, nonfinite, or nonsymmetric Q explicitly refuses; symmetric positive, zero, semidefinite and indefinite Q are valid."
+  },
+  "families": [
+    {
+      "name": "scalar_default",
+      "count": 4,
+      "A": [
+        "-2^-55",
+        "0",
+        "2^-55",
+        "-2^55"
+      ],
+      "Q": "I",
+      "stable": [
+        true,
+        false,
+        false,
+        true
+      ],
+      "status": [
+        "unique",
+        "inconsistent",
+        "unique",
+        "unique"
+      ],
+      "P": [
+        "2^54",
+        null,
+        "-2^54",
+        "2^-56"
+      ],
+      "PD": [
+        true,
+        null,
+        false,
+        true
+      ]
+    },
+    {
+      "name": "mixed_default",
+      "count": 3,
+      "A": "diag(-1,lambda)",
+      "lambda": [
+        "-2^-55",
+        "2^-55",
+        "0"
+      ],
+      "Q": "I",
+      "stable": [
+        true,
+        false,
+        false
+      ],
+      "status": [
+        "unique",
+        "unique",
+        "inconsistent"
+      ],
+      "P": [
+        "diag(1/2,2^54)",
+        "diag(1/2,-2^54)",
+        null
+      ],
+      "PD": [
+        true,
+        false,
+        null
+      ]
+    },
+    {
+      "name": "scalar_requested_Q",
+      "count": 4,
+      "A": [
+        "-2^-55",
+        "-1",
+        "1",
+        "-1"
+      ],
+      "Q": [
+        "2^-100",
+        "-1",
+        "-1",
+        "0"
+      ],
+      "stable": [
+        true,
+        true,
+        false,
+        true
+      ],
+      "status": "unique",
+      "P": [
+        "2^-46",
+        "-1/2",
+        "1/2",
+        "0"
+      ],
+      "PD": [
+        true,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "name": "two_state_Q_scale",
+      "count": 2,
+      "A": "-I2",
+      "Q": [
+        "2^-80*I2",
+        "2^80*I2"
+      ],
+      "stable": true,
+      "status": "unique",
+      "P": [
+        "2^-81*I2",
+        "2^79*I2"
+      ],
+      "PD": true
+    },
+    {
+      "name": "semidefinite_Q",
+      "count": 2,
+      "A": [
+        "diag(-1,-2)",
+        "[[-1,1],[0,-1]]"
+      ],
+      "Q": "diag(1,0)",
+      "stable": true,
+      "status": "unique",
+      "P": [
+        "diag(1/2,0)",
+        "[[1/2,1/4],[1/4,1/4]]"
+      ],
+      "PD": [
+        false,
+        true
+      ]
+    },
+    {
+      "name": "indefinite_Q",
+      "count": 1,
+      "A": "diag(-1,-2)",
+      "Q": "diag(1,-1)",
+      "stable": true,
+      "status": "unique",
+      "P": "diag(1/2,-1/4)",
+      "PD": false
+    },
+    {
+      "name": "nonsymmetric_Q",
+      "count": 1,
+      "A": "-I2",
+      "Q": "[[1,1],[0,1]]",
+      "input_valid": false,
+      "expected": "Explicit refused request; no solver exception or substituted symmetric RHS."
+    },
+    {
+      "name": "zero_compatible",
+      "count": 1,
+      "A": "[[0]]",
+      "Q": "[[0]]",
+      "stable": false,
+      "status": "nonunique",
+      "P": null,
+      "PD": null
+    },
+    {
+      "name": "rotation",
+      "count": 2,
+      "A": "[[0,-1],[1,0]]",
+      "Q": [
+        "I2",
+        "zero2"
+      ],
+      "stable": false,
+      "status": [
+        "inconsistent",
+        "nonunique"
+      ],
+      "P": null,
+      "PD": null
+    },
+    {
+      "name": "identity_nonunique",
+      "count": 1,
+      "A": "diag(-1,1)",
+      "Q": "I2",
+      "stable": false,
+      "status": "nonunique",
+      "P": null,
+      "PD": null,
+      "proof": "Identity equation fixes diagonal(1/2,-1/2), leaves off-diagonal free; no positive-definite solution."
+    },
+    {
+      "name": "coordinate_and_time",
+      "count": 9,
+      "baseA": "diag(-1,-2^-55)",
+      "baseQ": "I2",
+      "time_multiplier": [
+        "2^-20",
+        "1",
+        "2^20"
+      ],
+      "state_map": [
+        "I2",
+        "[[0,1],[1,0]]",
+        "[[0,2^-20],[2^20,0]]"
+      ],
+      "inputs": "A'=c*S*A*S^-1; Q'=S^-T*S^-1",
+      "stable": true,
+      "status": "unique",
+      "P": "S^-T*diag(1/2,2^54)*S^-1/c",
+      "PD": true,
+      "proof": "Signed permutations and dyadic diagonal scaling preserve every supplied binary64 coefficient."
+    },
+    {
+      "name": "float_range",
+      "count": 2,
+      "A": [
+        "-2^-1074",
+        "-2^1023"
+      ],
+      "Q": [
+        "1",
+        "2^-1074"
+      ],
+      "stable": true,
+      "status": "unique",
+      "P": [
+        "2^1073",
+        "2^-2098"
+      ],
+      "PD": true,
+      "float_status": "outside_float_range"
+    }
+  ],
+  "physical_case_count": 32,
+  "boolean_claim_count": 128,
+  "claim_checks": "Every system is called unclaimed and with False/True for each of hurwitz_stable and lyapunov_pd. Unique valid results accept exactly the truthful value. Singular valid equations accept exactly the truthful stability claim, and refuse both undefined-PD claims. Invalid Q refuses all four claims.",
+  "oracles": [
+    "Compare exact returned requested P strings to stated analytical P as rational numbers; no floating tolerance can convert a nonzero expected entry to zero.",
+    "Verify every returned exact requested and identity certificate against all entries of A^T P+PA using rational arithmetic of the supplied floats; this receiver does not solve a linear system.",
+    "Check strict PD of the returned 1x1/2x2 certificate by its diagonal/principal determinant, and match the known spectrum for Hurwitz flags.",
+    "For representable unique P entries require numerical matrix agreement within relative1e-12, with exact zeros checked as zero. Unrepresentable unique matrices are null and keep the lossless rational solution.",
+    "Require allow_nan=false JSON serialization and no exceptions for all32 systems and128 claims.",
+    "Registered Pi representative cases: mixed stable defaultQ, slow unstable control, and coupled semidefiniteQ; include defined and undefined Boolean claim handling.",
+    "Run every inherited repository CI gate, including merged rank159's analytical and real Pi checks."
+  ],
+  "decision": "All32 classifications/requested-solution/certificate/range checks and128 Boolean claim outcomes correct, zero exceptions, real Pi and full maintained CI success. Preserve all original stock outcomes; no coefficient/tolerance or case changes after first execution.",
+  "execution": "Native source preparation only, then one matched stock/candidate pair through maintained pull_request CI. No local numerical execution, no unsupported dispatcher retry, organizer data, dev-set run, scored submission, or paid model call.",
+  "references": [
+    {
+      "url": "https://ocw.mit.edu/courses/6-241j-dynamic-systems-and-control-spring-2011/996025f6db0d90b00f11c44fc49b85f9_MIT6_241JS11_textbook.pdf",
+      "sections": "Lecture 14, Theorem 14.1: continuous-time Lyapunov equivalence and uniqueness"
+    },
+    {
+      "url": "https://lall.stanford.edu/engr210a/lectures/lecture9_2001_10_30_01.pdf",
+      "sections": "Slides 9-10 and 9-19: Lyapunov solvability and continuous-time Hurwitz criterion"
+    },
+    {
+      "url": "https://eceweb1.rutgers.edu/~gajic/psfiles/chap5.pdf",
+      "sections": "Finite-dimensional state-coordinate invariance"
+    }
+  ]
+}

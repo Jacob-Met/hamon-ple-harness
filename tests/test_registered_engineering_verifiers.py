@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+from fractions import Fraction
 from pathlib import Path
 
 import tempfile
@@ -92,6 +93,20 @@ CONTROL_RANK_CASES = [
 ]
 
 
+# These four registered examples use two states. An absent requested P denotes
+# the inconsistent identity-forcing equation in the last example.
+IDENTITY_2 = [[1, 0], [0, 1]]
+STABILITY_CASES = [
+    ("slow-stable", {"A": [[-1, 0], [0, -(2.0**-55)]]},
+     True, [[0.5, 0], [0, 2**54]]),
+    ("slow-unstable", {"A": [[-1, 0], [0, 2.0**-55]]},
+     False, [[0.5, 0], [0, -(2**54)]]),
+    ("coupled-semidefinite", {"A": [[-1, 1], [0, -1]], "Q": [[1, 0], [0, 0]]},
+     True, [[0.5, 0.25], [0.25, 0.25]]),
+    ("singular-forcing", {"A": [[-1, 0], [0, 0]]}, False, None),
+]
+
+
 @pytest.fixture(scope="module")
 def routed(tmp_path_factory):
     workdir = tmp_path_factory.mktemp("registered-engineering")
@@ -143,6 +158,13 @@ def routed(tmp_path_factory):
                 calls.append({"id": f"{case}-{field}-{claim}", "mode": "control", "spec": {
                     "mode": "state_space", **matrices, "claimed_field": field, "claimed_value": claim,
                 }})
+    for case, matrices, _, _ in STABILITY_CASES:
+        spec = {"mode": "state_space", **matrices}
+        calls.append({"id": case, "mode": "control", "spec": spec})
+        for field in ("hurwitz_stable", "lyapunov_pd"):
+            for claim in (False, True):
+                calls.append({"id": f"{case}-{field}-{claim}", "mode": "control",
+                              "spec": {**spec, "claimed_field": field, "claimed_value": claim}})
     source = r"""
 import registerTaskTools, { PLE_DOMAIN_TOOL_NAMES } from './task-tools.ts';
 const tools = new Map();
@@ -253,6 +275,63 @@ def test_registered_algebraic_control_ranks(routed, case, matrices, rank):
             assert check["actual"] == float(full_rank) and check["within_tolerance"] is accepted
 
 
+def checked_pi_lyapunov_matrix(encoded, a, q):
+    assert isinstance(encoded, list) and len(encoded) == 2
+    assert all(len(row) == 2 and all(isinstance(x, str) for x in row) for row in encoded)
+    p = [[Fraction(x) for x in row] for row in encoded]
+    assert p[0][1] == p[1][0]
+    for i in range(2):
+        for j in range(2):
+            lhs = sum(Fraction(a[k][i]) * p[k][j] + p[i][k] * Fraction(a[k][j])
+                      for k in range(2))
+            assert lhs == -Fraction(q[i][j])
+    return p
+
+
+@pytest.mark.parametrize("case,matrices,stable,expected_p", STABILITY_CASES,
+                         ids=[row[0] for row in STABILITY_CASES])
+def test_registered_state_space_stability(routed, case, matrices, stable, expected_p):
+    result = routed[case]
+    assert result["completed"], result
+    details = result["details"]
+    assert details["domain"] == "control" and details["mode"] == "state_space"
+    assert details["passed"] is True and details["hurwitz_stable"] is stable, details
+    cert = details["stability_certificate"]
+    if expected_p is None:
+        expected_pd = None
+        assert cert["solution_status"] == details["lyapunov_solution_status"] == "inconsistent"
+        assert cert["P_exact"] is None and cert["residual_exact"] is None
+        assert cert["positive_definite"] is None
+        assert details["lyapunov_P"] is None and details["lyapunov_P_exact"] is None
+        assert details["lyapunov_residual_exact"] is None
+        assert details["lyapunov_float_status"] == "not_unique_solution"
+    else:
+        assert cert["solution_status"] == details["lyapunov_solution_status"] == "unique"
+        assert cert["residual_exact"] is True and details["lyapunov_residual_exact"] is True
+        p = checked_pi_lyapunov_matrix(details["lyapunov_P_exact"], matrices["A"],
+                                       matrices.get("Q", IDENTITY_2))
+        assert p == expected_p and details["lyapunov_P"] == expected_p
+        assert details["lyapunov_float_status"] == "finite"
+        expected_pd = p[0][0] > 0 and p[0][0] * p[1][1] > p[0][1]**2
+        identity_p = checked_pi_lyapunov_matrix(cert["P_exact"], matrices["A"], IDENTITY_2)
+        identity_pd = identity_p[0][0] > 0 and identity_p[0][0] * identity_p[1][1] > identity_p[0][1]**2
+        assert cert["positive_definite"] is stable and identity_pd is stable
+    assert details["lyapunov_pd"] is expected_pd
+    for field, truth in (("hurwitz_stable", stable), ("lyapunov_pd", expected_pd)):
+        for claim in (False, True):
+            reply = routed[f"{case}-{field}-{claim}"]
+            assert reply["completed"], reply
+            claimed = reply["details"]
+            assert claimed[field] is truth
+            assert claimed["passed"] is (claim is truth)
+            if truth is None:
+                assert isinstance(claimed.get("reason"), str) and claimed["reason"].strip()
+            else:
+                check = claimed["claim_check"]
+                assert check["field"] == field and check["claimed"] == float(claim)
+                assert check["actual"] == float(truth) and check["within_tolerance"] is (claim is truth)
+
+
 class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -287,3 +366,8 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
         for case, matrices, rank in CONTROL_RANK_CASES:
             with self.subTest(case=case):
                 test_registered_algebraic_control_ranks(self.routed_data, case, matrices, rank)
+
+    def test_registered_state_space_stability(self):
+        for case, matrices, stable, expected_p in STABILITY_CASES:
+            with self.subTest(case=case):
+                test_registered_state_space_stability(self.routed_data, case, matrices, stable, expected_p)
