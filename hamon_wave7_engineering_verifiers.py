@@ -402,40 +402,52 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
 
     if subkind == "heat_exchanger":
         arr = str(params.get("flow_arrangement", "counterflow")).strip().lower()
+        arrangements = {"counterflow", "parallel", "shell_tube_1_2", "crossflow_unmixed",
+                        "crossflow_cmax_mixed", "crossflow_cmin_mixed", "condenser", "boiler"}
+        if arr not in arrangements:
+            return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "unknown_flow_arrangement"}
+        observation_keys = ("UA", "effectiveness", "Q", "T_h_out", "T_c_out")
+        try:
+            observed = {key: float(params[key]) for key in observation_keys if key in params}
+        except (TypeError, ValueError, OverflowError):
+            return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "invalid_observation"}
+        if any(isinstance(params[key], bool) or not math.isfinite(value) for key, value in observed.items()):
+            return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "invalid_observation"}
         t_hi = float(params["T_h_in"])
         t_ci = float(params["T_c_in"])
-        if t_hi <= t_ci:
+        if not (math.isfinite(t_hi) and math.isfinite(t_ci) and t_hi > t_ci):
             return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "invalid_inlet_temperatures"}
 
         c_h = float(params.get("C_h", 0.0))
         c_c = float(params.get("C_c", 0.0))
-        if arr in ("condenser", "boiler"):
-            c_min = c_c if arr == "condenser" else c_h
-            cr = 0.0
+        if arr == "condenser":
+            sensible = [c_c]
+        elif arr == "boiler":
+            sensible = [c_h]
         else:
-            if c_h <= 0.0 or c_c <= 0.0:
-                return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "non_positive_heat_capacity_rates"}
-            c_min = min(c_h, c_c)
-            c_max = max(c_h, c_c)
-            cr = c_min / c_max
+            sensible = [c_h, c_c]
+        if not all(math.isfinite(c) and c > 0.0 for c in sensible):
+            return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "non_positive_heat_capacity_rates"}
+        c_min = min(sensible)
+        cr = c_min / max(sensible) if len(sensible) == 2 else 0.0
 
         crossflow_inverse = None
         q_max = c_min * (t_hi - t_ci)
-        if "UA" in params:
-            ua = float(params["UA"])
+        if "UA" in observed:
+            ua = observed["UA"]
             if ua < 0.0:
                 return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "negative_UA"}
             ntu = ua / c_min
             eps = _hx_eps_from_ntu(ntu, cr, arr)
         else:
-            if "effectiveness" in params:
-                eps_target = float(params["effectiveness"])
-            elif "Q" in params:
-                eps_target = float(params["Q"]) / q_max
-            elif "T_h_out" in params and c_h > 0.0:
-                eps_target = c_h * (t_hi - float(params["T_h_out"])) / q_max
-            elif "T_c_out" in params and c_c > 0.0:
-                eps_target = c_c * (float(params["T_c_out"]) - t_ci) / q_max
+            if "effectiveness" in observed:
+                eps_target = observed["effectiveness"]
+            elif "Q" in observed:
+                eps_target = observed["Q"] / q_max
+            elif "T_h_out" in observed and arr != "condenser":
+                eps_target = c_h * (t_hi - observed["T_h_out"]) / q_max
+            elif "T_c_out" in observed and arr != "boiler":
+                eps_target = c_c * (observed["T_c_out"] - t_ci) / q_max
             else:
                 return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "missing_rating_or_sizing_spec"}
 
@@ -481,7 +493,19 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
                 lmtd_val = difference / math.log1p(difference / smaller)
             lmtd_res = abs(ua * lmtd_val - q_actual) / max(q_actual, 1e-12)
 
-        residual = float(max(eb_h, eb_c, lmtd_res))
+        # A supplied rating can determine the state while other observations test it.
+        # Compare each outlet on its actual stream temperature-change scale.
+        expected = {"UA": ua, "effectiveness": eps, "Q": q_actual, "T_h_out": t_ho, "T_c_out": t_co}
+        inlet = {"T_h_out": t_hi, "T_c_out": t_ci}
+        observation_residuals = {}
+        for key, measured in observed.items():
+            value = expected[key]
+            reference = inlet.get(key, 0.0)
+            scale = max(abs(value - reference), abs(measured - reference))
+            roundoff = 2 * max(math.ulp(value), math.ulp(measured)) if key in inlet else 0.0
+            difference = max(0.0, abs(value - measured) - roundoff)
+            observation_residuals[key] = difference / scale if scale else 0.0
+        residual = float(max(eb_h, eb_c, lmtd_res, *observation_residuals.values()))
         return {
             "domain": "exchangers_radiation",
             "subkind": subkind,
@@ -494,6 +518,7 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
             "T_h_out_K": float(t_ho),
             "T_c_out_K": float(t_co),
             "LMTD_K": lmtd_val,
+            "observation_residuals": observation_residuals,
             **({"effectiveness_model": "ideal_single_pass_both_unmixed"} if arr == "crossflow_unmixed" else {}),
             **({"NTU_numerical_bracket": list(crossflow_inverse)} if crossflow_inverse is not None else {}),
             "residual": residual,

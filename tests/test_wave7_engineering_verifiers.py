@@ -150,3 +150,44 @@ def test_inverse_counterflow_near_pinch_and_balanced_capacity_rates():
     for invalid in (0, 1, 1.01, float("nan")):
         result = solve_exchanger_or_radiation({**base, "effectiveness": invalid})
         assert result["verified"] is False
+
+
+def test_exchanger_checks_every_rating_and_sizing_observation():
+    from hamon_conservation_cad_verifier import run_router_conservation_cad_verifier
+
+    base = {"subkind": "heat_exchanger", "flow_arrangement": "counterflow",
+            "T_h_in": 400., "T_c_in": 300., "C_h": 1000., "C_c": 1000.}
+    # For matched rates and NTU=1, epsilon=1/2 and both streams move by 50 K.
+    observed = {"UA": 1000., "effectiveness": .5, "Q": 50000., "T_h_out": 350., "T_c_out": 350.}
+
+    def solve(changes):
+        return run_router_conservation_cad_verifier({"mode": "exchangers_radiation", "spec": {**base, **changes}})
+
+    for first in range(len(observed)):
+        fields = list(observed)[first:]
+        values = {k: observed[k] for k in fields}
+        answer = solve(values)
+        assert answer["verified"], answer
+        for field in fields[1:]:
+            incorrect = solve({**values, field: observed[field] * 1.1})
+            assert not incorrect["verified"], (first, field, incorrect)
+            assert incorrect["observation_residuals"][field] > 1e-9
+
+    for field in observed:
+        for invalid in (float("nan"), None, True):
+            assert not solve({**observed, field: invalid})["verified"]
+    assert not solve({"UA": 0., "flow_arrangement": "unknown"})["verified"]
+
+
+def test_phase_change_exchanger_uses_sensible_outlet_to_size_and_checks_both():
+    for arrangement, active, fixed in (("condenser", "T_c_out", "T_h_out"), ("boiler", "T_h_out", "T_c_out")):
+        base = {"subkind": "heat_exchanger", "flow_arrangement": arrangement,
+                "T_h_in": 400., "T_c_in": 300., "C_h": 1000., "C_c": 1000.}
+        inlet = 400. if fixed == "T_h_out" else 300.
+        both = solve_exchanger_or_radiation({**base, active: 350., fixed: inlet})
+        assert both["verified"] and math.isclose(both["UA_W_K"], 1000 * math.log(2), rel_tol=1e-10)
+        assert not solve_exchanger_or_radiation({**base, active: 350., fixed: inlet + 1.})["verified"]
+        assert not solve_exchanger_or_radiation({**base, fixed: inlet})["verified"]
+        capacity = "C_c" if arrangement == "condenser" else "C_h"
+        for invalid in (0., -1000., float("inf")):
+            assert not solve_exchanger_or_radiation({**base, "UA": 1000., capacity: invalid})["verified"]
