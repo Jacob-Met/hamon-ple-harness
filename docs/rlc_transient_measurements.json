@@ -1,0 +1,5417 @@
+{
+  "baseline": {
+    "source_commit": "a142b262de04a8d295b6b4c3c589f8aff7d4fe72",
+    "source_sha256": "f2ea2bccb524a46d5dbf843d833630c314e5173e3c2195f073a901c9da64d1cd",
+    "cases_sha256": "8888e4a33398293cc73f17b62015ab2eda34d8f06c71bca380a2ae0479c365c6",
+    "python": "3.12.3",
+    "mpmath": "1.3.0",
+    "without_scipy": false,
+    "process_deadline_seconds": 4.0,
+    "workers": 2,
+    "passed": 31,
+    "total": 50,
+    "max_scaled_error": 2.1111131392558753e-10,
+    "timeouts": 14,
+    "scope": "Manufactured public linear-circuit controls; no organizer task data, model run or contest score.",
+    "results": [
+      {
+        "case": {
+          "name": "z0-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 0.005399595012149804,
+          "current": 0.0035994600242994787
+        },
+        "wall_seconds": 0.8825513999909163,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": 0.005399595012150371,
+            "i_l_A": 0.00359946002429948,
+            "percent_overshoot": 100.0,
+            "residual": 4.83554168928535e-17,
+            "verified": true
+          },
+          "solver_seconds": 0.0003823790466412902
+        },
+        "scaled_error": 4.7271214720367993e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 3.0286456014494583,
+          "current": 0.009095635331415006
+        },
+        "wall_seconds": 0.8199254969367757,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": 3.0286456014494583,
+            "i_l_A": 0.009095635331415006,
+            "percent_overshoot": 100.0,
+            "residual": 5.782411586589357e-19,
+            "verified": true
+          },
+          "solver_seconds": 0.0004327530041337013
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": -1.058641101651954,
+          "current": -0.01909113566890488
+        },
+        "wall_seconds": 0.5989022450521588,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": -1.0586411016519537,
+            "i_l_A": -0.01909113566890488,
+            "percent_overshoot": 100.0,
+            "residual": 1.1102230246251565e-16,
+            "verified": true
+          },
+          "solver_seconds": 0.00038417696487158537
+        },
+        "scaled_error": 1.1102230246251565e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 5.516372329582324,
+          "current": 0.10097651817694758
+        },
+        "wall_seconds": 0.6797800359781832,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": 5.516372329582323,
+            "i_l_A": 0.10097651817694758,
+            "percent_overshoot": 100.0,
+            "residual": 7.105427357601002e-15,
+            "verified": true
+          },
+          "solver_seconds": 0.000707295024767518
+        },
+        "scaled_error": 7.401486830834377e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 2.4623779024123156,
+          "current": -0.0198411064855555
+        },
+        "wall_seconds": 0.7680103910388425,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": 2.4623779024123156,
+            "i_l_A": -0.0198411064855555,
+            "percent_overshoot": 100.0,
+            "residual": 4.677739677087326e-14,
+            "verified": true
+          },
+          "solver_seconds": 0.0006453579990193248
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": -1.303848887220212,
+          "current": 0.014438083426874101
+        },
+        "wall_seconds": 0.5716486509190872,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": -1.3038488872202123,
+            "i_l_A": 0.014438083426874101,
+            "percent_overshoot": 100.0,
+            "residual": 2.353672812205332e-14,
+            "verified": true
+          },
+          "solver_seconds": 0.0006535249995067716
+        },
+        "scaled_error": 1.1102230246251565e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 0.005394199545341117,
+          "current": 0.0035940662294869754
+        },
+        "wall_seconds": 0.6285407089162618,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": 0.0053941995453410385,
+            "i_l_A": 0.0035940662294869762,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 8.312216655722201e-18,
+            "verified": true
+          },
+          "solver_seconds": 0.0003680880181491375
+        },
+        "scaled_error": 7.228014483236697e-18,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 3.028602002026056,
+          "current": 0.00906703772442808
+        },
+        "wall_seconds": 0.5779208720196038,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": 3.028602002026056,
+            "i_l_A": 0.009067037724428082,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 5.782411586589357e-18,
+            "verified": true
+          },
+          "solver_seconds": 0.0004934880416840315
+        },
+        "scaled_error": 5.782411586589357e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": -1.0585525539384477,
+          "current": -0.019032592006227905
+        },
+        "wall_seconds": 0.6260418790625408,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": -1.0585525539384477,
+            "i_l_A": -0.019032592006227908,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 1.734723475976807e-17,
+            "verified": true
+          },
+          "solver_seconds": 0.0003631250001490116
+        },
+        "scaled_error": 1.734723475976807e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 5.34009935258522,
+          "current": 0.09609481288239713
+        },
+        "wall_seconds": 0.5925961930770427,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": 5.34009935258522,
+            "i_l_A": 0.09609481288239716,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 1.0362081563168127e-14,
+            "verified": true
+          },
+          "solver_seconds": 0.0007129439618438482
+        },
+        "scaled_error": 2.312964634635743e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 2.4657652692070045,
+          "current": -0.019274576121773607
+        },
+        "wall_seconds": 0.6543862540274858,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": 2.465765269207004,
+            "i_l_A": -0.01927457612177361,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 6.468899490149245e-14,
+            "verified": true
+          },
+          "solver_seconds": 0.0007784739136695862
+        },
+        "scaled_error": 1.4802973661668753e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": -1.2665553765603137,
+          "current": 0.014525449022947933
+        },
+        "wall_seconds": 0.6761247430695221,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": -1.2665553765603135,
+            "i_l_A": 0.01452544902294794,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 4.6407322429331543e-14,
+            "verified": true
+          },
+          "solver_seconds": 0.0007330909138545394
+        },
+        "scaled_error": 3.469446951953614e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 0.005293205340449413,
+          "current": 0.003493603920785005
+        },
+        "wall_seconds": 0.5819438219768927,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": 0.0052932053393917045,
+            "i_l_A": 0.003493603920086397,
+            "percent_overshoot": 0.0,
+            "residual": 1.1643391689447157e-11,
+            "verified": true
+          },
+          "solver_seconds": 0.00039493595249950886
+        },
+        "scaled_error": 1.1643471197606464e-11,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 3.0277900646714295,
+          "current": 0.008539920695280766
+        },
+        "wall_seconds": 0.7086259960196912,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": 3.027790064671695,
+            "i_l_A": 0.008539920695456284,
+            "percent_overshoot": 0.0,
+            "residual": 1.1701056788988652e-11,
+            "verified": true
+          },
+          "solver_seconds": 0.00042607297655195
+        },
+        "scaled_error": 1.1701172437220373e-11,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": -1.056903430677971,
+          "current": -0.017953242370757783
+        },
+        "wall_seconds": 0.6621134820161387,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": -1.0569034306782372,
+            "i_l_A": -0.017953242370934167,
+            "percent_overshoot": 0.0,
+            "residual": 9.824394975623172e-12,
+            "verified": true
+          },
+          "solver_seconds": 0.000406844075769186
+        },
+        "scaled_error": 9.824588224668683e-12,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 3.170893412032536,
+          "current": 0.044145532943516114
+        },
+        "wall_seconds": 0.6482005920261145,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": 3.170893411443929,
+            "i_l_A": 0.044145532936158534,
+            "percent_overshoot": 0.0,
+            "residual": 1.2261696286721947e-10,
+            "verified": true
+          },
+          "solver_seconds": 0.0008359289495274425
+        },
+        "scaled_error": 1.226263303739888e-10,
+        "passed": false
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 2.5751560881878337,
+          "current": -0.011036383235756403
+        },
+        "wall_seconds": 0.5441209959099069,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": 2.5751560883472484,
+            "i_l_A": -0.011036383233671754,
+            "percent_overshoot": 0.0,
+            "residual": 1.3894024818160197e-10,
+            "verified": true
+          },
+          "solver_seconds": 0.0007238700054585934
+        },
+        "scaled_error": 1.389765617263621e-10,
+        "passed": false
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": -0.9430355293838012,
+          "current": 0.011036383235633777
+        },
+        "wall_seconds": 0.5926284320885316,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": -0.9430355295554786,
+            "i_l_A": 0.011036383233303871,
+            "percent_overshoot": 0.0,
+            "residual": 2.110707609067994e-10,
+            "verified": true
+          },
+          "solver_seconds": 0.0007671209750697017
+        },
+        "scaled_error": 2.1111131392558753e-10,
+        "passed": false
+      },
+      {
+        "case": {
+          "name": "z1-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 0.005293205340438932,
+          "current": 0.003493603920774629
+        },
+        "wall_seconds": 0.6380392409628257,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": 0.005293205340439755,
+            "i_l_A": 0.00349360392077463,
+            "percent_overshoot": 0.0,
+            "residual": 6.881069788041334e-17,
+            "verified": true
+          },
+          "solver_seconds": 0.0003641169751062989
+        },
+        "scaled_error": 6.859385744591624e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 3.0277900646713456,
+          "current": 0.008539920695226872
+        },
+        "wall_seconds": 0.6019941130653024,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": 3.0277900646713456,
+            "i_l_A": 0.008539920695226872,
+            "percent_overshoot": 0.0,
+            "residual": 1.1564823173178715e-16,
+            "verified": true
+          },
+          "solver_seconds": 0.00031970092095434666
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": -1.0569034306778007,
+          "current": -0.017953242370647403
+        },
+        "wall_seconds": 0.5810054510366172,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": -1.0569034306778007,
+            "i_l_A": -0.017953242370647403,
+            "percent_overshoot": 0.0,
+            "residual": 0.0,
+            "verified": true
+          },
+          "solver_seconds": 0.0003256789641454816
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 3.1708934118853844,
+          "current": 0.04414553294057308
+        },
+        "wall_seconds": 0.7427534620510414,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": 3.170893411885384,
+            "i_l_A": 0.044145532940573086,
+            "percent_overshoot": 0.0,
+            "residual": 9.598803233738334e-15,
+            "verified": true
+          },
+          "solver_seconds": 0.0008531030034646392
+        },
+        "scaled_error": 1.1564823173178715e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 2.5751560882000963,
+          "current": -0.01103638323514327
+        },
+        "wall_seconds": 0.5976621269946918,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": 2.5751560882000963,
+            "i_l_A": -0.011036383235143271,
+            "percent_overshoot": 0.0,
+            "residual": 3.666048945897653e-14,
+            "verified": true
+          },
+          "solver_seconds": 0.0007180230459198356
+        },
+        "scaled_error": 1.1564823173178715e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": -0.9430355293715386,
+          "current": 0.01103638323514327
+        },
+        "wall_seconds": 0.6568271769210696,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": -0.9430355293715387,
+            "i_l_A": 0.011036383235143271,
+            "percent_overshoot": 0.0,
+            "residual": 4.102456552869855e-14,
+            "verified": true
+          },
+          "solver_seconds": 0.0008670450188219547
+        },
+        "scaled_error": 1.5718224340496887e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 6.0000000006e-05
+        },
+        "reference": {
+          "voltage": 0.02075513281234347,
+          "current": 0.006780704642404107
+        },
+        "wall_seconds": 0.6226827320642769,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": 0.02075513281649144,
+            "i_l_A": 0.00678070464375943,
+            "percent_overshoot": 0.0,
+            "residual": 2.2588571640430154e-11,
+            "verified": true
+          },
+          "solver_seconds": 0.00035317393485456705
+        },
+        "scaled_error": 2.2588716200719833e-11,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 6.0000000006e-05
+        },
+        "reference": {
+          "voltage": 3.0513170888169485,
+          "current": 0.007157410454874991
+        },
+        "wall_seconds": 0.5251886940095574,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": 3.051317088815904,
+            "i_l_A": 0.00715741045453284,
+            "percent_overshoot": 0.0,
+            "residual": 2.2810168108479383e-11,
+            "verified": true
+          },
+          "solver_seconds": 0.00036279193591326475
+        },
+        "scaled_error": 2.2810110284363513e-11,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 6.0000000006e-05
+        },
+        "reference": {
+          "voltage": -1.1078229608369825,
+          "current": -0.016009997070351008
+        },
+        "wall_seconds": 0.6504159040050581,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": -1.1078229608359318,
+            "i_l_A": -0.01600999707000553,
+            "percent_overshoot": 0.0,
+            "residual": 2.157883712386655e-11,
+            "verified": true
+          },
+          "solver_seconds": 0.00030874996446073055
+        },
+        "scaled_error": 2.157883712386655e-11,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.0020000000002
+        },
+        "reference": {
+          "voltage": 7.127929803698479,
+          "current": 0.03248046797137363
+        },
+        "wall_seconds": 0.7297832800541073,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": 7.1279298047811634,
+            "i_l_A": 0.032480467973539,
+            "percent_overshoot": 0.0,
+            "residual": 9.021257814841495e-11,
+            "verified": true
+          },
+          "solver_seconds": 0.0012044430477544665
+        },
+        "scaled_error": 9.02236803786612e-11,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.0020000000002
+        },
+        "reference": {
+          "voltage": 1.488688115503494,
+          "current": -0.009473469825029088
+        },
+        "wall_seconds": 0.5529556779656559,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": 1.4886881151967333,
+            "i_l_A": -0.009473469825750876,
+            "percent_overshoot": 0.0,
+            "residual": 1.0223244473195336e-10,
+            "verified": true
+          },
+          "solver_seconds": 0.0009282419923692942
+        },
+        "scaled_error": 1.0225353896942124e-10,
+        "passed": false
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.0020000000002
+        },
+        "reference": {
+          "voltage": 0.24064131806839256,
+          "current": 0.010826822657214767
+        },
+        "wall_seconds": 0.6959186639869586,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": 0.2406413184112428,
+            "i_l_A": 0.010826822658117002,
+            "percent_overshoot": 0.0,
+            "residual": 1.7141038588519564e-10,
+            "verified": true
+          },
+          "solver_seconds": 0.0011269950773566961
+        },
+        "scaled_error": 1.7142512409584754e-10,
+        "passed": false
+      },
+      {
+        "case": {
+          "name": "z10-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.0006
+        },
+        "reference": {
+          "voltage": 0.3262002102975623,
+          "current": 0.005851527478753611
+        },
+        "wall_seconds": 0.5680663200328127,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": 0.3262002102975589,
+            "i_l_A": 0.005851527478753539,
+            "percent_overshoot": 0.0,
+            "residual": 3.859759734048396e-14,
+            "verified": true
+          },
+          "solver_seconds": 0.0018438260303810239
+        },
+        "scaled_error": 1.1998504042172916e-14,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.0006
+        },
+        "reference": {
+          "voltage": 2.967212676415223,
+          "current": -0.0014872611761923902
+        },
+        "wall_seconds": 0.5488160779932514,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": 2.967212676415224,
+            "i_l_A": -0.001487261176192372,
+            "percent_overshoot": 0.0,
+            "residual": 1.993486394476681e-13,
+            "verified": true
+          },
+          "solver_seconds": 0.0018991180695593357
+        },
+        "scaled_error": 1.214306433183765e-14,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.0006
+        },
+        "reference": {
+          "voltage": -1.0159754054048362,
+          "current": 0.0015116404826963775
+        },
+        "wall_seconds": 0.5703517340589315,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": -1.015975405404837,
+            "i_l_A": 0.0015116404826963589,
+            "percent_overshoot": 0.0,
+            "residual": 2.1947405390258955e-13,
+            "verified": true
+          },
+          "solver_seconds": 0.0020343760261312127
+        },
+        "scaled_error": 1.2336450088639429e-14,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.02
+        },
+        "reference": {
+          "voltage": 7.585432747883905,
+          "current": 0.002212829599828785
+        },
+        "wall_seconds": 0.5474672170821577,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": 7.585432747883849,
+            "i_l_A": 0.002212829599828785,
+            "percent_overshoot": 0.0,
+            "residual": 1.6049806160027085e-12,
+            "verified": true
+          },
+          "solver_seconds": 0.005449053016491234
+        },
+        "scaled_error": 4.6629367034256575e-15,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.02
+        },
+        "reference": {
+          "voltage": 1.1220820596942636,
+          "current": -0.0005624506895750918
+        },
+        "wall_seconds": 0.5363111860351637,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": 1.1220820596942778,
+            "i_l_A": -0.0005624506895750919,
+            "percent_overshoot": 0.0,
+            "residual": 2.764065018534545e-12,
+            "verified": true
+          },
+          "solver_seconds": 0.005717776017263532
+        },
+        "scaled_error": 4.736951571734001e-15,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.02
+        },
+        "reference": {
+          "voltage": 0.8594776936404965,
+          "current": 0.0005716939791929875
+        },
+        "wall_seconds": 0.7305435840971768,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": 0.859477693640482,
+            "i_l_A": 0.0005716939791929876,
+            "percent_overshoot": 0.0,
+            "residual": 4.2788960308987045e-10,
+            "verified": true
+          },
+          "solver_seconds": 0.00538161990698427
+        },
+        "scaled_error": 7.271960811294775e-15,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.6
+        },
+        "reference": {
+          "voltage": 0.3546535691779366,
+          "current": 5.822673229967715e-06
+        },
+        "passed": false,
+        "error": "process deadline",
+        "wall_seconds": 4.021570091950707
+      },
+      {
+        "case": {
+          "name": "z10000-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.6
+        },
+        "reference": {
+          "voltage": 2.911385129982432,
+          "current": -1.4556925686304475e-06
+        },
+        "passed": false,
+        "error": "process deadline",
+        "wall_seconds": 4.006599680054933
+      },
+      {
+        "case": {
+          "name": "z10000-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.6
+        },
+        "reference": {
+          "voltage": -0.9114336522593486,
+          "current": 1.4557168297689664e-06
+        },
+        "passed": false,
+        "error": "process deadline",
+        "wall_seconds": 4.016695950995199
+      },
+      {
+        "case": {
+          "name": "z10000-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 20
+        },
+        "reference": {
+          "voltage": 7.585446705942692,
+          "current": 2.2072766525468458e-06
+        },
+        "passed": false,
+        "error": "process deadline",
+        "wall_seconds": 4.009904037928209
+      },
+      {
+        "case": {
+          "name": "z10000-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 20
+        },
+        "reference": {
+          "voltage": 1.1036567174864316,
+          "current": -5.518283601227867e-07
+        },
+        "passed": false,
+        "error": "process deadline",
+        "wall_seconds": 4.016448401031084
+      },
+      {
+        "case": {
+          "name": "z10000-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 20
+        },
+        "reference": {
+          "voltage": 0.896324888541464,
+          "current": 5.51837557108862e-07
+        },
+        "passed": false,
+        "error": "process deadline",
+        "wall_seconds": 4.013566637062468
+      },
+      {
+        "case": {
+          "name": "z10000000-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 600
+        },
+        "reference": {
+          "voltage": 0.3546535974178736,
+          "current": 5.822673201291078e-09
+        },
+        "passed": false,
+        "error": "process deadline",
+        "wall_seconds": 4.018773530027829
+      },
+      {
+        "case": {
+          "name": "z10000000-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 600
+        },
+        "reference": {
+          "voltage": 2.9113366491678083,
+          "current": -1.4556683245839078e-09
+        },
+        "passed": false,
+        "error": "process deadline",
+        "wall_seconds": 4.0121626049513
+      },
+      {
+        "case": {
+          "name": "z10000000-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 600
+        },
+        "reference": {
+          "voltage": -0.911336697690085,
+          "current": 1.455668348845046e-09
+        },
+        "passed": false,
+        "error": "process deadline",
+        "wall_seconds": 4.013077409006655
+      },
+      {
+        "case": {
+          "name": "z10000000-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 20000
+        },
+        "reference": {
+          "voltage": 7.585446705942692,
+          "current": 2.2072766470286593e-09
+        },
+        "passed": false,
+        "error": "process deadline",
+        "wall_seconds": 4.014138053054921
+      },
+      {
+        "case": {
+          "name": "z10000000-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 20000
+        },
+        "reference": {
+          "voltage": 1.1036383419082991,
+          "current": -5.518191709541509e-10
+        },
+        "passed": false,
+        "error": "process deadline",
+        "wall_seconds": 4.025889215990901
+      },
+      {
+        "case": {
+          "name": "z10000000-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 20000
+        },
+        "reference": {
+          "voltage": 0.896361639697729,
+          "current": 5.518191801511369e-10
+        },
+        "passed": false,
+        "error": "process deadline",
+        "wall_seconds": 4.0189009620808065
+      },
+      {
+        "case": {
+          "name": "megohm_rc_tail",
+          "subkind": "rlc_transient",
+          "R": 1000000,
+          "L": 0.001,
+          "C": 1e-06,
+          "V_s": 12,
+          "t": 1
+        },
+        "reference": {
+          "voltage": 7.585446705942692,
+          "current": 4.4145532984718616e-06
+        },
+        "passed": false,
+        "error": "process deadline",
+        "wall_seconds": 4.016694128047675
+      },
+      {
+        "case": {
+          "name": "gigaohm_rc_tail",
+          "subkind": "rlc_transient",
+          "R": 1000000000,
+          "L": 0.001,
+          "C": 1e-06,
+          "V_s": 12,
+          "t": 1000
+        },
+        "reference": {
+          "voltage": 7.585446705942692,
+          "current": 4.414553294057312e-09
+        },
+        "passed": false,
+        "error": "process deadline",
+        "wall_seconds": 4.013922661077231
+      }
+    ]
+  },
+  "candidate": {
+    "source_commit": "a142b262de04a8d295b6b4c3c589f8aff7d4fe72",
+    "source_sha256": "84612463a4f436deb7023ce4b55ba7278feb76f34df68e994e0871adee543d7f",
+    "cases_sha256": "8888e4a33398293cc73f17b62015ab2eda34d8f06c71bca380a2ae0479c365c6",
+    "python": "3.12.3",
+    "mpmath": "1.3.0",
+    "without_scipy": false,
+    "process_deadline_seconds": 4.0,
+    "workers": 2,
+    "passed": 50,
+    "total": 50,
+    "max_scaled_error": 3.204492270538529e-16,
+    "timeouts": 0,
+    "scope": "Manufactured public linear-circuit controls; no organizer task data, model run or contest score.",
+    "results": [
+      {
+        "case": {
+          "name": "z0-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 0.005399595012149804,
+          "current": 0.0035994600242994787
+        },
+        "wall_seconds": 0.5293125270400196,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": 0.005399595012149804,
+            "i_l_A": 0.003599460024299479,
+            "percent_overshoot": 100.0,
+            "residual": 1.2048497998768692e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.00024031696375459433
+        },
+        "scaled_error": 3.614007241618348e-18,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 3.0286456014494583,
+          "current": 0.009095635331415006
+        },
+        "wall_seconds": 0.6837413409957662,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": 3.0286456014494583,
+            "i_l_A": 0.009095635331415004,
+            "percent_overshoot": 100.0,
+            "residual": 1.734723475976807e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.0002173880347982049
+        },
+        "scaled_error": 5.782411586589357e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": -1.058641101651954,
+          "current": -0.01909113566890488
+        },
+        "wall_seconds": 0.4768841889454052,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": -1.058641101651954,
+            "i_l_A": -0.019091135668904878,
+            "percent_overshoot": 100.0,
+            "residual": 1.734723475976807e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.00022113695740699768
+        },
+        "scaled_error": 1.734723475976807e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 5.516372329582324,
+          "current": 0.10097651817694758
+        },
+        "wall_seconds": 0.4974732770351693,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": 5.516372329582324,
+            "i_l_A": 0.10097651817694757,
+            "percent_overshoot": 100.0,
+            "residual": 1.3743579258194984e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 4
+          },
+          "solver_seconds": 0.00026495708152651787
+        },
+        "scaled_error": 1.1564823173178715e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 2.4623779024123156,
+          "current": -0.0198411064855555
+        },
+        "wall_seconds": 0.5765096110990271,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": 2.4623779024123156,
+            "i_l_A": -0.019841106485555496,
+            "percent_overshoot": 100.0,
+            "residual": 1.748615660361181e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 4
+          },
+          "solver_seconds": 0.00026124005671590567
+        },
+        "scaled_error": 1.1564823173178715e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": -1.303848887220212,
+          "current": 0.014438083426874101
+        },
+        "wall_seconds": 0.5587123030563816,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": -1.3038488872202123,
+            "i_l_A": 0.014438083426874098,
+            "percent_overshoot": 100.0,
+            "residual": 1.734723475976807e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 4
+          },
+          "solver_seconds": 0.0002663269406184554
+        },
+        "scaled_error": 1.734723475976807e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 0.005394199545341117,
+          "current": 0.0035940662294869754
+        },
+        "wall_seconds": 0.48661419097334146,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": 0.0053941995453411174,
+            "i_l_A": 0.003594066229486976,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 1.6079526363416234e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.00024190603289753199
+        },
+        "scaled_error": 3.614007241618348e-18,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 3.028602002026056,
+          "current": 0.00906703772442808
+        },
+        "wall_seconds": 0.4903303139144555,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": 3.028602002026056,
+            "i_l_A": 0.00906703772442808,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.00023321795742958784
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": -1.0585525539384477,
+          "current": -0.019032592006227905
+        },
+        "wall_seconds": 0.4815150649519637,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": -1.0585525539384477,
+            "i_l_A": -0.019032592006227905,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.0002223649062216282
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 5.34009935258522,
+          "current": 0.09609481288239713
+        },
+        "wall_seconds": 0.4761934799607843,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": 5.34009935258522,
+            "i_l_A": 0.09609481288239713,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.0002424200065433979
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 2.4657652692070045,
+          "current": -0.019274576121773607
+        },
+        "wall_seconds": 0.5079938960261643,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": 2.4657652692070045,
+            "i_l_A": -0.01927457612177361,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 1.8000120625399065e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.0002488410100340843
+        },
+        "scaled_error": 1.1564823173178715e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": -1.2665553765603137,
+          "current": 0.014525449022947933
+        },
+        "wall_seconds": 0.5046610600547865,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": -1.266555376560314,
+            "i_l_A": 0.014525449022947936,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 1.7531377548453956e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.00026371004059910774
+        },
+        "scaled_error": 1.734723475976807e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 0.005293205340449413,
+          "current": 0.003493603920785005
+        },
+        "wall_seconds": 0.47982369107194245,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": 0.005293205340449413,
+            "i_l_A": 0.0034936039207850056,
+            "percent_overshoot": 0.0,
+            "residual": 1.2413567159518033e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.0002443870762363076
+        },
+        "scaled_error": 7.228014482513894e-18,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 3.0277900646714295,
+          "current": 0.008539920695280766
+        },
+        "wall_seconds": 0.5506443399935961,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": 3.0277900646714295,
+            "i_l_A": 0.008539920695280766,
+            "percent_overshoot": 0.0,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.0002445249119773507
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": -1.056903430677971,
+          "current": -0.017953242370757783
+        },
+        "wall_seconds": 0.5432651831069961,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": -1.056903430677971,
+            "i_l_A": -0.017953242370757783,
+            "percent_overshoot": 0.0,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.0002492739586159587
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 3.170893412032536,
+          "current": 0.044145532943516114
+        },
+        "wall_seconds": 0.4858510539634153,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": 3.170893412032537,
+            "i_l_A": 0.04414553294351612,
+            "percent_overshoot": 0.0,
+            "residual": 2.801035242401304e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.0002694599097594619
+        },
+        "scaled_error": 1.156482317202223e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 2.5751560881878337,
+          "current": -0.011036383235756403
+        },
+        "wall_seconds": 0.47372560505755246,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": 2.5751560881878337,
+            "i_l_A": -0.011036383235756404,
+            "percent_overshoot": 0.0,
+            "residual": 1.571822433962365e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.0002749270061030984
+        },
+        "scaled_error": 1.156482317202223e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": -0.9430355293838012,
+          "current": 0.011036383235633777
+        },
+        "wall_seconds": 0.4735218419227749,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": -0.9430355293838012,
+            "i_l_A": 0.011036383235633778,
+            "percent_overshoot": 0.0,
+            "residual": 8.673617379884035e-17,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.00027823797427117825
+        },
+        "scaled_error": 1.5718224339798296e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 0.005293205340438932,
+          "current": 0.003493603920774629
+        },
+        "wall_seconds": 0.47674025502055883,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": 0.005293205340438933,
+            "i_l_A": 0.0034936039207746294,
+            "percent_overshoot": 0.0,
+            "residual": 1.6386323261671892e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.0002456459915265441
+        },
+        "scaled_error": 7.228014483236697e-18,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 3.0277900646713456,
+          "current": 0.008539920695226872
+        },
+        "wall_seconds": 0.5377338810358196,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": 3.0277900646713456,
+            "i_l_A": 0.008539920695226872,
+            "percent_overshoot": 0.0,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.0002524619922041893
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": -1.0569034306778007,
+          "current": -0.017953242370647403
+        },
+        "wall_seconds": 0.6012674419907853,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": -1.0569034306778007,
+            "i_l_A": -0.017953242370647403,
+            "percent_overshoot": 0.0,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.0002563260495662689
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 3.1708934118853844,
+          "current": 0.04414553294057308
+        },
+        "wall_seconds": 0.49988610099535435,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": 3.170893411885384,
+            "i_l_A": 0.04414553294057308,
+            "percent_overshoot": 0.0,
+            "residual": 1.4005176212656457e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.00026392005383968353
+        },
+        "scaled_error": 3.700743415417188e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 2.5751560882000963,
+          "current": -0.01103638323514327
+        },
+        "wall_seconds": 0.5823130959179252,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": 2.5751560882000963,
+            "i_l_A": -0.01103638323514327,
+            "percent_overshoot": 0.0,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.0002627309877425432
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": -0.9430355293715386,
+          "current": 0.01103638323514327
+        },
+        "wall_seconds": 0.4861199150327593,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": -0.9430355293715387,
+            "i_l_A": 0.01103638323514327,
+            "percent_overshoot": 0.0,
+            "residual": 1.1102230246251565e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.00025390798691660166
+        },
+        "scaled_error": 5.551115123125783e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 6.0000000006e-05
+        },
+        "reference": {
+          "voltage": 0.02075513281234347,
+          "current": 0.006780704642404107
+        },
+        "wall_seconds": 0.5305689269443974,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": 0.020755132812343452,
+            "i_l_A": 0.006780704642404106,
+            "percent_overshoot": 0.0,
+            "residual": 8.358045653868976e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 1
+          },
+          "solver_seconds": 0.0002641209866851568
+        },
+        "scaled_error": 1.4456028967918996e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 6.0000000006e-05
+        },
+        "reference": {
+          "voltage": 3.0513170888169485,
+          "current": 0.007157410454874991
+        },
+        "wall_seconds": 0.5078478159848601,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": 3.0513170888169485,
+            "i_l_A": 0.007157410454874991,
+            "percent_overshoot": 0.0,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 1
+          },
+          "solver_seconds": 0.0002367800334468484
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 6.0000000006e-05
+        },
+        "reference": {
+          "voltage": -1.1078229608369825,
+          "current": -0.016009997070351008
+        },
+        "wall_seconds": 0.5998757430352271,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": -1.1078229608369827,
+            "i_l_A": -0.01600999707035101,
+            "percent_overshoot": 0.0,
+            "residual": 2.004332937433181e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 1
+          },
+          "solver_seconds": 0.0002450239844620228
+        },
+        "scaled_error": 2.167050335304995e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.0020000000002
+        },
+        "reference": {
+          "voltage": 7.127929803698479,
+          "current": 0.03248046797137363
+        },
+        "wall_seconds": 0.5775585189694539,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": 7.127929803698478,
+            "i_l_A": 0.03248046797137363,
+            "percent_overshoot": 0.0,
+            "residual": 1.246053825108203e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 7
+          },
+          "solver_seconds": 0.0002730949781835079
+        },
+        "scaled_error": 7.401486830834377e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.0020000000002
+        },
+        "reference": {
+          "voltage": 1.488688115503494,
+          "current": -0.009473469825029088
+        },
+        "wall_seconds": 0.5078250879887491,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": 1.4886881155034937,
+            "i_l_A": -0.009473469825029088,
+            "percent_overshoot": 0.0,
+            "residual": 7.401486830834377e-17,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 7
+          },
+          "solver_seconds": 0.00029033899772912264
+        },
+        "scaled_error": 7.401486830834377e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.0020000000002
+        },
+        "reference": {
+          "voltage": 0.24064131806839256,
+          "current": 0.010826822657214767
+        },
+        "wall_seconds": 0.4994117090245709,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": 0.24064131806839262,
+            "i_l_A": 0.01082682265721477,
+            "percent_overshoot": 0.0,
+            "residual": 1.734723475976807e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 7
+          },
+          "solver_seconds": 0.0002628610236570239
+        },
+        "scaled_error": 3.204492270538529e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.0006
+        },
+        "reference": {
+          "voltage": 0.3262002102975623,
+          "current": 0.005851527478753611
+        },
+        "wall_seconds": 0.49506563995964825,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": 0.3262002102975623,
+            "i_l_A": 0.005851527478753612,
+            "percent_overshoot": 0.0,
+            "residual": 1.4822826025131367e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 7
+          },
+          "solver_seconds": 0.00033829500898718834
+        },
+        "scaled_error": 1.4456028966473392e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.0006
+        },
+        "reference": {
+          "voltage": 2.967212676415223,
+          "current": -0.0014872611761923902
+        },
+        "wall_seconds": 0.49412171402946115,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": 2.967212676415223,
+            "i_l_A": -0.0014872611761923905,
+            "percent_overshoot": 0.0,
+            "residual": 2.168404344971009e-17,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 7
+          },
+          "solver_seconds": 0.00027030904311686754
+        },
+        "scaled_error": 1.4456028966473392e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.0006
+        },
+        "reference": {
+          "voltage": -1.0159754054048362,
+          "current": 0.0015116404826963775
+        },
+        "wall_seconds": 0.5534048350527883,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": -1.0159754054048364,
+            "i_l_A": 0.0015116404826963777,
+            "percent_overshoot": 0.0,
+            "residual": 2.185531300696724e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 7
+          },
+          "solver_seconds": 0.00027056504040956497
+        },
+        "scaled_error": 1.4344709405394685e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.02
+        },
+        "reference": {
+          "voltage": 7.585432747883905,
+          "current": 0.002212829599828785
+        },
+        "wall_seconds": 0.5647038000170141,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": 7.585432747883906,
+            "i_l_A": 0.002212829599828785,
+            "percent_overshoot": 0.0,
+            "residual": 1.1709001308434232e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 12
+          },
+          "solver_seconds": 0.0002899810206145048
+        },
+        "scaled_error": 7.401486830834377e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.02
+        },
+        "reference": {
+          "voltage": 1.1220820596942636,
+          "current": -0.0005624506895750918
+        },
+        "wall_seconds": 0.48379595403093845,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": 1.1220820596942636,
+            "i_l_A": -0.0005624506895750919,
+            "percent_overshoot": 0.0,
+            "residual": 1.0842021724855044e-17,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 12
+          },
+          "solver_seconds": 0.00029142003040760756
+        },
+        "scaled_error": 7.228014483236696e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.02
+        },
+        "reference": {
+          "voltage": 0.8594776936404965,
+          "current": 0.0005716939791929875
+        },
+        "wall_seconds": 0.4879100340185687,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": 0.8594776936404968,
+            "i_l_A": 0.0005716939791929876,
+            "percent_overshoot": 0.0,
+            "residual": 2.220446049250313e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 12
+          },
+          "solver_seconds": 0.0002810800215229392
+        },
+        "scaled_error": 1.1102230246251565e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.6
+        },
+        "reference": {
+          "voltage": 0.3546535691779366,
+          "current": 5.822673229967715e-06
+        },
+        "wall_seconds": 0.5395175509620458,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000.0,
+            "v_c_V": 0.3546535691779366,
+            "i_l_A": 5.822673229967715e-06,
+            "percent_overshoot": 0.0,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 27
+          },
+          "solver_seconds": 0.0014279679162427783
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.6
+        },
+        "reference": {
+          "voltage": 2.911385129982432,
+          "current": -1.4556925686304475e-06
+        },
+        "wall_seconds": 0.544436436961405,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000.0,
+            "v_c_V": 2.911385129982432,
+            "i_l_A": -1.4556925686304477e-06,
+            "percent_overshoot": 0.0,
+            "residual": 2.1175823681357508e-20,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 27
+          },
+          "solver_seconds": 0.00044495798647403717
+        },
+        "scaled_error": 1.4117215787571671e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.6
+        },
+        "reference": {
+          "voltage": -0.9114336522593486,
+          "current": 1.4557168297689664e-06
+        },
+        "wall_seconds": 0.4908224529353902,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000.0,
+            "v_c_V": -0.9114336522593486,
+            "i_l_A": 1.4557168297689666e-06,
+            "percent_overshoot": 0.0,
+            "residual": 1.0587911840678754e-20,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 27
+          },
+          "solver_seconds": 0.00042832596227526665
+        },
+        "scaled_error": 1.4546664054655655e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 20
+        },
+        "reference": {
+          "voltage": 7.585446705942692,
+          "current": 2.2072766525468458e-06
+        },
+        "wall_seconds": 0.48599563201423734,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000.0,
+            "v_c_V": 7.58544670594269,
+            "i_l_A": 2.207276652546846e-06,
+            "percent_overshoot": 0.0,
+            "residual": 2.341795952516011e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 32
+          },
+          "solver_seconds": 0.0004355580313131213
+        },
+        "scaled_error": 1.4802973661668753e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 20
+        },
+        "reference": {
+          "voltage": 1.1036567174864316,
+          "current": -5.518283601227867e-07
+        },
+        "wall_seconds": 0.4978871359489858,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000.0,
+            "v_c_V": 1.1036567174864316,
+            "i_l_A": -5.518283601227868e-07,
+            "percent_overshoot": 0.0,
+            "residual": 1.0587911840678754e-20,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 32
+          },
+          "solver_seconds": 0.0004378239391371608
+        },
+        "scaled_error": 7.058607893785836e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 20
+        },
+        "reference": {
+          "voltage": 0.896324888541464,
+          "current": 5.51837557108862e-07
+        },
+        "wall_seconds": 0.481588963069953,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000.0,
+            "v_c_V": 0.8963248885414636,
+            "i_l_A": 5.518375571088621e-07,
+            "percent_overshoot": 0.0,
+            "residual": 3.3306690738754696e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 32
+          },
+          "solver_seconds": 0.0004716189578175545
+        },
+        "scaled_error": 1.6653345369377348e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000000-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 600
+        },
+        "reference": {
+          "voltage": 0.3546535974178736,
+          "current": 5.822673201291078e-09
+        },
+        "wall_seconds": 0.5144483329495415,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000000.0,
+            "v_c_V": 0.35465359741787367,
+            "i_l_A": 5.822673201291078e-09,
+            "percent_overshoot": 0.0,
+            "residual": 1.5652217159340228e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 47
+          },
+          "solver_seconds": 0.0005902521079406142
+        },
+        "scaled_error": 4.625929269271485e-18,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000000-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 600
+        },
+        "reference": {
+          "voltage": 2.9113366491678083,
+          "current": -1.4556683245839078e-09
+        },
+        "wall_seconds": 0.5485850460827351,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000000.0,
+            "v_c_V": 2.9113366491678088,
+            "i_l_A": -1.4556683245839078e-09,
+            "percent_overshoot": 0.0,
+            "residual": 1.4802973661668753e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 47
+          },
+          "solver_seconds": 0.0005498389946296811
+        },
+        "scaled_error": 1.4802973661668753e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000000-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 600
+        },
+        "reference": {
+          "voltage": -0.911336697690085,
+          "current": 1.455668348845046e-09
+        },
+        "wall_seconds": 0.5536314069759101,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000000.0,
+            "v_c_V": -0.9113366976900851,
+            "i_l_A": 1.455668348845046e-09,
+            "percent_overshoot": 0.0,
+            "residual": 1.1102230246251565e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 47
+          },
+          "solver_seconds": 0.000542287016287446
+        },
+        "scaled_error": 5.551115123125783e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000000-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 20000
+        },
+        "reference": {
+          "voltage": 7.585446705942692,
+          "current": 2.2072766470286593e-09
+        },
+        "wall_seconds": 0.5308147970354185,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000000.0,
+            "v_c_V": 7.585446705942692,
+            "i_l_A": 2.2072766470286597e-09,
+            "percent_overshoot": 0.0,
+            "residual": 1.8737583566304263e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 52
+          },
+          "solver_seconds": 0.0005637010326609015
+        },
+        "scaled_error": 6.89317177127523e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000000-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 20000
+        },
+        "reference": {
+          "voltage": 1.1036383419082991,
+          "current": -5.518191709541509e-10
+        },
+        "wall_seconds": 0.5039714009035379,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000000.0,
+            "v_c_V": 1.1036383419082993,
+            "i_l_A": -5.51819170954151e-10,
+            "percent_overshoot": 0.0,
+            "residual": 7.401486830834377e-17,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 52
+          },
+          "solver_seconds": 0.0005450600292533636
+        },
+        "scaled_error": 7.401486830834377e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000000-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 20000
+        },
+        "reference": {
+          "voltage": 0.896361639697729,
+          "current": 5.518191801511369e-10
+        },
+        "wall_seconds": 0.48818182793911546,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000000.0,
+            "v_c_V": 0.8963616396977289,
+            "i_l_A": 5.51819180151137e-10,
+            "percent_overshoot": 0.0,
+            "residual": 1.1102230246251565e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 52
+          },
+          "solver_seconds": 0.0005974250379949808
+        },
+        "scaled_error": 1.0339757656912845e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "megohm_rc_tail",
+          "subkind": "rlc_transient",
+          "R": 1000000,
+          "L": 0.001,
+          "C": 1e-06,
+          "V_s": 12,
+          "t": 1
+        },
+        "reference": {
+          "voltage": 7.585446705942692,
+          "current": 4.4145532984718616e-06
+        },
+        "wall_seconds": 0.5592043709475547,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 31622.776601683792,
+            "zeta": 15811.388300841898,
+            "v_c_V": 7.585446705942694,
+            "i_l_A": 4.414553298471861e-06,
+            "percent_overshoot": 0.0,
+            "residual": 2.341795952516011e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 33
+          },
+          "solver_seconds": 0.0005536600947380066
+        },
+        "scaled_error": 1.4802973661668753e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "gigaohm_rc_tail",
+          "subkind": "rlc_transient",
+          "R": 1000000000,
+          "L": 0.001,
+          "C": 1e-06,
+          "V_s": 12,
+          "t": 1000
+        },
+        "reference": {
+          "voltage": 7.585446705942692,
+          "current": 4.414553294057312e-09
+        },
+        "wall_seconds": 0.5816376169677824,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 31622.776601683792,
+            "zeta": 15811388.300841898,
+            "v_c_V": 7.585446705942692,
+            "i_l_A": 4.414553294057313e-09,
+            "percent_overshoot": 0.0,
+            "residual": 1.8737583566304293e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 53
+          },
+          "solver_seconds": 0.0005808830028399825
+        },
+        "scaled_error": 6.89317177127523e-17,
+        "passed": true
+      }
+    ]
+  },
+  "candidate-without-scipy": {
+    "source_commit": "a142b262de04a8d295b6b4c3c589f8aff7d4fe72",
+    "source_sha256": "84612463a4f436deb7023ce4b55ba7278feb76f34df68e994e0871adee543d7f",
+    "cases_sha256": "8888e4a33398293cc73f17b62015ab2eda34d8f06c71bca380a2ae0479c365c6",
+    "python": "3.12.3",
+    "mpmath": "1.3.0",
+    "without_scipy": true,
+    "process_deadline_seconds": 4.0,
+    "workers": 2,
+    "passed": 50,
+    "total": 50,
+    "max_scaled_error": 3.204492270538529e-16,
+    "timeouts": 0,
+    "scope": "Manufactured public linear-circuit controls; no organizer task data, model run or contest score.",
+    "results": [
+      {
+        "case": {
+          "name": "z0-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 0.005399595012149804,
+          "current": 0.0035994600242994787
+        },
+        "wall_seconds": 0.29194533498957753,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": 0.005399595012149804,
+            "i_l_A": 0.003599460024299479,
+            "percent_overshoot": 100.0,
+            "residual": 1.2048497998768692e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.00022230204194784164
+        },
+        "scaled_error": 3.614007241618348e-18,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 3.0286456014494583,
+          "current": 0.009095635331415006
+        },
+        "wall_seconds": 0.2940137190744281,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": 3.0286456014494583,
+            "i_l_A": 0.009095635331415004,
+            "percent_overshoot": 100.0,
+            "residual": 1.734723475976807e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.00023455300834029913
+        },
+        "scaled_error": 5.782411586589357e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": -1.058641101651954,
+          "current": -0.01909113566890488
+        },
+        "wall_seconds": 0.31856549193616956,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": -1.058641101651954,
+            "i_l_A": -0.019091135668904878,
+            "percent_overshoot": 100.0,
+            "residual": 1.734723475976807e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.00021984998602420092
+        },
+        "scaled_error": 1.734723475976807e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 5.516372329582324,
+          "current": 0.10097651817694758
+        },
+        "wall_seconds": 0.30445779801812023,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": 5.516372329582324,
+            "i_l_A": 0.10097651817694757,
+            "percent_overshoot": 100.0,
+            "residual": 1.3743579258194984e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 4
+          },
+          "solver_seconds": 0.00027054199017584324
+        },
+        "scaled_error": 1.1564823173178715e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 2.4623779024123156,
+          "current": -0.0198411064855555
+        },
+        "wall_seconds": 0.3126222100108862,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": 2.4623779024123156,
+            "i_l_A": -0.019841106485555496,
+            "percent_overshoot": 100.0,
+            "residual": 1.748615660361181e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 4
+          },
+          "solver_seconds": 0.0002564269816502929
+        },
+        "scaled_error": 1.1564823173178715e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 0,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": -1.303848887220212,
+          "current": 0.014438083426874101
+        },
+        "wall_seconds": 0.31937597307842225,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.0,
+            "v_c_V": -1.3038488872202123,
+            "i_l_A": 0.014438083426874098,
+            "percent_overshoot": 100.0,
+            "residual": 1.734723475976807e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 4
+          },
+          "solver_seconds": 0.00024023500736802816
+        },
+        "scaled_error": 1.734723475976807e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 0.005394199545341117,
+          "current": 0.0035940662294869754
+        },
+        "wall_seconds": 0.34630127798300236,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": 0.0053941995453411174,
+            "i_l_A": 0.003594066229486976,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 1.6079526363416234e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.00023339607287198305
+        },
+        "scaled_error": 3.614007241618348e-18,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 3.028602002026056,
+          "current": 0.00906703772442808
+        },
+        "wall_seconds": 0.34212200006004423,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": 3.028602002026056,
+            "i_l_A": 0.00906703772442808,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.0002418940421193838
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": -1.0585525539384477,
+          "current": -0.019032592006227905
+        },
+        "wall_seconds": 0.2826661729486659,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": -1.0585525539384477,
+            "i_l_A": -0.019032592006227905,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.0002503790892660618
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 5.34009935258522,
+          "current": 0.09609481288239713
+        },
+        "wall_seconds": 0.266493453993462,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": 5.34009935258522,
+            "i_l_A": 0.09609481288239713,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.00024610001128166914
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 2.4657652692070045,
+          "current": -0.019274576121773607
+        },
+        "wall_seconds": 0.26851679291576147,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": 2.4657652692070045,
+            "i_l_A": -0.01927457612177361,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 1.8000120625399065e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.00024617696180939674
+        },
+        "scaled_error": 1.1564823173178715e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.05-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 10,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": -1.2665553765603137,
+          "current": 0.014525449022947933
+        },
+        "wall_seconds": 0.26026163692586124,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.05,
+            "v_c_V": -1.266555376560314,
+            "i_l_A": 0.014525449022947936,
+            "percent_overshoot": 85.44678930067565,
+            "residual": 1.7531377548453956e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.0002575699472799897
+        },
+        "scaled_error": 1.734723475976807e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 0.005293205340449413,
+          "current": 0.003493603920785005
+        },
+        "wall_seconds": 0.26597821596078575,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": 0.005293205340449413,
+            "i_l_A": 0.0034936039207850056,
+            "percent_overshoot": 0.0,
+            "residual": 1.2413567159518033e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.0002535009989514947
+        },
+        "scaled_error": 7.228014482513894e-18,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 3.0277900646714295,
+          "current": 0.008539920695280766
+        },
+        "wall_seconds": 0.26599354192148894,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": 3.0277900646714295,
+            "i_l_A": 0.008539920695280766,
+            "percent_overshoot": 0.0,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.0002452030312269926
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": -1.056903430677971,
+          "current": -0.017953242370757783
+        },
+        "wall_seconds": 0.27359685103874654,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": -1.056903430677971,
+            "i_l_A": -0.017953242370757783,
+            "percent_overshoot": 0.0,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.000281742075458169
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 3.170893412032536,
+          "current": 0.044145532943516114
+        },
+        "wall_seconds": 0.2767711110645905,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": 3.170893412032537,
+            "i_l_A": 0.04414553294351612,
+            "percent_overshoot": 0.0,
+            "residual": 2.801035242401304e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.000272172037512064
+        },
+        "scaled_error": 1.156482317202223e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 2.5751560881878337,
+          "current": -0.011036383235756403
+        },
+        "wall_seconds": 0.2837909710360691,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": 2.5751560881878337,
+            "i_l_A": -0.011036383235756404,
+            "percent_overshoot": 0.0,
+            "residual": 1.571822433962365e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.00032872892916202545
+        },
+        "scaled_error": 1.156482317202223e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z0.9999999999-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 199.99999997999998,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": -0.9430355293838012,
+          "current": 0.011036383235633777
+        },
+        "wall_seconds": 0.2806457499973476,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "underdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 0.9999999998999999,
+            "v_c_V": -0.9430355293838012,
+            "i_l_A": 0.011036383235633778,
+            "percent_overshoot": 0.0,
+            "residual": 8.673617379884035e-17,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.00027530500665307045
+        },
+        "scaled_error": 1.5718224339798296e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 0.005293205340438932,
+          "current": 0.003493603920774629
+        },
+        "wall_seconds": 0.28955394704826176,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": 0.005293205340438933,
+            "i_l_A": 0.0034936039207746294,
+            "percent_overshoot": 0.0,
+            "residual": 1.6386323261671892e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.00026794790755957365
+        },
+        "scaled_error": 7.228014483236697e-18,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": 3.0277900646713456,
+          "current": 0.008539920695226872
+        },
+        "wall_seconds": 0.28203249303624034,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": 3.0277900646713456,
+            "i_l_A": 0.008539920695226872,
+            "percent_overshoot": 0.0,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.0002864230191335082
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 2.9999999999999997e-05
+        },
+        "reference": {
+          "voltage": -1.0569034306778007,
+          "current": -0.017953242370647403
+        },
+        "wall_seconds": 0.2804863469209522,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": -1.0569034306778007,
+            "i_l_A": -0.017953242370647403,
+            "percent_overshoot": 0.0,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 0
+          },
+          "solver_seconds": 0.0002545079914852977
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 3.1708934118853844,
+          "current": 0.04414553294057308
+        },
+        "wall_seconds": 0.27787718502804637,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": 3.170893411885384,
+            "i_l_A": 0.04414553294057308,
+            "percent_overshoot": 0.0,
+            "residual": 1.4005176212656457e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.0002784020034596324
+        },
+        "scaled_error": 3.700743415417188e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": 2.5751560882000963,
+          "current": -0.01103638323514327
+        },
+        "wall_seconds": 0.36580685002263635,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": 2.5751560882000963,
+            "i_l_A": -0.01103638323514327,
+            "percent_overshoot": 0.0,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.0002888719318434596
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 200,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.001
+        },
+        "reference": {
+          "voltage": -0.9430355293715386,
+          "current": 0.01103638323514327
+        },
+        "wall_seconds": 0.36144772998522967,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "critically_damped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0,
+            "v_c_V": -0.9430355293715387,
+            "i_l_A": 0.01103638323514327,
+            "percent_overshoot": 0.0,
+            "residual": 1.1102230246251565e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 5
+          },
+          "solver_seconds": 0.0002717170864343643
+        },
+        "scaled_error": 5.551115123125783e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 6.0000000006e-05
+        },
+        "reference": {
+          "voltage": 0.02075513281234347,
+          "current": 0.006780704642404107
+        },
+        "wall_seconds": 0.2942234940128401,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": 0.020755132812343452,
+            "i_l_A": 0.006780704642404106,
+            "percent_overshoot": 0.0,
+            "residual": 8.358045653868976e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 1
+          },
+          "solver_seconds": 0.0002616179408505559
+        },
+        "scaled_error": 1.4456028967918996e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 6.0000000006e-05
+        },
+        "reference": {
+          "voltage": 3.0513170888169485,
+          "current": 0.007157410454874991
+        },
+        "wall_seconds": 0.295929767889902,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": 3.0513170888169485,
+            "i_l_A": 0.007157410454874991,
+            "percent_overshoot": 0.0,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 1
+          },
+          "solver_seconds": 0.0002508030738681555
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 6.0000000006e-05
+        },
+        "reference": {
+          "voltage": -1.1078229608369825,
+          "current": -0.016009997070351008
+        },
+        "wall_seconds": 0.29343384702224284,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": -1.1078229608369827,
+            "i_l_A": -0.01600999707035101,
+            "percent_overshoot": 0.0,
+            "residual": 2.004332937433181e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 1
+          },
+          "solver_seconds": 0.00025702593848109245
+        },
+        "scaled_error": 2.167050335304995e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.0020000000002
+        },
+        "reference": {
+          "voltage": 7.127929803698479,
+          "current": 0.03248046797137363
+        },
+        "wall_seconds": 0.28835741605143994,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": 7.127929803698478,
+            "i_l_A": 0.03248046797137363,
+            "percent_overshoot": 0.0,
+            "residual": 1.246053825108203e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 7
+          },
+          "solver_seconds": 0.00026261608581990004
+        },
+        "scaled_error": 7.401486830834377e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.0020000000002
+        },
+        "reference": {
+          "voltage": 1.488688115503494,
+          "current": -0.009473469825029088
+        },
+        "wall_seconds": 0.27170578006189317,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": 1.4886881155034937,
+            "i_l_A": -0.009473469825029088,
+            "percent_overshoot": 0.0,
+            "residual": 7.401486830834377e-17,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 7
+          },
+          "solver_seconds": 0.00028130493592470884
+        },
+        "scaled_error": 7.401486830834377e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z1.0000000001-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 200.00000002000002,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.0020000000002
+        },
+        "reference": {
+          "voltage": 0.24064131806839256,
+          "current": 0.010826822657214767
+        },
+        "wall_seconds": 0.2701019620290026,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 1.0000000001,
+            "v_c_V": 0.24064131806839262,
+            "i_l_A": 0.01082682265721477,
+            "percent_overshoot": 0.0,
+            "residual": 1.734723475976807e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 7
+          },
+          "solver_seconds": 0.00027341803070157766
+        },
+        "scaled_error": 3.204492270538529e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.0006
+        },
+        "reference": {
+          "voltage": 0.3262002102975623,
+          "current": 0.005851527478753611
+        },
+        "wall_seconds": 0.27152400894556195,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": 0.3262002102975623,
+            "i_l_A": 0.005851527478753612,
+            "percent_overshoot": 0.0,
+            "residual": 1.4822826025131367e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 7
+          },
+          "solver_seconds": 0.0002745289821177721
+        },
+        "scaled_error": 1.4456028966473392e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.0006
+        },
+        "reference": {
+          "voltage": 2.967212676415223,
+          "current": -0.0014872611761923902
+        },
+        "wall_seconds": 0.2688350999960676,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": 2.967212676415223,
+            "i_l_A": -0.0014872611761923905,
+            "percent_overshoot": 0.0,
+            "residual": 2.168404344971009e-17,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 7
+          },
+          "solver_seconds": 0.0002656029537320137
+        },
+        "scaled_error": 1.4456028966473392e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.0006
+        },
+        "reference": {
+          "voltage": -1.0159754054048362,
+          "current": 0.0015116404826963775
+        },
+        "wall_seconds": 0.2650426209438592,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": -1.0159754054048364,
+            "i_l_A": 0.0015116404826963777,
+            "percent_overshoot": 0.0,
+            "residual": 2.185531300696724e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 7
+          },
+          "solver_seconds": 0.00026244495529681444
+        },
+        "scaled_error": 1.4344709405394685e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.02
+        },
+        "reference": {
+          "voltage": 7.585432747883905,
+          "current": 0.002212829599828785
+        },
+        "wall_seconds": 0.26599661295767874,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": 7.585432747883906,
+            "i_l_A": 0.002212829599828785,
+            "percent_overshoot": 0.0,
+            "residual": 1.1709001308434232e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 12
+          },
+          "solver_seconds": 0.0002891670446842909
+        },
+        "scaled_error": 7.401486830834377e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.02
+        },
+        "reference": {
+          "voltage": 1.1220820596942636,
+          "current": -0.0005624506895750918
+        },
+        "wall_seconds": 0.2629477350274101,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": 1.1220820596942636,
+            "i_l_A": -0.0005624506895750919,
+            "percent_overshoot": 0.0,
+            "residual": 1.0842021724855044e-17,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 12
+          },
+          "solver_seconds": 0.0002979289274662733
+        },
+        "scaled_error": 7.228014483236696e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.02
+        },
+        "reference": {
+          "voltage": 0.8594776936404965,
+          "current": 0.0005716939791929875
+        },
+        "wall_seconds": 0.2704756309976801,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10.0,
+            "v_c_V": 0.8594776936404968,
+            "i_l_A": 0.0005716939791929876,
+            "percent_overshoot": 0.0,
+            "residual": 2.220446049250313e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 12
+          },
+          "solver_seconds": 0.00029988610185682774
+        },
+        "scaled_error": 1.1102230246251565e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 0.6
+        },
+        "reference": {
+          "voltage": 0.3546535691779366,
+          "current": 5.822673229967715e-06
+        },
+        "wall_seconds": 0.2626285389997065,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000.0,
+            "v_c_V": 0.3546535691779366,
+            "i_l_A": 5.822673229967715e-06,
+            "percent_overshoot": 0.0,
+            "residual": 0.0,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 27
+          },
+          "solver_seconds": 0.00040093506686389446
+        },
+        "scaled_error": 0.0,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 0.6
+        },
+        "reference": {
+          "voltage": 2.911385129982432,
+          "current": -1.4556925686304475e-06
+        },
+        "wall_seconds": 0.2671402549603954,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000.0,
+            "v_c_V": 2.911385129982432,
+            "i_l_A": -1.4556925686304477e-06,
+            "percent_overshoot": 0.0,
+            "residual": 2.1175823681357508e-20,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 27
+          },
+          "solver_seconds": 0.00040123099461197853
+        },
+        "scaled_error": 1.4117215787571671e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 0.6
+        },
+        "reference": {
+          "voltage": -0.9114336522593486,
+          "current": 1.4557168297689664e-06
+        },
+        "wall_seconds": 0.31311216694302857,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000.0,
+            "v_c_V": -0.9114336522593486,
+            "i_l_A": 1.4557168297689666e-06,
+            "percent_overshoot": 0.0,
+            "residual": 1.0587911840678754e-20,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 27
+          },
+          "solver_seconds": 0.0003979710163548589
+        },
+        "scaled_error": 1.4546664054655655e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 20
+        },
+        "reference": {
+          "voltage": 7.585446705942692,
+          "current": 2.2072766525468458e-06
+        },
+        "wall_seconds": 0.3310188699979335,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000.0,
+            "v_c_V": 7.58544670594269,
+            "i_l_A": 2.207276652546846e-06,
+            "percent_overshoot": 0.0,
+            "residual": 2.341795952516011e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 32
+          },
+          "solver_seconds": 0.0004288500640541315
+        },
+        "scaled_error": 1.4802973661668753e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 20
+        },
+        "reference": {
+          "voltage": 1.1036567174864316,
+          "current": -5.518283601227867e-07
+        },
+        "wall_seconds": 0.2646539069246501,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000.0,
+            "v_c_V": 1.1036567174864316,
+            "i_l_A": -5.518283601227868e-07,
+            "percent_overshoot": 0.0,
+            "residual": 1.0587911840678754e-20,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 32
+          },
+          "solver_seconds": 0.00045872002374380827
+        },
+        "scaled_error": 7.058607893785836e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 20
+        },
+        "reference": {
+          "voltage": 0.896324888541464,
+          "current": 5.51837557108862e-07
+        },
+        "wall_seconds": 0.2663571040611714,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000.0,
+            "v_c_V": 0.8963248885414636,
+            "i_l_A": 5.518375571088621e-07,
+            "percent_overshoot": 0.0,
+            "residual": 3.3306690738754696e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 32
+          },
+          "solver_seconds": 0.00043608597479760647
+        },
+        "scaled_error": 1.6653345369377348e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000000-t0.03-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 600
+        },
+        "reference": {
+          "voltage": 0.3546535974178736,
+          "current": 5.822673201291078e-09
+        },
+        "wall_seconds": 0.26538459002040327,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000000.0,
+            "v_c_V": 0.35465359741787367,
+            "i_l_A": 5.822673201291078e-09,
+            "percent_overshoot": 0.0,
+            "residual": 1.5652217159340228e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 47
+          },
+          "solver_seconds": 0.0005087839672341943
+        },
+        "scaled_error": 4.625929269271485e-18,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000000-t0.03-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 600
+        },
+        "reference": {
+          "voltage": 2.9113366491678083,
+          "current": -1.4556683245839078e-09
+        },
+        "wall_seconds": 0.2647565900115296,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000000.0,
+            "v_c_V": 2.9113366491678088,
+            "i_l_A": -1.4556683245839078e-09,
+            "percent_overshoot": 0.0,
+            "residual": 1.4802973661668753e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 47
+          },
+          "solver_seconds": 0.0005032300250604749
+        },
+        "scaled_error": 1.4802973661668753e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000000-t0.03-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 600
+        },
+        "reference": {
+          "voltage": -0.911336697690085,
+          "current": 1.455668348845046e-09
+        },
+        "wall_seconds": 0.3056409009732306,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000000.0,
+            "v_c_V": -0.9113366976900851,
+            "i_l_A": 1.455668348845046e-09,
+            "percent_overshoot": 0.0,
+            "residual": 1.1102230246251565e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 47
+          },
+          "solver_seconds": 0.0005226799985393882
+        },
+        "scaled_error": 5.551115123125783e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000000-t1-init12,0,0",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 12,
+          "v_c0": 0,
+          "i_l0": 0,
+          "t": 20000
+        },
+        "reference": {
+          "voltage": 7.585446705942692,
+          "current": 2.2072766470286593e-09
+        },
+        "wall_seconds": 0.304320752969943,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000000.0,
+            "v_c_V": 7.585446705942692,
+            "i_l_A": 2.2072766470286597e-09,
+            "percent_overshoot": 0.0,
+            "residual": 1.8737583566304263e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 52
+          },
+          "solver_seconds": 0.0005589579232037067
+        },
+        "scaled_error": 6.89317177127523e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000000-t1-init0,3,0.01",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 0,
+          "v_c0": 3,
+          "i_l0": 0.01,
+          "t": 20000
+        },
+        "reference": {
+          "voltage": 1.1036383419082991,
+          "current": -5.518191709541509e-10
+        },
+        "wall_seconds": 0.31927878607530147,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000000.0,
+            "v_c_V": 1.1036383419082993,
+            "i_l_A": -5.51819170954151e-10,
+            "percent_overshoot": 0.0,
+            "residual": 7.401486830834377e-17,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 52
+          },
+          "solver_seconds": 0.0005605790065601468
+        },
+        "scaled_error": 7.401486830834377e-17,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "z10000000-t1-init2,-1,-0.02",
+          "subkind": "rlc_transient",
+          "R": 2000000000,
+          "L": 0.1,
+          "C": 1e-05,
+          "V_s": 2,
+          "v_c0": -1,
+          "i_l0": -0.02,
+          "t": 20000
+        },
+        "reference": {
+          "voltage": 0.896361639697729,
+          "current": 5.518191801511369e-10
+        },
+        "wall_seconds": 0.2889131479896605,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 1000.0,
+            "zeta": 10000000.0,
+            "v_c_V": 0.8963616396977289,
+            "i_l_A": 5.51819180151137e-10,
+            "percent_overshoot": 0.0,
+            "residual": 1.1102230246251565e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 52
+          },
+          "solver_seconds": 0.0005500109400600195
+        },
+        "scaled_error": 1.0339757656912845e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "megohm_rc_tail",
+          "subkind": "rlc_transient",
+          "R": 1000000,
+          "L": 0.001,
+          "C": 1e-06,
+          "V_s": 12,
+          "t": 1
+        },
+        "reference": {
+          "voltage": 7.585446705942692,
+          "current": 4.4145532984718616e-06
+        },
+        "wall_seconds": 0.26707032206468284,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 31622.776601683792,
+            "zeta": 15811.388300841898,
+            "v_c_V": 7.585446705942694,
+            "i_l_A": 4.414553298471861e-06,
+            "percent_overshoot": 0.0,
+            "residual": 2.341795952516011e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 33
+          },
+          "solver_seconds": 0.0004643539432436228
+        },
+        "scaled_error": 1.4802973661668753e-16,
+        "passed": true
+      },
+      {
+        "case": {
+          "name": "gigaohm_rc_tail",
+          "subkind": "rlc_transient",
+          "R": 1000000000,
+          "L": 0.001,
+          "C": 1e-06,
+          "V_s": 12,
+          "t": 1000
+        },
+        "reference": {
+          "voltage": 7.585446705942692,
+          "current": 4.414553294057312e-09
+        },
+        "wall_seconds": 0.2776369509520009,
+        "returncode": 0,
+        "output": {
+          "result": {
+            "domain": "rf_transmission_rlc",
+            "subkind": "rlc_transient",
+            "regime": "overdamped",
+            "omega0_rad_s": 31622.776601683792,
+            "zeta": 15811388.300841898,
+            "v_c_V": 7.585446705942692,
+            "i_l_A": 4.414553294057313e-09,
+            "percent_overshoot": 0.0,
+            "residual": 1.8737583566304293e-16,
+            "verified": true,
+            "verification_method": "decimal_scaled_matrix_exponential",
+            "reference_squarings": 53
+          },
+          "solver_seconds": 0.0005791919538751245
+        },
+        "scaled_error": 6.89317177127523e-17,
+        "passed": true
+      }
+    ]
+  }
+}
