@@ -1,0 +1,309 @@
+{
+  "schema": "ple.control.exact-dc-gain-range-v1",
+  "source_base": "57c8e0180d9d38fe4482de687eb4093a509d1154",
+  "source_base_tree": "9c4581445f455fac9375333f9d4468a05574dbbd",
+  "source_solver_sha256": "7bb044f6fbcd1c2cac363f2c09524ee7bd5b47b146a4052bf7a4836323e59081",
+  "candidate_solver_sha256": "8f2f41a06c8413c69d6cc05e4b19e7212bd28643d5da985db9c22bc69c60312f",
+  "independent_receiver_sha256": "628ba409e74bf066723d0ee76b1782d654b83659233beeb0f47be5af6b22401b",
+  "registered_receiver_sha256": "e450fd9c2b240962f338b66e7802aa7e444e4dfc3ea4bd94ca646ffd627daf96",
+  "question": "Can a nonzero exact static gain that rounds to signed zero be withheld instead of approving a false exact-zero scalar claim, while preserving origin limits, existing overflow handling, representable subnormals, and all non-DC behavior?",
+  "constants": {
+    "B": "s+1",
+    "u": "2^-1074, the smallest positive binary64 subnormal",
+    "F": "Exact rational value of the transported binary64 coefficient",
+    "small": "F(1e-300)/F(1e100), strictly positive but rounds to zero",
+    "large": "F(1e300)/F(1e-100), strictly positive but overflows"
+  },
+  "input_semantics": [
+    "Use the existing finite float conversion and sign normalization of D and N. Compute the DC limit in the exact accepted binary64 coefficient units already used by the transfer certificates.",
+    "All fourteen inputs have nonzero degree-at-least-one open denominators and nonzero feedback characteristics. All fourteen unclaimed verifier requests pass; one of them has a genuine undefined DC value because of an origin pole.",
+    "A zero numerator has exact DC value zero. If N=s^a*N0 and D=s^b*D0 with nonzero N0(0),D0(0), then a>b gives exact zero, a=b gives the signed exact ratio N0(0)/D0(0), and a<b gives a genuine DC pole.",
+    "Leading coefficient zeros, common origin factors, and negative numerator signs retain their existing behavior. The original denominator origin order still distinguishes finite from finite_limit.",
+    "Bode coefficient interpretation, exact root certificates, numeric pole diagnostics, state-space code, and the shared scalar claim checker remain unchanged."
+  ],
+  "output_contract": {
+    "dc_gain_exact": "Canonical exact rational string for every finite mathematical DC limit, including zero and values outside float range; null at a genuine DC pole.",
+    "dc_gain": "Rounded float when finite and no nonzero exact value rounds to zero; preserve positive and negative nonzero subnormals. Null for a genuine DC pole or an unavailable nonzero rendering.",
+    "dc_gain_status": {
+      "finite": "Renderable DC value when the original denominator has no origin factor.",
+      "finite_limit": "Renderable DC limit when the original denominator has an origin factor.",
+      "outside_float_range": "The finite nonzero exact limit overflows or rounds to signed zero; exact rational evidence remains available.",
+      "pole_at_zero": "A genuine origin pole remains after common factors cancel; scalar and exact DC evidence are null."
+    },
+    "scalar_claims": "Claims against dc_gain compare the available rendered scalar with the requested tolerances. Claims against an unavailable scalar explicitly refuse.",
+    "evidence_claims": "dc_gain_exact is rational evidence, not a scalar claim field. Every numeric claim targeting it explicitly refuses with a reason naming the field and no numeric claim_check; do not attempt float('a/b'), including for integer-looking strings or null.",
+    "rounding_scope": "A finite display can differ from the exact rational limit. In particular, exact 3u/2 rounds to 2u and remains available. This course does not assert every finite display is an exact real value."
+  },
+  "cases": [
+    {
+      "name": "ordinary/third",
+      "N": "1",
+      "D": "3B",
+      "exact": "1/3",
+      "display": "binary64(1/3)",
+      "status": "finite",
+      "second_claim": {
+        "field": "dc_gain_exact",
+        "value": "binary64(1/3)"
+      },
+      "old_dc_unchanged": true
+    },
+    {
+      "name": "zero/identical",
+      "N": "0",
+      "D": "B",
+      "exact": "0",
+      "display": "0.0",
+      "status": "finite",
+      "second_claim": {
+        "field": "dc_gain_exact",
+        "value": "0"
+      },
+      "old_dc_unchanged": true
+    },
+    {
+      "name": "origin/extra-zero",
+      "N": "-3s^2",
+      "D": "2sB",
+      "exact": "0",
+      "display": "0.0",
+      "status": "finite_limit",
+      "second_claim": {
+        "field": "dc_gain",
+        "value": "1"
+      },
+      "old_dc_unchanged": true
+    },
+    {
+      "name": "origin/finite-negative",
+      "N": "-3s^2",
+      "D": "2s^2B",
+      "exact": "-3/2",
+      "display": "-1.5",
+      "status": "finite_limit",
+      "second_claim": {
+        "field": "dc_gain_exact",
+        "value": "-1.5"
+      },
+      "old_dc_unchanged": true
+    },
+    {
+      "name": "origin/pole",
+      "N": "-s",
+      "D": "s^2B",
+      "exact": null,
+      "display": null,
+      "status": "pole_at_zero",
+      "second_claim": {
+        "field": "dc_gain_exact",
+        "value": "0"
+      },
+      "old_dc_unchanged": true
+    },
+    {
+      "name": "underflow/positive",
+      "N": "1e-300",
+      "D": "1e100 B",
+      "exact": "small",
+      "display": null,
+      "status": "outside_float_range",
+      "second_claim": {
+        "field": "dc_gain_exact",
+        "value": "0"
+      },
+      "old_dc_unchanged": false
+    },
+    {
+      "name": "underflow/negative-common-origin",
+      "N": "-1e-300 s",
+      "D": "1e100 sB",
+      "exact": "-small",
+      "display": null,
+      "status": "outside_float_range",
+      "second_claim": {
+        "field": "dc_gain_exact",
+        "value": "0"
+      },
+      "old_dc_unchanged": false
+    },
+    {
+      "name": "overflow/positive",
+      "N": "1e300",
+      "D": "1e-100 B",
+      "exact": "large",
+      "display": null,
+      "status": "outside_float_range",
+      "second_claim": {
+        "field": "dc_gain_exact",
+        "value": "0"
+      },
+      "old_dc_unchanged": true
+    },
+    {
+      "name": "overflow/negative-common-origin",
+      "N": "-1e300 s",
+      "D": "1e-100 sB",
+      "exact": "-large",
+      "display": null,
+      "status": "outside_float_range",
+      "second_claim": {
+        "field": "dc_gain_exact",
+        "value": "0"
+      },
+      "old_dc_unchanged": true
+    },
+    {
+      "name": "subnormal/minimum-positive",
+      "N": "u",
+      "D": "B",
+      "exact": "u",
+      "display": "u",
+      "status": "finite",
+      "second_claim": {
+        "field": "dc_gain",
+        "value": "0"
+      },
+      "old_dc_unchanged": true
+    },
+    {
+      "name": "subnormal/minimum-negative",
+      "N": "-u",
+      "D": "B",
+      "exact": "-u",
+      "display": "-u",
+      "status": "finite",
+      "second_claim": {
+        "field": "dc_gain",
+        "value": "0"
+      },
+      "old_dc_unchanged": true
+    },
+    {
+      "name": "tie/half-positive",
+      "N": "u",
+      "D": "2B",
+      "exact": "u/2",
+      "display": null,
+      "status": "outside_float_range",
+      "second_claim": {
+        "field": "dc_gain_exact",
+        "value": "0"
+      },
+      "old_dc_unchanged": false
+    },
+    {
+      "name": "tie/half-negative",
+      "N": "-u",
+      "D": "2B",
+      "exact": "-u/2",
+      "display": null,
+      "status": "outside_float_range",
+      "second_claim": {
+        "field": "dc_gain_exact",
+        "value": "0"
+      },
+      "old_dc_unchanged": false
+    },
+    {
+      "name": "tie/three-halves",
+      "N": "3u",
+      "D": "2B",
+      "exact": "3u/2",
+      "display": "2u",
+      "status": "finite",
+      "second_claim": {
+        "field": "dc_gain",
+        "value": "0"
+      },
+      "old_dc_unchanged": true
+    }
+  ],
+  "system_count": 14,
+  "unclaimed_route_count": 14,
+  "unclaimed_approvals": 14,
+  "claim_count": 28,
+  "total_route_calls": 42,
+  "expected_claim_approvals": 7,
+  "expected_claim_refusals": 21,
+  "counts": {
+    "renderable": 7,
+    "finite_status": 5,
+    "finite_limit_status": 2,
+    "nonzero_outside_float_range": 6,
+    "genuine_dc_pole": 1,
+    "evidence_key_claims": 10
+  },
+  "claims": {
+    "first": "Claim dc_gain equal to the correctly rounded displayed value when available, otherwise claim zero. Seven approvals and seven refusals are required.",
+    "second": "Use the per-case second_claim above. All fourteen refuse: numeric claims against exact evidence, an incorrect finite limit, or false zero claims against representable nonzero subnormals.",
+    "tolerances": "Every scalar and evidence-key request explicitly supplies atol=0 and rtol=0.",
+    "all_calls": "Every system is called unclaimed and twice claimed before the aggregate assertion.",
+    "stock_reporting": "Report false approvals/refusals separately from new-schema evidence checks. Stock may correctly refuse an unknown dc_gain_exact field while lacking the new exact evidence required by the frozen contract."
+  },
+  "oracle": [
+    "Derive limits from the stated factored transfer families, using exact Fraction.from_float ratios for the transported extreme constants. Do not use the producer's origin-order branch as the expected-value oracle.",
+    "Compare exact canonical rational strings, scalar types and values, and status names. A genuine DC pole is null in both fields; nonzero rendering failures retain exact strings.",
+    "For the min-subnormal fixtures, prescribe u and -u exactly. Prescribe null for the +/-u/2 ties. Prescribe 2u explicitly for the 3u/2 tie, independently of the producer's conversion.",
+    "Check complete scalar claim evidence for available values, explicit null refusals, and named evidence-only refusals without a claim_check. All 42 outputs must serialize with allow_nan=false.",
+    "Four actual registered Pi fixtures add thirteen request specifications: positive underflow, negative common-origin underflow, the 3u/2 tie, and a true origin pole. Four are unclaimed; nine claims require one approval and eight refusals, all with zero tolerances.",
+    "The Pi subset has no representable finite_limit fixture; that status is independently covered by the fourteen-system Python route course.",
+    "Retain all inherited Bode range 11/34, exact transfer 20/80, rank 49/196, Lyapunov 32/128, characteristic diagnostics 17/68, and every maintained CI gate."
+  ],
+  "paired_projections": {
+    "legacy_dc": [
+      "dc_gain",
+      "dc_gain_status"
+    ],
+    "expected_legacy_dc_changes": [
+      "underflow/positive",
+      "underflow/negative-common-origin",
+      "tie/half-positive",
+      "tie/half-negative"
+    ],
+    "unchanged_legacy_dc": "Require exact paired equality for the other ten systems, including existing overflow refusals and signed nonzero subnormals.",
+    "bode": [
+      "w_gc_rad_s",
+      "phase_margin_deg",
+      "w_pc_rad_s",
+      "gain_margin_db",
+      "gain_crossovers",
+      "phase_crossovers",
+      "unity_gain_intervals_rad_s",
+      "negative_real_intervals_rad_s",
+      "imaginary_axis_poles_rad_s",
+      "removable_holes_rad_s"
+    ],
+    "unchanged_bode": "All ten Bode fields must match exactly for every new system.",
+    "non_dc_exclusions": [
+      "dc_gain",
+      "dc_gain_status",
+      "dc_gain_exact"
+    ],
+    "unchanged_non_dc": "The full unclaimed output excluding exactly these three DC keys must match for every system, including root certificates, diagnostics, and Bode frequency evidence.",
+    "inherited": "The existing 20-system TF Bode/DC aggregate and 11-system Bode range legacy-projection aggregate must remain unchanged; inspect their per-case rows as well.",
+    "record": "Record each projection's per-case field count and SHA256 plus the ordered aggregate. Investigate any unexpected difference before integration."
+  },
+  "decision": "Require fourteen complete systems, all fourteen unclaimed approvals, 28 correct full-evidence claim checks with seven approvals and 21 refusals, zero solver/JSON exceptions, all paired projection equalities, real Pi success, and every maintained CI gate. No case, coefficient, tolerance, or expectation changes after first execution.",
+  "execution": "Native source-only preparation, followed by one frozen stock/candidate pair in maintained repository PR CI as the first numerical execution. Tests and protocol are identical; only solver source differs. Retain all original failures and partial results. No alternate test route, workflow change, organizer/dev/scored/model run.",
+  "integration": "Start from fully qualified merged Bode tree 9c4581445f455fac9375333f9d4468a05574dbbd at57c8e0180d9d38fe4482de687eb4093a509d1154. Record actual CI base/merge trees and compare the eventual landed tree directly against the actual successful CI tree; never assume concurrent changes absent.",
+  "limitations": [
+    "dc_gain_exact certifies the static limit for accepted binary64 inputs; it does not reconstruct a decimal value lost before those inputs were accepted.",
+    "Numeric scalar claims continue to target a rounded display, not an exact-rational comparison API. Exact evidence-key numeric claims explicitly refuse.",
+    "The existing distinct Bode decimal-string convention, approximate frequency/margin displays, and numerical pole diagnostics remain unchanged.",
+    "No universal performance, physical feedback well-posedness, or benchmark-score improvement is claimed."
+  ],
+  "references": [
+    {
+      "url": "https://docs.python.org/3.12/library/fractions.html",
+      "topic": "Exact rational representation and Fraction.from_float input semantics"
+    },
+    {
+      "url": "https://docs.python.org/3.12/library/math.html",
+      "topic": "Binary64 spacing through math.ulp and subnormal values"
+    },
+    {
+      "url": "https://docs.python.org/3.12/library/sys.html#sys.float_info",
+      "topic": "Normal and subnormal float distinction"
+    }
+  ]
+}

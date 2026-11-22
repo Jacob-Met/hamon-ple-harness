@@ -148,6 +148,18 @@ BODE_RANGE_CASES = [
 ]
 
 
+# Transfer-function DC ratios use the accepted binary64 values. In particular
+# the subnormal tie below has exact value 3u/2 and rounds to the even value 2u.
+DC_UNIT = 2.0**-1074
+DC_SMALL = Fraction(1e-300) / Fraction(1e100)
+DC_RANGE_CASES = [
+    ("dc-positive-underflow", [1e-300], [1e100, 1e100], DC_SMALL, None, "outside_float_range"),
+    ("dc-common-origin-underflow", [-1e-300, 0], [1e100, 1e100, 0], -DC_SMALL, None, "outside_float_range"),
+    ("dc-subnormal-tie", [3 * DC_UNIT], [2, 2], 3 * Fraction(DC_UNIT) / 2, 2 * DC_UNIT, "finite"),
+    ("dc-origin-pole", [-1, 0], [1, 1, 0, 0], None, None, "pole_at_zero"),
+]
+
+
 @pytest.fixture(scope="module")
 def routed(tmp_path_factory):
     workdir = tmp_path_factory.mktemp("registered-engineering")
@@ -233,6 +245,15 @@ def routed(tmp_path_factory):
             calls.append({"id": f"bode-{case}-{field}", "mode": "control",
                           "spec": {**spec, "claimed_field": field, "claimed_value": value,
                                    "atol": atol, "rtol": 0}})
+    for case, num, den, _, rendered, _ in DC_RANGE_CASES:
+        spec = {"mode": "transfer_function", "num": num, "den": den}
+        calls.append({"id": case, "mode": "control", "spec": spec})
+        claims = [("zero", "dc_gain", 0), ("evidence", "dc_gain_exact", 0)]
+        if rendered is not None:
+            claims.append(("rendered", "dc_gain", rendered))
+        for label, field, value in claims:
+            calls.append({"id": f"{case}-{label}", "mode": "control",
+                          "spec": {**spec, "claimed_field": field, "claimed_value": value, "rtol": 0, "atol": 0}})
     source = r"""
 import registerTaskTools, { PLE_DOMAIN_TOOL_NAMES } from './task-tools.ts';
 const tools = new Map();
@@ -632,6 +653,53 @@ def test_registered_bode_frequency_range(routed, case, num, den, pm):
             assert check["field"] == field and check["claimed"] == truth and check["within_tolerance"] is True
 
 
+@pytest.mark.parametrize("case,num,den,exact,rendered,status", DC_RANGE_CASES,
+                         ids=[row[0] for row in DC_RANGE_CASES])
+def test_registered_dc_gain_range(routed, case, num, den, exact, rendered, status):
+    reply = routed[case]
+    assert reply["completed"], reply
+    result = reply["details"]
+    assert result["domain"] == "control" and result["mode"] == "transfer_function"
+    assert result["passed"] is True and result["dc_gain_status"] == status
+    assert result["dc_gain"] == rendered
+    if exact is None:
+        assert result["dc_gain_exact"] is None
+    else:
+        assert isinstance(result["dc_gain_exact"], str) and Fraction(result["dc_gain_exact"]) == exact
+    if rendered is not None:
+        assert 0 < result["dc_gain"] == 2 * DC_UNIT and Fraction(result["dc_gain"]) != exact
+
+    opened = result["open_loop_root_certificate"]
+    closed = result["closed_loop_root_certificate"]
+    assert opened["status"] == closed["status"] == "classified"
+    assert result["hurwitz_stable"] is opened["hurwitz_stable"]
+    assert result["closed_loop_hurwitz_stable"] is closed["hurwitz_stable"]
+    evidence = result["bode_frequency_evidence"]
+    assert evidence["coordinate"] == "omega_squared_rad2_per_s2"
+    for key in ("gain_crossovers", "phase_crossovers", "imaginary_axis_poles_rad_s",
+                "removable_holes_rad_s", "unity_gain_intervals_rad_s", "negative_real_intervals_rad_s"):
+        assert isinstance(result[key], list) and len(result[key]) == len(evidence[key])
+
+    for label in ("zero", "evidence"):
+        checked = routed[f"{case}-{label}"]
+        assert checked["completed"], checked
+        details = checked["details"]
+        assert details["passed"] is False and details["dc_gain_exact"] == result["dc_gain_exact"]
+        assert isinstance(details.get("reason"), str) and details["reason"].strip()
+        if label == "evidence":
+            assert "dc_gain_exact" in details["reason"] and "evidence" in details["reason"].lower()
+        elif rendered is not None:
+            check = details["claim_check"]
+            assert check["field"] == "dc_gain" and check["claimed"] == 0
+            assert check["actual"] == rendered and check["within_tolerance"] is False
+    if rendered is not None:
+        checked = routed[f"{case}-rendered"]
+        assert checked["completed"] and checked["details"]["passed"] is True, checked
+        check = checked["details"]["claim_check"]
+        assert check["field"] == "dc_gain" and check["actual"] == check["claimed"] == rendered
+        assert check["within_tolerance"] is True
+
+
 class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -686,3 +754,8 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
         for args in BODE_RANGE_CASES:
             with self.subTest(case=args[0]):
                 test_registered_bode_frequency_range(self.routed_data, *args)
+
+    def test_registered_dc_gain_range(self):
+        for args in DC_RANGE_CASES:
+            with self.subTest(case=args[0]):
+                test_registered_dc_gain_range(self.routed_data, *args)

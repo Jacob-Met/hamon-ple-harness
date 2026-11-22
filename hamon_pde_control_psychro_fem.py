@@ -1237,21 +1237,23 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         cl_poles, cl_pole_status = _transfer_pole_diagnostics(closed_monic)
 
         margins = _bode_margins(spec.get("num", [1.0]), spec["den"])
-        # Infinity is invalid on the JSON tool wire. Cancel origin factors before
-        # distinguishing a finite DC limit from a genuine DC pole.
-        n_dc = list(reversed(num))
-        d_dc = list(reversed(den))
-        d_order = next(i for i, c in enumerate(d_dc) if c)
-        n_order = next((i for i, c in enumerate(n_dc) if c), None)
+        # Take the origin limit in the same exact binary64 coefficient units
+        # as the transfer certificates, before rounding the scalar for display.
+        d_order = next(i for i, c in enumerate(reversed(den_exact)) if c)
+        n_order = next((i for i, c in enumerate(reversed(num_exact)) if c), None)
         dc_status = "finite_limit" if d_order else "finite"
         if n_order is None or n_order > d_order:
-            dc_gain = 0.0
+            dc_exact = Fraction(0)
         elif n_order == d_order:
-            dc_gain = n_dc[n_order] / d_dc[d_order]
-            if not math.isfinite(dc_gain):
-                dc_gain, dc_status = None, "outside_float_range"
+            dc_exact = num_exact[-1 - n_order] / den_exact[-1 - d_order]
         else:
-            dc_gain, dc_status = None, "pole_at_zero"
+            dc_exact, dc_status = None, "pole_at_zero"
+        dc_gain = None
+        if dc_exact is not None:
+            try:
+                dc_gain = _diagnostic_float(dc_exact)
+            except OverflowError:
+                dc_status = "outside_float_range"
 
         res: Dict[str, Any] = {
             "passed": bool(closed_monic),
@@ -1266,6 +1268,7 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             "rhp_poles_eigen_is_approximate": True,
             "jw_axis_poles": open_certificate["jw_axis_poles"],
             "dc_gain": dc_gain,
+            "dc_gain_exact": _fraction_text(dc_exact) if dc_exact is not None else None,
             "dc_gain_status": dc_status,
             "poles_real_imag": poles,
             "poles_status": pole_status,
@@ -1276,7 +1279,10 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         if not closed_monic:
             res["reason"] = closed_certificate["reason"]
         field = spec.get("claimed_field")
-        if "claimed_value" in spec and field in res and res[field] is None:
+        if "claimed_value" in spec and field == "dc_gain_exact":
+            res["passed"] = False
+            res["reason"] = "dc_gain_exact is rational evidence. Use dc_gain for a numeric scalar claim."
+        elif "claimed_value" in spec and field in res and res[field] is None:
             res["passed"] = False
             res["reason"] = f"Cannot verify claimed {field}: the result is undefined or unavailable"
         else:
