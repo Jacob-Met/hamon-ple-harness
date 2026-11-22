@@ -49,7 +49,10 @@ import time
 from typing import Any
 import urllib.parse
 
-from websockets.asyncio.server import serve as _ws_serve
+try:
+    from websockets.asyncio.server import serve as _ws_serve
+except ImportError:
+    _ws_serve = None
 from websockets.exceptions import ConnectionClosed
 
 # Limits the evaluator enforces (docs/protocol.md). It counts a message past one
