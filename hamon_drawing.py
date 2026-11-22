@@ -2,7 +2,8 @@
 
 Text boxes are in the PDF-page coordinate frame, vector paths in Cairo SVG
 viewBox coordinates. Any physical drawing scale is an unverified annotation,
-never automatically applied to measurements. No OCR or network calls.
+never automatically applied to measurements. Detail-link candidates can use local
+Tesseract on bounded rendered captions. No network calls.
 """
 from __future__ import annotations
 from bisect import bisect_left, bisect_right
@@ -1017,6 +1018,285 @@ def _resolve_ruled_captions(result, pages, target, source, directory):
                                  else "candidate_detail")
 
 
+def _detail_symbol_inventory(source, page, directory):
+    try:
+        inventory = _svg_inventory(_page_svg(source, page, directory), 30000)
+    except (OSError, ValueError, subprocess.TimeoutExpired, ET.ParseError):
+        return [], []
+    if inventory["vector_limit_hit"] or inventory["unlocalized_vectors"]:
+        return [], []
+    markers, horizontal = [], []
+    for v in inventory["reported_vectors"]:
+        if v.get("stroke") in (None, "none") or not v["bbox_exact_for_centerline"]:
+            continue
+        a, b, c, d = v["svg_bbox"]
+        if 5 <= c-a <= 80 and abs(c-a-(d-b)) < .03*(c-a) and _round_marker(v):
+            markers.append({"id": v["id"], "box": [a,b,c,d]})
+        points = v.get("svg_points") or []
+        for i,j in v.get("svg_segment_vertex_pairs") or []:
+            x,y = points[i]
+            xx,yy = points[j]
+            if abs(y-yy) < .2 and abs(xx-x) > 4:
+                horizontal.append((min(x,xx), max(x,xx), (y+yy)/2, v["id"]))
+    return markers, horizontal
+
+
+def _divided_source_mark(ref, markers, horizontal):
+    numerators = ref.get("numerator_evidence", [])
+    if len(numerators) != 1 or ref.get("target_detail") != numerators[0]["text"].upper():
+        return None
+    n = numerators[0]["box"]
+    s = ref["source"]["box"]
+    matches = []
+    for m in markers:
+        a,b,c,d = m["box"]
+        x,y,r = (a+c)/2, (b+d)/2, (c-a)/2
+        # Font ascent and descent boxes can overlap a divider even when their
+        # printed ink does not. Bind the text centres to opposite semicircles.
+        ny, sy = (n[1]+n[3])/2, (s[1]+s[3])/2
+        if not (b < ny <= y-.18*r and y+.18*r <= sy < d):
+            continue
+        if any(box[1] < b-.15*r or box[3] > d+.15*r
+               or abs((box[0]+box[2])/2-x) >= .2*r
+               or any(((xx-x)/r)**2+((cy-y)/r)**2 >= 1.0 for xx in (box[0],box[2]))
+               for box,cy in ((n,ny),(s,sy))):
+            continue
+        rules = [v for lo,hi,cy,v in horizontal if abs(cy-y)<.08*r and lo<=a+.12*r and hi>=c-.12*r]
+        if len(rules)==1:
+            matches.append({"ring":m, "divider":rules[0], "numerator_line":numerators[0]["line"]})
+    return matches[0] if len(matches)==1 else None
+
+
+def _ruled_detail_regions(markers, horizontal):
+    regions=[]
+    for marker in markers:
+        a,b,c,d = marker["box"]
+        mid=(b+d)/2
+        diameter=c-a
+        rules=[(right,y,uid) for left,right,y,uid in horizontal
+               if abs(left-c)<.10*diameter and abs(y-mid)<.08*diameter
+               and 3*diameter < right-c < 30*diameter]
+        if len(rules)==1:
+            right,y,uid=rules[0]
+            regions.append({"ring":marker,"rule":uid,
+                            "caption_box":[c, y-.92*diameter, right, y-.045*diameter]})
+    return regions
+
+
+def _caption_raster(source, page, box, scale, erase_ring=False, pixel_limit=2500000):
+    a,b,c,d=box
+    left,top=math.floor(a*scale),math.floor(b*scale)
+    width,height=math.ceil(c*scale)-left, math.ceil(d*scale)-top
+    if min(left,top)<0 or min(width,height)<1 or width*height>pixel_limit:
+        return None
+    call=subprocess.run(["pdftoppm","-cropbox","-r",str(72*scale),"-f",str(page),"-l",str(page),
+                         "-singlefile","-x",str(left),"-y",str(top),"-W",str(width),"-H",str(height),
+                         "-gray",str(source)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=30)
+    if call.returncode:
+        return None
+    header=re.match(rb"P5\s+(\d+)\s+(\d+)\s+255\s",call.stdout)
+    if not header or tuple(map(int,header.groups()))!=(width,height):
+        return None
+    pixels=bytearray(call.stdout[header.end():])
+    if len(pixels)!=width*height:
+        return None
+    if erase_ring:
+        rx=(c-a)*scale/2
+        ry=(d-b)*scale/2
+        cx=(a+c)*scale/2-left
+        cy=(b+d)*scale/2-top
+        for y in range(height):
+            for x in range(width):
+                if ((x+.5-cx)/rx)**2+((y+.5-cy)/ry)**2>.91**2:
+                    pixels[y*width+x]=255
+    return f"P5\n{width} {height}\n255\n".encode()+pixels
+
+
+def _ink_window(source, page, markers):
+    """Obtain one bounded physical raster for all marked regions on this page."""
+    if not markers:
+        return None
+    boxes=[m["box"] for m in markers]
+    left=max(0,math.floor(min(a-.25*(c-a) for a,b,c,d in boxes)))
+    top=max(0,math.floor(min(b-.25*(d-b) for a,b,c,d in boxes)))
+    right=math.ceil(max(c+1.75*(c-a) for a,b,c,d in boxes))
+    bottom=math.ceil(max(d+.25*(d-b) for a,b,c,d in boxes))
+    scale=2
+    try:
+        pgm=_caption_raster(source,page,[left,top,right,bottom],scale,pixel_limit=22000000)
+    except (OSError,subprocess.TimeoutExpired):
+        return None
+    if pgm is None:
+        return None
+    header,shape,maximum,pixels=pgm.split(b"\n",3)
+    width,height=map(int,shape.split())
+    return left,top,scale,width,height,pixels
+
+
+def _printed_mark(ink, marker, right_rule=False):
+    """Require visible two-sided contrast around the ring and through its rule."""
+    if ink is None:return None
+    left,top,scale,width,height,pixels=ink
+    a,b,c,d=marker["box"]
+    cx,cy,r=(a+c)/2,(b+d)/2,(c-a)/2
+    def profile(x,y):
+        i=round((x-left)*scale-.5);j=round((y-top)*scale-.5)
+        if not 1<=i<width-1 or not 1<=j<height-1:return 255,255
+        values=sorted(pixels[(j+dj)*width+i+di] for di in (-1,0,1) for dj in (-1,0,1))
+        return values[0],values[4]
+    arc_hits=0
+    for i in range(16):
+        theta=(i+.5)*math.tau/16
+        x,y=math.cos(theta),math.sin(theta)
+        core=profile(cx+r*x,cy+r*y)[0]
+        inside=profile(cx+.78*r*x,cy+.78*r*y)[1]
+        outside=profile(cx+1.22*r*x,cy+1.22*r*y)[1]
+        arc_hits+=core+35<=min(inside,outside)
+    offsets=(1.35,1.85,2.5,3.1) if right_rule else (-.72,-.4,.4,.72)
+    rule_hits=[]
+    for dx in offsets:
+        x=cx+dx*r
+        core=profile(x,cy)[0]
+        rule_hits.append(core+35<=min(profile(x,cy-.23*r)[1],profile(x,cy+.23*r)[1]))
+    if arc_hits<10 or not(any(rule_hits[:2]) and any(rule_hits[2:])):
+        return None
+    return {"ring_contrast_samples":arc_hits, "ring_samples":16,
+            "rule_contrast_samples":sum(rule_hits), "rule_samples":4, "dpi":72*scale}
+
+
+def _printed_source_tokens(ink, marker, ref):
+    """Require two-dimensional ink in each text box, away from the outline and rule."""
+    if ink is None:
+        return None
+    left, top, scale, width, height, pixels = ink
+    a, b, c, d = marker["box"]
+    cx, cy, radius = (a + c) / 2, (b + d) / 2, (c - a) / 2
+    evidence = {}
+    rows = (("numerator", ref["numerator_evidence"][0]), ("sheet", ref["source"]))
+    for name, row in rows:
+        x0, y0, x1, y1 = row["box"]
+        xlo = max(0, math.floor((x0 - left) * scale))
+        xhi = min(width, math.ceil((x1 - left) * scale))
+        ylo = max(0, math.floor((y0 - top) * scale))
+        yhi = min(height, math.ceil((y1 - top) * scale))
+        cells = {}
+        for j in range(ylo, yhi):
+            y = top + (j + .5) / scale
+            distance = cy - y if name == "numerator" else y - cy
+            if distance < .17 * radius:
+                continue
+            for i in range(xlo, xhi):
+                x = left + (i + .5) / scale
+                if (x - cx) ** 2 + (y - cy) ** 2 < (.83 * radius) ** 2:
+                    cells[i, j] = pixels[j * width + i]
+        # A one-dimensional construction line or flat fill does not establish
+        # visible character strokes. Compare adjacent pixels inside the mask.
+        dark = [(i, j) for (i, j), value in cells.items() if value < 150]
+        if not dark:
+            return None
+        horizontal_edges = set()
+        vertical_edges = set()
+        for (i, j), value in cells.items():
+            if value >= 150:
+                continue
+            if any(cells.get((i + step, j), 0) >= value + 50 for step in (-1, 1)):
+                horizontal_edges.add(j)
+            if any(cells.get((i, j + step), 0) >= value + 50 for step in (-1, 1)):
+                vertical_edges.add(i)
+        if (len(dark) < .07 * len(cells) or len(horizontal_edges) < 2
+                or len(vertical_edges) < 2):
+            return None
+        evidence[name] = {"interior_pixels": len(cells), "dark_pixels": len(dark),
+                          "horizontal_edge_rows": len(horizontal_edges),
+                          "vertical_edge_columns": len(vertical_edges)}
+    return evidence
+
+
+def _read_caption_words(pgm, psm, digits=False):
+    if pgm is None:
+        return []
+    cmd=["tesseract","stdin","stdout","--psm",str(psm)]
+    if digits:
+        cmd.extend(["-c","tessedit_char_whitelist=0123456789"])
+    call=subprocess.run(cmd+["tsv"],input=pgm,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
+    words=[]
+    if call.returncode==0:
+        for line in call.stdout.decode(errors="replace").splitlines()[1:]:
+            columns=line.split("\t",11)
+            if len(columns)==12 and columns[0]=="5" and columns[11].strip():
+                words.append((columns[11].strip(),float(columns[10])))
+    return words
+
+
+def _read_ruled_detail(source, page, region):
+    recognized=[]
+    for scale,mode,restrict_digits in ((4,8,True),(6,10,False)):
+        words=_read_caption_words(_caption_raster(source,page,region["ring"]["box"],scale,True),mode,restrict_digits)
+        if len(words)!=1 or not re.fullmatch(r"[1-9]\d?",words[0][0]) or words[0][1]<80:
+            return None
+        recognized.append(words[0])
+    if recognized[0][0]!=recognized[1][0]:
+        return None
+    title=_read_caption_words(_caption_raster(source,page,region["caption_box"],3),7)
+    if sum(bool(re.search(r"[A-Za-z]{2}",word)) and confidence>=70 for word,confidence in title)<2:
+        return None
+    return dict(region,detail=recognized[0][0],digit_confidences=[x[1]for x in recognized],
+                caption=" ".join(word for word,confidence in title),page=page)
+
+
+def _resolve_rendered_stacked(result, target, source, directory):
+    refs=[r for r in result["references"] if r["target_sheet"]==target
+          and r["reference_form"]=="stacked_text_candidate" and r.get("target_detail")
+          and r["status"] in ("sheet_only","candidate_detail")]
+    places=result["sheets"].get(target,[])
+    if not refs or len(places)!=1 or places[0]["sheet_ids_on_page"]!=[target]:
+        return
+    target_page=places[0]["page"]
+    by_source={}
+    for ref in refs:
+        by_source.setdefault(ref["source"]["page"],[]).append(ref)
+    verified=[]
+    for page, group in by_source.items():
+        markers,lines=_detail_symbol_inventory(source,page,directory)
+        matches=[(ref,evidence) for ref in group
+                 if (evidence:=_divided_source_mark(ref,markers,lines))]
+        ink=_ink_window(source,page,[e["ring"] for ref,e in matches])
+        for ref,evidence in matches:
+            visible=_printed_mark(ink,evidence["ring"])
+            text_ink = _printed_source_tokens(ink, evidence["ring"], ref) if visible else None
+            if text_ink:
+                ref["source_symbol_evidence"]=dict(evidence,visible_ink=visible, token_ink=text_ink)
+                verified.append(ref)
+    if not verified or not shutil.which("pdftoppm") or not shutil.which("tesseract"):
+        return
+    markers,lines=_detail_symbol_inventory(source,target_page,directory)
+    regions=_ruled_detail_regions(markers,lines)
+    if not 2<=len(regions)<=64:
+        return
+    identified={}
+    ink=_ink_window(source,target_page,[reg["ring"] for reg in regions])
+    for region in regions:
+        visible=_printed_mark(ink,region["ring"],right_rule=True)
+        if not visible:
+            continue
+        region=dict(region,visible_ink=visible)
+        try:
+            evidence=_read_ruled_detail(source,target_page,region)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            continue
+        if evidence:
+            identified.setdefault(evidence["detail"],[]).append(evidence)
+    for ref in verified:
+        hits=identified.get(ref["target_detail"],[])
+        if hits:
+            ref["rendered_caption_evidence"]=hits
+            # Optical recognition is explicitly a review candidate; the original native-text proofs stay authoritative.
+            if len(hits)>1:
+                ref["status"]="ambiguous_detail"
+            elif ref["status"]=="sheet_only":
+                ref["status"]="candidate_detail"
+
+
 def detail_links(filename, target_sheet=None):
     """Document-wide native text index. All boxes refer to Poppler crop-box text coordinates."""
     source = pathlib.Path(filename)
@@ -1048,9 +1328,10 @@ def detail_links(filename, target_sheet=None):
         result = _detail_graph(rows)
         if target_sheet is not None:
             _resolve_ruled_captions(result, rows, target_sheet.upper(), frozen, directory)
+            _resolve_rendered_stacked(result, target_sheet.upper(), frozen, directory)
     result.update(kind="pdf-detail-links", source_sha256=hashlib.sha256(data).hexdigest(),
                   page_count=total, coordinate_frame="Poppler pdftotext -cropbox -bbox-layout",
-                  coverage="Native text references and titled detail headings. A selected target sheet is also checked for numbered vector captions. Stacked source pairs are candidates; raster-only details need visual review.")
+                  coverage="Native-text headings and numbered vector captions are indexed. A selected target sheet may also include verified split source symbols and OCR-nominated caption boxes. Inspect optical candidates against the printed detail before use.")
     if target_sheet is not None:
         target = target_sheet.upper()
         selected = [r for r in result["references"] if r["target_sheet"] == target]
