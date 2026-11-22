@@ -294,6 +294,25 @@ HEAT_TIME_CASES = [
 ]
 
 
+HEAT_AMPLITUDE_SCALE = 2.0**-100
+HEAT_AMPLITUDE_PEAK = 2.0**1022
+HEAT_AMPLITUDE_CONTINUUM = math.pi * HEAT_AMPLITUDE_SCALE
+HEAT_AMPLITUDE_GRID = 120 * math.sin(math.pi / 120) * HEAT_AMPLITUDE_SCALE
+HEAT_AMPLITUDE_INPUTS = {
+    "large": (2.0**100, 2.0**-1022, HEAT_AMPLITUDE_PEAK),
+    "ordinary": (1, HEAT_AMPLITUDE_SCALE, 1),
+    "boundary": (2.0**100, 0, HEAT_AMPLITUDE_PEAK),
+}
+HEAT_AMPLITUDE_CASES = [
+    ("heat-amplitude-large", "large", None, True),
+    ("heat-amplitude-true", "large",
+     ("u_exact", HEAT_AMPLITUDE_CONTINUUM, 2e-13 * HEAT_AMPLITUDE_CONTINUUM), True),
+    ("heat-amplitude-false", "large", ("u_crank_nicolson", 0, 0), False),
+    ("heat-amplitude-ordinary", "ordinary", None, True),
+    ("heat-amplitude-boundary", "boundary", None, True),
+]
+
+
 @pytest.fixture(scope="module")
 def routed(tmp_path_factory):
     workdir = tmp_path_factory.mktemp("registered-engineering")
@@ -432,6 +451,14 @@ def routed(tmp_path_factory):
         if claim is not None:
             value, atol = claim
             spec.update(claimed_field="u_exact", claimed_value=value, atol=atol, rtol=0)
+        calls.append({"id": case, "mode": "pde", "spec": spec})
+    for case, system, claim, _ in HEAT_AMPLITUDE_CASES:
+        length, position, amplitude = HEAT_AMPLITUDE_INPUTS[system]
+        spec = {"mode": "heat_1d_transient", "alpha_m2_s": 1, "length_m": length,
+                "t_eval_s": 0, "x_eval_m": position, "modes": [{"n": 1, "amplitude": amplitude}]}
+        if claim is not None:
+            field, value, atol = claim
+            spec.update(claimed_field=field, claimed_value=value, atol=atol, rtol=0)
         calls.append({"id": case, "mode": "pde", "spec": spec})
     source = r"""
 import registerTaskTools, { PLE_DOMAIN_TOOL_NAMES } from './task-tools.ts';
@@ -1161,6 +1188,44 @@ def test_registered_heat_modal_time(routed, case, system, claim, passed):
             assert isinstance(result.get("reason"), str) and result["reason"].strip()
 
 
+@pytest.mark.parametrize("case,system,claim,passed", HEAT_AMPLITUDE_CASES,
+                         ids=[row[0] for row in HEAT_AMPLITUDE_CASES])
+def test_registered_heat_modal_amplitude(routed, case, system, claim, passed):
+    reply = routed[case]
+    assert reply["completed"], reply
+    result = reply["details"]
+    assert result["domain"] == "pde" and result["mode"] == "heat_1d_transient", result
+    assert result["passed"] is passed, result
+    assert result["error_measure"] == "whole-domain upper bound", result
+    for field in ("u_exact", "u_crank_nicolson", "query_abs_error", "linf_error"):
+        assert type(result[field]) in (int, float) and math.isfinite(result[field]), result
+    assert type(result["spatial_cells"]) is int and result["spatial_cells"] == 120, result
+    assert type(result["time_steps"]) is int and result["time_steps"] == 0, result
+
+    exact, grid = result["u_exact"], result["u_crank_nicolson"]
+    query_error = result["query_abs_error"]
+    if system == "boundary":
+        assert exact == grid == query_error == 0, result
+    else:
+        # Both interior inputs have A*x/L = 2^-100. The cubic sine
+        # correction is below roundoff; the first-cell interpolant uses sin(pi/120).
+        assert exact > 0 and math.isclose(exact, HEAT_AMPLITUDE_CONTINUUM, rel_tol=2e-13, abs_tol=0), result
+        assert grid > 0 and math.isclose(grid, HEAT_AMPLITUDE_GRID, rel_tol=2e-13, abs_tol=0), result
+        assert query_error == abs(exact - grid) and query_error > 0, result
+    amplitude = HEAT_AMPLITUDE_INPUTS[system][2]
+    assert 0 <= query_error <= result["linf_error"] <= 0.003 * amplitude, result
+    if claim is None:
+        assert "claim_check" not in result
+    else:
+        field, value, atol = claim
+        comparison = result["claim_check"]
+        assert comparison["field"] == field and comparison["claimed"] == value
+        assert comparison["actual"] == result[field] and comparison["within_tolerance"] is passed
+        assert comparison["tolerance_limit"] == atol and comparison["abs_error"] == abs(result[field] - value)
+        if not passed:
+            assert isinstance(result.get("reason"), str) and result["reason"].strip()
+
+
 class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1255,3 +1320,8 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
         for args in HEAT_TIME_CASES:
             with self.subTest(case=args[0]):
                 test_registered_heat_modal_time(self.routed_data, *args)
+
+    def test_registered_heat_modal_amplitude(self):
+        for args in HEAT_AMPLITUDE_CASES:
+            with self.subTest(case=args[0]):
+                test_registered_heat_modal_amplitude(self.routed_data, *args)

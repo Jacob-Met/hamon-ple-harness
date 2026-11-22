@@ -1,0 +1,160 @@
+{
+  "course": "heat_modal_spatial_amplitude",
+  "version": 2,
+  "state": "frozen_before_first_numerical_execution",
+  "base_commit": "75a72cce535126b48ff534d506fb9e23f7e5d54a",
+  "base_tree": "8f747627e41732ef3ef2a5c20002846913ad5561",
+  "scope_sha256": "cd6142cfd339cac7f3908069c706859b7722192f76cbff29b42cbe767df8b2d2",
+  "scope_post": 183396,
+  "plans": {
+    "producer": "23d1448353d2671bdd476a94d09ac7a5532b8bc10c610a6965d67b2044cb3008",
+    "direct_v2": "5f8912e2c8da864db64f37aedbc0d100d1d8cb1acf29a987043ab8311f5cb8f0",
+    "direct_v1_unexecuted": "a6a7af59a960a595b0edaed2a5ac1042b42545b4f2b4d709d0772aca27353e15",
+    "registered": "719a1cbe89715f5b006d3282d524096bc6f3c2e4f91fbee3341f12b721b25776"
+  },
+  "direct": {
+    "ordinary": 15,
+    "claims": 30,
+    "total": 45,
+    "expected_ordinary": {
+      "approved": 14,
+      "refused": 1,
+      "full": 15
+    },
+    "expected_claims": {
+      "approved": 14,
+      "refused": 16,
+      "full": 30
+    },
+    "whole_controls": [
+      2,
+      4,
+      6,
+      10,
+      11,
+      12,
+      13,
+      15
+    ],
+    "twins": [
+      [
+        1,
+        2
+      ],
+      [
+        3,
+        4
+      ],
+      [
+        5,
+        6
+      ],
+      [
+        9,
+        10
+      ]
+    ],
+    "signed_comparison": [
+      5,
+      7
+    ],
+    "all_requests_before_assertions": true,
+    "full_independent_plan": "# Amplitude-scaled spatial response on a Dirichlet rod\n\nProspective, unexecuted direct course. The temporal 195/196 pair and its audit remain separate. No proposed amplitude producer design was read. This plan tests whether a mode's final continuum and interpolated contribution survive rounding of an intermediate spatial fraction, sine or weight. It concerns the represented inputs, established sine-series model, inherited attenuation, virtual mesh and resulting binary64 fields.\n\nUse the registered Python pde route with heat_1d_transient and explicit alpha_m2_s, length_m, t_eval_s, x_eval_m and modes. Write p(e)=2^e and u=p(−1074). Unless specified otherwise use α=1, t=0, n=1 and C=120, reported M=0. All numeric inputs are exactly represented. Every interior near-left query in rows 1–10 and 13 lies in the first cell. Its exact normalized coordinate is z=x/L and the signed spatial magnitude scale is b=sign(n)·A·z. Let s(v)=sin(v)/v for v≠0 with s(0)=1. For these unit absolute harmonics the real continuum and spatial-grid responses at zero time are bπs(πz) and b·120sin(π/120). At finite time multiply these by the separate continuum and CN attenuations. These identities specify an independent physical oracle using the final scale b before rounding. They do not depend on an implementation of scaled trigonometry.\n\n| Row | Name | L, x, A | Additional input | b or physical check | Wrong CN claim |\n|---:|---|---|---|---|---|\n| 1 | phase/large-scale-vanishing-ratio | p(100), p(−1022), p(1022) | default | p(−100), both outputs normal | 0 |\n| 2 | ordinary/linear-twin-100 | 1, p(−100), 1 | default | p(−100), ordinary counterparts of row 1 | 0 |\n| 3 | subnormal/two-ulp-displays | 2, u, 1 | default | u/2; both outputs round to 2u | 0 |\n| 4 | ordinary/normal-factors-subnormal-result | 1, p(−100), p(−975) | default | u/2; both displays 2u from ordinary spatial factors | 0 |\n| 5 | weight/vanishing-first-cell-weight | 256, u, p(1023) | default | p(−59); exact first-cell weight is 15u/32 | 0 |\n| 6 | ordinary/linear-twin-59 | 1, p(−59), 1 | default | p(−59); ordinary counterpart of row 5 | 0 |\n| 7 | sign/negative-harmonic | 256, u, p(1023) | n=−1 | −p(−59); both fields negate row 5 | 0 |\n| 8 | sign/negative-amplitude-before-weight-rounding | 2, u, −p(1023) | default | −p(−52); a surviving weight can still round its unit-amplitude interpolant to 2u too early | −p(−50) |\n| 9 | time/decaying-scaled-spatial-sample | 2, u, p(1023) | α=4, t=1/8 | p(−52); S=1/8, C=M=120 | 0 |\n| 10 | ordinary/decaying-linear-twin | 1, p(−52), 1 | α=1, t=1/8 | p(−52), same damping and mesh as row 9 | 0 |\n| 11 | boundary/left-with-large-amplitude | 256, 0, p(1023) | default | true Dirichlet zero | 1 |\n| 12 | boundary/right-with-large-amplitude | 256, 256, p(1023) | default | true Dirichlet zero | 1 |\n| 13 | range/true-final-underflow | 8, u, 1 | default | b=u/8; positive exact values below u/2, both displayed zero | u |\n| 14 | range/true-summed-overflow | 1, 1/2, p(1023) | two identical modes, both amplitude p(1023) | true point temperature 2^1024, explicit refusal | 1 |\n| 15 | ordinary/unit-midpoint | 1, 1/2, 1 | default | both exact node-peak temperatures 1 | 0 |\n\n## Mathematical checks\n\n- In row 1, z=2^−1122 and C z is below u/2; rounding the normalized spatial ratio or first-cell weight before amplitude loses finite outputs near π·2^−100. In row 5, C z=120u/256 is below u/2, although the final two temperatures both lie in (3.13·2^−59,3.15·2^−59). In row 8, C z=60u is representable; the unscaled interpolation rounds to 2u and would yield −2^−50 if only then multiplied by A. The physical value lies near −π·2^−52. These are different premature-rounding mechanisms.\n- Derive the positive subnormal interval independently: from 3.14<π<22/7 and v−v³/6<sin(v)<v, rows 3/4 each yield temperatures between 1.56u and 1.58u. The two ideal results independently round to exactly 2u. Row 13 yields temperatures between 0.39u and 0.40u, so correct rounding yields zero. Signs of zero are not material to this wire contract. Row 14 is a positive overflow of the actual summed response; preserve the inherited explicit refusal with no partial numerical solution or claim_check. It is not a reason to refuse rows 1/5/8/9.\n- Rows (1,2), (3,4), (5,6), (9,10) share b, C, grid phase and, where relevant, dimensionless time S; therefore the exact grid responses are identical. Their nonlinear continuum sines have distinct z. The relative difference is bounded by π² max(z²)/6 using the small-angle inequality. In these pairs it lies far below the adopted tolerance. They are scale-matched small-angle controls, not a claim of linearity of sine at arbitrary coordinates. Row 7 is the sign-reflected version of row 5 on exactly the same rod. The endpoint controls deliberately have nonzero estimator despite zero physical values.\n- Use 100-digit Decimal arithmetic and explicit dyadic inputs/scales. Evaluate sinc for the tiny arguments by its alternating series, which starts at one, rather than subtracting cosines or requiring binary64 z. Evaluate sin(π/120) independently by Taylor series with the next term below 1e−110. For rows 9/10 compute continuum D=exp(−π²/8), K=4·120²·(1/8)·sin²(π/240), and Dcn=[(1−K/240)/(1+K/240)]^120. The exact centered-difference grid response is b·120sin(π/120)·Dcn. For row 15 use the known exact sine at x/L=1/2 directly; for row 14 use the known endpoint of each amplitude's finite range and the exact two-mode sum.\n- B=Σ |A|[|Dcn−D|+D(πn/C)²/8] with D=Dcn=1 at zero time. At n=1 and C120, B/|A|=π²/(8·120²)<.000086 when t=0, and below .00005 at S=1/8. All listed finite rows pass the existing tolerance on the first mesh; tiny A also has the inherited absolute tolerance floor. Positive-time rows have K<2 and retain M=120. Even with two amplitudes of 2^1023, B in row 14 remains finite below 2^1011; the truly unrepresentable quantity is the summed response, not the error bound.\n\n## Wire and evidence\n\nOne ordinary request, then a truthful u_exact challenge and a false u_crank_nicolson challenge as tabulated for each row. Row 14 challenges u_exact=0 and u_crank_nicolson=1, both refused before scalar comparison. All 45 calls precede aggregate assertions. Expected ordinary 14A/1R, claims 14A/16R. Preserve raw passed before strict JSON serialization; record missing raw verdict, solver/JSON error, incorrect physical fields and incorrect claim evidence separately.\n\nRequire integer C=120, integer M=0 or 120 as stated, unchanged error_measure, correct route and complete scalar evidence. On normal nonzero temperatures use atol=2e−13·|target| independently on each field, rtol=0, and cap the tolerances on the scalar challenges at one eighth of the correct-grid-to-wrong-claim separation. Rows 3/4/11/12/13/15 use exact displayed temperatures and zero claim tolerances; enforce exact query error zero when displayed values coincide. For other query discrepancies use the independently expected continuum/grid difference and allowance 2e−13·max(|u_exact|,|u_CN|), without an absolute floor. For linf_error compare max(B, query discrepancy) at 2e−13 relative allowance on all zero-time rows. On positive-time rows 9/10 only, use the absolute allowance 2e−13·|A|·max(D,Dcn) on linf_error: its |Dcn−D| term subtracts two separately rounded attenuations near 0.29, so the diagnostic can inherit an absolute rounding error set by those attenuations even when their difference is small. This adjustment applies only to that estimator; all temperatures, query errors, full hashes and zero-time bound checks retain their original criteria. Require finite, nonnegative errors. Compare all scale-matched pairs on temperature only (the estimator weights input amplitudes) and the signed case by sign reversal. The independent target governs each arm.\n\nRecord all 15 entire ordinary hashes. Full-response preservation controls are rows 2,4,6,10,11,12,13,15. Existing heat-phase, heat-time (if landed), other engineering and registered tests remain independent regression evidence. This prospective plan makes no claim for arbitrary cancellation among huge terms, time-decay underflow before amplitude, nonfinite inputs, universal correct rounding of sine or endpoints outside the represented rod.\n"
+  },
+  "registered": {
+    "requests": 5,
+    "expected_approved": 4,
+    "expected_refused": 1,
+    "all_calls_before_assertions": true,
+    "full_independent_plan": "# Prospective registered Pi checks for a tiny phase with finite modal temperature\n\nThis plan is independent of a future amplitude implementation. It proposes five actual tool requests and no changes to the active temporal study. Times are zero throughout, the only harmonic is n=1, and both decay factors equal one. The study isolates the multiplication of a small spatial sine or a grid interpolation weight by a large, finite amplitude.\n\n## Identical route, two scales\n\nUse the registered hamon_conservation_cad_verifier with outer mode pde, inner mode heat_1d_transient, alpha_m2_s=1, t_eval_s=0, and modes=[{n:1,amplitude:A}]. Specify length_m=L and x_eval_m=x explicitly. All inputs, including the smallest positive normal position, are finite binary64 values and JSON-safe.\n\n| ID | L | x | A | Claim | Overall result |\n|---|---:|---:|---:|---|---|\n| heat-amplitude-large | 2^100 | 2^-1022 | 2^1022 | Ordinary | Approve |\n| heat-amplitude-true | 2^100 | 2^-1022 | 2^1022 | u_exact = H, atol=2e−13 H | Approve |\n| heat-amplitude-false | 2^100 | 2^-1022 | 2^1022 | u_crank_nicolson = 0, atol=0 | Refuse |\n| heat-amplitude-ordinary | 1 | 2^-100 | 1 | Ordinary | Approve |\n| heat-amplitude-boundary | 2^100 | 0 | 2^1022 | Ordinary | Approve |\n\nSet rtol=0 on both claims. H=π·2^-100, which can be evaluated by scaling π directly. Three ordinary calls and two claims yield four expected approvals and one refusal. The negative claim must reach a valid positive scalar and return its comparison and reason. Capture all five registered replies before assertions. No null inputs, exotic harmonic indices, or dependent requests are needed.\n\n## Independently derived temperatures\n\nThe continuum temperature at the large-amplitude query is A sin(πx/L). Its phase fraction is 2^-1122, which rounds to zero if converted separately to binary64. Nevertheless Aπx/L=H is a normal positive temperature. For z=π·2^-1122, the absolute difference between A sin z and H is bounded by H z²/6. For the ordinary control z'=π·2^-100, and the same relative bound z'²/6 applies. Both are far below binary64 roundoff. H is a justified shared numerical reference; the two real continuum values need not be exactly equal.\n\nAt C=120 cells the positions are in the first cell. The linearly interpolated initial temperature is A·(Cx/L)·sin(π/C), since the left node is exactly zero. Although the large-amplitude fractional weight 120·2^-1122 by itself rounds to zero, its weighted result is G=120·sin(π/120)·2^-100. The two systems have exactly the same real grid value G. Evaluate G from these bounded factors. G and H are both positive normals, separated by approximately a factor 1.14e−4 of H in absolute difference. The direct reference requires no tiny-angle sine, grid scan, model import or new transport capability.\n\nBoth cases start at C=120 and stop on the first grid. The interpolation estimate A(π/120)²/8 is less than .003A for each amplitude here. Both report time_steps=0. At the large-amplitude Dirichlet endpoint both fields and query_abs_error must be exactly zero.\n\n## Proposed checks and interpretation\n\nFor each interior reply, including the false claim, require positive finite u_exact and u_crank_nicolson. Compare the former to H and the latter to G, each with relative tolerance 2e−13 and zero absolute tolerance. This resolves their interpolation difference comfortably. Require query_abs_error to equal the absolute difference of the two returned temperatures and be positive. Check the reported spatial_cells=120, time_steps=0, whole-domain error-measure label, and finite nonnegative linf_error consistent with covering the reported discrepancy, within the original A-scaled tolerance. The ordinary control and the large-amplitude query have unequal physical amplitudes, so their whole-domain estimates should not be forced equal. Compare their local temperatures to the same references and their reported counts to the same integers.\n\nRequire completed tool replies, correct domain and mode, ordinary physical admission, and claim evidence on both claimed cases. The truthful claim has an absolute allowance proportional to the tiny positive result. The false claim uses exact zero tolerance. An unrelated input refusal would not establish that comparison.\n\nThe plan applies to the final represented modal contribution at a fixed position. It makes no promise of correct rounding for arbitrary sine values, exact cancellation across multiple modes, a universal floating-point error certificate, or any temporal-policy change. No solver or receiver was written or run.\n"
+  },
+  "preservation": {
+    "old_phase_helper": true,
+    "all_temporal_helpers": true,
+    "parser_temporal_refinement_estimator": true,
+    "other_domains": true,
+    "registered_pure_additions": true,
+    "inherited_cases": 299,
+    "inherited_totals": 13,
+    "separate_beam": 1,
+    "baseline_log_sha256": "981a3cda0a10376643c938b90474312427b828318ee3280cfd4458de3d209bae",
+    "baseline_run": 45063804133,
+    "integration_landing_exact": true,
+    "baseline_commit": "75a72cce535126b48ff534d506fb9e23f7e5d54a",
+    "baseline_tree": "8f747627e41732ef3ef2a5c20002846913ad5561",
+    "baseline_log_path": "combined heat-time/mineral first original981a3cda; PR198 exactly qualified after documented PR196 merge race",
+    "source_base_includes_pr199": true,
+    "original_qualified_baseline_commit": "002822975bf74952bdefa1979336d479560ef200",
+    "original_qualified_baseline_tree": "6d02b5ae385cfe8ea4ed6d8d79bf9e8e9f5b58ba",
+    "earlier_marker_baseline": "Successful exact PR198 original981a3cda; all299 records/13 totals/beam still required unchanged."
+  },
+  "sources": {
+    "baseline_solver_sha256": "9084df229f91d85a270f19544975c9c7d97b3610c756693494a6bf7113211841",
+    "baseline_solver_blob": "bd7bee6f63e1426b77a00ec2e9a14c63bcac2639",
+    "baseline_registered_sha256": "3d0200d900cd81cda86aca1096a9c04dc0b9113729ffedb06102f27ae3bbdfc5",
+    "baseline_registered_blob": "f679afcb896603459ca9715830770d7f47213f84",
+    "candidate_solver_sha256": "d109d639f53a42e773677a70a9a789c548b4a54cfd26e37ed89a5202f15fe047",
+    "candidate_patch_sha256": "9a53a21e1eab9b9f4acdd8e5e529d9fe5db87b64bd16479511ec7117ab58e9a5",
+    "direct_receiver_sha256": "04f879578de1f714e8d21af8186de6e92b3257431ccd4c2890dbe2f6a9f22c73",
+    "registered_receiver_sha256": "2191c94b6b57a61ab81dc93c2d9039028b0791f967b5f93db1ecbae2dfd91241",
+    "registered_receiver_blob": "03b4ffb277901b282a6e3fac739cbf830ae9a100",
+    "registered_patch_sha256": "a12d37cd9afd7331a1f9aeb20c7db244e5d2a5aca6cbef989d537c9e2f427f4e",
+    "original_candidate_solver_sha256": "be2b01cc9afc1b1eb38c6fffdb44784b6a480014d5f6fef6581472c9f5dd8158",
+    "original_candidate_solver_blob": "6cb67b093c7f2106ae736daff7010217e45450f6"
+  },
+  "limits": [
+    "Keep existing rendered attenuation; no repair of prior decay underflow.",
+    "Keep modal fsum; no arbitrary cancellation or summed-overflow extension.",
+    "Represented pi/sine approximations; no universal correctly rounded transcendental guarantee.",
+    "Production tolerance, integrator, grid and count schema unchanged; no performance or model score claim."
+  ],
+  "execution": {
+    "pair": "Separate branches with exact common base and identical receivers/protocol; only production solver differs.",
+    "preregister_before_PR_creation": true,
+    "retain_first_originals_once": true,
+    "no_stock_replay_or_changed_oracle": true,
+    "incoming_main": "Freeze and qualify separately; if a merge race changes landing, record it and qualify the combined tree explicitly."
+  },
+  "mechanism": {
+    "scope": "New private spatial helpers and spatial modal products only; existing phase helper and all temporal/parser/refinement/estimator code preserved bytewise.",
+    "ordinary": "Retain existing phase, interpolation and amplitude*decay*factor operation order for ordinary spatial factors and intermediates, including legitimate final subnormal/zero multiplication.",
+    "phase_factor": "Use the qualified sine helper first. Values with abs>=4*minimum-normal cannot hide a subnormal reduced phase. Otherwise recompute exact modular phase; structural zero and normally represented reduced ratios retain the old value. A subnormal/zero nonzero reduced ratio becomes signed Fraction(pi64)*Fraction(reduced,denominator).",
+    "bound": "For the exceptional tiny phase, relative sin(pi*r) linearization error <=(pi*r)^2/6. No universal correctly rounded transcendental claim.",
+    "interpolation": "At exact node use that node only. Otherwise preserve ordinary products when weights and nonzero weighted terms/sample are normal. Exceptional weights, factors or sample use exact rational complementary weights and represented signed node factors, carried through A and the existing rendered Dcn before final float.",
+    "structural": "Rod endpoints zero both paths. An individual integer sine phase zeros only that factor; a neighboring grid contribution remains. Existing rendered zero decay remains zero.",
+    "cancellation": "Opposite normal interpolation terms that round to zero stay on the legacy path. Cross-mode fsum and genuine summed-overflow refusal remain unchanged; no general cancellation repair."
+  },
+  "source_review": {
+    "candidate": [
+      "root",
+      "p2",
+      "p3"
+    ],
+    "direct": [
+      "root",
+      "p1"
+    ],
+    "registered": [
+      "root",
+      "p1"
+    ],
+    "receivers_frozen_before_candidate_read": true,
+    "no_numerical_execution_yet": true,
+    "bytewise_preservation": {
+      "prefix_and_qualified_phase": true,
+      "temporal_parser_refinement_estimator_endpoint_coordinate": true,
+      "query_result_and_other_domains": true
+    },
+    "registered_inherited_lines_retained": true,
+    "incoming_199_composition": {
+      "incoming_all_heat_bytes_identical": true,
+      "original_candidate_tail_identical_to_qualified_base": true
+    }
+  },
+  "pre_execution_base_amendment": {
+    "path": "tests/heat_modal_amplitude/integration_199.json",
+    "sha256": "3c03b1609b26a17db2c899328a764ab164e50ee9e74690c1b4e2ed6915b0c162",
+    "original_protocol_sha256": "c2e75163f8c36d745392e03067be2d1a86b206a2ae8e3eee7accb5ef4f5658eb",
+    "physical_contracts_unchanged": true
+  }
+}
