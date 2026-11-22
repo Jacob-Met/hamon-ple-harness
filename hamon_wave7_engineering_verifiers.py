@@ -899,6 +899,7 @@ def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]
                     "error": "negative_internal_section_flow", **conditions}
         xi, yi, gap = feed_contact(reflux)
         x_int, y_int = float(xi), float(yi)
+        one_stage = xd * (1 + (volatility - 1) * xb) == volatility * xb
         flash = liquid == 0 and strip_vapor == 0
         if flash and gap:
             return {"domain": "electrochem_separations", "subkind": subkind, "verified": False,
@@ -925,8 +926,8 @@ def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]
             stages = step
             if feed_stage is None and x_eq <= x_int and x_prev > x_int:
                 feed_stage = step
-            if flash:
-                # Both product compositions satisfy VLE at the prescribed feed split.
+            if one_stage:
+                # These exact products share an equilibrium tie line; Fenske equality is attainable.
                 frac_stages = 1.0
                 break
             if x_eq <= x_b:
@@ -960,7 +961,7 @@ def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]
             "N_theoretical": float(frac_stages),
             "feed_stage": feed_stage if feed_stage is not None else stages,
             "residual": residual,
-            "verified": bool((flash or frac_stages > n_min) and residual < 1e-10),
+            "verified": bool((one_stage or frac_stages > n_min) and residual < 1e-10),
         }
 
     return {"domain": "electrochem_separations", "subkind": subkind, "verified": False, "error": f"unsupported_electrochem_separation:{subkind}"}

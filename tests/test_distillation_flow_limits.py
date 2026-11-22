@@ -68,6 +68,17 @@ class DistillationLimits(unittest.TestCase):
                 self.assertIs(result["verified"], False)
                 self.assertEqual(result["error"], "zero_circulation_flash_products_not_in_equilibrium")
 
+    def test_one_equilibrium_contact_can_attain_fenske_equality(self):
+        for q, reflux, expected_mode in ((1, 0, "stripping_only"), (0, 1, "rectifying_only"),
+                                          (1, 0.25, "two_section")):
+            with self.subTest(q=q, reflux=reflux):
+                result = self.solve(q=q, R=reflux, alpha=3, x_D=0.5, x_B=0.25, z_F=0.375)
+                self.assertIs(result["verified"], True)
+                self.assertEqual(result["section_mode"], expected_mode)
+                self.assertEqual(result["N_min_fenske"], 1)
+                self.assertEqual(result["N_theoretical"], 1)
+                self.assertEqual(result["N_stages_integer"], 1)
+
     def test_genuine_pinches_at_finite_and_single_section_boundaries(self):
         cases = ({"x_D": 0.95, "x_B": 0.05, "R": 1.7},
                  {"alpha": 3, "z_F": 0.25, "x_D": 0.5, "x_B": 0.125, "R": 0},
