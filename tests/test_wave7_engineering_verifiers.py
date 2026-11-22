@@ -150,3 +150,133 @@ def test_inverse_counterflow_near_pinch_and_balanced_capacity_rates():
     for invalid in (0, 1, 1.01, float("nan")):
         result = solve_exchanger_or_radiation({**base, "effectiveness": invalid})
         assert result["verified"] is False
+
+
+def test_exchanger_checks_every_rating_and_sizing_observation():
+    from hamon_conservation_cad_verifier import run_router_conservation_cad_verifier
+
+    base = {"subkind": "heat_exchanger", "flow_arrangement": "counterflow",
+            "T_h_in": 400., "T_c_in": 300., "C_h": 1000., "C_c": 1000.}
+    # For matched rates and NTU=1, epsilon=1/2 and both streams move by 50 K.
+    observed = {"UA": 1000., "effectiveness": .5, "Q": 50000., "T_h_out": 350., "T_c_out": 350.}
+
+    def solve(changes):
+        return run_router_conservation_cad_verifier({"mode": "exchangers_radiation", "spec": {**base, **changes}})
+
+    for first in range(len(observed)):
+        fields = list(observed)[first:]
+        values = {k: observed[k] for k in fields}
+        answer = solve(values)
+        assert answer["verified"], answer
+        for field in fields[1:]:
+            incorrect = solve({**values, field: observed[field] * 1.1})
+            assert not incorrect["verified"], (first, field, incorrect)
+            assert (incorrect.get("invalid_observation") == field
+                    or incorrect["observation_residuals"][field] > 1e-9)
+
+    for field in observed:
+        for invalid in (float("nan"), None, True):
+            assert not solve({**observed, field: invalid})["verified"]
+    assert not solve({"UA": 0., "flow_arrangement": "unknown"})["verified"]
+
+
+def test_phase_change_exchanger_uses_sensible_outlet_to_size_and_checks_both():
+    for arrangement, active, fixed in (("condenser", "T_c_out", "T_h_out"), ("boiler", "T_h_out", "T_c_out")):
+        base = {"subkind": "heat_exchanger", "flow_arrangement": arrangement,
+                "T_h_in": 400., "T_c_in": 300., "C_h": 1000., "C_c": 1000.}
+        inlet = 400. if fixed == "T_h_out" else 300.
+        both = solve_exchanger_or_radiation({**base, active: 350., fixed: inlet})
+        assert both["verified"] and math.isclose(both["UA_W_K"], 1000 * math.log(2), rel_tol=1e-10)
+        assert not solve_exchanger_or_radiation({**base, active: 350., fixed: inlet + 1.})["verified"]
+        assert not solve_exchanger_or_radiation({**base, fixed: inlet})["verified"]
+        capacity = "C_c" if arrangement == "condenser" else "C_h"
+        for invalid in (0., -1000., float("inf")):
+            assert not solve_exchanger_or_radiation({**base, "UA": 1000., capacity: invalid})["verified"]
+
+
+def test_phase_change_sizing_at_the_pinch_and_finite_rate_with_rounded_outlet():
+    for arr, sensible in (("condenser", "T_c_out"), ("boiler", "T_h_out")):
+        base = {"flow_arrangement": arr, "T_h_in": 400., "T_c_in": 300., "C_h": 1000., "C_c": 1000.}
+        ntu = 38 * math.log(2)
+        rated = solve_exchanger_or_radiation({**base, "UA": 1000 * ntu})
+        assert rated["verified"] and rated["effectiveness"] == 1.0 - 2.0**-38
+        for key, value in (("effectiveness", rated["effectiveness"]), ("Q", rated["Q_W"]),
+                           (sensible, rated[sensible + "_K"])):
+            sized = solve_exchanger_or_radiation({**base, key: value})
+            assert sized["verified"] and math.isclose(sized["NTU"], ntu, rel_tol=1e-6)
+        # Exactly saturated outlet temperatures cannot identify a finite inverse
+        # rating. A known finite conductance can nevertheless round to that outlet.
+        for extreme in (1e-16, 50., 1000.):
+            result = solve_exchanger_or_radiation({**base, "UA": 1000 * extreme})
+            assert result["verified"], result
+            lo, hi = result["LMTD_bounds_K"]
+            assert lo - 1e-13 <= result["LMTD_K"] <= hi + 1e-13
+        assert not solve_exchanger_or_radiation({**base, "effectiveness": 1.0})["verified"]
+
+def test_lower_priority_phase_observations_cannot_cross_physical_endpoints():
+    for arr, sensible, crossover in (("condenser", "T_c_out", 400.00000005),
+                                     ("boiler", "T_h_out", 299.99999995)):
+        base = {"flow_arrangement": arr, "T_h_in": 400., "T_c_in": 300., "C_h": 1000., "C_c": 1000.,
+                "UA": 38000. * math.log(2)}
+        assert solve_exchanger_or_radiation(base)["verified"]
+        for key, value in (("effectiveness", 1.0000000005), ("Q", 100000.00005), (sensible, crossover)):
+            failed = solve_exchanger_or_radiation({**base, key: value})
+            assert not failed["verified"] and failed["invalid_observation"] == key
+        inactive_capacity = "C_h" if arr == "condenser" else "C_c"
+        assert not solve_exchanger_or_radiation({**base, inactive_capacity: -1000.})["verified"]
+
+
+def test_parallel_flow_rejects_measured_crossovers_inside_global_duty_bounds():
+    base = {"flow_arrangement": "parallel", "T_h_in": 400., "T_c_in": 300., "C_h": 1000., "C_c": 1000.,
+            "UA": 16000. * math.log(2)}
+    assert solve_exchanger_or_radiation(base)["verified"]
+    # Equal-rate streams cannot cross their 350 K equilibrium in parallel flow.
+    for key, value in (("T_h_out", 349.99999999), ("T_c_out", 350.00000001),
+                       ("effectiveness", .50000000008), ("Q", 50000.000008)):
+        result = solve_exchanger_or_radiation({**base, key: value})
+        assert not result["verified"] and result["invalid_observation"] == key
+
+
+def test_finite_arrangement_pinch_inverse_and_mixed_small_ratio_ratings():
+    for arr, ch, cc, ntu in (("parallel", 1000., 1000., 19 * math.log(2)),
+                             ("shell_tube_1_2", 1000., 2000., 26.),
+                             ("crossflow_cmax_mixed", 1000., 2000., 26.),
+                             ("crossflow_cmin_mixed", 1000., 2000., 52.)):
+        base = {"flow_arrangement": arr, "T_h_in": 400., "T_c_in": 300., "C_h": ch, "C_c": cc}
+        rated = solve_exchanger_or_radiation({**base, "UA": ntu * min(ch, cc)})
+        assert rated["verified"], rated
+        for key, output in (("effectiveness", "effectiveness"), ("Q", "Q_W"),
+                            ("T_h_out", "T_h_out_K"), ("T_c_out", "T_c_out_K")):
+            sized = solve_exchanger_or_radiation({**base, key: rated[output]})
+            assert sized["verified"] and math.isclose(sized["NTU"], ntu, rel_tol=.001), (key, sized)
+
+    base = {"flow_arrangement": "crossflow_cmax_mixed", "T_h_in": 400., "T_c_in": 300.,
+            "C_h": 2.**40, "C_c": 1., "UA": 40.}
+    rated = solve_exchanger_or_radiation(base)
+    assert rated["verified"] and rated["effectiveness"] == -math.expm1(-2.**-40) / 2.**-40
+    assert solve_exchanger_or_radiation({**base, "effectiveness": rated["effectiveness"]})["verified"]
+
+
+def test_phase_inverse_preserves_deficit_in_supplied_units():
+    from decimal import Decimal, localcontext
+
+    base = {"flow_arrangement": "condenser", "T_h_in": 480., "T_c_in": 300., "C_h": 1000., "C_c": 1000.}
+    duty = math.nextafter(180000., 0.)
+    outlet = math.nextafter(480., 0.)
+    with localcontext() as ctx:
+        ctx.prec = 70
+        gaps = (Decimal(1) - Decimal(duty) / 180000, (480 - Decimal(outlet)) / 180)
+        for key, measurement, gap in zip(("Q", "T_c_out"), (duty, outlet), gaps):
+            sized = solve_exchanger_or_radiation({**base, key: measurement})
+            assert sized["verified"] and math.isclose(sized["NTU"], float(-gap.ln()), rel_tol=1e-14)
+
+
+def test_counterflow_mean_temperature_check_handles_a_rounded_terminal_pinch():
+    for hot_capacity, cold_capacity in ((1000., 2000.), (2000., 1000.), (1000., 1000.)):
+        base = {"flow_arrangement": "counterflow", "T_h_in": 400., "T_c_in": 300.,
+                "C_h": hot_capacity, "C_c": cold_capacity}
+        for ntu in (40., 80., 1e17):
+            result = solve_exchanger_or_radiation({**base, "UA": ntu * min(hot_capacity, cold_capacity)})
+            assert result["verified"], result
+            low, high = result["LMTD_bounds_K"]
+            assert low <= result["LMTD_K"] <= high
