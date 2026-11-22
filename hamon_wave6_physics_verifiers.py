@@ -16,7 +16,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 import numpy as np
 from _scipy_compat import HAS_SCIPY, integrate, optimize
-from decimal import Decimal, getcontext
+from decimal import Decimal, getcontext, localcontext
 try:
     import sympy as sp
     HAS_SYMPY = True
@@ -293,6 +293,198 @@ def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any
     raise ValueError(f"Unsupported compressible_acoustics subkind: {subkind}")
 
 
+def _rlc_matrix_product(a, b):
+    """Multiply two row-major 2x2 Decimal matrices."""
+    return (a[0] * b[0] + a[1] * b[2],
+            a[0] * b[1] + a[1] * b[3],
+            a[2] * b[0] + a[3] * b[2],
+            a[2] * b[1] + a[3] * b[3])
+
+
+def _rlc_matrix_vector(matrix, vector):
+    return (matrix[0] * vector[0] + matrix[1] * vector[1],
+            matrix[2] * vector[0] + matrix[3] * vector[1])
+
+
+def _rlc_matrix_reference(r, l, c, vs, v0, i0, time_):
+    """Independent affine matrix exponential, without modal roots.
+
+    Use energy coordinates (v, i*sqrt(L/C)) and propagate the constant
+    source column directly. This preserves tiny zero-state responses that
+    would disappear when subtracting two equilibrium-sized quantities.
+    """
+    if time_ == 0 or (v0 == vs and i0 == 0):
+        return v0, i0, 0
+    with localcontext() as context:
+        context.prec = 50
+        rd, ld, cd, sd, vd, id_, td = map(
+            lambda value: Decimal(str(value)), (r, l, c, vs, v0, i0, time_))
+        omega = Decimal(1) / (ld * cd).sqrt()
+        alpha = rd / (2 * ld)
+        # Infinity norm of the augmented constant-source generator.
+        norm = 2 * td * (omega + alpha)
+        context.prec += max(0, norm.adjusted() + 1) if norm else 0
+        omega = Decimal(1) / (ld * cd).sqrt()
+        alpha = rd / (2 * ld)
+        impedance = (ld / cd).sqrt()
+        norm = 2 * td * (omega + alpha)
+        scale, squarings = Decimal(1), 0
+        while norm / scale > Decimal("0.125"):
+            scale *= 2
+            squarings += 1
+        h = (Decimal(0), td * omega / scale,
+             -td * omega / scale, -td * 2 * alpha / scale)
+        forcing = (Decimal(0), td * omega / scale)
+        h_norm = norm / scale
+        term = total = (Decimal(1), Decimal(0), Decimal(0), Decimal(1))
+        source_term = source_total = (Decimal(0), Decimal(0))
+        term_bound = Decimal(1)
+        tolerance = Decimal(1).scaleb(-context.prec + 8)
+        for degree in range(1, max(64, context.prec)):
+            term = tuple(value / degree for value in _rlc_matrix_product(term, h))
+            source_term = (forcing if degree == 1 else tuple(
+                value / degree for value in _rlc_matrix_vector(h, source_term)))
+            total = tuple(a + b for a, b in zip(total, term))
+            source_total = tuple(a + b for a, b in zip(source_total, source_term))
+            term_bound *= h_norm / degree
+            tail_bound = (term_bound * h_norm / (degree + 1)
+                          / (1 - h_norm / (degree + 2)))
+            # A zero-state voltage first appears in degree two.
+            if degree >= 2 and tail_bound <= tolerance:
+                break
+        else:
+            raise ArithmeticError("RLC matrix exponential did not meet its tail bound")
+        for _ in range(squarings):
+            transported = _rlc_matrix_vector(total, source_total)
+            source_total = tuple(a + b for a, b in zip(source_total, transported))
+            total = _rlc_matrix_product(total, total)
+        scaled_current = id_ * impedance
+        voltage = total[0] * vd + total[1] * scaled_current + source_total[0] * sd
+        current = (total[2] * vd + total[3] * scaled_current + source_total[1] * sd) / impedance
+        return float(voltage), float(current), squarings
+
+
+def _rlc_analytic_state(alpha, omega, impedance, vs, v0, i0, time_):
+    """Stable modal propagator; voltage and impedance-scaled current."""
+    if alpha == omega:
+        regime = "critically_damped"
+    elif alpha < omega:
+        regime = "underdamped"
+    else:
+        regime = "overdamped"
+    if time_ == 0 or (v0 == vs and i0 == 0):
+        return v0, i0, regime
+    wt, at = omega * time_, alpha * time_
+    if wt + 2 * at <= 0.125:
+        # Affine increments keep the O(t^2) zero-state voltage explicit.
+        initial_current = i0 * impedance
+        increment = (wt * initial_current,
+                     wt * (vs - v0) - 2 * at * initial_current)
+        voltages, currents = [v0], [initial_current]
+        for degree in range(1, 49):
+            voltages.append(increment[0])
+            currents.append(increment[1])
+            voltage, current = math.fsum(voltages), math.fsum(currents)
+            if (degree >= 2
+                    and abs(increment[0]) <= 2e-16 * max(abs(voltage), math.ulp(0.0))
+                    and abs(increment[1]) <= 2e-16 * max(abs(current), math.ulp(0.0))):
+                break
+            increment = (wt * increment[1] / (degree + 1),
+                         (-wt * increment[0] - 2 * at * increment[1]) / (degree + 1))
+        return voltage, current / impedance, regime
+    if regime == "overdamped":
+        beta = math.sqrt(alpha - omega) * math.sqrt(alpha + omega)
+        denominator = alpha + beta
+        slow = -omega * (omega / denominator)
+        fast = -denominator
+        gap = 2 * beta
+        if not all(math.isfinite(value) for value in (beta, denominator, gap)):
+            raise ValueError("RLC modal rates exceed the supported finite range")
+        e_slow, e_fast = math.exp(slow * time_), math.exp(fast * time_)
+        if gap == 0 or gap * time_ == 0:
+            k = time_ * e_slow
+        else:
+            k = e_slow * (-math.expm1(-gap * time_)) / gap
+        p00, p11 = e_slow - slow * k, e_fast + slow * k
+        source_gain = -math.expm1(slow * time_) + slow * k
+    else:
+        decay = math.exp(-alpha * time_)
+        if not decay:
+            return vs, 0.0, regime
+        if regime == "critically_damped":
+            k = time_ * decay
+            cosine = decay
+            source_gain = -math.expm1(-alpha * time_) - alpha * k
+        else:
+            frequency = math.sqrt(omega - alpha) * math.sqrt(omega + alpha)
+            phase = frequency * time_
+            if not math.isfinite(phase):
+                raise ValueError("RLC oscillation phase exceeds the supported finite range")
+            sinc = math.sin(phase) / phase if phase else 1.0
+            k = time_ * decay * sinc
+            cosine = decay * math.cos(phase)
+            source_gain = (-math.expm1(-alpha * time_)
+                           + 2 * decay * math.sin(0.5 * phase) ** 2 - alpha * k)
+        p00, p11 = cosine + alpha * k, cosine - alpha * k
+    cross = omega * k
+    shifted, scaled_current = v0 - vs, i0 * impedance
+    voltage = p00 * v0 + source_gain * vs + cross * scaled_current
+    current = (-cross * shifted + p11 * scaled_current) / impedance
+    return voltage, current, regime
+
+
+def _solve_rlc_transient(params):
+    r, l, c = (float(params[name]) for name in ("R", "L", "C"))
+    vs, v0, i0 = (float(params.get(name, default))
+                  for name, default in (("V_s", 1.0), ("v_c0", 0.0), ("i_l0", 0.0)))
+    time_ = float(params["t"])
+    if not all(math.isfinite(value) for value in (r, l, c, vs, v0, i0, time_)):
+        raise ValueError("RLC parameters must be finite")
+    if r < 0 or l <= 0 or c <= 0 or time_ < 0:
+        raise ValueError("Passive RLC requires R >= 0, L > 0, C > 0 and t >= 0")
+    alpha = (0.5 * r) / l
+    lc = l * c
+    omega = (1.0 / math.sqrt(lc) if math.isfinite(lc) and lc > 0
+             else (1.0 / math.sqrt(l)) / math.sqrt(c))
+    impedance = math.sqrt(l) / math.sqrt(c)
+    if not all(math.isfinite(value) and value > 0 for value in (omega, impedance)):
+        raise ValueError("RLC natural scales exceed the supported finite range")
+    if not math.isfinite(alpha) or not math.isfinite(alpha / omega):
+        raise ValueError("RLC damping exceeds the supported finite range")
+    if not math.isfinite(v0 - vs) or not math.isfinite(i0 * impedance):
+        raise ValueError("RLC initial state exceeds the supported finite range")
+    voltage, current, regime = _rlc_analytic_state(
+        alpha, omega, impedance, vs, v0, i0, time_)
+    reference_v, reference_i, squarings = _rlc_matrix_reference(
+        r, l, c, vs, v0, i0, time_)
+    if not all(math.isfinite(value) for value in (voltage, current, reference_v, reference_i)):
+        raise ValueError("RLC solution exceeds the supported finite range")
+    voltage_scale = max(abs(reference_v), abs(v0), math.ulp(0.0))
+    current_scale = max(abs(reference_i), abs(i0), math.ulp(0.0))
+    residual = max(abs(voltage - reference_v) / voltage_scale,
+                   abs(current - reference_i) / current_scale)
+    zeta = alpha / omega
+    if alpha < omega:
+        frequency = math.sqrt(omega - alpha) * math.sqrt(omega + alpha)
+        overshoot = 100.0 * math.exp(-math.pi * alpha / frequency)
+    else:
+        overshoot = 0.0
+    return {
+        "domain": "rf_transmission_rlc",
+        "subkind": "rlc_transient",
+        "regime": regime,
+        "omega0_rad_s": omega,
+        "zeta": zeta,
+        "v_c_V": voltage,
+        "i_l_A": current,
+        "percent_overshoot": overshoot,
+        "residual": residual,
+        "verified": residual < 1e-8,
+        "verification_method": "decimal_scaled_matrix_exponential",
+        "reference_squarings": squarings,
+    }
+
+
 def solve_transmission_line_rlc(params: Mapping[str, Any]) -> Dict[str, Any]:
     """Deterministic solver for lossless/lossy transmission lines, Smith-chart stubs, and RLC transients."""
     subkind = str(params.get("subkind", "transmission_line")).strip().lower()
@@ -387,70 +579,7 @@ def solve_transmission_line_rlc(params: Mapping[str, Any]) -> Dict[str, Any]:
         }
 
     if subkind == "rlc_transient":
-        r_ohm = float(params["R"])
-        l_h = float(params["L"])
-        c_f = float(params["C"])
-        v_source = float(params.get("V_s", 1.0))
-        v0 = float(params.get("v_c0", 0.0))
-        i0 = float(params.get("i_l0", 0.0))
-        t_eval = float(params["t"])
-
-        alpha = r_ohm / (2.0 * l_h)
-        omega0 = 1.0 / math.sqrt(l_h * c_f)
-        zeta = alpha / omega0
-        dv0 = i0 / c_f
-        x0 = v0 - v_source
-
-        if abs(zeta - 1.0) < 1e-9:
-            regime = "critically_damped"
-            a1 = x0
-            a2 = dv0 + alpha * x0
-            vc_t = v_source + (a1 + a2 * t_eval) * math.exp(-alpha * t_eval)
-            il_t = c_f * (a2 - alpha * (a1 + a2 * t_eval)) * math.exp(-alpha * t_eval)
-        elif zeta < 1.0:
-            regime = "underdamped"
-            omega_d = omega0 * math.sqrt(1.0 - zeta * zeta)
-            b1 = x0
-            b2 = (dv0 + alpha * x0) / omega_d
-            exp_t = math.exp(-alpha * t_eval)
-            cos_t = math.cos(omega_d * t_eval)
-            sin_t = math.sin(omega_d * t_eval)
-            vc_t = v_source + exp_t * (b1 * cos_t + b2 * sin_t)
-            dvc_dt = exp_t * ((-alpha * b1 + omega_d * b2) * cos_t + (-alpha * b2 - omega_d * b1) * sin_t)
-            il_t = c_f * dvc_dt
-        else:
-            regime = "overdamped"
-            disc = math.sqrt(alpha * alpha - omega0 * omega0)
-            s1 = -alpha + disc
-            s2 = -alpha - disc
-            a1 = (dv0 - s2 * x0) / (s1 - s2)
-            a2 = x0 - a1
-            vc_t = v_source + a1 * math.exp(s1 * t_eval) + a2 * math.exp(s2 * t_eval)
-            il_t = c_f * (a1 * s1 * math.exp(s1 * t_eval) + a2 * s2 * math.exp(s2 * t_eval))
-
-        if t_eval > 0:
-            ode = lambda _t, y: [y[1] / c_f, (v_source - y[0] - r_ohm * y[1]) / l_h]
-            sol = integrate.solve_ivp(ode, (0.0, t_eval), [v0, i0], method="DOP853", rtol=1e-12, atol=1e-14)
-            vc_num = float(sol.y[0, -1])
-            il_num = float(sol.y[1, -1])
-            scale = max(abs(v_source), abs(v0), 1.0)
-            residual = max(abs(vc_t - vc_num) / scale, abs(il_t - il_num) / max(abs(il_num), scale / max(r_ohm, 1.0)))
-        else:
-            residual = 0.0
-
-        overshoot_pct = 100.0 * math.exp(-math.pi * zeta / math.sqrt(1.0 - zeta * zeta)) if zeta < 1.0 else 0.0
-        return {
-            "domain": "rf_transmission_rlc",
-            "subkind": subkind,
-            "regime": regime,
-            "omega0_rad_s": omega0,
-            "zeta": zeta,
-            "v_c_V": vc_t,
-            "i_l_A": il_t,
-            "percent_overshoot": overshoot_pct,
-            "residual": residual,
-            "verified": residual < 1e-8,
-        }
+        return _solve_rlc_transient(params)
 
     raise ValueError(f"Unsupported rf_transmission_rlc subkind: {subkind}")
 
