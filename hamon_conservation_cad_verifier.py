@@ -544,6 +544,14 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "mode": "structural", "tool": "hamon_conservation_cad_verifier",
                 "error": message, "conservation_verified": False}
 
+    if spec.get("calculation") == "diaphragm_membrane":
+        from hamon_diaphragm import solve_diaphragm
+        try:
+            result = solve_diaphragm(spec)
+        except (KeyError, IndexError, TypeError, ValueError, OverflowError) as exc:
+            return unsupported(str(exc))
+        return {"ok": True, "tool": "hamon_conservation_cad_verifier", "mode": "structural",
+                "conservation_verified": result["dual_verified"], **result}
     bc = str(spec.get("boundary", "simply_supported_udl")).lower()
     if bc not in {"simply_supported_udl", "simply_supported_point", "cantilever_point",
                   "cantilever_udl", "fixed_fixed_udl"}:
@@ -1127,7 +1135,7 @@ def run_router_conservation_cad_verifier(payload: Dict[str, Any]) -> Dict[str, A
         elif spec.get("calculation") in ("ac_power_flow", "symmetrical_fault"): mode = "circuit"
         elif spec.get("netlist") or spec.get("branches") or fname.endswith((".cir", ".sp", ".spice", ".net")): mode = "circuit"
         elif "lhs" in spec and "rhs" in spec: mode = "dimensional"
-        elif "span_m" in spec and "E_Pa" in spec: mode = "structural"
+        elif spec.get("calculation") == "diaphragm_membrane" or ("span_m" in spec and "E_Pa" in spec): mode = "structural"
         elif spec.get("calculation") in ("consolidation_1d", "rankine_layers", "bearing_capacity") or any(k in spec for k in ("cut_bank_m3", "footing_B_m", "channel_B_m")): mode = "civil_geotech"
         elif any(k in spec for k in ("inlets", "outlets", "pipe_D_m", *_HX_INPUTS, "UA_W_K")): mode = "thermal_fluid"
         elif spec.get("file_b64"):
