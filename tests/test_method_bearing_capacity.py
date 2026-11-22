@@ -111,3 +111,16 @@ def test_domain_and_auto_routes_reject_wrong_capacity():
         spec["proposed_q_ult_Pa"] = claim
         assert run_router_conservation_cad_verifier({"mode": "auto", "spec": spec})["conservation_verified"] is expected
         assert run_dual_verify_spec({"mode": "domain", "kind": "bearing_capacity", "spec": spec})["dual_verified"] is expected
+
+
+@pytest.mark.parametrize("method", ["legacy_vesic", "terzaghi", "meyerhof", "vesic"])
+def test_design_factor_cannot_certify_loading_above_ultimate(method):
+    spec = base(method)
+    spec["FS"] = 1
+    ultimate = verify_bearing_capacity(spec)["q_ult_Pa"]
+    spec["applied_gross_pressure_Pa"] = ultimate
+    assert verify_bearing_capacity(spec)["bearing_ok"]
+    spec["applied_gross_pressure_Pa"] = 1.5 * ultimate
+    assert not verify_bearing_capacity(spec)["conservation_verified"]
+    spec["FS"] = 0.5
+    assert not verify_bearing_capacity(spec)["ok"]
