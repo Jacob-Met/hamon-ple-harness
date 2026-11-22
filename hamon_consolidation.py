@@ -69,6 +69,13 @@ def primary_settlement(h, e0, cc, initial, load, pc, cr):
     virgin = load - recompression
     loss = (cr * math.log1p(recompression / initial)
             + cc * math.log1p(virgin / (initial + recompression))) / math.log(10.0)
+    return settlement_from_void_loss(h, e0, loss)
+
+
+def settlement_from_void_loss(h, e0, loss):
+    """Convert a signed change in void ratio to settlement at constant solid volume."""
+    if not math.isfinite(h) or not math.isfinite(e0) or h <= 0 or e0 < 0:
+        raise ValueError("Require finite positive layer height and nonnegative void ratio")
     # e is the ratio of void to solid volume. No compression history can
     # consume more than the initial voids (USACE EM 1110-2-1906, App. VIII).
     if not math.isfinite(loss):
