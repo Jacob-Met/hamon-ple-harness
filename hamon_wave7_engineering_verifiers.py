@@ -15,6 +15,7 @@ and First/Second-Law & dynamical conservation invariants:
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
@@ -275,9 +276,105 @@ def solve_thermodynamic_cycle(params: Mapping[str, Any]) -> Dict[str, Any]:
     return {"domain": "thermo_cycles", "subkind": subkind, "verified": False, "error": f"unsupported_cycle:{subkind}"}
 
 
+def _unmixed_crossflow_small(ntu: float, cr: float) -> float:
+    """Evaluate E[min(Pois(a), Pois(b))]/b for 0 < a <= 1 and b=a*Cr."""
+    b = ntu * cr
+    mass_a = ntu * math.exp(-ntu)
+    mass_b_per_b = math.exp(-b)
+    masses = []
+    # At a,b <= 1, the first omitted mass divided by its mean is <= 1/25!.
+    for count in range(1, 25):
+        masses.append((mass_a, mass_b_per_b))
+        mass_a *= ntu / (count + 1)
+        mass_b_per_b *= b / (count + 1)
+    tail_a = tail_b_per_b = result = 0.0
+    for mass_a, mass_b_per_b in reversed(masses):
+        tail_a += mass_a
+        tail_b_per_b += mass_b_per_b
+        result += tail_a * tail_b_per_b
+    return result
+
+
+@lru_cache(maxsize=1)
+def _unmixed_quadrature():
+    return np.polynomial.legendre.leggauss(32)
+
+
+def _unmixed_crossflow_deficit(ntu: float, cr: float) -> float:
+    """Unequilibrated outlet fraction from the ideal both-unmixed flow equations."""
+    if ntu <= 0.0:
+        return 1.0
+    if cr == 0.0:
+        return math.exp(-ntu)
+    if math.isnan(ntu) or math.isnan(cr):
+        return math.nan
+    if math.isinf(ntu):
+        return 0.0
+    ratio = math.sqrt(cr)
+    # This difference retains precision when the capacity rates almost coincide.
+    difference = (1.0 - cr) / (1.0 + ratio)
+    root_ntu = math.sqrt(ntu)
+    root_z = root_ntu * math.sqrt(2.0 * ratio)
+    gap = root_ntu * difference
+    if gap >= 28.0:
+        return 0.0  # exp(-gap**2) is below the binary64 subnormal range.
+
+    # The ideal unmixed-flow PDE gives eps = E[min(X,Y)]/b for independent
+    # X~Pois(NTU), Y~Pois(b=Cr*NTU). The remaining fraction is E[(Y-X)+]/b.
+    # Integrating the Skellam Bessel series by parts yields a positive angular
+    # integral with denominator (1-r)^2 + 4*r*sin(theta/2)^2. Its exponential
+    # is exp(-2*(sqrt(z)*sin(theta/2))^2); stop after its exponent reaches -80.
+    right = 2.0 * math.asin(min(1.0, math.sqrt(40.0) / root_z))
+    nodes, weights = _unmixed_quadrature()
+    edge = min(right, difference / math.sqrt(ratio)) if difference else right
+    left = total = 0.0
+    while left < right:
+        half_width = (edge - left) * 0.5
+        angle = left + (nodes + 1.0) * half_width
+        sine_half = np.sin(angle * 0.5)
+        binding = np.hypot(difference, 2.0 * math.sqrt(ratio) * sine_half)
+        integrand = np.exp(-2.0 * (root_z * sine_half)**2) * (np.sin(angle) / binding)**2
+        total += half_width * float(np.dot(weights, integrand))
+        left, edge = edge, min(right, 8.0 * edge)
+    return (2.0 / math.pi) * math.exp(-gap * gap) * total
+
+
+def _unmixed_crossflow_ntu(eps: float, cr: float):
+    """Locate the inverse for the supplied effectiveness using the numerical model."""
+    if eps < 1e-16:
+        return eps, (eps, math.nextafter(eps, math.inf))
+
+    def below_target(log_ntu):
+        ntu = math.exp(log_ntu)
+        if eps > 0.5:
+            # Invert the directly evaluated deficit, which stays resolved when
+            # effectiveness rounds to 1 at physically different NTU values.
+            return _unmixed_crossflow_deficit(ntu, cr) > 1.0 - eps
+        return _hx_eps_from_ntu(ntu, cr, "crossflow_unmixed") < eps
+
+    lower = math.log(0.5 * eps)  # Effectiveness cannot exceed NTU.
+    upper = 1.0
+    while below_target(upper):
+        upper *= 2.0
+    for _ in range(96):
+        middle = (lower + upper) * 0.5
+        if middle == lower or middle == upper:
+            break
+        if below_target(middle):
+            lower = middle
+        else:
+            upper = middle
+    lo, hi = math.exp(lower), math.exp(upper)
+    return lo + (hi - lo) * 0.5, (lo, hi)
+
+
 def _hx_eps_from_ntu(ntu: float, cr: float, arrangement: str) -> float:
     if ntu <= 0.0:
         return 0.0
+    if arrangement == "crossflow_unmixed":
+        if ntu <= 1.0:
+            return _unmixed_crossflow_small(ntu, cr)
+        return 1.0 - _unmixed_crossflow_deficit(ntu, cr)
     if arrangement == "counterflow":
         delta = 1.0 - cr
         if delta == 0.0:
@@ -292,8 +389,6 @@ def _hx_eps_from_ntu(ntu: float, cr: float, arrangement: str) -> float:
         s = math.sqrt(1.0 + cr * cr)
         e = math.exp(-ntu * s)
         return 2.0 / (1.0 + cr + s * (1.0 + e) / max(1.0 - e, 1e-15))
-    if arrangement == "crossflow_unmixed":
-        return 1.0 - math.exp((ntu ** 0.22 / cr) * (math.exp(-cr * (ntu ** 0.78)) - 1.0))
     if arrangement == "crossflow_cmax_mixed":
         return (1.0 / cr) * (1.0 - math.exp(-cr * (1.0 - math.exp(-ntu))))
     if arrangement == "crossflow_cmin_mixed":
@@ -323,6 +418,7 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
             c_max = max(c_h, c_c)
             cr = c_min / c_max
 
+        crossflow_inverse = None
         q_max = c_min * (t_hi - t_ci)
         if "UA" in params:
             ua = float(params["UA"])
@@ -342,10 +438,12 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
             else:
                 return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "missing_rating_or_sizing_spec"}
 
-            limit = 1.0 if arr == "counterflow" else _hx_eps_from_ntu(250.0, cr, arr) - 1e-11
+            limit = 1.0 if arr in ("counterflow", "crossflow_unmixed") else _hx_eps_from_ntu(250.0, cr, arr) - 1e-11
             if not 0.0 < eps_target < limit:
                 return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "second_law_crossover_or_unreachable_effectiveness"}
-            if arr == "counterflow":
+            if arr == "crossflow_unmixed":
+                ntu, crossflow_inverse = _unmixed_crossflow_ntu(eps_target, cr)
+            elif arr == "counterflow":
                 # Invert the counterflow relation at its physical limit, including C_r = 1.
                 odds = eps_target / (1.0 - eps_target)
                 delta = 1.0 - cr
@@ -395,6 +493,8 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
             "T_h_out_K": float(t_ho),
             "T_c_out_K": float(t_co),
             "LMTD_K": lmtd_val,
+            **({"effectiveness_model": "ideal_single_pass_both_unmixed"} if arr == "crossflow_unmixed" else {}),
+            **({"NTU_numerical_bracket": list(crossflow_inverse)} if crossflow_inverse is not None else {}),
             "residual": residual,
             "verified": bool(second_law_ok and residual < 1e-9),
         }
