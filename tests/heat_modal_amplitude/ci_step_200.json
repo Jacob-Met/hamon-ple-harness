@@ -1,0 +1,36 @@
+{
+  "course": "heat_modal_spatial_amplitude_step200_ci_gate",
+  "version": 1,
+  "state": "frozen_before_gate_execution",
+  "observed_gap": {
+    "feature": "d21f9588644f82293a325b983874e859996a1854",
+    "tree": "b0bebeef7e48144ef48c4f07345acbb99195a381",
+    "checkout": "7f698cf57f6e267ced16c6d230b48e2e43826572",
+    "run": 45067339000,
+    "job": 137346321396,
+    "log_sha256": "e081fbccfe8486313a28717c9acc6b15fa9bf1acdd6dc69c24184866d3d40b86",
+    "completed": "495 unittest;214 pytest;81 subtests;all314 direct records/14 totals/beam exactly preserved;registered Pi5 full",
+    "missing": "Maintained pytest command selected four files and omitted tests/test_step_translated_properties.py. Its15 incoming cases were not executed by this green CI. The first combined tree is not yet qualified under integration_200.json.",
+    "original_preserved": true
+  },
+  "change": {
+    "workflow": ".github/workflows/engineering-intake.yml",
+    "original_blob": "64af6ef4f3f59a12040fd6b20abc180ec9a40a46",
+    "edit": "Append exactly tests/test_step_translated_properties.py to the existing registered/physics pytest command.",
+    "extra_file": "tests/heat_modal_amplitude/ci_step_200.json",
+    "all_other_source_and_receiver_blobs_unchanged": true
+  },
+  "acceptance": {
+    "all_previous314_cases14_totals_and_beam_exact": true,
+    "all_amplitude45_direct_and5_registered_full": true,
+    "additional_step_pytest": 15,
+    "expected_total_pytest": 229,
+    "expected_subtests": 81,
+    "unit_tests": 495,
+    "all_maintained_gates": true,
+    "actual_ci_and_landed_tree_verified": true,
+    "new_stock_replay": false,
+    "numerical_expectations_changed": false
+  },
+  "limits": "This adds the previously omitted incoming test file to the maintained gate. It preserves the successful first combined original and its documented coverage limitation."
+}
