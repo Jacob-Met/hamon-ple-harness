@@ -90,9 +90,11 @@ def convert_to_si(value: float, unit: str, *, patm_pa: float = 101325.0, is_temp
         return float(value) * scale, dim
     val_scale = 1.0
     dim_acc = [Fraction(0)] * 7
-    parts = u.split("/")
-    if len(parts) > 2:
+    # A slash inside a rational exponent belongs to the unit token itself.
+    divisions = [m.start() for m in re.finditer(r"[A-Za-z]+\^?[+-]?\d+/\d+|(/)", u) if m[1]]
+    if len(divisions) > 1:
         raise ValueError(f"Ambiguous multiple '/' in unit {unit!r}")
+    parts = (u[:divisions[0]], u[divisions[0] + 1:]) if divisions else (u,)
     for side_idx, part in enumerate(parts):
         sign = 1 if side_idx == 0 else -1
         for tok in re.split(r"[*·\s]+", part.strip()):
