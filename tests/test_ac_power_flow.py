@@ -209,3 +209,30 @@ def test_alternative_reactive_pivot_after_inconsistent_intermediate(vb, angle, s
     result = verify_ac_power_flow(spec)
     assert result["conservation_verified"], result
     assert result["clamped_pv_q_pu"] == {"A": qa}
+
+
+@pytest.mark.parametrize("injections", [(1.2,), (-1.2,), (1.2, -1.4)])
+def test_reactive_bound_can_solve_unreachable_pv_setpoint(injections):
+    # A unit slack and unit reactance give P=Im(V), Q=|V|²-Re(V).
+    # |P|>1 rules out the PV setpoint |V|=1. V=1+jP satisfies Qmin=P².
+    buses = [{"id": "S", "type": "slack", "vm_pu": 1}]
+    lines = []
+    expected = {}
+    proposed = {"S": {"vm_pu": 1, "va_deg": 0}}
+    for i, p in enumerate(injections):
+        name = f"G{i}"
+        buses.append({"id": name, "type": "PV", "p_injection_pu": p, "vm_pu": 1,
+                      "q_min_injection_pu": p * p, "q_max_injection_pu": 3})
+        lines.append({"id": name, "from": "S", "to": name, "r_pu": 0, "x_pu": 1})
+        expected[name] = p * p
+        proposed[name] = {"vm_pu": math.hypot(1, p), "va_deg": math.degrees(math.atan(p))}
+    spec = {"buses": buses, "lines": lines, "proposed_voltages": proposed}
+    answer = verify_ac_power_flow(spec)
+    assert answer["conservation_verified"], answer
+    assert answer["clamped_pv_q_pu"] == expected
+    proposed["G0"]["va_deg"] += 0.1
+    assert not verify_ac_power_flow(spec)["conservation_verified"]
+    # Q=Re(V)^2-Re(V)+P^2 >= P^2-1/4, so neither bound is attainable.
+    del spec["proposed_voltages"]
+    buses[1].update(q_min_injection_pu=-1, q_max_injection_pu=0)
+    assert not verify_ac_power_flow(spec)["conservation_verified"]

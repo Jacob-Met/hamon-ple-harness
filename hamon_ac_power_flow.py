@@ -1,7 +1,7 @@
 """Balanced AC load flow and terminal faults of three-sequence Thevenin equivalents."""
 
 import cmath
-from collections import deque
+from collections import OrderedDict, deque
 import math
 
 import numpy as np
@@ -230,6 +230,7 @@ def network(spec):
         return dict(state), np.flatnonzero(bus_types == "PQ")
 
     pending = deque([((), initial)])
+    failed_pivots = OrderedDict()
     seen = set()
     last_solved = None
     first_error = None
@@ -238,8 +239,12 @@ def network(spec):
     # Four bounded regulators have at most 3**4 possible states. For larger
     # networks keep the fallback work proportional to the number of regulators.
     regime_budget = max(81, 4 * len(limits) + 1)
-    while pending and len(seen) < regime_budget:
-        state, seed = pending.popleft()
+    while (pending or failed_pivots) and len(seen) < regime_budget:
+        # Exhaust pivots justified by a solved state's violations first.
+        if pending:
+            state, seed = pending.popleft()
+        else:
+            state, seed = failed_pivots.popitem(last=False)
         if state in seen:
             continue
         seen.add(state)
@@ -252,6 +257,16 @@ def network(spec):
         except (ValueError, np.linalg.LinAlgError) as exc:
             if first_error is None:
                 first_error = exc
+            # A voltage setpoint can be unreachable at the specified P even
+            # though a reactive limit admits a physical PQ solution. No Q
+            # mismatch exists to select a bound in this failed regime.
+            for idx, bounds in limits.items():
+                if idx in limited:
+                    continue
+                for bound in bounds:
+                    key = tuple(sorted((*state, (idx, bound))))
+                    if key not in seen:
+                        failed_pivots.setdefault(key, seed)
             continue
         injection = voltage * np.conj(ybus @ voltage)
         residual_floor = power_roundoff(voltage)
