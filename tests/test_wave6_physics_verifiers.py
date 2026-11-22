@@ -188,3 +188,38 @@ class Wave6PhysicsVerifiersUnittest(unittest.TestCase):
 for _name, _fn in list(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         setattr(Wave6PhysicsVerifiersUnittest, _name, staticmethod(_fn))
+
+
+def test_smith_stub_equal_resistance_keeps_quarter_wave_intersection():
+    for x in (-50.0, 50.0):
+        for stub_type in ("open", "short"):
+            spec = dict(subkind="smith_stub", Z0=50.0, R_L=50.0, X_L=x, stub_type=stub_type)
+            solutions = solve_transmission_line_rlc(spec)["all_branches"]
+            assert len(solutions) == 2
+            assert solutions[0]["d_over_lambda"] < solutions[1]["d_over_lambda"]
+            quarter = min(solutions, key=lambda s: abs(s["d_over_lambda"] - 0.25))
+            assert math.isclose(quarter["d_over_lambda"], 0.25, abs_tol=2e-15)
+            # At a quarter wave, normalized line admittance equals normalized load impedance.
+            expected = 0.125 if (x > 0) == (stub_type == "short") else 0.375
+            assert math.isclose(quarter["l_stub_over_lambda"], expected, abs_tol=2e-15)
+            for branch, solution in enumerate(solutions):
+                result = solve_transmission_line_rlc({**spec, "branch": branch})
+                assert result["verified"]
+                assert result["d_over_lambda"] == solution["d_over_lambda"]
+
+
+def test_smith_stub_matched_and_nearly_matched_loads():
+    for stub_type, length in (("open", 0.0), ("short", 0.25)):
+        spec = dict(subkind="smith_stub", R_L=50.0, X_L=0.0, stub_type=stub_type)
+        matched = solve_transmission_line_rlc(spec)
+        assert len(matched["all_branches"]) == 1
+        assert matched["d_over_lambda"] == 0.0
+        assert matched["l_stub_over_lambda"] == length
+        for resistance in (math.nextafter(50.0, 0.0), math.nextafter(50.0, 100.0)):
+            result = solve_transmission_line_rlc({**spec, "R_L": resistance, "X_L": 50.0})
+            branches = result["all_branches"]
+            assert len(branches) == 2
+            assert max(b["residual"] for b in branches) < 1e-12
+            assert min(abs(b["d_over_lambda"] - 0.25) for b in branches) < 1e-14
+            nearly_real = solve_transmission_line_rlc({**spec, "R_L": resistance})
+            assert all(0.0 <= item["l_stub_over_lambda"] < 0.5 for item in nearly_real["all_branches"])
