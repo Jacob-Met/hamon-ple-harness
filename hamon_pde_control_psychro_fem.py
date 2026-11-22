@@ -1203,6 +1203,27 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
 def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "truss_2d")).strip().lower()
 
+    prescribed: Dict[int, float] = {}
+    if mode in ("truss_2d", "euler_bernoulli_beam_1d"):
+        if mode == "truss_2d":
+            fields = (("fix_x", "ux_m"), ("fix_y", "uy_m"))
+            node_count = len(spec["nodes"])
+        else:
+            fields = (("fix_w", "w_m"), ("fix_theta", "theta_rad"))
+            node_count = len(spec["x_nodes_m"])
+        for support in spec.get("supports", []):
+            node = int(support["node"])
+            if not 0 <= node < node_count:
+                return {"passed": False, "domain": "fem", "mode": mode, "reason": "Support node outside mesh"}
+            for axis, (fixed, field) in enumerate(fields):
+                if support.get(fixed, False):
+                    dof = 2 * node + axis
+                    value = float(support.get(field, 0.0))
+                    if dof in prescribed and prescribed[dof] != value:
+                        return {"passed": False, "domain": "fem", "mode": mode,
+                                "reason": f"Conflicting support values for {field} at node {node}"}
+                    prescribed[dof] = value
+
     if mode == "truss_2d":
         nodes = [[float(c[0]), float(c[1])] for c in spec["nodes"]]
         elements = spec["elements"]
@@ -1243,14 +1264,6 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
             f_ext[2 * nd] += float(ld.get("fx_N", 0.0))
             f_ext[2 * nd + 1] += float(ld.get("fy_N", 0.0))
 
-        prescribed: Dict[int, float] = {}
-        for sup in spec.get("supports", []):
-            nd = int(sup["node"])
-            if sup.get("fix_x", False):
-                prescribed[2 * nd] = float(sup.get("ux_m", 0.0))
-            if sup.get("fix_y", False):
-                prescribed[2 * nd + 1] = float(sup.get("uy_m", 0.0))
-
         free_dofs = [d for d in range(ndof) if d not in prescribed]
         if not free_dofs:
             u_full = [prescribed.get(d, 0.0) for d in range(ndof)]
@@ -1279,13 +1292,12 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
         axial_forces: List[float] = []
         axial_stresses: List[float] = []
         strain_energy = 0.0
-        has_thermal_or_settlement = any(abs(v) > 0.0 for v in prescribed.values())
+        thermal_work = 0.0
         for (_, _, e_mod, area, length, _, _, alpha, dt_k, dofs, b_vec) in elem_meta:
             ext_m = sum(b_vec[idx] * u_full[dofs[idx]] for idx in range(4))
             mech_ext = ext_m - alpha * dt_k * length
-            if abs(dt_k) > 0.0 and abs(alpha) > 0.0:
-                has_thermal_or_settlement = True
             n_force = (e_mod * area / length) * mech_ext
+            thermal_work -= 0.5 * n_force * alpha * dt_k * length
             axial_forces.append(n_force)
             axial_stresses.append(n_force / area)
             strain_energy += 0.5 * (n_force ** 2) * length / (e_mod * area)
@@ -1299,10 +1311,13 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
         load_scale = max((abs(v) for v in f_ext), default=1.0)
         eq_ok = max(abs(fx_sum), abs(fy_sum), abs(mom_z)) <= 1e-6 * max(1.0, load_scale)
 
-        ext_work = 0.5 * sum(f_ext[d] * u_full[d] for d in range(ndof))
-        clapeyron_ok = True
-        if not has_thermal_or_settlement:
-            clapeyron_ok = abs(strain_energy - ext_work) <= 1e-7 * max(abs(strain_energy), 1e-12)
+        # All actions ramp proportionally from the stress-free reference.
+        # For each bar, U = N * (extension - free thermal extension) / 2.
+        applied_work = 0.5 * math.fsum(f * u for f, u in zip(f_ext, u_full))
+        support_work = 0.5 * math.fsum(reactions[d] * u for d, u in prescribed.items())
+        ext_work = applied_work + support_work
+        work_scale = max(abs(strain_energy), abs(applied_work), abs(support_work), abs(thermal_work), 1e-12)
+        clapeyron_ok = abs(strain_energy - ext_work - thermal_work) <= 1e-7 * work_scale
 
         res: Dict[str, Any] = {
             "passed": bool(eq_ok and clapeyron_ok),
@@ -1314,6 +1329,9 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
             "reactions_xy_N": [[reactions[2 * i], reactions[2 * i + 1]] for i in range(n_nodes)],
             "strain_energy_J": strain_energy,
             "external_work_J": ext_work,
+            "applied_load_work_J": applied_work,
+            "support_work_J": support_work,
+            "thermal_strain_work_J": thermal_work,
             "equilibrium_residual_N": max(abs(fx_sum), abs(fy_sum)),
         }
         _check_claimed(res, spec)
@@ -1359,14 +1377,6 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
             f_eq[2 * nd] += float(ld.get("fy_N", 0.0))
             f_eq[2 * nd + 1] += float(ld.get("mz_Nm", 0.0))
 
-        prescribed = {}
-        for sup in spec.get("supports", []):
-            nd = int(sup["node"])
-            if sup.get("fix_w", False):
-                prescribed[2 * nd] = float(sup.get("w_m", 0.0))
-            if sup.get("fix_theta", False):
-                prescribed[2 * nd + 1] = float(sup.get("theta_rad", 0.0))
-
         free_dofs = [d for d in range(ndof) if d not in prescribed]
         k_ff = [[k_glob[r][c] for c in free_dofs] for r in free_dofs]
         rhs_f = [
@@ -1386,9 +1396,11 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
             for i in range(ndof)
         ]
         u_strain = 0.5 * sum(u_full[i] * sum(k_glob[i][j] * u_full[j] for j in range(ndof)) for i in range(ndof))
-        w_ext = 0.5 * sum(f_eq[i] * u_full[i] for i in range(ndof))
-        has_settlement = any(abs(v) > 0.0 for v in prescribed.values())
-        clapeyron_ok = True if has_settlement else (abs(u_strain - w_ext) <= 1e-7 * max(abs(u_strain), 1e-12))
+        applied_work = 0.5 * math.fsum(f * u for f, u in zip(f_eq, u_full))
+        support_work = 0.5 * math.fsum(reactions[d] * u for d, u in prescribed.items())
+        w_ext = applied_work + support_work
+        work_scale = max(abs(u_strain), abs(applied_work), abs(support_work), 1e-12)
+        clapeyron_ok = abs(u_strain - w_ext) <= 1e-7 * work_scale
 
         res = {
             "passed": clapeyron_ok,
@@ -1400,6 +1412,8 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
             "reactions_V_M": [[reactions[2 * i], reactions[2 * i + 1]] for i in range(n_nodes)],
             "strain_energy_J": u_strain,
             "external_work_J": w_ext,
+            "applied_load_work_J": applied_work,
+            "support_work_J": support_work,
         }
         _check_claimed(res, spec)
         return res
