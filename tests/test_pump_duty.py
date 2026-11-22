@@ -28,6 +28,30 @@ class PumpDutyTests(unittest.TestCase):
         self.assertFalse(self.check(required_head_m=28)["duty_verified"])
         self.assertFalse(self.check(per_pump_input_W=30000, available_panel_W=59999)["duty_verified"])
 
+    def test_explicit_zero_connected_power_cannot_deliver_positive_hydraulic_work(self):
+        for panel, required in [(0, 27), (60000, 27), (60000, 0)]:
+            with self.subTest(panel=panel, required=required):
+                result = self.check(per_pump_input_W=0, available_panel_W=panel,
+                                    required_head_m=required)
+                self.assertTrue(result["ok"])
+                self.assertTrue(result["checks"]["head_adequate"])
+                self.assertTrue(result["checks"]["panel_adequate"])
+                self.assertFalse(result["checks"]["connected_power_consistent"])
+                self.assertFalse(result["duty_verified"])
+
+    def test_zero_power_guard_uses_positive_flow_and_actual_curve_head(self):
+        self.assertTrue(self.check()["duty_verified"])
+        electrical = {"per_pump_input_W": 0, "available_panel_W": 0}
+        self.assertTrue(self.check(total_flow_m3_s=0, required_head_m=60,
+                                   **electrical)["duty_verified"])
+        zero_curve = [{"flow_m3_s": 0, "head_m": 0}, {"flow_m3_s": .03, "head_m": 0}]
+        self.assertTrue(self.check(curve=zero_curve, required_head_m=0,
+                                   **electrical)["duty_verified"])
+        tiny = 1e-200
+        tiny_curve = [{"flow_m3_s": 0, "head_m": tiny}, {"flow_m3_s": 1, "head_m": tiny}]
+        self.assertFalse(self.check(total_flow_m3_s=tiny, curve=tiny_curve,
+                                    required_head_m=0, **electrical)["duty_verified"])
+
     def test_curve_ends_and_knot(self):
         for flow, head in [(0, 60), (0.04, 40), (0.06, 15)]:
             with self.subTest(flow=flow):

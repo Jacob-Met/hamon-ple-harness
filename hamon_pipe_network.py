@@ -353,7 +353,13 @@ def equipped_branch_head(branch, flow_per_pump):
 
 
 def verify_pump_duty(spec):
-    """Check a prescribed duty against one tabulated curve for identical parallel pumps."""
+    """Check fixed-speed duty for identical parallel pumps at their tabulated head.
+
+    Supplying both electrical fields declares a connected input rating per pump
+    and the panel capacity. Positive hydraulic work requires a positive electrical
+    connection. The ratings do not measure the power drawn at the operating point.
+    Omitting both fields requests a hydraulic head check only.
+    """
     result = {"calculation": "pump_duty", "mode": "thermal_fluid",
               "tool": "hamon_conservation_cad_verifier", "ok": False, "duty_verified": False}
     try:
@@ -408,6 +414,12 @@ def verify_pump_duty(spec):
         head = (1.0 - fraction) * heads[i - 1] + fraction * heads[i]
         margin = head - required
         checks["head_adequate"] = margin >= 0
+        if flow > 0 and head > 0 and result.get("total_input_W") == 0:
+            checks["connected_power_consistent"] = False
+            result["reason"] = (
+                "Positive flow and developed pump head require positive connected "
+                "electrical power for this electrically driven duty"
+            )
         return {**result, "ok": True, "checks": checks,
                 "available_head_m": head, "head_margin_m": margin, "duty_verified": all(checks.values())}
     except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
