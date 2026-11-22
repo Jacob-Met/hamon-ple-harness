@@ -1,0 +1,352 @@
+{
+  "schema": "ple.wave5.exact-scalar-tolerance-v1",
+  "state": "frozen source-only protocol before first numerical execution",
+  "source_base_solver_sha256": "064606a5df98b2c85521b45647968fe4bea7d58d48ac500dd7b7dee3ad0f44d8",
+  "candidate_solver_sha256": "1a49d00803e9e6464448fd43ecbab5292ed58366c8f9cfe766c7b36522a4b460",
+  "independent_receiver_sha256": "4f537ccc6ed79a8a680aa6c8e865722e78d5826404ae3ef496fe40a37231511c",
+  "registered_receiver_base_sha256": "e450fd9c2b240962f338b66e7802aa7e444e4dfc3ea4bd94ca646ffd627daf96",
+  "registered_receiver_sha256": "195fdce3917c759667cb68daf5d1dfdea8f525d663a77063f877fb0f73e6be71",
+  "question": "Can the existing Wave 5 scalar tolerance inequality be evaluated over the exact accepted numbers, without false approvals from intermediate rounding/overflow or non-JSON diagnostics?",
+  "scope": "Only _check_claimed in hamon_pde_control_psychro_fem.py and the transfer null-field preguard. Shared by Wave 5 PDE, control, psychrometrics and FEM; no universal claim about other engineering routes. New numerical course uses the control router and actual registered tool.",
+  "accepted_semantics": [
+    "Convert the requested claim and tolerances using the existing float conversion, then require finite values and finite nonnegative tolerances. Preserve numeric text and Boolean 0/1 inputs.",
+    "The selected result must be an existing numeric int/float/bool scalar; refuse rational/string/structured/null evidence, unknown fields, nonempty-string violations, and either missing member of the claim pair. With neither claim key, the ordinary response is unchanged.",
+    "Interpret the finite accepted binary64 actual, claim and tolerances as exact dyadic rational values; F(x) denotes the exact value of the accepted float. Do not compare against an unrounded physical value or dc_gain_exact.",
+    "Let E=abs(a-c) and L=max(A,R*max(abs(a),F(1e-12))). Use the original actual-value magnitude floor and max rule, with inclusive E<=L. Preserve the original float defaults 1e-4 and 1e-2 when omitted.",
+    "A truthful claim never changes an underlying passed=False to true. Keep existing specific evidence-only and undefined-result refusals."
+  ],
+  "evidence": {
+    "retained": [
+      "field",
+      "claimed",
+      "actual",
+      "abs_error",
+      "within_tolerance"
+    ],
+    "added": [
+      "tolerance_limit",
+      "abs_error_exact",
+      "tolerance_limit_exact",
+      "abs_error_float_status",
+      "tolerance_limit_float_status"
+    ],
+    "exact": "Canonical rational strings for E and L on every valid scalar comparison.",
+    "rendering": "Round to a finite float when available, preserving nonzero subnormals. Nonzero zero-rounding gives null/below_float_range; overflow gives null/above_float_range. Zero has float0 and finite status.",
+    "refusal": "Malformed or unsupported requests give passed=False and a reason without claim_check. An exact outside-tolerance verdict has complete claim_check and an accurate reason even if rounded E and L displays coincide.",
+    "json": "Every unclaimed and claimed result must serialize with allow_nan=false. Preserve raw old decision observations if the old result fails serialization."
+  },
+  "core_cases": [
+    {
+      "name": "absolute/outside",
+      "parameters": "a=1; c=-2^-54; A=1; R=0",
+      "within_tolerance": false,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "absolute/equal",
+      "parameters": "a=1; c=0; A=1; R=0",
+      "within_tolerance": true,
+      "overall_pass": true,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "absolute/inside",
+      "parameters": "a=1; c=2^-54; A=1; R=0",
+      "within_tolerance": true,
+      "overall_pass": true,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "product/outside",
+      "parameters": "d=2^-27; a=1+3d; c=-d-4d^2; A=0; R=1+d",
+      "within_tolerance": false,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "product/equal",
+      "parameters": "d=2^-27; a=1+3d; c=-d-3d^2; A=0; R=1+d",
+      "within_tolerance": true,
+      "overall_pass": true,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "product/inside",
+      "parameters": "d=2^-27; a=1+3d; c=-d-2d^2; A=0; R=1+d",
+      "within_tolerance": true,
+      "overall_pass": true,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "overflow/outside",
+      "parameters": "a=F(1e308); c=-a; A=0; R=F(1.9)",
+      "within_tolerance": false,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "overflow/equal",
+      "parameters": "a=F(1e308); c=-a; A=0; R=2",
+      "within_tolerance": true,
+      "overall_pass": true,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "overflow/inside",
+      "parameters": "a=F(1e308); c=-a; A=0; R=2+2^-51",
+      "within_tolerance": true,
+      "overall_pass": true,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "floor/zero",
+      "parameters": "a=0; c=u=2^-1074; A=0; R=0",
+      "within_tolerance": false,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "floor/rounds-up",
+      "parameters": "a=0; c=u=2^-1074; A=0; R=2^-1035",
+      "within_tolerance": false,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "floor/inside",
+      "parameters": "a=0; c=u=2^-1074; A=0; R=2^-1034",
+      "within_tolerance": true,
+      "overall_pass": true,
+      "unclaimed_pass": true
+    }
+  ],
+  "control_cases": [
+    {
+      "name": "control/reflected-outside",
+      "parameters": "a=-1; c=2^-54; A=1; R=0",
+      "within_tolerance": false,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "control/rounded-third",
+      "transfer": "N=1; D=3(s+1)",
+      "parameters": "claim rendered binary64(1/3); A=R=0",
+      "within_tolerance": true,
+      "overall_pass": true,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "control/boolean",
+      "transfer": "N=1; D=s+1",
+      "parameters": "claim hurwitz_stable=true; A=R=0",
+      "within_tolerance": true,
+      "overall_pass": true,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "control/preserve-refusal",
+      "transfer": "N=-(s+1); D=s+1",
+      "parameters": "claim dc_gain=-1; A=R=0",
+      "within_tolerance": true,
+      "overall_pass": false,
+      "unclaimed_pass": false
+    },
+    {
+      "name": "control/positive-limit-rounds-zero",
+      "parameters": "a=c=A=0; R=2^-1036",
+      "within_tolerance": true,
+      "overall_pass": true,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "control/max-not-sum",
+      "parameters": "a=1; c=0; A=1/2; R=3/4",
+      "within_tolerance": false,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    }
+  ],
+  "invalid_cases": [
+    {
+      "name": "refuse/missing-value",
+      "request": "claimed_field=dc_gain with no claimed_value",
+      "within_tolerance": null,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "refuse/missing-field",
+      "request": "claimed_value=1 with no claimed_field",
+      "within_tolerance": null,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "refuse/unknown-field",
+      "request": "claimed_field=no_such_control_output",
+      "within_tolerance": null,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "refuse/exact-evidence",
+      "request": "claimed_field=dc_gain_exact",
+      "within_tolerance": null,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "refuse/structured-evidence",
+      "request": "claimed_field=open_loop_root_certificate",
+      "within_tolerance": null,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "refuse/nonnumeric-claim",
+      "request": "claimed_value='not a number'",
+      "within_tolerance": null,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "refuse/infinite-claim",
+      "request": "claimed_value='Infinity'",
+      "within_tolerance": null,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "refuse/negative-atol",
+      "request": "atol=-1",
+      "within_tolerance": null,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "refuse/negative-rtol",
+      "request": "rtol=-1",
+      "within_tolerance": null,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "refuse/nan-rtol",
+      "request": "rtol='NaN'",
+      "within_tolerance": null,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    },
+    {
+      "name": "refuse/unavailable-scalar",
+      "request": "N=1; D=s; claim dc_gain=1",
+      "within_tolerance": null,
+      "overall_pass": false,
+      "unclaimed_pass": true
+    }
+  ],
+  "counts": {
+    "cases": 29,
+    "unclaimed_calls": 29,
+    "claimed_calls": 29,
+    "total_calls": 58,
+    "unclaimed_approvals": 28,
+    "unclaimed_refusals": 1,
+    "core_cases": 12,
+    "core_approvals": 7,
+    "core_refusals": 5,
+    "valid_control_cases": 6,
+    "control_approvals": 3,
+    "control_refusals": 3,
+    "explicit_refusal_cases": 11,
+    "total_claim_approvals": 10,
+    "total_claim_refusals": 19
+  },
+  "independent_oracle": [
+    "Use signed integer units of powers of two from float.as_integer_ratio; align exponents for subtraction/comparison, multiply integer units for relative tolerance, and gcd-normalize for rational evidence. Do not use producer Fraction arithmetic in this receiver.",
+    "Independently prescribe each analytic within_tolerance result, and check the integer comparison agrees with it. All core transfers are a/(s+1).",
+    "Absolute boundary: exact 1+2^-54 exceeds1 although subtraction rounds onto1. Product boundary: (1+3d)(1+d)=1+4d+3d^2 for d=2^-27, while the exterior error is1+4d+4d^2. Overflow family reduces to comparison of2 with R. Floor family compares u with R*F(1e-12).",
+    "All 58 route calls precede the aggregate assertion. Record every case's verdict, evidence failures, solver exceptions, JSON exceptions and full ordinary-output SHA256.",
+    "Report wrong decisions separately from missing new evidence, explicit malformed policy changes, and wire errors.",
+    "A positive-both tolerance control has E=1 and L=max(1/2,3/4)=3/4, so it refuses; an erroneous sum would approve."
+  ],
+  "pi_subset": {
+    "request_specs": 14,
+    "all_claimed": true,
+    "expected_approvals": 3,
+    "expected_refusals": 11,
+    "valid_comparisons": 6,
+    "valid_arithmetic_refusals": 2,
+    "truthful_prior_refusal": 1,
+    "malformed_or_unsupported_refusals": 8,
+    "cases": [
+      "rounded subtraction",
+      "overflow outside",
+      "overflow equality",
+      "state-space Boolean",
+      "numeric-text rendered third",
+      "truthful Boolean on undefined feedback",
+      "NaN claim text",
+      "negative tolerance",
+      "unknown field",
+      "rational evidence field",
+      "unavailable scalar",
+      "list selector",
+      "missing claim value",
+      "missing selector"
+    ],
+    "execution": "Construct and execute all actual registered tool requests before assertions; dedicated unittest wrapper and existing pytest stage.",
+    "independence": "Pi reconstructs exact accepted-number arithmetic with Fraction; the separate Python receiver uses integer dyadics. Numeric text and list-selector checks belong to this subset, not the 29-row receiver."
+  },
+  "paired_preservation": [
+    "Full unclaimed results for all 29 cases must match with no excluded keys, per-case and aggregate.",
+    "Preserve all inherited DC14/28, Bode11/34, transfer20/80, rank49/196, Lyapunov32/128 and diagnostics17/68 courses plus every maintained CI gate.",
+    "Compare new DC-course legacy/non-DC/Bode digests and older TF/Bode projections, not only totals.",
+    "Tests/protocol identical on stock and candidate; source difference only the solver module. Record actual CI trees and directly compare the eventual landed tree."
+  ],
+  "execution": "Native source-only preparation from the exact qualified DC base, followed by one frozen stock/candidate pair in the maintained repository PR workflow as the first numerical execution of this new course. Identical tests/protocol; only solver source differs. Preserve all original failures and raw decisions. No case, coefficient, tolerance, or expectation changes after first execution.",
+  "limitations": [
+    "Exact decisions apply to accepted rounded scalar outputs and accepted binary64 tolerance inputs, not an exact physical solution.",
+    "Malformed input policy is explicitly tightened; it is distinct from finite arithmetic correctness.",
+    "New control-route fixtures do not establish universal accuracy or speed for other Wave5 calculations or any model/organizer benchmark.",
+    "No host bypass, relay change, altered workflow, or replay of an ambiguous native operation."
+  ],
+  "references": [
+    {
+      "url": "https://docs.python.org/3.12/library/fractions.html",
+      "topic": "Exact preservation of finite accepted floats"
+    },
+    {
+      "url": "https://docs.python.org/3.12/library/stdtypes.html#float.as_integer_ratio",
+      "topic": "Exact integer ratio for an accepted float"
+    },
+    {
+      "url": "https://docs.python.org/3.12/library/math.html",
+      "topic": "Finite floats, spacing and subnormals"
+    }
+  ],
+  "source_drafts_retained": {
+    "receiver_v1_sha256": "3665cb0002a9331f0dbd7d6cff76352953a1f033d3f81c504512a9f3a383aa35",
+    "protocol_v1_sha256": "effe50b14e9b74eafb132f805c8b390ee364571e761ffc4e43d2abd8b57017e2",
+    "reason": "One pre-execution max-versus-sum discriminator added after independent source review; no numerical execution or changed existing oracle.",
+    "protocol_v2_sha256": "71a23e427fa94338be4e963483d9380c0efe0f58d6b6ede220d13d4fb744d8a8",
+    "premerge_candidate_sha256": "62c7cf7ba4e52d92a1b54a65998461702ff47d55e9f4183c10fbe809471b0fc4",
+    "premerge_candidate_base_sha256": "8f2f41a06c8413c69d6cc05e4b19e7212bd28643d5da985db9c22bc69c60312f",
+    "premerge_patch_sha256": "a3cca854b3833ab24f7107c36016971318de1a70798604946d19b3fa27020d8b",
+    "port": "Original narrow patch applied to fully qualified landed DC source with zero fuzz. Compared patch text differs only in the second hunk coordinate shifted by32 lines for the intervening PR172 fin work. No semantic or oracle changes."
+  },
+  "source_base": "145418856e4f14fcc003da2ce9e28524c0fd3b56",
+  "source_base_tree": "abf94bb76de552b4815a723492a014997cbe177c",
+  "candidate_patch_sha256": "606ed9ea260737f3f2eac6175213dad70ec2ff01239e6ba3d0817263b0d0d36b",
+  "integration": "Both base commit and full tree are qualified by DC original CI run45049578455. Preserve PR172 fin and PR173 pipe changes in the source. Record actual stock/candidate workflow checkout trees and concurrent changes, then directly compare the eventual normal-merge tree to the successful CI tree. GitHub may mark the stock test-only comparison merged through common ancestry; do not confuse that metadata with a separate stock-solver integration.",
+  "known_projection_references": {
+    "dc_non_dc": "096e56b45a0ff79585cde6e47762e26ab317a75e9ab0df9cdd8c293087bd61ab",
+    "dc_bode": "130764a4ae943feec2a19d264800b9a8cbb5328b214f32d82cbbcd228f589b58",
+    "dc_legacy": "4107107e9a7b49564655d504fa126f043b61c22101d7add72cc85f076d876663",
+    "transfer_bode_dc": "dda63a967d6b0e1196f50736e3e7f2108c347f39483b8a8291696b85aa06cbec",
+    "bode_legacy": "a307f416cff98d748ad003b517ed448f14b73715831484d52262aadc47855040",
+    "rank_nonrank": "67dc1c1535f6c18c73c4bfc355b506b04da88edde0837a1fa0fba0c0f76064f8"
+  }
+}
