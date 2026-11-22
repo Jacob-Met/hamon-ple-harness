@@ -1016,7 +1016,7 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
     while len((shared := _cstr_poly_gcd(ordinary, common))) > 1:
         ordinary = _cstr_poly_divmod(ordinary, shared)[0]
     exact_reference = []
-    if rate_kind == "reference" and slope != 0:
+    if rate_kind == "reference" and activation != 0 and slope != 0:
         q = (F(reference)-F(inlet))/F(slope)
         if 0 < q < 1 and poly_value(coefficients, q) == 0:
             concentration = F(c0)*(1-q)/(1+F(epsilon)*q)
@@ -1197,12 +1197,11 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
 
     gas_phase = bool(params.get("gas_phase", abs(eps_a) > 1e-15))
 
-    def rate_minus_ra(x_conv: float, unreacted: Optional[float] = None) -> float:
+    def rate_minus_ra(x_conv: float) -> float:
         temp_x = (t0_k + delta_t_ad * x_conv) if abs(delta_t_ad) > 1e-15 else t_op
         k_val = k_at_temp(temp_x)
         vol_factor = (1.0 + eps_a * x_conv) * (temp_x / t0_k if gas_phase else 1.0)
-        remaining = max(1.0 - x_conv, 0.0) if unreacted is None else unreacted
-        ca_x = c_a0 * remaining / vol_factor
+        ca_x = c_a0 * max(1.0 - x_conv, 0.0) / vol_factor
         return k_val * (ca_x ** order_n)
 
     def _cstr_series_exit_x(tau_stage: float, n_stages: int) -> float:

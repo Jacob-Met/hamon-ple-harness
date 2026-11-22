@@ -109,6 +109,15 @@ class CstrMultiplicity(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,"no physical"):
                     solve({**p,"volume":math.nextafter(1.,math.inf)})
 
+    def test_zero_activation_reference_fold_is_not_duplicated(self):
+        p=dict(reactor_type="cstr",order=-1.,C_A0=1.,F_A0=4.,volume=1.,
+               k_ref=1.,T_ref=600.,E_a=0.,T0=500.,delta_T_adiabatic=200.,
+               steady_state_branch="all")
+        result=solve(p)
+        self.assertEqual(result["steady_state_count"],1)
+        self.assertEqual(result["steady_states"][0]["conversion_X"],.5)
+        self.assertTrue(result["verified"])
+
     def test_exact_reference_temperature_fold_and_adjacent_volumes(self):
         p=dict(reactor_type="cstr",order=1.,k_ref=1.,T_ref=512.,
                E_a=2048*8.31446261815324,T0=256.,delta_T_adiabatic=512.,
