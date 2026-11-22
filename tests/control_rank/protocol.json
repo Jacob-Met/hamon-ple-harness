@@ -1,0 +1,206 @@
+{
+  "schema": "ple.control.algebraic-rank-v1",
+  "source_base": "842c082fa855794e643bc891750a57037042b84c",
+  "unchanged_control_source_blob": "0c9708288b617e5e60135fd00a23800089fddc47",
+  "question": "Do the registered controllability and observability results equal the exact algebraic Kalman ranks of the accepted finite binary64 matrices, including changes of coordinates and channel units?",
+  "semantics": "Convert input through existing float parsing, then treat those accepted finite binary64 values as exact rationals. No claim about conditioning, robust controllability, or coefficients rounded away before the call.",
+  "families": [
+    {
+      "name": "diagonal_coordinate_units",
+      "count": 9,
+      "A": "diag(-1,-2)",
+      "B": "[1,2^k]^T",
+      "C": "[1,2^-k]",
+      "k": [
+        -100,
+        -55,
+        -42,
+        -20,
+        0,
+        20,
+        42,
+        55,
+        100
+      ],
+      "ranks": [
+        2,
+        2
+      ],
+      "proof": "Exact similarity diag(1,2^k) of the same fully reachable and observable two-mode system; transfer function unchanged."
+    },
+    {
+      "name": "mimo_channel_units",
+      "count": 9,
+      "A": "diag(-1,-2)",
+      "B": "diag(2^k,2^-k)",
+      "C": "diag(2^-k,2^k)",
+      "k": [
+        -100,
+        -55,
+        -42,
+        -20,
+        0,
+        20,
+        42,
+        55,
+        100
+      ],
+      "ranks": [
+        2,
+        2
+      ],
+      "proof": "B and C themselves are nonsingular."
+    },
+    {
+      "name": "absent_second_mode",
+      "count": 9,
+      "A": "diag(-1,-2)",
+      "B": "[2^k,0]^T",
+      "C": "[2^-k,0]",
+      "k": [
+        -100,
+        -55,
+        -42,
+        -20,
+        0,
+        20,
+        42,
+        55,
+        100
+      ],
+      "ranks": [
+        1,
+        1
+      ],
+      "proof": "Only first eigenspace is excited or measured."
+    },
+    {
+      "name": "zero_channels",
+      "count": 1,
+      "A": "diag(-1,-2)",
+      "B": "[0,0]^T",
+      "C": "[0,0]",
+      "ranks": [
+        0,
+        0
+      ]
+    },
+    {
+      "name": "coupling_before_rounding",
+      "count": 5,
+      "A": "[[-1,0],[delta,-1]]",
+      "B": "[1,1]^T",
+      "C": "[1,1]",
+      "delta": [
+        "2^-20",
+        "2^-42",
+        "2^-55",
+        "2^-100",
+        "-2^-55"
+      ],
+      "ranks": [
+        2,
+        2
+      ],
+      "proof": "Two-by-two Kalman determinants are delta and -delta."
+    },
+    {
+      "name": "uncoupled_direction",
+      "count": 5,
+      "A": "[[-1,0],[delta,-1]]",
+      "B": "[0,1]^T",
+      "C": "[1,0]",
+      "delta": [
+        "2^-20",
+        "2^-42",
+        "2^-55",
+        "2^-100",
+        "-2^-55"
+      ],
+      "ranks": [
+        1,
+        1
+      ],
+      "proof": "B and C are invariant eigen-directions."
+    },
+    {
+      "name": "zero_coupling",
+      "count": 1,
+      "A": "-I2",
+      "B": "[1,1]^T",
+      "C": "[1,1]",
+      "ranks": [
+        1,
+        1
+      ]
+    },
+    {
+      "name": "instant_mimo_near_dependence",
+      "count": 2,
+      "A": "-I2",
+      "B": "[[1,1],[1,float(1+delta)]]",
+      "C": "transpose(B)",
+      "delta": [
+        "2^-40",
+        "2^-55"
+      ],
+      "ranks_by_delta": [
+        [
+          2,
+          2
+        ],
+        [
+          1,
+          1
+        ]
+      ],
+      "proof": "First determinant2^-40; second has identical columns after the specified float input conversion."
+    },
+    {
+      "name": "jordan_chain",
+      "count": 8,
+      "n": [
+        2,
+        3,
+        4,
+        6
+      ],
+      "A": "-I_n +2^-55 times lower shift",
+      "full": {
+        "B": "e1",
+        "C": "en^T",
+        "ranks": "[n,n]"
+      },
+      "deficient": {
+        "B": "en",
+        "C": "e1^T",
+        "ranks": [
+          1,
+          1
+        ]
+      },
+      "proof": "Full-chain Kalman determinant is nonzero power of delta; reversed ports are invariant eigendirections."
+    }
+  ],
+  "physical_case_count": 49,
+  "checks": [
+    "For every case inspect both ranks and both booleans through the registered Python router.",
+    "Correct Boolean claims pass, opposite Boolean claims fail for each property (196 claim checks).",
+    "Retain exact per-case nonrank-output digests to compare stock/candidate without changing stability, characteristic polynomial, Lyapunov or eigenvalue behavior.",
+    "Omitted B/C preserve null results; empty channels preserve algebraic rank0.",
+    "The real registered Pi TypeScript/Python entry receives representative scaled, rounded-Krylov, and rank-deficient cases.",
+    "All inherited maintained CI gates run. No new organizer, scored, or paid-model run."
+  ],
+  "decision": "All49 analytic rank pairs and196 Boolean claim checks must be correct, no newly introduced exception, unchanged nonrank-output digest between matched stock and candidate; actual Pi route and full maintained CI must pass.",
+  "execution": "Native source-only preparation and normal repository pull_request CI. The dispatcher is known not to configure this repository; do not replay refused requests or wrap tests in general execution.",
+  "references": [
+    {
+      "url": "https://eceweb1.rutgers.edu/~gajic/psfiles/chap5.pdf",
+      "sections": "Theorem5.4, Theorems5.5–5.6, Section5.5"
+    },
+    {
+      "url": "https://engineering.purdue.edu/~sundara2/misc/ft_control_lecture_notes.pdf",
+      "sections": "2.6.1,2.6.2,2.6.5"
+    }
+  ]
+}
