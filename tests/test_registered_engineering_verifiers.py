@@ -103,6 +103,10 @@ def routed(tmp_path_factory):
     equal_lengths = {"lhs": {"value": 2, "unit": "m"},
                      "rhs": {"value": 200, "unit": "cm"}}
     calls.extend([
+        {"id": "fin-hot-tip-at-ambient-base", "mode": "pde", "spec": {
+            "mode": "convective_fin_1d", "tip_bc": "prescribed_temp",
+            "k_w_mk": 2.0, "area_m2": 0.02, "perimeter_m": 0.4, "h_w_m2k": 0.1,
+            "length_m": 1.0, "t_base_c": 20.0, "t_inf_c": 20.0, "t_tip_c": 70.0}},
         {"id": "legacy-positive", "mode": "dimensional", "spec": equal_lengths},
         {"id": "legacy-auto", "mode": "auto", "spec": equal_lengths},
         {"id": "legacy-unverified", "mode": "dimensional", "spec": {
@@ -176,6 +180,15 @@ def test_completed_transport_preserves_failed_physics(routed, family, spec):
 def test_registered_tool_refuses_unspecified_calculations(routed, family, prefix):
     assert routed[prefix + family]["completed"] is False
     assert "requires" in routed[prefix + family]["error"]
+
+
+def test_registered_fin_preserves_signed_flux_at_an_ambient_base(routed):
+    hot_tip = routed["fin-hot-tip-at-ambient-base"]
+    assert hot_tip["completed"], hot_tip
+    details = hot_tip["details"]
+    assert details["passed"], details
+    assert details["q_fin_w"] == pytest.approx(-1.7018362564786431)
+    assert details["fin_efficiency"] is None
 
 
 def test_legacy_checks_and_explicit_family_contract(routed):
