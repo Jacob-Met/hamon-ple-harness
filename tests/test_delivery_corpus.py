@@ -1,4 +1,7 @@
 """Independent offline reconciliation contracts, no model or hidden test inputs."""
+import hashlib
+from pathlib import Path
+import tempfile
 import unittest
 from ship import audit_ple_delivery as audit
 
@@ -65,6 +68,58 @@ class CorpusAuditContracts(unittest.TestCase):
                 "Program Office's document store.")
         result=audit.evaluate_task("solar-witness-test-package",prompt,{})
         self.assertEqual(result["state"],"no_explicit_output_contract")
+
+
+class ArtifactCustody(unittest.TestCase):
+    def test_named_return_requires_one_matching_export(self):
+        prompt = "Return a memo named Review.docx."
+        item = {"state": "verified", "actual_blob": "example"}
+        files = {"filesystem/Review.docx": item}
+        row = {"targets": []}
+        self.assertEqual(audit.custody(prompt, row, files)[0]["state"], "verified")
+        files["app/files/Review.docx"] = item
+        self.assertEqual(audit.custody(prompt, row, files)[0]["state"], "ambiguous_exports")
+
+    def test_remote_filing_needs_destination_evidence(self):
+        prompt = ("Return a memo named Review.docx, filed in the commissioning "
+                  "folder in the document store, with a signed decision.")
+        files = {"filesystem/Review.docx": {"state": "verified"}}
+        result = audit.custody(prompt, {"targets": []}, files)[0]
+        self.assertEqual(result["state"], "destination_receipt_unverified")
+        self.assertEqual(result["destination"], "the commissioning folder in the document store")
+        self.assertEqual(len(result["exports"]), 1)
+
+    def test_declared_local_folder_uses_exact_path(self):
+        prompt = "Return a memo named Review.docx, filed in /filesystem/reports."
+        files = {"filesystem/Review.docx": {"state": "verified"}}
+        self.assertEqual(audit.custody(prompt, {"targets": []}, files)[0]["state"], "missing_export")
+
+    def test_verify_export_matches_git_blob_and_actual_bytes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "filesystem/memo.txt"
+            path.parent.mkdir()
+            path.write_bytes(b"approved")
+            expected = hashlib.sha1(b"blob 8\0approved").hexdigest()
+            observed = audit.verify_export(root, "filesystem/memo.txt", expected)
+            self.assertEqual(observed["state"], "verified")
+            self.assertEqual(observed["sha256"], hashlib.sha256(b"approved").hexdigest())
+            path.write_bytes(b"revised!")
+            self.assertEqual(audit.verify_export(root, "filesystem/memo.txt", expected)["state"], "blob_mismatch")
+
+    def test_status_needs_every_requested_destination(self):
+        verified = {"state": "verified"}
+        self.assertEqual(audit.delivery_status([verified]), "verified")
+        self.assertEqual(audit.delivery_status([verified, {"state": "missing_export"}]), "incomplete")
+        self.assertEqual(audit.delivery_status([verified, {"state": "destination_receipt_unverified"}]), "unverified")
+        self.assertEqual(audit.delivery_status([]), "unverified")
+
+    def test_terminal_observation_belongs_to_the_call(self):
+        step = {"step_id": 11, "tool_calls": [{"tool_call_id": "last"}],
+                "observation": {"results": [{"source_call_id": "earlier"}]}}
+        self.assertEqual(audit.terminal_step([step])["without_observation"], ["last"])
+        step["observation"]["results"].append({"source_call_id": "last"})
+        self.assertEqual(audit.terminal_step([step])["without_observation"], [])
 
 
 if __name__=="__main__":
