@@ -594,6 +594,118 @@ def _mapped_operator_3d(entities, ref, unit_scale):
     return matrix
 
 
+class UnresolvedSolidGeometry(ValueError):
+    """A physical Body was present but could not supply verified solid geometry."""
+
+
+def _polygonal_solid_mesh(entities, args, unit_scale):
+    """Tessellate bounded planar regions; preserve all holes and oriented shell edges."""
+    from collections import Counter
+    try:
+        from shapely import Polygon, constrained_delaunay_triangles
+        from shapely.errors import GEOSException
+    except ImportError as exc:
+        raise UnresolvedSolidGeometry("polygonal Body requires constrained polygon triangulation") from exc
+
+    def fail(reason):
+        raise UnresolvedSolidGeometry("polygonal Body: " + reason)
+
+    def reference(ref, accepted):
+        if not isinstance(ref, tuple) or ref[0] != "ref" or ref[1] not in entities:
+            fail("missing referenced IFC entity")
+        kind, attrs = entities[ref[1]]
+        if kind not in accepted:
+            fail("unexpected referenced " + kind)
+        return kind, attrs
+
+    if len(args) < 3 or args[1] is False or not args[2]:
+        fail("open or empty face set cannot establish solid quantities")
+    _, points = reference(args[0], {"IFCCARTESIANPOINTLIST3D"})
+    if not points:
+        fail("missing point list")
+    try:
+        vertices = np.asarray(points[0], dtype=np.float64) * unit_scale
+    except (ValueError, TypeError) as exc:
+        raise UnresolvedSolidGeometry("malformed polygonal point list") from exc
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or not np.isfinite(vertices).all():
+        fail("non-finite or non-3D point list")
+    # STEP PnIndex, when present, maps both outer and inner loop indices.
+    index_map = args[3] if len(args) > 3 and args[3] is not None else range(1, len(vertices) + 1)
+    if not isinstance(index_map, (list, range)) or any(type(i) is not int or not 1 <= i <= len(vertices) for i in index_map):
+        fail("invalid point-index indirection")
+    def indices(source):
+        if not isinstance(source, list) or len(source) < 3 or any(type(i) is not int or not 1 <= i <= len(index_map) for i in source):
+            fail("invalid face vertex indices")
+        return [index_map[i - 1] - 1 for i in source]
+
+    triangles = []
+    directed = Counter()
+    for ref in args[2]:
+        kind, bounds = reference(ref, {"IFCINDEXEDPOLYGONALFACE", "IFCINDEXEDPOLYGONALFACEWITHVOIDS"})
+        if not bounds:
+            fail("missing exterior ring")
+        rings = [indices(bounds[0])]
+        if kind == "IFCINDEXEDPOLYGONALFACEWITHVOIDS":
+            if len(bounds) < 2 or not isinstance(bounds[1], list) or not bounds[1]:
+                fail("missing inner rings")
+            rings.extend(indices(loop) for loop in bounds[1])
+
+        # Coordinates are shifted before projection to keep survey origin out of the fit.
+        exterior = vertices[rings[0]] - vertices[rings[0][0]]
+        normal = np.cross(exterior, np.roll(exterior, -1, axis=0)).sum(axis=0)
+        norm = np.linalg.norm(normal)
+        if norm == 0 or not np.isfinite(norm):
+            fail("degenerate exterior ring")
+        normal /= norm
+        omit = int(np.argmax(np.abs(normal)))
+        axes = [(omit + 1) % 3, (omit + 2) % 3]
+        faces_2d = []
+        vertex_for = {}
+        for ring in rings:
+            local = vertices[ring] - vertices[rings[0][0]]
+            span = np.max(np.abs(local))
+            if np.max(np.abs(local @ normal)) > 1e-9 * max(1., span):
+                fail("non-planar polygonal face")
+            projected = local[:, axes]
+            area = _signed_area_2d(projected)
+            if (area * normal[omit] > 0) != (len(faces_2d) == 0) or area == 0:
+                fail("inconsistent ring winding")
+            for uv, idx in zip(projected, ring):
+                key = tuple(uv)
+                if key in vertex_for:
+                    fail("repeated or overlapping boundary vertex")
+                vertex_for[key] = idx
+            faces_2d.append(projected)
+        try:
+            polygon = Polygon(faces_2d[0], faces_2d[1:])
+            if not polygon.is_valid or polygon.is_empty or polygon.area <= 0:
+                fail("invalid polygon or inner ring nesting")
+            tessellation = constrained_delaunay_triangles(polygon)
+            area_sum = 0.
+            for triangle in tessellation.geoms:
+                coords = list(triangle.exterior.coords)[:-1]
+                if len(coords) != 3 or any(c not in vertex_for for c in coords) or not polygon.covers(triangle):
+                    fail("constrained tessellation escaped polygon boundaries")
+                area_sum += triangle.area
+                tri = [vertex_for[c] for c in coords]
+                if _signed_area_2d(np.asarray(coords)) * normal[omit] < 0:
+                    tri.reverse()
+                triangles.append(tri)
+                for a, b in zip(tri, tri[1:] + tri[:1]):
+                    directed[(tuple(vertices[a]), tuple(vertices[b]))] += 1
+            if not math.isclose(area_sum, polygon.area, rel_tol=1e-10, abs_tol=0.):
+                fail("incomplete constrained triangulation")
+        except (GEOSException, ValueError) as exc:
+            if isinstance(exc, UnresolvedSolidGeometry):
+                raise
+            raise UnresolvedSolidGeometry("invalid planar polygonal Body") from exc
+    if not triangles or any(count != 1 or directed[(b, a)] != 1 for (a, b), count in directed.items()):
+        fail("shell is open, non-manifold or inconsistently oriented")
+    # Drop unreferenced coordinates: PnIndex may select only one part of a shared list.
+    used, inverse = np.unique(np.asarray(triangles, dtype=np.int32), return_inverse=True)
+    return [(vertices[used], inverse.reshape(-1, 3).astype(np.int32))]
+
+
 def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, unit_scale: float) -> List[Tuple[np.ndarray, np.ndarray]]:
     if not (isinstance(iref, tuple) and iref[0] == "ref" and iref[1] in entities):
         return []
@@ -624,7 +736,10 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
                     _, rargs = entities[rep_ref[1]]
                     if len(rargs) >= 4 and isinstance(rargs[3], list):
                         for sub in rargs[3]:
-                            for (vv, ff) in _extract_solid_item(entities, sub, unit_scale):
+                            sub_meshes = _extract_solid_item(entities, sub, unit_scale)
+                            if not sub_meshes:
+                                raise UnresolvedSolidGeometry("unresolved physical item in mapped representation")
+                            for (vv, ff) in sub_meshes:
                                 out_items.append((_apply_transform(vv, map_mat @ orig_mat), ff))
         return out_items
 
@@ -637,23 +752,8 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
                 faces = np.array([[int(idx) - 1 for idx in tri] for tri in args[3]], dtype=np.int32)
                 return [(verts, faces)]
 
-    if itype == "IFCPOLYGONALFACESET" and len(args) >= 3:
-        cref = args[0]
-        faces_arg = args[2]
-        if isinstance(cref, tuple) and cref[0] == "ref" and cref[1] in entities and isinstance(faces_arg, list):
-            _, cargs = entities[cref[1]]
-            if cargs and isinstance(cargs[0], list):
-                verts = np.array([[float(c) * unit_scale for c in pt] for pt in cargs[0]], dtype=np.float64)
-                tris: List[Tuple[int, int, int]] = []
-                for fref in faces_arg:
-                    if isinstance(fref, tuple) and fref[0] == "ref" and fref[1] in entities:
-                        _, fargs = entities[fref[1]]
-                        if fargs and isinstance(fargs[0], list):
-                            loop = [int(x) - 1 for x in fargs[0]]
-                            for k in range(1, len(loop) - 1):
-                                tris.append((loop[0], loop[k], loop[k + 1]))
-                if tris:
-                    return [(verts, np.array(tris, dtype=np.int32))]
+    if itype == "IFCPOLYGONALFACESET":
+        return _polygonal_solid_mesh(entities, args, unit_scale)
 
     if itype == "IFCFACETEDBREP" and len(args) >= 1:
         sref = args[0]
@@ -821,7 +921,7 @@ def _require_single_swept_body(entities, step):
     raise UnresolvedOpening("unsupported swept opening or host profile")
 
 
-def _physical_occurrences(solids,entities,unit_scale):
+def _opening_relationships(entities):
     related = {}
     for kind,args in entities.values():
         if kind != "IFCRELVOIDSELEMENT":
@@ -830,14 +930,16 @@ def _physical_occurrences(solids,entities,unit_scale):
             raise UnresolvedOpening("malformed IFC opening relationship")
         host, opening = args[4][1],args[5][1]
         related.setdefault(host,set()).add(opening)
+    return related
+
+
+def _physical_occurrences(solids,entities,unit_scale,related):
     by_step = {s.metadata["step_id"]:s for s in solids}
     for host,openings in related.items():
         if host not in by_step or any(i not in by_step or
                 by_step[i].ifc_type not in ("IFCOPENINGELEMENT","IFCOPENINGSTANDARDCASE")
                 for i in openings):
             raise UnresolvedOpening("missing or unsupported host/opening body")
-        for step in (host, *sorted(openings)):
-            _require_single_swept_body(entities, step)
         frame = _resolve_local_placement(entities,entities[host][1][5],unit_scale)
         by_step[host] = _subtract_opening_boxes(by_step[host],[by_step[i] for i in sorted(openings)],frame)
     return [s for s in by_step.values() if s is not None and
@@ -848,6 +950,8 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
     entities = parse_ifc_entities(ifc_text)
     unit_scale = _detect_length_unit_scale(entities)
     solids: List[SolidMesh3D] = []
+    related = _opening_relationships(entities)
+    participants = set(related).union(*related.values())
 
     for eid, (etype, args) in sorted(entities.items()):
         if len(args) < 7 or not etype.startswith("IFC"):
@@ -859,6 +963,8 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
         if rtype != "IFCPRODUCTDEFINITIONSHAPE" or len(rargs) < 3 or not isinstance(rargs[2], list):
             continue
 
+        if eid in participants:
+            _require_single_swept_body(entities, eid)
         global_id = str(args[0] or f"#{eid}")
         name = str(args[2] or f"{etype}_{eid}")
         world_mat = _resolve_local_placement(entities, args[5], unit_scale)
@@ -876,7 +982,10 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
             if rep_ident in ("AXIS", "FOOTPRINT", "BOX"):
                 continue
             for item_ref in sr_args[3]:
-                for (v_local, f_local) in _extract_solid_item(entities, item_ref, unit_scale):
+                item_meshes = _extract_solid_item(entities, item_ref, unit_scale)
+                if rep_ident == "BODY" and not item_meshes:
+                    raise UnresolvedSolidGeometry(f"unsupported or empty physical Body item on #{eid}")
+                for (v_local, f_local) in item_meshes:
                     v_world = _apply_transform(v_local, world_mat)
                     all_verts.append(v_world)
                     all_faces.append(f_local + v_offset)
@@ -892,7 +1001,7 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
                 faces=np.vstack(all_faces),
                 metadata={"step_id": eid, "unit_scale_m": unit_scale},
             ))
-    return _physical_occurrences(solids,entities,unit_scale)
+    return _physical_occurrences(solids,entities,unit_scale,related)
 
 
 def parse_stl_mesh(data: bytes | str, element_id: str = "stl_0", name: str = "stl_part", scale_to_m: float = 1.0) -> SolidMesh3D:
@@ -1529,6 +1638,9 @@ def run_router_ifc_clash(payload: dict) -> dict:
                         if has_entities and zero_solids:
                             continue
                         return out
+                except UnresolvedSolidGeometry as exc:
+                    return {"ok":False,"tool":"hamon_ifc_spatial_clash","status":"unresolved_solid_geometry",
+                            "reason":str(exc),"total_solid_volume_m3":None}
                 except UnresolvedOpening as exc:
                     return {"ok":False,"tool":"hamon_ifc_spatial_clash","status":"unresolved_opening",
                             "reason":str(exc),"total_solid_volume_m3":None}
