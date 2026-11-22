@@ -424,6 +424,25 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
             if tv is None:
                 adiabatic.add(idx)
 
+        # In a closed enclosure, an adiabatic surface sets J_i = sum(F_ij J_j).
+        # A component containing only such equations leaves its common J free.
+        # Walk backwards from prescribed emitters along the actual positive factors.
+        anchored = np.array([i not in adiabatic and eps_vec[i] > 0.0 for i in range(n)])
+        pending = np.flatnonzero(anchored).tolist()
+        while pending:
+            j = pending.pop()
+            predecessors = np.flatnonzero((f_mat[:, j] > 0.0) & ~anchored)
+            anchored[predecessors] = True
+            pending.extend(predecessors.tolist())
+        if not np.all(anchored):
+            return {
+                "domain": "exchangers_radiation",
+                "subkind": subkind,
+                "verified": False,
+                "error": "underdetermined_closed_radiation_enclosure",
+                "surfaces_without_temperature_path": np.flatnonzero(~anchored).tolist(),
+            }
+
         m_sys = np.zeros((n, n), dtype=float)
         b_rhs = np.zeros(n, dtype=float)
         for i in range(n):
