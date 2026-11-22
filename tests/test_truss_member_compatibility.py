@@ -75,6 +75,39 @@ class TrussCompatibilityTests(unittest.TestCase):
         self.assertTrue(math.isclose(cold+hot, n2, rel_tol=1e-7))
         self.assertTrue(math.isclose(cold-hot, 10.0*thermal, rel_tol=1e-12))
 
+    def test_force_free_rigid_translation_and_compatible_thermal_expansion(self):
+        y = 1.0 + 1e-7
+        for split in (False, True):
+            for shift in (1e-8, 1e-7, 1.0):
+                case = truss(y, split=split, shift=shift)
+                case["loads"] = []
+                result = verify_fem_structure(case)
+                self.assertTrue(result["passed"])
+                self.assertEqual(result["displacements_xy_m"][0], [shift, -shift])
+                self.assertEqual(result["axial_forces_N"], [0.0] * len(case["elements"]))
+                self.assertEqual(result["strain_energy_J"], 0.0)
+            strain = 1e-7
+            case = truss(y, split=split)
+            case["loads"] = []
+            for el in case["elements"]:
+                el.update(alpha_per_K=strain, dT_K=1)
+            result = verify_fem_structure(case)
+            self.assertTrue(result["passed"])
+            self.assertEqual(result["axial_forces_N"], [0.0] * len(case["elements"]))
+            self.assertEqual(result["reactions_xy_N"], [[0.0, 0.0]] * 3)
+            dx, dy = result["displacements_xy_m"][0]
+            error = math.hypot(dx - strain*(y-1), dy + strain*(y+1))
+            self.assertLess(error, 1e-7 * math.hypot(dx, dy))
+
+    def test_unrelated_thermal_self_stress_cannot_mask_a_local_incompatibility(self):
+        case = truss(1.0 + 1e-9)
+        original = verify_fem_structure(case)
+        case["nodes"].extend([[2, 0], [3, 0]])
+        case["supports"].extend({"node": i, "fix_x": True, "fix_y": True} for i in (3, 4))
+        case["elements"].append({"i": 3, "j": 4, "E_pa": 1e9, "A_m2": 1,
+                                 "alpha_per_K": 1e-5, "dT_K": 10})
+        self.assertEqual(verify_fem_structure(case)["passed"], original["passed"])
+
     def test_exact_transverse_mechanism_is_rejected_in_every_order(self):
         for reflection in (-1, 1):
             for reorder in (False, True):
