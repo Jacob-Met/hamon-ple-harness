@@ -1,0 +1,55 @@
+{
+  "course": "heat_modal_spatial_amplitude",
+  "amendment": 1,
+  "state": "frozen_before_any_amplitude_numerical_execution",
+  "reason": "The first native source-preparation queue expired without admission during a full-disk outage. A new managed cold checkout verified the old baseline. Before either paired branch/PR or any amplitude solver run, main received independently maintained PR199.",
+  "original": {
+    "base": "002822975bf74952bdefa1979336d479560ef200",
+    "tree": "6d02b5ae385cfe8ea4ed6d8d79bf9e8e9f5b58ba",
+    "scope_sha256": "cd6142cfd339cac7f3908069c706859b7722192f76cbff29b42cbe767df8b2d2",
+    "protocol_sha256": "c2e75163f8c36d745392e03067be2d1a86b206a2ae8e3eee7accb5ef4f5658eb",
+    "candidate_sha256": "be2b01cc9afc1b1eb38c6fffdb44784b6a480014d5f6fef6581472c9f5dd8158",
+    "candidate_patch_sha256": "9a53a21e1eab9b9f4acdd8e5e529d9fe5db87b64bd16479511ec7117ab58e9a5",
+    "sources_retained": true,
+    "source_preparation_job": "161636-lead-heat-modal-amplitude-frozen-source-v1",
+    "source_preparation_outcome": "expired_before_admission_no_native_exit"
+  },
+  "common_incoming": {
+    "pr": 199,
+    "head": "4dededb7dfc999225c0641ba00a12f2eb4d56408",
+    "merge": "75a72cce535126b48ff534d506fb9e23f7e5d54a",
+    "tree": "8f747627e41732ef3ef2a5c20002846913ad5561",
+    "successful_maintained_run": 45065003706,
+    "files": [
+      {
+        "path": "hamon_pde_control_psychro_fem.py",
+        "blob": "bd7bee6f63e1426b77a00ec2e9a14c63bcac2639",
+        "sha256": "9084df229f91d85a270f19544975c9c7d97b3610c756693494a6bf7113211841"
+      },
+      {
+        "path": "tests/test_wave5_pde_control_psychro_fem.py",
+        "blob": "25e888c667d3e0db1f20d70608ddddc46326a209"
+      }
+    ],
+    "scope": "New sine-profile Laplace rectangle helper/route and one aspect/unit/boundary test; transient heat and registered fixtures unchanged."
+  },
+  "new_pair": {
+    "base": "75a72cce535126b48ff534d506fb9e23f7e5d54a",
+    "tree": "8f747627e41732ef3ef2a5c20002846913ad5561",
+    "candidate_sha256": "d109d639f53a42e773677a70a9a789c548b4a54cfd26e37ed89a5202f15fe047",
+    "construction": "Frozen amplitude candidate prefix before def _passive_fin_ratio plus exact incoming199 tail from that marker through EOF. The same original two amplitude hunks are the only stock/candidate solver difference."
+  },
+  "fixed": {
+    "direct_source_sha256": "04f879578de1f714e8d21af8186de6e92b3257431ccd4c2890dbe2f6a9f22c73",
+    "registered_source_sha256": "2191c94b6b57a61ab81dc93c2d9039028b0791f967b5f93db1ecbae2dfd91241",
+    "direct_calls": 45,
+    "registered_calls": 5,
+    "whole_controls": 8,
+    "all_inputs_references_claims_tolerances_unchanged": true,
+    "inherited_records": 299,
+    "inherited_totals": 13,
+    "separate_beam": 1,
+    "all_prior_records_still_required_exact": true
+  },
+  "qualification": "Preregister exact common-base stock/candidate heads before creating PRs; retain both first originals once. Full maintained CI must include the incoming Laplace test. No original command binding moved and no numerical job has been replayed."
+}
