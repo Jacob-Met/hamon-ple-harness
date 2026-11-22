@@ -874,7 +874,13 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         if not all(map(math.isfinite, (a_len, b_len, t_top, xq, yq))) or a_len <= 0.0 or b_len <= 0.0 or not (0.0 <= xq <= a_len) or not (0.0 <= yq <= b_len):
             return {"passed": False, "domain": "pde", "mode": mode, "reason": "Invalid 2D Laplace domain or query point"}
 
-        solver = _sine_laplace_rectangle if top_profile == "sine" else _constant_top_rectangle
+        if top_profile == "sine":
+            solver = _sine_laplace_rectangle
+        elif top_profile in ("constant", "uniform"):
+            solver = _constant_top_rectangle
+        else:
+            return {"passed": False, "domain": "pde", "mode": mode,
+                    "reason": "Unsupported top_profile. Use sine, constant, or uniform."}
         try:
             t_exact, t_fdm = solver(a_len, b_len, xq, yq, t_top)
         except ValueError as exc:
