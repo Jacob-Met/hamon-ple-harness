@@ -226,20 +226,47 @@ def page_connectivity(filename, page=1):
             "printed_equivalence_anchors": anchors}
 
 
+def _ground_glyph_precedence(name, components, glyphs, labels, occurrences):
+    """Allow incidental text on a witnessed ground island only when it cannot identify another island."""
+    if not _GROUND_NAME.fullmatch(name):
+        return False
+    for component in components:
+        marks = glyphs[component]
+        if set(marks) != {(name, "ground_bar")}:
+            return False
+        roots = marks[name, "ground_bar"]
+        if len(roots) < 2:
+            return False
+        for other, anchors in labels[component].items():
+            if other == name:
+                continue
+            if (_GROUND_NAME.fullmatch(other) or _POWER_NAME.fullmatch(other)
+                    or len(occurrences[other]) != 1 or not anchors <= roots):
+                return False
+    return True
+
+
 def _stitch_pages(pages):
     """Map sheet-local components onto flat-design nets using witnessed exact names."""
     by_name = defaultdict(set)
-    by_component = defaultdict(set)
+    by_component = defaultdict(lambda: defaultdict(set))
+    glyph_evidence = defaultdict(lambda: defaultdict(set))
+    occurrences = defaultdict(set)
     for page in pages:
         membership = page["wire_groups"]
         number = page["page"]
         glyphs = {(mark["name"], membership[mark["wire_index"]])
                   for mark in page["supply_glyphs"]}
+        for mark in page["supply_glyphs"]:
+            root = mark["wire_index"]
+            component = (number, membership[root])
+            glyph_evidence[component][mark["name"], mark["shape"]].add(root)
         for name, anchors in page["printed_equivalence_anchors"].items():
             for index in anchors:
                 group = membership[index]
                 component = (number, group)
-                by_component[component].add(name)
+                by_component[component][name].add(index)
+                occurrences[name].add((number, index))
                 # A printed supply word can lie on a different wire. Require
                 # physical glyph evidence on each sheet for a supply join.
                 supply_name = _GROUND_NAME.fullmatch(name) or _POWER_NAME.fullmatch(name)
@@ -252,10 +279,20 @@ def _stitch_pages(pages):
     for name, components in sorted(by_name.items()):
         if len(components) < 2 or len({page for page, _ in components}) != len(components):
             continue
-        if any(by_component[component] != {name} for component in components):
+        conflicting_text = any(set(by_component[component]) != {name} for component in components)
+        if conflicting_text and not _ground_glyph_precedence(
+                name, components, glyph_evidence, by_component, occurrences):
             continue
         canonical.update(dict.fromkeys(components, min(components)))
-        links.append({"name": name, "page_groups": sorted(components)})
+        link = {"name": name, "page_groups": sorted(components)}
+        if conflicting_text:
+            link["ground_bar_witnesses"] = [
+                {"page": page, "group": group,
+                 "wire_islands": sorted(glyph_evidence[page, group][name, "ground_bar"]),
+                 "incidental_labels": sorted(set(by_component[page, group]) - {name})}
+                for page, group in sorted(components)
+            ]
+        links.append(link)
 
     group_ids = {}
     memberships = []
