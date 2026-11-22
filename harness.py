@@ -37,7 +37,6 @@ import hashlib
 import json
 import os
 import pathlib
-import shutil
 import subprocess
 import tempfile
 from typing import Any
@@ -50,8 +49,8 @@ import delivery_materialize
 import hamon_pareto
 
 HERE = pathlib.Path(__file__).resolve().parent
-# npm ci, from package-lock.json
-PI = shutil.which("pi") or str(HERE / "node_modules" / ".bin" / "pi")
+# submission.yaml installs this CLI into the harness source tree with npm ci.
+PI = str(HERE / "node_modules" / ".bin" / "pi")
 # pi's --thinking level: off, minimal, low, medium, high, xhigh or max
 THINKING = "max"
 # stop pi this long before the deadline (less on short tasks) so its answer
