@@ -33,6 +33,15 @@ class ParseContracts(unittest.TestCase):
         self.assertEqual(self.targets(prompt, "/filesystem/DCBim"),
                          [("/filesystem/DCBim/submission/model.ifc", "file")])
 
+    def test_submitted_generator_and_optional_runtime_outputs(self):
+        prompt = ("Expected output One self-contained Python script at `output/build.py` "
+                  "that builds the model and writes a file to sys.argv[1] "
+                  "(default `output/model.ifc`). "
+                  "Drawing notes (optional side file) Write a JSON file next to the model "
+                  "(output/notes.json). Separately write the report to output/report.pdf.")
+        self.assertEqual(self.targets(prompt), [
+            ("/filesystem/output/build.py", "file"), ("/filesystem/output/report.pdf", "file")])
+
     def test_output_directory(self):
         prompt = ("Save the files that make up your answer under "
                   "\`output/\` in this workspace; do not edit the inputs.")

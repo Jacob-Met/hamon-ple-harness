@@ -31,6 +31,11 @@ ACTION = re.compile(
     r"|expected\s+output\s*submit\b)",
     re.I | re.S,
 )
+SCRIPT_DELIVERY = re.compile(
+    r"\bexpected\s+output\b[\s:#*-]*(?:one|a single)\s+(?:self[- ]contained\s+)?"
+    r"python\s+script\s+at\s+[`'\x22]*(?P<path>[A-Za-z0-9_./+\-]+\.py)"
+    r"[`'\x22]*\s+that\s+(?:builds|generates|writes|produces)\b", re.I,
+)
 MAX_TARGETS = 24
 
 
@@ -58,6 +63,11 @@ def extract_targets(instruction: str, workdir: str) -> list[dict[str, str]]:
     if not isinstance(instruction, str) or not isinstance(workdir, str):
         return []
     found: dict[str, dict[str, str]] = {}
+    script = SCRIPT_DELIVERY.search(instruction)
+    if script:
+        script_path = _safe_path(script.group("path"), workdir)
+        if script_path:
+            found[script_path] = {"path": script_path, "kind": "file"}
     for match in FILE.finditer(instruction):
         context = instruction[max(0, match.start() - 180):match.start()]
         # Do not silently strip directory traversal into a valid-looking path.
@@ -66,6 +76,12 @@ def extract_targets(instruction: str, workdir: str) -> list[dict[str, str]]:
         # A path is an output only when a nearby affirmative write clause says so.
         # Keep the last statement to prevent an earlier "write" marking inputs.
         clause = re.split(r"(?<=[.;])\s+|\n{2,}", context)[-1]
+        if script:
+            # The submitted code is the deliverable. A default runtime filename
+            # and an explicitly optional side file are not additional obligations.
+            if (re.search(r"\bdefault\s+[`'\x22]*$", context, re.I)
+                    or re.search(r"\boptional side file\b", clause, re.I)):
+                continue
         if not ACTION.search(clause):
             continue
         path = _safe_path(match.group("path"), workdir)
