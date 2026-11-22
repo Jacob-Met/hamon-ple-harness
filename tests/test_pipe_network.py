@@ -264,3 +264,47 @@ def test_all_heads_prescribed_and_disconnected_reservoir_components():
     assert result["flows_m3_s"] == {"link": 0.0}
     nodes.append({"id": "c", "fixed_head_m": 1.0})
     assert not verify_pipe_network({"nodes": nodes, "pipes": [pipe]})["ok"]
+
+
+@pytest.mark.parametrize("direction", [1, -1])
+@pytest.mark.parametrize("tap_first", [True, False])
+@pytest.mark.parametrize("separate_reservoirs", [True, False])
+def test_parallel_capillary_feed_keeps_downstream_minor_gradient(direction, tap_first, separate_reservoirs):
+    # Two laminar feed pipes have 1:5 resistance. The terminal tap drops
+    # 0.26 micrometres while the feed drops over twenty metres.
+    feed, tap = direction * 5.1e-7, direction * 1e-8
+    coefficient = 128e-6 / (math.pi * 9.80665)
+    left = 100.
+    right = left + direction * .025 if separate_reservoirs else left
+    resistance = coefficient * 12 / .001**4
+    mid = (left + right / 5 - resistance * feed) / 1.2
+    short_flow = (left - mid) / resistance
+    long_flow = (mid - right) / (5 * resistance)
+    end = mid - coefficient * tap / .02**4
+    nodes = [{"id": "M", "demand_m3_s": feed - tap}, {"id": "T", "demand_m3_s": tap},
+             {"id": "R", "fixed_head_m": left}]
+    heads = {"M": mid, "T": end, "R": left}
+    right_name = "R"
+    if separate_reservoirs:
+        right_name = "S"
+        nodes.append({"id": "S", "fixed_head_m": right})
+        heads["S"] = right
+    pipes = [
+        {"id": "short", "from": "R", "to": "M", "length_m": 12, "diameter_m": .001},
+        {"id": "long", "from": "M", "to": right_name, "length_m": 60, "diameter_m": .001},
+    ]
+    tap_pipe = {"id": "tap", "from": "T", "to": "M", "length_m": 1, "diameter_m": .02}
+    pipes.insert(0 if tap_first else len(pipes), tap_pipe)
+    case = {
+        "calculation": "pipe_network", "nodes": nodes, "pipes": pipes,
+        "proposed_heads_m": heads,
+        "proposed_flows_m3_s": {"short": short_flow, "long": long_flow, "tap": -tap},
+    }
+    result = verify_pipe_network(case)
+    assert result["conservation_verified"], result
+    assert result["independent_cycles"] == (0 if separate_reservoirs else 1)
+    assert result["max_nodal_cycle_flow_difference_m3_s"] < 1e-20
+    assert result["heads_m"] == pytest.approx(heads, rel=0, abs=1e-12)
+    assert result["flows_m3_s"] == pytest.approx(case["proposed_flows_m3_s"], rel=0, abs=1e-20)
+    case["proposed_heads_m"]["T"] = mid
+    assert not verify_pipe_network(case)["proposed_checks"]["pipe_head_drops_match"]
