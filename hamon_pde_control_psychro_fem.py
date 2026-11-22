@@ -40,6 +40,8 @@ import json
 import math
 import re
 import sys
+from fractions import Fraction
+from itertools import zip_longest
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
@@ -516,85 +518,231 @@ def _routh_table(coeffs: Sequence[float]) -> Tuple[List[List[float]], int, bool]
     return table, sign_changes, zero_row_detected
 
 
+def _trim_poly(p):
+    while p and not p[-1]:
+        p.pop()
+    return p
+
+
+def _poly_sum(a, b, sign=1):
+    return _trim_poly([x + sign*y for x, y in zip_longest(a, b, fillvalue=0)])
+
+
+def _poly_product(a, b):
+    if not a or not b:
+        return []
+    out = [0] * (len(a) + len(b) - 1)
+    for i, x in enumerate(a):
+        for j, y in enumerate(b):
+            out[i+j] += x*y
+    return _trim_poly(out)
+
+
+def _poly_divrem(a, b):
+    remainder = list(a)
+    quotient = [0] * max(0, len(a) - len(b) + 1)
+    while len(remainder) >= len(b):
+        offset = len(remainder) - len(b)
+        q = Fraction(remainder[-1], b[-1])
+        quotient[offset] = q
+        for i, c in enumerate(b):
+            remainder[offset+i] -= q*c
+        _trim_poly(remainder)
+    return quotient, remainder
+
+
+def _primitive_poly(p):
+    """Reduce rational coefficients to signed primitive integers without changing signs."""
+    if not p:
+        return []
+    denominator = math.lcm(*(c.denominator for c in p))
+    integers = [int(c*denominator) for c in p]
+    divisor = math.gcd(*integers)
+    return [v//divisor for v in integers]
+
+
+def _sturm_chain(p):
+    chain = [_primitive_poly(p)]
+    derivative = _primitive_poly([i*c for i, c in enumerate(p) if i])
+    if derivative:
+        chain.append(derivative)
+    while len(chain[-1]) > 1:
+        _, rem = _poly_divrem(chain[-2], chain[-1])
+        if not rem:
+            break
+        chain.append(_primitive_poly([-c for c in rem]))
+    return chain
+
+
+def _poly_value(p, x):
+    out = 0
+    for c in reversed(p):
+        out = out*x + c
+    return out
+
+
+def _poly_gcd(a, b):
+    a, b = _primitive_poly(a), _primitive_poly(b)
+    while b:
+        a, b = b, _primitive_poly(_poly_divrem(a, b)[1])
+    return a
+
+
+def _resolved_nonzero(poly, lo, hi):
+    """Bound nonzero polynomial values even immediately next to a pole or zero."""
+    low = high = 0
+    for c in reversed(poly):
+        bounds = (low*lo, low*hi, high*lo, high*hi)
+        low, high = min(bounds) + c, max(bounds) + c
+    return (low > 0 or high < 0) and (high-low) * (1 << 45) <= min(abs(low), abs(high))
+
+
+def _regular_roots(poly, exclude=(), nonzero_witnesses=()):
+    """Isolate distinct positive roots in rational intervals; remove exact pole/zero factors."""
+    p = _primitive_poly(poly)
+    while p and not p[0]:
+        p.pop(0)
+    if len(p) < 2:
+        return []
+    gcd = _sturm_chain(p)[-1]
+    if len(gcd) > 1:
+        p = _primitive_poly(_poly_divrem(p, gcd)[0])
+    if exclude:
+        common = _poly_gcd(p, exclude)
+        if len(common) > 1:
+            p = _primitive_poly(_poly_divrem(p, common)[0])
+    if len(p) < 2:
+        return []
+    if len(p) == 2:
+        x = Fraction(-p[0], p[1])
+        return [(x, x)] if x > 0 else []
+    chain = _sturm_chain(p)
+
+    def variations(x):
+        signs = [_poly_value(q, x) for q in chain]
+        nonzero = [v > 0 for v in signs if v]
+        return sum(a != b for a, b in zip(nonzero, nonzero[1:]))
+
+    # Cauchy's strict upper bound encloses every finite root, independently of units.
+    upper = Fraction(2 + max(abs(v) for v in p[:-1]) // abs(p[-1]))
+    pending = [(Fraction(0), upper, variations(0), variations(upper))]
+    roots = []
+    while pending:
+        lo, hi, left, right = pending.pop()
+        count = left - right
+        if count == 0:
+            continue
+        if count == 1:
+            if not _poly_value(p, hi):
+                roots.append((hi, hi))
+                continue
+            if ((hi-lo) * (1 << 56) <= hi and _poly_value(p, lo)
+                    and all(_resolved_nonzero(q, lo, hi) for q in nonzero_witnesses)):
+                roots.append((lo, hi))
+                continue
+        mid = (lo+hi)/2
+        middle = variations(mid)
+        pending.append((mid, hi, middle, right))
+        pending.append((lo, mid, left, middle))
+    return roots
+
+
+def _jw_parts(coeffs):
+    """Return A(x), B(x) for P(jw) = A(w²) + jw B(w²)."""
+    cs = [Fraction(str(c)) for c in reversed(coeffs)]
+    return tuple(_trim_poly([(-1)**i * c for i, c in enumerate(cs[k::2])]) for k in (0, 1))
+
+
 def _bode_margins(num: Sequence[float], den: Sequence[float]) -> Dict[str, Any]:
-    def g_jw(w: float) -> complex:
-        jw = 1j * w
-        d_val = _poly_eval_complex(den, jw)
-        if abs(d_val) < 1e-30:
-            return complex(float("inf"), 0.0)
-        return _poly_eval_complex(num, jw) / d_val
+    """Find positive-frequency margins from the real rational transfer function.
 
-    n_pts = 1600
-    w_grid = [10.0 ** (-4.0 + 8.0 * k / (n_pts - 1)) for k in range(n_pts)]
-    mags: List[float] = []
-    phases_deg: List[float] = []
-    prev_ph = 0.0
-    for idx, w in enumerate(w_grid):
-        val = g_jw(w)
-        mags.append(abs(val))
-        raw = math.degrees(cmath.phase(val))
-        if idx == 0:
-            ph = raw - 360.0 if raw > 5.0 else raw
-        else:
-            ph = raw
-            while ph - prev_ph > 180.0:
-                ph -= 360.0
-            while ph - prev_ph < -180.0:
-                ph += 360.0
-        phases_deg.append(ph)
-        prev_ph = ph
+    The four scalar fields select the smallest absolute margin (degrees or dB)
+    among isolated crossings. Open intervals describe non-isolated crossover
+    sets separately; their right endpoint is None when unbounded. Denominator
+    zeros are excluded at the original input frequencies, even when removable.
+    """
+    nr, ni = _jw_parts(num)
+    dr, di = _jw_parts(den)
 
-    def unwrap_near(w: float, ref_deg: float) -> float:
-        ph = math.degrees(cmath.phase(g_jw(w)))
-        while ph - ref_deg > 180.0:
-            ph -= 360.0
-        while ph - ref_deg < -180.0:
-            ph += 360.0
-        return ph
+    def dot(ar, ai, br, bi):
+        return _poly_sum(_poly_product(ar, br), [0] + _poly_product(ai, bi))
 
-    w_gc: Optional[float] = None
-    pm_deg: Optional[float] = None
-    for k in range(n_pts - 1):
-        f0 = mags[k] - 1.0
-        f1 = mags[k + 1] - 1.0
-        if f0 == 0.0 or f0 * f1 < 0.0:
-            lo, hi = w_grid[k], w_grid[k + 1]
-            for _ in range(60):
-                mid = 0.5 * (lo + hi)
-                if (abs(g_jw(lo)) - 1.0) * (abs(g_jw(mid)) - 1.0) <= 0.0:
-                    hi = mid
-                else:
-                    lo = mid
-            w_gc = 0.5 * (lo + hi)
-            ref_ph = 0.5 * (phases_deg[k] + phases_deg[k + 1])
-            pm_deg = 180.0 + unwrap_near(w_gc, ref_ph)
-            break
+    mag_n = dot(nr, ni, nr, ni)
+    mag_d = dot(dr, di, dr, di)
+    if not mag_d:
+        raise ValueError("The transfer denominator must be nonzero")
+    real = dot(nr, ni, dr, di)
+    imag = _poly_sum(_poly_product(ni, dr), _poly_product(nr, di), -1)
+    unity = _poly_sum(mag_n, mag_d, -1)
+    undefined = _poly_product(mag_n, mag_d)
+    denominator_zeros = _regular_roots(mag_d)
+    common = _poly_gcd(mag_d, mag_n)
+    reduced_den, _ = _poly_divrem(mag_d, common)
+    poles = _regular_roots(reduced_den)
+    removable = _regular_roots(common, reduced_den)
 
-    w_pc: Optional[float] = None
-    gm_db: Optional[float] = None
-    for k in range(n_pts - 1):
-        p0 = phases_deg[k] + 180.0
-        p1 = phases_deg[k + 1] + 180.0
-        if p0 * p1 < 0.0 or (abs(p0) < 1e-9 and k > 0):
-            lo, hi = w_grid[k], w_grid[k + 1]
-            ref_ph = 0.5 * (phases_deg[k] + phases_deg[k + 1])
-            for _ in range(60):
-                mid = 0.5 * (lo + hi)
-                if (unwrap_near(lo, ref_ph) + 180.0) * (unwrap_near(mid, ref_ph) + 180.0) <= 0.0:
-                    hi = mid
-                else:
-                    lo = mid
-            w_pc = 0.5 * (lo + hi)
-            mag_pc = abs(g_jw(w_pc))
-            gm_db = -20.0 * math.log10(max(mag_pc, 1e-30))
-            break
+    def center(interval):
+        return (interval[0] + interval[1])/2
 
-    return {
-        "w_gc_rad_s": w_gc,
-        "phase_margin_deg": pm_deg,
-        "w_pc_rad_s": w_pc,
-        "gain_margin_db": gm_db,
-    }
+    def frequency(interval):
+        x = center(interval)
+        exponent = (x.numerator.bit_length() - x.denominator.bit_length()) // 2
+        scaled = x / (Fraction(2) ** (2*exponent))
+        return math.ldexp(math.sqrt(float(scaled)), exponent)
+
+    def open_intervals(boundaries, include):
+        runs = []
+        previous = None
+        for following in [*boundaries, None]:
+            lo = previous[1] if previous else Fraction(0)
+            x = (lo + following[0])/2 if following else lo+1
+            if include(x):
+                runs.append([frequency(previous) if previous else 0.0,
+                             frequency(following) if following else None])
+            previous = following
+        return runs
+
+    gain, phase = [], []
+    if unity:
+        # On the real axis, exact unit gain is +1 or -1. Evaluating a nearby
+        # midpoint can choose the opposite side of the phase wrap at +1.
+        axis = _poly_gcd(unity, imag)
+        for interval in _regular_roots(axis, mag_d, (real,)):
+            pm = -180.0 if _poly_value(real, center(interval)) > 0 else 0.0
+            gain.append({"w_rad_s": frequency(interval), "phase_margin_deg": pm})
+        for interval in _regular_roots(unity, _poly_product(mag_d, axis), (imag, mag_d)):
+            x = center(interval)
+            w = frequency(interval)
+            re, im = _poly_value(real, x), _poly_value(imag, x)
+            scale = max(abs(re), abs(im))
+            angle = math.degrees(math.atan2(float(im/scale)*w, float(re/scale)))
+            gain.append({"w_rad_s": w, "phase_margin_deg": angle % 360 - 180})
+        gain.sort(key=lambda entry: entry["w_rad_s"])
+    for interval in _regular_roots(imag, undefined, (real, mag_d)):
+        x = center(interval)
+        re = _poly_value(real, x)
+        if re < 0:
+            # At a real-axis crossover G = Re(N conj(D)) / |D|².
+            ratio = Fraction(_poly_value(mag_d, x), -re)
+            if Fraction(1, 2) <= ratio <= 2:
+                db = 20 * math.log1p(float(ratio-1)) / math.log(10)
+            else:
+                db = 20 * (math.log10(ratio.numerator) - math.log10(ratio.denominator))
+            phase.append({"w_rad_s": frequency(interval), "gain_margin_db": db})
+
+    # Constant unity magnitude and real-axis continua have no unique crossover frequency.
+    gain_intervals = open_intervals(denominator_zeros, lambda _: True) if not unity else []
+    phase_intervals = (open_intervals(_regular_roots(undefined), lambda x: _poly_value(real, x) < 0)
+                       if not imag and mag_n else [])
+    gc = min(gain, key=lambda v: abs(v["phase_margin_deg"]), default={})
+    pc = min(phase, key=lambda v: abs(v["gain_margin_db"]), default={})
+    return {"w_gc_rad_s": gc.get("w_rad_s"), "phase_margin_deg": gc.get("phase_margin_deg"),
+            "w_pc_rad_s": pc.get("w_rad_s"), "gain_margin_db": pc.get("gain_margin_db"),
+            "gain_crossovers": gain, "phase_crossovers": phase,
+            "unity_gain_intervals_rad_s": gain_intervals,
+            "negative_real_intervals_rad_s": phase_intervals,
+            "imaginary_axis_poles_rad_s": [frequency(i) for i in poles],
+            "removable_holes_rad_s": [frequency(i) for i in removable]}
 
 
 def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
@@ -628,8 +776,22 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         _, cl_rhp_routh, cl_zero_row = _routh_table(cl_poly if cl_poly[0] > 0 else [-c for c in cl_poly])
         closed_loop_hurwitz = (cl_rhp_routh == 0) and (not cl_zero_row) and all(p.real < -1e-6 for p in cl_poles)
 
-        margins = _bode_margins(num, den)
-        dc_gain = (num[-1] / den[-1]) if abs(den[-1]) > 1e-14 else float("inf")
+        margins = _bode_margins(spec.get("num", [1.0]), spec["den"])
+        # Infinity is invalid on the JSON tool wire. Cancel origin factors before
+        # distinguishing a finite DC limit from a genuine DC pole.
+        n_dc = list(reversed(num))
+        d_dc = list(reversed(den))
+        d_order = next(i for i, c in enumerate(d_dc) if c)
+        n_order = next((i for i, c in enumerate(n_dc) if c), None)
+        dc_status = "finite_limit" if d_order else "finite"
+        if n_order is None or n_order > d_order:
+            dc_gain = 0.0
+        elif n_order == d_order:
+            dc_gain = n_dc[n_order] / d_dc[d_order]
+            if not math.isfinite(dc_gain):
+                dc_gain, dc_status = None, "outside_float_range"
+        else:
+            dc_gain, dc_status = None, "pole_at_zero"
 
         res: Dict[str, Any] = {
             "passed": bool(routh_root_consistent),
@@ -641,6 +803,7 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             "rhp_poles_eigen": rhp_roots,
             "jw_axis_poles": imag_roots,
             "dc_gain": dc_gain,
+            "dc_gain_status": dc_status,
             "poles_real_imag": [[p.real, p.imag] for p in sorted(poles, key=lambda z: (round(z.real, 7), round(z.imag, 7)))],
             "closed_loop_poles_real_imag": [[p.real, p.imag] for p in sorted(cl_poles, key=lambda z: (round(z.real, 7), round(z.imag, 7)))],
             **margins,
