@@ -14,8 +14,8 @@ numerical cross-verification suite for Physical Engineering's Last Exam (PLE):
        pivot regularization), companion/Durand-Kerner polished complex poles,
        exact Bode gain/phase crossover frequencies, Gain Margin (dB), Phase Margin (deg),
        unity-feedback closed-loop stability, and static DC gain.
-     - State-space Faddeev-LeVerrier characteristic polynomial (M_1 = I), Cayley-Hamilton
-       residual gate, exact algebraic controllability/observability ranks of the supplied
+     - State-space exact Faddeev-LeVerrier characteristic polynomial, Cayley-Hamilton
+       residual, numerical pole diagnostics and algebraic controllability/observability ranks of the supplied
        finite binary64 coefficients, and exact symmetric continuous Lyapunov
        certificates for stability (Q=I) and the requested forcing matrix Q.
   3. Psychrometrics (`verify_psychrometric_process`):
@@ -828,6 +828,108 @@ def _bode_margins(num: Sequence[float], den: Sequence[float]) -> Dict[str, Any]:
             "removable_holes_rad_s": [frequency(i) for i in removable]}
 
 
+def _fraction_text(value):
+    # Decimal(int) is exact and avoids Python's limit on integer-to-text digits.
+    numerator = str(Decimal(value.numerator))
+    return numerator if value.denominator == 1 else numerator + "/" + str(Decimal(value.denominator))
+
+
+def _state_characteristic(a):
+    """Integer Faddeev–LeVerrier on D*A, with coefficients and residual in A's units."""
+    n = len(a)
+    denominator = max(value.denominator for row in a for value in row)
+    operator = [[v.numerator * (denominator // v.denominator) for v in row] for row in a]
+    accumulator = [[int(i == j) for j in range(n)] for i in range(n)]
+    coeffs = [Fraction(1)]
+    power = 1
+    for k in range(1, n + 1):
+        columns = list(zip(*accumulator))
+        accumulator = [[sum(x * y for x, y in zip(row, col)) for col in columns]
+                       for row in operator]
+        coefficient, remainder = divmod(-sum(accumulator[i][i] for i in range(n)), k)
+        if remainder:
+            raise ArithmeticError("Nonintegral characteristic coefficient for an integer matrix")
+        for i in range(n):
+            accumulator[i][i] += coefficient
+        power *= denominator
+        coeffs.append(Fraction(coefficient, power))
+    # At this step the accumulator is the full monic polynomial of D*A evaluated
+    # at D*A. Dividing each entry by D**n recovers the matrix residual for A.
+    residual = Fraction(max(abs(x) for row in accumulator for x in row), power)
+    return coeffs, residual
+
+
+def _diagnostic_float(value):
+    rendered = float(value)
+    if not math.isfinite(rendered) or (value and rendered == 0.0):
+        raise OverflowError("Nonzero or nonfinite diagnostic is outside binary64 range")
+    return rendered
+
+
+def _binary_exponent(value):
+    """Floor(log2(value)) for a positive Fraction, without converting to float."""
+    exponent = value.numerator.bit_length() - value.denominator.bit_length()
+    return exponent if value >= Fraction(2) ** exponent else exponent - 1
+
+
+def _scaled_sqrt(value):
+    """Positive square root without rounding a large or tiny radicand to binary64."""
+    numerator = math.isqrt(value.numerator)
+    denominator = math.isqrt(value.denominator)
+    if numerator * numerator == value.numerator and denominator * denominator == value.denominator:
+        return Fraction(numerator, denominator)
+    scale = Fraction(2) ** (_binary_exponent(value) // 2)
+    return Fraction(math.sqrt(float(value / (scale * scale)))) * scale
+
+
+def _state_pole_diagnostics(coeffs, matrix_scale):
+    """Render finite pole approximations; only the zero multiplicity is certified."""
+    end = len(coeffs)
+    while end > 1 and not coeffs[end - 1]:
+        end -= 1
+    zeros = len(coeffs) - end
+    reduced = coeffs[:end]
+    degree = end - 1
+    poles = [[0.0, 0.0] for _ in range(zeros)]
+    try:
+        if degree == 1:
+            poles.append([_diagnostic_float(-reduced[1]), 0.0])
+        elif degree == 2:
+            _, b, c = reduced
+            center = -b / 2
+            radius_squared = center * center - c
+            if radius_squared < 0:
+                real = _diagnostic_float(center)
+                imag = _diagnostic_float(_scaled_sqrt(-radius_squared))
+                poles.extend([[real, -imag], [real, imag]])
+            elif not radius_squared:
+                root = _diagnostic_float(center)
+                poles.extend([[root, 0.0], [root, 0.0]])
+            else:
+                radius = _scaled_sqrt(radius_squared)
+                # Choose the sum of like-signed magnitudes for one root. Recover the
+                # other via their product before rendering either to binary64.
+                dominant = center - radius if b > 0 else center + radius
+                poles.extend([[_diagnostic_float(dominant), 0.0],
+                              [_diagnostic_float(c / dominant), 0.0]])
+        elif degree > 2:
+            # The roots of p(s*y)/s**degree are dimensionless. Restore the
+            # physical scale only after the existing numerical root iteration.
+            scale = Fraction(2) ** _binary_exponent(matrix_scale)
+            normalized = [_diagnostic_float(v / scale ** i) for i, v in enumerate(reduced)]
+            for root in _poly_roots(normalized):
+                real = _diagnostic_float(Fraction(root.real) * scale)
+                imag = _diagnostic_float(Fraction(root.imag) * scale)
+                if real == imag == 0.0:
+                    # All exact zero factors were removed before this approximation.
+                    return None, "unavailable_numerical_diagnostic", zeros
+                poles.append([real, imag])
+    except (ArithmeticError, ValueError):
+        status = "unavailable_numerical_diagnostic" if degree > 2 else "outside_float_range"
+        return None, status, zeros
+    return sorted(poles), "finite_approximation", zeros
+
+
 def _symmetric_lyapunov_solutions(a, forcings):
     """Solve AᵀP + PA = −Q on symmetric matrices, sharing elimination across Qs."""
     n = len(a)
@@ -908,12 +1010,7 @@ def _lyapunov_certificate(a, q, solution):
         q[i][j] + sum(a[k][i] * p[k][j] + p[i][k] * a[k][j] for k in range(n)) == 0
         for i in range(n) for j in range(n)
     )
-    # Decimal(int) is exact and avoids Python's limit on integer-to-text digits.
-    def fraction_text(value):
-        numerator = str(Decimal(value.numerator))
-        return numerator if value.denominator == 1 else numerator + "/" + str(Decimal(value.denominator))
-
-    return {"solution_status": status, "P_exact": [[fraction_text(v) for v in row] for row in p],
+    return {"solution_status": status, "P_exact": [[_fraction_text(v) for v in row] for row in p],
             "positive_definite": _positive_definite_exact(p), "residual_exact": zero_residual}
 
 
@@ -1004,16 +1101,16 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
                 or any(not math.isfinite(v) for row in a_mat for v in row)):
             return {"passed": False, "domain": "control", "mode": mode, "reason": "Matrix A must be finite, non-empty and square"}
 
-        m_cur = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
-        char_poly = [1.0]
-        for k in range(1, n + 1):
-            am = _mat_mul(a_mat, m_cur)
-            ck = -sum(am[i][i] for i in range(n)) / float(k)
-            char_poly.append(ck)
-            m_cur = [[am[i][j] + (ck if i == j else 0.0) for j in range(n)] for i in range(n)]
-
-        ch_residual = max(abs(m_cur[i][j]) for i in range(n) for j in range(n))
-        eigs = _poly_roots(char_poly)
+        a_exact = [[Fraction(v) for v in row] for row in a_mat]
+        coefficients, ch_residual = _state_characteristic(a_exact)
+        try:
+            char_poly = [_diagnostic_float(v) for v in coefficients]
+            char_status = "finite"
+        except OverflowError:
+            char_poly, char_status = None, "outside_float_range"
+        poles, pole_status, zero_multiplicity = _state_pole_diagnostics(
+            coefficients, max(abs(v) for row in a_exact for v in row)
+        )
 
         controllable: Optional[bool] = None
         ctrl_rank: Optional[int] = None
@@ -1040,7 +1137,6 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             obs_rank = _algebraic_reachable_rank(transpose_a, transpose_c)
             observable = obs_rank == n
 
-        a_exact = [[Fraction(v) for v in row] for row in a_mat]
         identity = [[int(i == j) for j in range(n)] for i in range(n)]
         q = identity
         if "Q" in spec:
@@ -1068,15 +1164,18 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         hurwitz = stability["positive_definite"] is True and stability["residual_exact"] is True
         p_mat, float_status = _lyapunov_float_matrix(solutions[-1][1])
 
-        scale_a = max((abs(a_mat[i][j]) for i in range(n) for j in range(n)), default=1.0) ** max(1, n)
-        passed = (ch_residual <= 1e-7 * max(1.0, scale_a)
+        passed = (ch_residual == 0
                   and stability["residual_exact"] is not False and requested["residual_exact"] is not False)
         res = {
             "passed": passed,
             "domain": "control",
             "mode": mode,
             "char_poly": char_poly,
-            "cayley_hamilton_residual": ch_residual,
+            "char_poly_exact": [_fraction_text(v) for v in coefficients],
+            "char_poly_float_status": char_status,
+            "cayley_hamilton_residual": float(ch_residual),
+            "cayley_hamilton_residual_exact": _fraction_text(ch_residual),
+            "cayley_hamilton_residual_basis": "char_poly_exact",
             "hurwitz_stable": hurwitz,
             "controllable": controllable,
             "controllability_rank": ctrl_rank,
@@ -1089,7 +1188,9 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             "lyapunov_residual_exact": requested["residual_exact"],
             "lyapunov_float_status": float_status,
             "lyapunov_P": p_mat,
-            "eigenvalues_real_imag": [[z.real, z.imag] for z in sorted(eigs, key=lambda z: (round(z.real, 7), round(z.imag, 7)))],
+            "eigenvalues_real_imag": poles,
+            "eigenvalues_status": pole_status,
+            "zero_eigenvalue_multiplicity": zero_multiplicity,
         }
         if ("claimed_value" in spec and spec.get("claimed_field") == "lyapunov_pd"
                 and res["lyapunov_pd"] is None):
