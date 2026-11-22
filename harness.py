@@ -33,6 +33,7 @@ custom `model` provider with `UNKNOWN_MODEL` limits.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import pathlib
@@ -173,11 +174,72 @@ def configure(
   return name, model
 
 
+def message_digest(message: dict[str, Any]) -> bytes:
+  """Compare live and persisted Pi messages without keeping another tool payload."""
+  encoded = json.dumps(message, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+  return hashlib.sha256(encoded.encode("ascii")).digest()
+
+
+def acknowledged_tool_session(
+    directory: pathlib.Path, assistant: bytes, observed: dict[str, bytes],
+    expected: set[str], history: bytes | None,
+) -> pathlib.Path | None:
+  """Find the one linear private session with this exact assistant and all results."""
+  if history is None or not expected or observed.keys() != expected:
+    return None
+  files = list(directory.glob("*.jsonl"))
+  if len(files) != 1 or files[0].is_symlink():
+    return None
+  parent = None
+  seen: set[str] = set()
+  matched = False
+  results: dict[str, bytes] = {}
+  try:
+    with files[0].open(encoding="utf-8") as stream:
+      header = json.loads(next(stream))
+      if header.get("type") != "session":
+        return None
+      replay = message_digest(header)
+      for line in stream:
+        entry = json.loads(line)
+        entry_id = entry.get("id")
+        if not isinstance(entry_id, str) or entry_id in seen or entry.get("parentId") != parent:
+          return None
+        seen.add(entry_id)
+        parent = entry_id
+        if entry.get("type") != "message":
+          # Compaction/rewind can change what will actually reach the model.
+          if matched:
+            return None
+          continue
+        message = entry["message"]
+        digest = message_digest(message)
+        replay = hashlib.sha256(replay + digest).digest()
+        if message.get("role") == "assistant":
+          matched = digest == assistant
+          results.clear()
+        elif matched:
+          if message.get("role") != "toolResult":
+            return None
+          call_id = message.get("toolCallId")
+          if call_id not in expected or call_id in results:
+            return None
+          results[call_id] = digest
+  except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, StopIteration):
+    return None
+  return files[0] if matched and replay == history and results == observed else None
+
+
 class Run:
   """Tracks JSON stream events from a single Pi subprocess run."""
 
   def __init__(self, session: taskbridge.Session, model: str):
     self.session, self.model, self.replies = session, model, 0
+    self.tool_turn: bytes | None = None
+    self.expected_calls: set[str] = set()
+    self.observed_results: dict[str, bytes] = {}
+    self.invalid_tail = False
+    self.history: bytes | None = None
 
   async def on_event(self, event: dict[str, Any]) -> None:
     """Processes a parsed JSON event from Pi, updating final message and usage.
@@ -186,14 +248,34 @@ class Run:
       event: Decoded JSON event dictionary from Pi's stdout stream.
     """
     kind, message = event.get("type"), event.get("message") or {}
-    if kind == "message_end" and message.get("role") == "assistant":
+    if kind == "session":
+      self.history = message_digest(event)
+    if kind == "message_end" and self.history is not None:
+      if message.get("role") in ("system", "user", "assistant", "toolResult"):
+        self.history = hashlib.sha256(self.history + message_digest(message)).digest()
+    if kind == "message_end" and message.get("role") == "toolResult":
+      if self.tool_turn is not None:
+        call_id = message.get("toolCallId")
+        if call_id not in self.expected_calls or call_id in self.observed_results:
+          self.invalid_tail = True
+        else:
+          self.observed_results[call_id] = message_digest(message)
+    elif kind == "message_end" and message.get("role") == "assistant":
       self.replies += 1
+      calls = [b for b in message.get("content", []) if b.get("type") == "toolCall"]
+      self.tool_turn = message_digest(message) if calls else None
+      self.expected_calls = {b["id"] for b in calls if isinstance(b.get("id"), str) and b["id"]}
+      self.observed_results = {}
+      self.invalid_tail = bool(calls) and (
+          len(self.expected_calls) != len(calls) or message.get("stopReason") != "toolUse")
       text = "\n".join(
           b.get("text", "")
           for b in message.get("content") or []
           if b.get("type") == "text"
       )
-      if text.strip():
+      if calls:
+        self.session.final_message = ""
+      elif text.strip():
         self.session.final_message = text.strip()
       if message.get("stopReason") == "error":
         await self.session.log(
@@ -277,9 +359,7 @@ async def solve(session: taskbridge.Session) -> str:
       before_delivery = await delivery_guard.snapshot(session, delivery_targets)
       checked_delivery = bool(delivery_targets) and before_delivery is not None
       session_dir = pathlib.Path(scratch) / "delivery-session"
-      session_args = (
-          ["--session-dir", str(session_dir)] if checked_delivery else ["--no-session"]
-      )
+      session_args = ["--session-dir", str(session_dir)]
       # A generator written during this task can deterministically finish an
       # exact requested artifact; inherited unchanged scripts are never run.
       materialize_candidates = delivery_materialize.candidates(delivery_targets)
@@ -340,6 +420,11 @@ async def solve(session: taskbridge.Session) -> str:
           stop_before_sec=reserve_window,
           log_prefix="pi: ",
       )
+      tool_session = None
+      if run.tool_turn is not None and not run.invalid_tail:
+        tool_session = acknowledged_tool_session(
+            session_dir, run.tool_turn, run.observed_results, run.expected_calls, run.history)
+      can_continue = run.tool_turn is None or tool_session is not None
       if delivery_targets and before_delivery is not None:
         after_delivery = await delivery_guard.snapshot(session, delivery_targets)
         issues = delivery_guard.compare(before_delivery, after_delivery)
@@ -367,7 +452,7 @@ async def solve(session: taskbridge.Session) -> str:
               issues = delivery_guard.compare(before_delivery, after_delivery)
               await session.log("delivery_gate: post_materialize=" + str(len(issues)))
           delivery_time = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC)
-          if issues and (delivery_time is None or delivery_time >= MIN_DELIVERY_RUN_SEC):
+          if issues and can_continue and (delivery_time is None or delivery_time >= MIN_DELIVERY_RUN_SEC):
             # Each task has its own temporary session directory. Continue the
             # actual calculation history if Pi persisted it before the cutoff.
             resume = any(session_dir.glob("*.jsonl"))
@@ -389,11 +474,22 @@ async def solve(session: taskbridge.Session) -> str:
             await session.log(
                 "delivery_gate: residual=" + str(len(still_missing))
             )
+      elif tool_session is not None:
+        remaining = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC)
+        if remaining is None or remaining >= MIN_DELIVERY_RUN_SEC:
+          await session.log("delivery_gate: continuing acknowledged tool results")
+          await taskbridge.run_process(
+              [*argv, "--session", str(tool_session)], session, env=env, cwd=str(work),
+              on_line=run.on_line, stop_before_sec=STOP_BEFORE_SEC, log_prefix="pi-finalize: ",
+              stdin=(b"Continue from the recorded tool results. Check what was actually delivered, "
+                     b"finish the requested work within the remaining time, and report its status."))
   if not run.replies:
     raise RuntimeError(
         f"pi exited with {done.code} before the model answered:"
         f" {done.stderr[-2000:]}"
     )
+  if run.tool_turn is not None:
+    return "(pi stopped after requesting a tool, before giving a final answer)"
   return session.final_message or "(pi stopped without a final message)"
 
 
