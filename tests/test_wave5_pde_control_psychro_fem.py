@@ -72,6 +72,52 @@ class TestWave5PDEControlPsychroFEM(unittest.TestCase):
         self.assertAlmostEqual(r_lap["t_exact"], exact_mid, places=6)
         self.assertAlmostEqual(r_lap["t_fdm_sor"], exact_mid, delta=0.2)
 
+    def test_constant_hot_trace_and_discontinuous_corners(self):
+        spec = dict(mode="laplace_2d_rect", top_profile="constant", width_m=1., height_m=1., t_top=100.)
+        for x, y, expected in ((.001, 1., 100.), (.999, 1., 100.), (0., 1., 0.),
+                               (1., 1., 0.), (0., .999, 0.), (.5, 0., 0.)):
+            result = w5.verify_wave5_engineering(dict(spec, x_eval_m=x, y_eval_m=y))
+            self.assertTrue(result["passed"])
+            self.assertEqual((result["t_exact"], result["t_fdm_sor"]), (expected, expected))
+
+    def test_constant_hot_corner_against_separated_modes(self):
+        for w, h in ((1., 1.), (1000., 1.), (1., 1000.)):
+            for x in (.005, w - .005):
+                y = h - .005
+                if w <= h:
+                    def mode(n):
+                        k = n * math.pi / w
+                        return (4 * math.sin(k * min(x, w-x)) / (n * math.pi)
+                                * math.exp(-k*(h-y)) * -math.expm1(-2*k*y) / -math.expm1(-2*k*h))
+                    harmonic = math.fsum(mode(n) for n in range(1, 5000, 2))
+                else:
+                    def mode(n):
+                        k = n * math.pi / h
+                        return (2 * (-1 if n % 2 == 0 else 1) * math.sin(k*y) / (n * math.pi)
+                                * (math.exp(-k*x) + math.exp(-k*(w-x))) / (1 + math.exp(-k*w)))
+                    harmonic = y/h - math.fsum(mode(n) for n in range(1, 5000))
+                spec = dict(mode="laplace_2d_rect", top_profile="constant", width_m=w,
+                            height_m=h, x_eval_m=x, y_eval_m=y, t_top=-53.)
+                result = w5.verify_wave5_engineering(spec)
+                self.assertTrue(result["passed"])
+                self.assertAlmostEqual(result["t_exact"], -53 * harmonic, places=9)
+                self.assertAlmostEqual(result["t_fdm_sor"], -53 * harmonic, delta=.002)
+        self.assertFalse(w5.verify_wave5_engineering(dict(
+            spec, claimed_field="t_fdm_sor", claimed_value=0.))["passed"])
+
+    def test_constant_edge_retains_tiny_distances_to_cold_walls(self):
+        # Ordinary odd modes and their derivatives at a square's cold edges.
+        # Multiplication by a large finite boundary temperature exposes lost y/x.
+        for x, y, top, expected in ((.5, 1e-17, 1e20, 345.7137573420231),
+                                    (1e-17, .5, 1e20, 834.6268416740731),
+                                    (1e-17, 1e-17, 1e34, 1.0942198076132388)):
+            result = w5.verify_wave5_engineering(dict(
+                mode="laplace_2d_rect", top_profile="constant", width_m=1., height_m=1.,
+                x_eval_m=x, y_eval_m=y, t_top=top))
+            self.assertTrue(result["passed"])
+            self.assertAlmostEqual(result["t_exact"], expected, delta=1e-11*expected)
+            self.assertAlmostEqual(result["t_fdm_sor"], expected, delta=.01*expected)
+
     def test_rectangular_sine_boundary_layer_across_aspect_and_units(self):
         for height, width, temperature in ((40, 1., 100.), (230, 1., -50.),
                                             (1000, 1e100, 25.), (1000, 1e-100, 25.)):

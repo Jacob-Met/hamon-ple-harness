@@ -488,6 +488,127 @@ def _passive_fin_ratio(base_excess, conductance, reference):
         return None, "below_float_range" if ratio < 1 else "above_float_range"
 
 
+def _constant_top_rectangle(width, height, x, y, top):
+    """Harmonic measure of the hot edge, checked by a corner-lifted five-point SOR."""
+    # At the two incompatible corner points retain the sidewall convention.
+    if x == 0.0 or x == width or y == 0.0:
+        return 0.0, 0.0
+    if y == height:
+        return top, top
+    near = min(x, width - x)
+    depth = height - y
+
+    if height >= width:
+        # Odd sine modes of a constant edge summed on a semi-infinite strip.
+        # Alternating Dirichlet images at the bottom recover the finite strip.
+        sine = math.sin(math.pi * (near / width))
+        def strip(z):
+            p = math.pi * z
+            return (2.0 / math.pi) * math.atan2(2.0 * math.exp(-p) * sine, -math.expm1(-2.0 * p))
+
+        aspect, d = height / width, depth / width
+        if y <= height * 0.5:
+            # Here the odd-mode series decays by at least exp(-pi/2)
+            # per mode. Retain y itself even if height-y rounds to height.
+            exact = 0.0
+            for n in range(1, 33, 2):
+                k = n * math.pi
+                ratio = math.exp(-k * d) * -math.expm1(-2 * k * (y / width)) / -math.expm1(-2 * k * aspect)
+                exact += 4.0 * math.sin(k * (near / width)) * ratio / k
+        else:
+            exact = strip(d) - strip(aspect + y / width)
+            for k in range(1, 8):
+                exact += strip(2 * k * aspect + d) - strip(2 * k * aspect + aspect + y / width)
+    else:
+        # Subtract the two cold-side corrections from the linear y/height
+        # profile. This orientation converges even on an arbitrarily wide plate.
+        z, d = y / height, depth / height
+        left, aspect = near / height, width / height
+        p = math.pi * left
+        r = math.exp(-p)
+        # Write z minus the nearest-side angle as one angle; group the
+        # remaining images in opposite-sign pairs that vanish at x=0.
+        exact = (2.0 / math.pi) * math.atan2(
+            -math.expm1(-p) * math.sin(0.5 * math.pi * z),
+            (1.0 + r) * math.sin(0.5 * math.pi * d),
+        )
+        sine, cosine = math.sin(math.pi * min(z, d)), math.cos(math.pi * z)
+        for k in range(1, 16):
+            # (width-near)/height stays well defined when aspect and left overflow.
+            a = (width - near) / height if k == 1 else (k - 1) * aspect + (width - near) / height
+            ra = math.exp(-math.pi * a)
+            rb = ra * math.exp(-2.0 * p)
+            pair = (2.0 / math.pi) * math.atan2(
+                ra * -math.expm1(-2.0 * p) * sine, 1.0 + (ra + rb) * cosine + ra * rb)
+            exact += pair if k % 2 == 0 else -pair
+
+    # In short-side units, boundary influence beyond 16 widths is O(exp(-16*pi)).
+    # Keep the nearest hot corners and cold wall. On a wide plate fold the
+    # query by reflection; beyond the cutoff both side corrections have decayed.
+    scale = min(width, height)
+    w, h = min(width / scale, 32.0), min(height / scale, 16.0)
+    qx, qd = min(near / scale, w * 0.5), min(depth / scale, h)
+    nx, ny = min(320, math.ceil(28 * w)), min(256, math.ceil(28 * h))
+    dx, dy = w / nx, h / ny
+
+    def wedge(x_pos, z_depth):
+        # Sum the two half-plane angle solutions. Their coefficient is the
+        # 90-degree corner jump, independent of the strip-image solution above.
+        short = min(x_pos, w - x_pos)
+        if short == 0.0 and z_depth == 0.0:
+            return 0.0
+        return (2.0 / math.pi) * (math.atan2(short, z_depth) - math.atan2(z_depth, w - short))
+
+    grid = [[0.0] * (ny + 1) for _ in range(nx + 1)]
+    for j in range(ny + 1):
+        grid[0][j] = grid[nx][j] = -wedge(0.0, j * dy)
+    for i in range(1, nx):
+        grid[i][ny] = -wedge(i * dx, h)
+    wx = 0.5 * dy**2 / (dx**2 + dy**2)
+    wy = 0.5 - wx
+    for _ in range(1500):
+        largest = 0.0
+        for i in range(1, nx):
+            row, prev, nxt = grid[i], grid[i - 1], grid[i + 1]
+            for j in range(1, ny):
+                update = 1.8 * (wx * (prev[j] + nxt[j]) + wy * (row[j-1] + row[j+1]) - row[j])
+                row[j] += update
+                largest = max(largest, abs(update))
+        if largest < 1e-10:
+            break
+    else:
+        raise ValueError("2D Laplace constant-edge SOR did not converge")
+    cold_fraction = 1.0
+    if height / scale <= 16.0 and y / scale < dy:
+        # Interpolate the full field from its zero trace, keeping the input
+        # distance to the bottom instead of subtracting two nearly equal y's.
+        cold_fraction = (y / scale) / dy
+        qd = h - dy
+    fx, fy = qx / dx, qd / dy
+    i, j = min(int(fx), nx - 1), min(int(fy), ny - 1)
+    tx, ty = fx - i, fy - j
+    right = (1 - ty) * grid[i+1][j] + ty * grid[i+1][j+1]
+    if i == 0:
+        # Use the exact cold sidewall and the angle-difference identity to
+        # retain temperatures proportional to very small x.
+        wedge_delta = (2.0 / math.pi) * (
+            math.atan2(qx, qd) - math.atan2(qd*qx, w*(w-qx) + qd*qd))
+        numerical = wedge_delta + tx * (right + wedge(0.0, qd))
+        # Recover the smooth residual's one-sided wall gradient using the
+        # two interior columns and its known sidewall value.
+        second = (1 - ty) * grid[2][j] + ty * grid[2][j+1]
+        numerical += 0.5 * tx * (tx - 1.0) * (second - 2.0 * right - wedge(0.0, qd))
+        if cold_fraction < 1.0:
+            # Both adjacent traces vanish. Approach the bilinear x*y limit
+            # continuously as the query tends to their intersection.
+            bilinear = tx * (wedge(dx, qd) + right)
+            numerical = cold_fraction * numerical + (1 - cold_fraction) * bilinear
+    else:
+        left = (1 - ty) * grid[i][j] + ty * grid[i][j+1]
+        numerical = wedge(qx, qd) + (1 - tx)*left + tx*right
+    return top * exact, top * (cold_fraction * numerical)
+
+
 def _sine_laplace_rectangle(width, height, x, y, top):
     """Continuum harmonic and independent finite-difference SOR on its horizontal grid mode."""
     from bisect import bisect_right
@@ -753,57 +874,11 @@ def verify_pde_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         if not all(map(math.isfinite, (a_len, b_len, t_top, xq, yq))) or a_len <= 0.0 or b_len <= 0.0 or not (0.0 <= xq <= a_len) or not (0.0 <= yq <= b_len):
             return {"passed": False, "domain": "pde", "mode": mode, "reason": "Invalid 2D Laplace domain or query point"}
 
-        if top_profile == "sine":
-            try:
-                t_exact, t_fdm = _sine_laplace_rectangle(a_len, b_len, xq, yq, t_top)
-            except ValueError as exc:
-                return {"passed": False, "domain": "pde", "mode": mode, "reason": str(exc)}
-        else:
-            t_exact = 0.0
-            for k_odd in range(1, 120, 2):
-                bn = 4.0 * t_top / (k_odd * math.pi)
-                arg_y = k_odd * math.pi * yq / a_len
-                arg_b = k_odd * math.pi * b_len / a_len
-                ratio = math.exp(arg_y - arg_b) * (1.0 - math.exp(-2.0 * arg_y)) / (1.0 - math.exp(-2.0 * arg_b))
-                t_exact += bn * math.sin(k_odd * math.pi * xq / a_len) * ratio
-
-            nx = 40
-            ny = max(20, int(round(nx * b_len / a_len)))
-            ny = min(ny, 60)
-            dx = a_len / nx
-            dy = b_len / ny
-            grid = [[0.0] * (ny + 1) for _ in range(nx + 1)]
-            for i in range(1, nx):
-                grid[i][ny] = t_top
-
-            dx2 = dx * dx
-            dy2 = dy * dy
-            denom = 2.0 * (dx2 + dy2)
-            omega = 1.72
-            for _ in range(900):
-                max_upd = 0.0
-                for i in range(1, nx):
-                    for j in range(1, ny):
-                        gs = ((grid[i + 1][j] + grid[i - 1][j]) * dy2 + (grid[i][j + 1] + grid[i][j - 1]) * dx2) / denom
-                        upd = omega * (gs - grid[i][j])
-                        grid[i][j] += upd
-                        if abs(upd) > max_upd:
-                            max_upd = abs(upd)
-                if max_upd < 1e-8 * max(abs(t_top), 1.0):
-                    break
-
-            fx = xq / dx
-            fy = yq / dy
-            i0 = min(int(math.floor(fx)), nx - 1)
-            j0 = min(int(math.floor(fy)), ny - 1)
-            tx = fx - i0
-            ty = fy - j0
-            t_fdm = (
-                (1 - tx) * (1 - ty) * grid[i0][j0]
-                + tx * (1 - ty) * grid[i0 + 1][j0]
-                + (1 - tx) * ty * grid[i0][j0 + 1]
-                + tx * ty * grid[i0 + 1][j0 + 1]
-            )
+        solver = _sine_laplace_rectangle if top_profile == "sine" else _constant_top_rectangle
+        try:
+            t_exact, t_fdm = solver(a_len, b_len, xq, yq, t_top)
+        except ValueError as exc:
+            return {"passed": False, "domain": "pde", "mode": mode, "reason": str(exc)}
         err = abs(t_fdm - t_exact)
         passed = err <= max(1e-3, 1.5e-2 * abs(t_top))
         res = {
