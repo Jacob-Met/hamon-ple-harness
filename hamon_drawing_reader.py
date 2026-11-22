@@ -462,7 +462,13 @@ def read_vector_pdf(pdf_bytes: bytes) -> List[PdfSheetPage]:
         else:
             cm_single = re.search(rb"/Contents\s+(\d+)\s+\d+\s+R", hdr)
             if cm_single:
-                content_ids = [int(cm_single.group(1))]
+                cid = int(cm_single.group(1))
+                # A Contents reference can point to the array of streams itself.
+                target = objs.get(cid, b"").strip()
+                if target.startswith(b"[") and target.endswith(b"]"):
+                    content_ids = [int(ref.group(1)) for ref in re.finditer(reference, target)]
+                else:
+                    content_ids = [cid]
 
         combined = b"\n".join(extract_stream(objs[cid]) for cid in content_ids if cid in objs)
         texts, segs = _interpret_pdf_stream(combined.decode("latin-1", errors="replace"), p_idx, page_ctm)
