@@ -97,6 +97,22 @@ class TestIfcSpatialClashAndDrawingPreflight(unittest.TestCase):
         self.assertEqual(rep["hard_clash_count"], 1)
         self.assertEqual(rep["min_clearance_m"], 0.0)
 
+    def test_cross_discipline_filter_uses_declared_distribution_element(self):
+        base = _clean_ifc_beam_duct().replace("IFCBEAM(", "IFCBUILDINGELEMENTPROXY(")
+        base = base.replace("Main Steel Girder", "Panel A").replace("HVAC Supply Duct", "Run 1")
+        for kind in ("IFCCABLECARRIERSEGMENT", "IFCFIRESUPPRESSIONTERMINAL",
+                     "IFCELECTRICDISTRIBUTIONBOARD", "IFCUNITARYEQUIPMENT", "IFCSANITARYTERMINAL"):
+            with self.subTest(kind=kind):
+                text = base.replace("IFCDUCTSEGMENT(", kind + "(")
+                result = detect_ifc_clashes(text, cross_discipline_only=True)
+                self.assertEqual((result["pair_count"], result["hard_clash_count"]), (1, 1))
+
+        # A cooled beam and a fan are both MEP, even with a structural word in the name.
+        both_mep = base.replace("IFCBUILDINGELEMENTPROXY(", "IFCCOOLEDBEAM(")
+        both_mep = both_mep.replace("Panel A", "Cooled beam").replace("IFCDUCTSEGMENT(", "IFCFAN(")
+        self.assertEqual(detect_ifc_clashes(both_mep, cross_discipline_only=True)["pair_count"], 0)
+        self.assertEqual(detect_ifc_clashes(both_mep, cross_discipline_only=False)["hard_clash_count"], 1)
+
     def test_03_ifc_exact_vertical_clearance_violation_and_clear(self):
         rep_viol = detect_ifc_clashes(_clean_ifc_beam_duct(duct_z_mm=3320.0), required_clearance_m=0.050, cross_discipline_only=True)
         self.assertEqual(rep_viol["hard_clash_count"], 0)
