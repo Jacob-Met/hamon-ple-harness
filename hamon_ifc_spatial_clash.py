@@ -36,14 +36,20 @@ class SolidMesh3D:
     def aabb_max(self) -> np.ndarray:
         return np.max(self.vertices, axis=0) if len(self.vertices) else np.zeros(3)
 
+    def _local_tetrahedra(self):
+        # The tetrahedra share a point on the mesh. Using the global origin
+        # makes their signed moments cancel at survey-coordinate magnitudes.
+        origin = self.vertices[self.faces[0, 0]]
+        local = self.vertices - origin
+        a, b, c = (local[self.faces[:, i]] for i in range(3))
+        six_volumes = np.einsum("ij,ij->i", a, np.cross(b, c))
+        return origin, a, b, c, six_volumes
+
     def volume_m3(self) -> float:
         if len(self.faces) == 0:
             return 0.0
-        v0 = self.vertices[self.faces[:, 0]]
-        v1 = self.vertices[self.faces[:, 1]]
-        v2 = self.vertices[self.faces[:, 2]]
-        signed = np.sum(np.einsum("ij,ij->i", np.cross(v0, v1), v2)) / 6.0
-        return float(abs(signed))
+        _, _, _, _, six_volumes = self._local_tetrahedra()
+        return float(abs(np.sum(six_volumes)) / 6.0)
 
     def surface_area_m2(self) -> float:
         if len(self.faces) == 0:
@@ -58,16 +64,13 @@ class SolidMesh3D:
         if len(self.faces) == 0:
             c = np.mean(self.vertices, axis=0) if len(self.vertices) else np.zeros(3)
             return (float(c[0]), float(c[1]), float(c[2]))
-        v0 = self.vertices[self.faces[:, 0]]
-        v1 = self.vertices[self.faces[:, 1]]
-        v2 = self.vertices[self.faces[:, 2]]
-        det = np.einsum("ij,ij->i", np.cross(v0, v1), v2)
-        total = np.sum(det)
+        origin, a, b, c_local, six_volumes = self._local_tetrahedra()
+        total = np.sum(six_volumes)
         if abs(total) < 1e-15:
             c = np.mean(self.vertices, axis=0)
-            return (float(c[0]), float(c[1]), float(c[2]))
-        centers = (v0 + v1 + v2) / 4.0
-        c = np.sum(centers * det[:, None], axis=0) / total
+        else:
+            weighted = (a + b + c_local) * six_volumes[:, None]
+            c = origin + np.sum(weighted, axis=0) / (4.0 * total)
         return (float(c[0]), float(c[1]), float(c[2]))
 
 
