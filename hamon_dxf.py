@@ -25,16 +25,16 @@ def _groups(data):
 def _get(groups,code):
     return next((v for c,v in groups if c==code),None)
 
-def _float(groups,code):
+def _float(groups,code,default=None):
     v=_get(groups,code)
-    if v is None: return None
+    if v is None: return default
     try: n=float(v)
     except ValueError: return None
     return n if math.isfinite(n) else None
 
 def _point(groups,x,y,z):
-    a,b,c=_float(groups,x),_float(groups,y),_float(groups,z)
-    return [a,b,c if c is not None else 0.0] if a is not None and b is not None else None
+    a,b,c=_float(groups,x),_float(groups,y),_float(groups,z,0.0)
+    return [a,b,c] if None not in (a,b,c) else None
 
 def _model_space(groups):
     # Layout flags belong to the entity, outside application-defined 102 groups.
@@ -66,11 +66,9 @@ def _dimension(groups,ordinal,offset):
         if kind=="aligned_linear": calculated=math.dist(p1,p2)
         elif kind=="rotated_linear":
             angle=_float(groups,50)
-            normal=[_float(groups,210),_float(groups,220),_float(groups,230)]
-            normal=[v if v is not None else default
-                    for v,default in zip(normal,(0.0,0.0,1.0))]
+            normal=[_float(groups,210,0.0),_float(groups,220,0.0),_float(groups,230,1.0)]
             if angle is not None and all(
-                    math.isclose(v,e,abs_tol=1e-10)
+                    v is not None and math.isclose(v,e,abs_tol=1e-10)
                     for v,e in zip(normal,(0.0,0.0,1.0))):
                 radians=math.radians(angle)
                 calculated=abs(dx*math.cos(radians)+dy*math.sin(radians))

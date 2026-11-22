@@ -59,6 +59,18 @@ class DxfEvidenceTests(unittest.TestCase):
             self.assertFalse(report["dimension_limit_hit"])
             self.assertEqual([(r["ordinal"],r["usable_qualified_value"]) for r in report["dimensions"]],[(2,120)])
 
+    def test_invalid_optional_geometry_is_not_a_default(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "optional.dxf"
+            for kind, code, value in ((1, 34, "NaN"), (0, 230, "invalid")):
+                with self.subTest(code=code):
+                    fixture(path, kind=kind, angle=0)
+                    self.assertEqual(hamon_dxf.scan_dxf(path)["geometry_supported_count"], 1)
+                    path.write_text(path.read_text().replace("8\nDIM\n", f"8\nDIM\n{code}\n{value}\n"))
+                    row = hamon_dxf.scan_dxf(path)["dimensions"][0]
+                    self.assertEqual(row["geometry_status"], "geometry_unavailable")
+                    self.assertIsNone(row["usable_qualified_value"])
+
     def test_source_change_mismatch_fails(self):
         with tempfile.TemporaryDirectory() as td:
             p=Path(td)/"a.dxf";fixture(p);before=hamon_dxf.scan_dxf(p)
