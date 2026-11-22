@@ -1,0 +1,386 @@
+{
+  "schema": "ple.control.exact-characteristic-diagnostics-v1",
+  "source_base": "d71933ab5aae721cb21106ca2144428a1d5bf23c",
+  "source_solver_sha256": "bdf4a07183cce87dbd010f57b1c9c737b27b97fbadf610981cba566dc9cba65f",
+  "question": "Can finite state-space inputs retain their exact stability certificates when floating characteristic or root diagnostics exceed binary64 range, while recovering representable small poles and characteristic coefficients lost to intermediate rounding?",
+  "constants": {
+    "M": "2^512",
+    "H": "2^520",
+    "h": "2^-550",
+    "T": "2^1023",
+    "u": "2^-52"
+  },
+  "input_semantics": "All matrices are built from the stated dyadic formulas, converted to finite binary64 wire values, then interpreted exactly. Q=I in every case, B/C omitted.",
+  "output_contract": {
+    "char_poly_exact": "Descending monic coefficient list of rational strings for the supplied A.",
+    "char_poly": "Descending float coefficient list if every coefficient converts finitely and every nonzero coefficient remains nonzero; null otherwise. Finite coefficients may be rounded and are not the exact certificate.",
+    "char_poly_float_status": [
+      "finite",
+      "outside_float_range"
+    ],
+    "cayley_hamilton_residual_exact": "Exact original-unit max-entry residual for char_poly_exact, encoded as a rational string; required to be zero.",
+    "cayley_hamilton_residual": "Float representation of that exact-polynomial residual, required 0.0 in this course.",
+    "cayley_hamilton_residual_basis": "char_poly_exact",
+    "zero_eigenvalue_multiplicity": "Exact trailing-zero multiplicity of char_poly_exact.",
+    "eigenvalues_real_imag": "Approximate root pairs with multiplicity, or null when unavailable; never Inf/NaN. Exact algebraic zero roots are emitted exactly as zero.",
+    "eigenvalues_status": [
+      "finite_approximation",
+      "outside_float_range",
+      "unavailable_numerical_diagnostic"
+    ],
+    "passed": "All valid systems can pass with certified exact characteristic and identity/requested Lyapunov results. Availability of numeric coefficient or root diagnostics does not decide exact verification.",
+    "retained": "PR162 exact Lyapunov outputs and Boolean claim semantics remain required; rank and transfer-function implementations are outside this repair."
+  },
+  "cases": [
+    {
+      "name": "ordinary-stable",
+      "A": "diag(-1,-2)",
+      "roots": [
+        "-1",
+        "-2"
+      ],
+      "poly": [
+        "1",
+        "3",
+        "2"
+      ],
+      "stable": true,
+      "status": "unique",
+      "P": "diag(1/2,1/4)",
+      "char_float": "finite"
+    },
+    {
+      "name": "ordinary-mixed",
+      "A": "diag(-1,2)",
+      "roots": [
+        "-1",
+        "2"
+      ],
+      "poly": [
+        "1",
+        "-1",
+        "-2"
+      ],
+      "stable": false,
+      "status": "unique",
+      "P": "diag(1/2,-1/4)",
+      "char_float": "finite"
+    },
+    {
+      "name": "mixed-fast-first",
+      "A": "diag(-M,-1)",
+      "roots": [
+        "-M",
+        "-1"
+      ],
+      "poly": [
+        "1",
+        "M+1",
+        "M"
+      ],
+      "stable": true,
+      "status": "unique",
+      "P": "diag(1/(2M),1/2)",
+      "char_float": "finite"
+    },
+    {
+      "name": "mixed-fast-second",
+      "A": "diag(-1,-M)",
+      "roots": [
+        "-1",
+        "-M"
+      ],
+      "poly": [
+        "1",
+        "M+1",
+        "M"
+      ],
+      "stable": true,
+      "status": "unique",
+      "P": "diag(1/2,1/(2M))",
+      "char_float": "finite"
+    },
+    {
+      "name": "mixed-fast-unstable",
+      "A": "diag(-M,1)",
+      "roots": [
+        "-M",
+        "1"
+      ],
+      "poly": [
+        "1",
+        "M-1",
+        "-M"
+      ],
+      "stable": false,
+      "status": "unique",
+      "P": "diag(1/(2M),-1/2)",
+      "char_float": "finite"
+    },
+    {
+      "name": "large-repeated",
+      "A": "diag(-H,-H)",
+      "roots": [
+        "-H",
+        "-H"
+      ],
+      "poly": [
+        "1",
+        "2H",
+        "H^2"
+      ],
+      "stable": true,
+      "status": "unique",
+      "P": "I2/(2H)",
+      "char_float": "outside_float_range"
+    },
+    {
+      "name": "large-mixed",
+      "A": "diag(-H,2H)",
+      "roots": [
+        "-H",
+        "2H"
+      ],
+      "poly": [
+        "1",
+        "-H",
+        "-2H^2"
+      ],
+      "stable": false,
+      "status": "unique",
+      "P": "diag(1/(2H),-1/(4H))",
+      "char_float": "outside_float_range"
+    },
+    {
+      "name": "large-spiral",
+      "A": "[[-H,-H],[H,-H]]",
+      "roots": [
+        "-H-iH",
+        "-H+iH"
+      ],
+      "poly": [
+        "1",
+        "2H",
+        "2H^2"
+      ],
+      "stable": true,
+      "status": "unique",
+      "P": "I2/(2H)",
+      "char_float": "outside_float_range"
+    },
+    {
+      "name": "large-rotation",
+      "A": "[[0,-H],[H,0]]",
+      "roots": [
+        "-iH",
+        "iH"
+      ],
+      "poly": [
+        "1",
+        "0",
+        "H^2"
+      ],
+      "stable": false,
+      "status": "inconsistent",
+      "P": null,
+      "char_float": "outside_float_range"
+    },
+    {
+      "name": "tiny-diagonal",
+      "A": "diag(-h,-2h)",
+      "roots": [
+        "-h",
+        "-2h"
+      ],
+      "poly": [
+        "1",
+        "3h",
+        "2h^2"
+      ],
+      "stable": true,
+      "status": "unique",
+      "P": "diag(1/(2h),1/(4h))",
+      "char_float": "outside_float_range"
+    },
+    {
+      "name": "outside-root-range",
+      "A": "[[-3T/2,T],[T,-3T/2]]",
+      "roots": [
+        "-T/2",
+        "-5T/2"
+      ],
+      "poly": [
+        "1",
+        "3T",
+        "5T^2/4"
+      ],
+      "stable": true,
+      "status": "unique",
+      "P": "[[3,2],[2,3]]/(5T)",
+      "char_float": "outside_float_range",
+      "root_float": "outside_float_range"
+    },
+    {
+      "name": "rounded-product-cancellation",
+      "A": "[[1,1+u],[-(1-u),-1]]",
+      "roots": [
+        "-u",
+        "u"
+      ],
+      "poly": [
+        "1",
+        "0",
+        "-u^2"
+      ],
+      "stable": false,
+      "status": "inconsistent",
+      "P": null,
+      "char_float": "finite"
+    },
+    {
+      "name": "cubic-unit",
+      "A": "diag(-1,-2,-4)",
+      "roots": [
+        "-1",
+        "-2",
+        "-4"
+      ],
+      "poly": [
+        "1",
+        "7",
+        "14",
+        "8"
+      ],
+      "stable": true,
+      "status": "unique",
+      "P": "diag(1/2,1/4,1/8)",
+      "char_float": "finite"
+    },
+    {
+      "name": "cubic-large",
+      "A": "diag(-H,-2H,-4H)",
+      "roots": [
+        "-H",
+        "-2H",
+        "-4H"
+      ],
+      "poly": [
+        "1",
+        "7H",
+        "14H^2",
+        "8H^3"
+      ],
+      "stable": true,
+      "status": "unique",
+      "P": "diag(1/2,1/4,1/8)/H",
+      "char_float": "outside_float_range"
+    },
+    {
+      "name": "cubic-tiny",
+      "A": "diag(-s,-2s,-4s),s=2^-520",
+      "roots": [
+        "-s",
+        "-2s",
+        "-4s"
+      ],
+      "poly": [
+        "1",
+        "7s",
+        "14s^2",
+        "8s^3"
+      ],
+      "stable": true,
+      "status": "unique",
+      "P": "diag(1/2,1/4,1/8)/s",
+      "char_float": "outside_float_range"
+    },
+    {
+      "name": "cubic-mixed-large",
+      "A": "diag(-H,2H,4H)",
+      "roots": [
+        "-H",
+        "2H",
+        "4H"
+      ],
+      "poly": [
+        "1",
+        "-5H",
+        "2H^2",
+        "8H^3"
+      ],
+      "stable": false,
+      "status": "unique",
+      "P": "diag(1/2,-1/4,-1/8)/H",
+      "char_float": "outside_float_range"
+    },
+    {
+      "name": "cubic-zero",
+      "A": "diag(-2,0,1)",
+      "roots": [
+        "-2",
+        "0",
+        "1"
+      ],
+      "poly": [
+        "1",
+        "1",
+        "-2",
+        "0"
+      ],
+      "stable": false,
+      "status": "inconsistent",
+      "P": null,
+      "char_float": "finite",
+      "zero_multiplicity": 1
+    }
+  ],
+  "physical_case_count": 17,
+  "boolean_claim_count": 68,
+  "total_route_calls": 85,
+  "expected_approvals": 31,
+  "expected_refusals": 37,
+  "counts": {
+    "unique": 14,
+    "inconsistent": 3,
+    "nonunique": 0,
+    "stable": 10,
+    "unstable_or_marginal": 7,
+    "char_float_finite": 8,
+    "char_float_unavailable": 9,
+    "root_float_finite": 16,
+    "root_float_unavailable": 1
+  },
+  "defaults": {
+    "root_float": "finite_approximation",
+    "zero_multiplicity": 0,
+    "lyapunov_float_status_for_unique": "finite"
+  },
+  "oracle": [
+    "Compute expected coefficients from the stated factorizations or independent trace/determinant arithmetic over the exact binary64 inputs, never by the producer's characteristic recurrence.",
+    "Match rational-string coefficients exactly and evaluate the exact Cayley-Hamilton identity entrywise using independent matrix-polynomial arithmetic.",
+    "For each finite coefficient require its correct binary64 rounding; nonzero underflow or overflow withholds the entire numeric coefficient list.",
+    "Match the complete root multiset to the analytic poles. Each nonzero analytic component must agree to relative1e-12; a zero component of a nonzero pole may have error at most1e-12 times that pole's magnitude. An actual zero pole must be exactly(0,0).",
+    "Only outside-root-range may withhold roots in this frozen course; its entire numeric root list is null with outside_float_range while the exact certificate still passes.",
+    "Match requested and identity P to the analytic formulas and verify all exact equation entries independently. Unique PD agrees with the known spectrum; inconsistent PD is null and both Boolean claims refuse explicitly.",
+    "All17 systems are called unclaimed and with false/true for hurwitz_stable and lyapunov_pd; all85 outputs must serialize with allow_nan=false.",
+    "20 additional real registered Pi calls cover ordinary stable, mixed-fast-first, large-spiral, and outside-root-range, in both maintained unittest and pytest stages.",
+    "Retain every inherited CI gate, including PR159 rank49/196 and PR162 stability32/128 courses."
+  ],
+  "decision": "All17 complete system/diagnostic/certificate checks and68 Boolean outcomes correct,31 approvals/37 refusals,zero solver/serialization exceptions,real Pi and full maintained CI success. No case,coefficient,tolerance or expected outcome changes after first execution.",
+  "execution": "Source-only preparation on native fleet; first execution is one matched stock/candidate pair in maintained repository PR CI. Same tests/protocol, only solver differs. Preserve complete original failures; no organizer/dev/model/scored run.",
+  "limitation": "Exact characteristic coefficients and Lyapunov decisions do not imply exact symbolic general roots, conditioning-independent higher-degree root accuracy, uniform runtime, or a benchmark-score improvement.",
+  "references": [
+    {
+      "url": "https://arxiv.org/pdf/2008.04247",
+      "section": "Section2: exact characteristic recurrence and Cayley-Hamilton identity"
+    },
+    {
+      "url": "https://arxiv.org/pdf/2011.12573",
+      "section": "Algorithm1 and exact divisions by small integers"
+    },
+    {
+      "url": "https://people.eecs.berkeley.edu/~wkahan/ieee754status/baleful.pdf",
+      "section": "Quadratic dominant-root/product-quotient formula and cancellation cautions"
+    }
+  ]
+}

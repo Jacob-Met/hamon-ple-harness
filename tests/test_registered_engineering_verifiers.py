@@ -3,6 +3,7 @@
 These synthetic inputs qualify runtime reachability, not benchmark accuracy.
 """
 import json
+import math
 import os
 import subprocess
 import sys
@@ -107,6 +108,21 @@ STABILITY_CASES = [
 ]
 
 
+# Use binary64 inputs on the Pi JSON wire, including the finite 3T/2 entries.
+MIXED_FAST = 2.0**512
+SPIRAL_FAST = 2.0**520
+RANGE_SCALE = 2.0**1023
+DIAGNOSTIC_CASES = [
+    ("ordinary-poles", [[-1, 0], [0, -2]], "finite", [(-2, 0), (-1, 0)]),
+    ("mixed-fast-poles", [[-MIXED_FAST, 0], [0, -1]], "finite",
+     [(-MIXED_FAST, 0), (-1, 0)]),
+    ("spiral-poles", [[-SPIRAL_FAST, -SPIRAL_FAST], [SPIRAL_FAST, -SPIRAL_FAST]],
+     "outside_float_range", [(-SPIRAL_FAST, -SPIRAL_FAST), (-SPIRAL_FAST, SPIRAL_FAST)]),
+    ("outside-float-pole", [[-1.5 * RANGE_SCALE, RANGE_SCALE], [RANGE_SCALE, -1.5 * RANGE_SCALE]],
+     "outside_float_range", None),
+]
+
+
 @pytest.fixture(scope="module")
 def routed(tmp_path_factory):
     workdir = tmp_path_factory.mktemp("registered-engineering")
@@ -160,6 +176,13 @@ def routed(tmp_path_factory):
                 }})
     for case, matrices, _, _ in STABILITY_CASES:
         spec = {"mode": "state_space", **matrices}
+        calls.append({"id": case, "mode": "control", "spec": spec})
+        for field in ("hurwitz_stable", "lyapunov_pd"):
+            for claim in (False, True):
+                calls.append({"id": f"{case}-{field}-{claim}", "mode": "control",
+                              "spec": {**spec, "claimed_field": field, "claimed_value": claim}})
+    for case, matrix, _, _ in DIAGNOSTIC_CASES:
+        spec = {"mode": "state_space", "A": matrix}
         calls.append({"id": case, "mode": "control", "spec": spec})
         for field in ("hurwitz_stable", "lyapunov_pd"):
             for claim in (False, True):
@@ -332,6 +355,61 @@ def test_registered_state_space_stability(routed, case, matrices, stable, expect
                 assert check["actual"] == float(truth) and check["within_tolerance"] is (claim is truth)
 
 
+@pytest.mark.parametrize("case,matrix,poly_status,poles", DIAGNOSTIC_CASES,
+                         ids=[row[0] for row in DIAGNOSTIC_CASES])
+def test_registered_state_space_diagnostic_range(routed, case, matrix, poly_status, poles):
+    reply = routed[case]
+    assert reply["completed"], reply
+    result = reply["details"]
+    assert result["domain"] == "control" and result["mode"] == "state_space"
+    assert result["passed"] is True and result["hurwitz_stable"] is True
+    assert result["lyapunov_pd"] is True and result["lyapunov_solution_status"] == "unique"
+    exact_p = checked_pi_lyapunov_matrix(result["lyapunov_P_exact"], matrix, IDENTITY_2)
+    assert exact_p[0][0] > 0 and exact_p[0][0] * exact_p[1][1] > exact_p[0][1]**2
+    assert result["lyapunov_float_status"] == "finite"
+    assert result["lyapunov_P"] == [[float(value) for value in row] for row in exact_p]
+
+    (a, b), (c, d) = [[Fraction(v) for v in row] for row in matrix]
+    coefficients = [Fraction(1), -(a + d), a*d - b*c]
+    encoded = result["char_poly_exact"]
+    assert isinstance(encoded, list) and all(isinstance(s, str) for s in encoded)
+    assert [Fraction(s) for s in encoded] == coefficients
+    assert result["char_poly_float_status"] == poly_status
+    if poly_status == "finite":
+        assert result["char_poly"] == [float(v) for v in coefficients]
+    else:
+        assert result["char_poly"] is None
+    assert result["cayley_hamilton_residual_exact"] == "0"
+    assert result["cayley_hamilton_residual"] == 0.0
+    assert result["cayley_hamilton_residual_basis"] == "char_poly_exact"
+    assert type(result["zero_eigenvalue_multiplicity"]) is int
+    assert result["zero_eigenvalue_multiplicity"] == 0
+
+    if poles is None:
+        assert result["eigenvalues_real_imag"] is None
+        assert result["eigenvalues_status"] == "outside_float_range"
+    else:
+        assert result["eigenvalues_status"] == "finite_approximation"
+        actual = result["eigenvalues_real_imag"]
+        assert len(actual) == 2 and all(len(z) == 2 for z in actual)
+        # Accept either pole order. Each nonzero component gets its own scale,
+        # so the large real pole cannot hide the loss of its slow companion.
+        def matches(got, wanted):
+            return all(math.isclose(x, y, rel_tol=1e-12, abs_tol=0.0) for x, y in zip(got, wanted))
+        assert any(all(matches(actual[i], order[i]) for i in range(2))
+                   for order in (poles, poles[::-1])), actual
+
+    for field in ("hurwitz_stable", "lyapunov_pd"):
+        for claim in (False, True):
+            claimed = routed[f"{case}-{field}-{claim}"]
+            assert claimed["completed"], claimed
+            details = claimed["details"]
+            assert details[field] is True and details["passed"] is claim
+            check = details["claim_check"]
+            assert check["field"] == field and check["claimed"] == float(claim)
+            assert check["actual"] == 1.0 and check["within_tolerance"] is claim
+
+
 class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -371,3 +449,8 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
         for case, matrices, stable, expected_p in STABILITY_CASES:
             with self.subTest(case=case):
                 test_registered_state_space_stability(self.routed_data, case, matrices, stable, expected_p)
+
+    def test_registered_state_space_diagnostic_range(self):
+        for case, matrix, poly_status, poles in DIAGNOSTIC_CASES:
+            with self.subTest(case=case):
+                test_registered_state_space_diagnostic_range(self.routed_data, case, matrix, poly_status, poles)
