@@ -235,3 +235,37 @@ def test_parallel_flow_rejects_measured_crossovers_inside_global_duty_bounds():
                        ("effectiveness", .50000000008), ("Q", 50000.000008)):
         result = solve_exchanger_or_radiation({**base, key: value})
         assert not result["verified"] and result["invalid_observation"] == key
+
+
+def test_finite_arrangement_pinch_inverse_and_mixed_small_ratio_ratings():
+    for arr, ch, cc, ntu in (("parallel", 1000., 1000., 19 * math.log(2)),
+                             ("shell_tube_1_2", 1000., 2000., 26.),
+                             ("crossflow_cmax_mixed", 1000., 2000., 26.),
+                             ("crossflow_cmin_mixed", 1000., 2000., 52.)):
+        base = {"flow_arrangement": arr, "T_h_in": 400., "T_c_in": 300., "C_h": ch, "C_c": cc}
+        rated = solve_exchanger_or_radiation({**base, "UA": ntu * min(ch, cc)})
+        assert rated["verified"], rated
+        for key, output in (("effectiveness", "effectiveness"), ("Q", "Q_W"),
+                            ("T_h_out", "T_h_out_K"), ("T_c_out", "T_c_out_K")):
+            sized = solve_exchanger_or_radiation({**base, key: rated[output]})
+            assert sized["verified"] and math.isclose(sized["NTU"], ntu, rel_tol=.001), (key, sized)
+
+    base = {"flow_arrangement": "crossflow_cmax_mixed", "T_h_in": 400., "T_c_in": 300.,
+            "C_h": 2.**40, "C_c": 1., "UA": 40.}
+    rated = solve_exchanger_or_radiation(base)
+    assert rated["verified"] and rated["effectiveness"] == -math.expm1(-2.**-40) / 2.**-40
+    assert solve_exchanger_or_radiation({**base, "effectiveness": rated["effectiveness"]})["verified"]
+
+
+def test_phase_inverse_preserves_deficit_in_supplied_units():
+    from decimal import Decimal, localcontext
+
+    base = {"flow_arrangement": "condenser", "T_h_in": 480., "T_c_in": 300., "C_h": 1000., "C_c": 1000.}
+    duty = math.nextafter(180000., 0.)
+    outlet = math.nextafter(480., 0.)
+    with localcontext() as ctx:
+        ctx.prec = 70
+        gaps = (Decimal(1) - Decimal(duty) / 180000, (480 - Decimal(outlet)) / 180)
+        for key, measurement, gap in zip(("Q", "T_c_out"), (duty, outlet), gaps):
+            sized = solve_exchanger_or_radiation({**base, key: measurement})
+            assert sized["verified"] and math.isclose(sized["NTU"], float(-gap.ln()), rel_tol=1e-14)
