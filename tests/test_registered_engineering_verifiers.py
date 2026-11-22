@@ -8,7 +8,27 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
+import tempfile
+import unittest
+
+try:
+    import pytest
+except ModuleNotFoundError:
+    class _PytestShim:
+        @staticmethod
+        def fixture(*_a, **_kw):
+            def _dec(fn):
+                return fn
+            return _dec
+
+        class mark:
+            @staticmethod
+            def parametrize(*_a, **_kw):
+                def _dec(fn):
+                    return fn
+                return _dec
+
+    pytest = _PytestShim()
 
 from hamon_pde_control_psychro_fem import verify_wave5_engineering
 from hamon_wave6_physics_verifiers import dispatch_wave6_verifier
@@ -183,3 +203,33 @@ def test_default_capable_solvers_distinguish_unknown_keys_from_explicit_zero(rou
         assert routed[name]["completed"], routed[name]
         assert routed[name]["details"]["verified"] is True
 
+
+class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not (ROOT / "node_modules" / "@earendil-works" / "pi-coding-agent").exists():
+            raise unittest.SkipTest("node_modules/@earendil-works/pi-coding-agent not installed")
+        cls._tmpdir = tempfile.TemporaryDirectory()
+        class _Factory:
+            @staticmethod
+            def mktemp(name):
+                p = Path(cls._tmpdir.name) / name
+                p.mkdir(parents=True, exist_ok=True)
+                return p
+        cls.routed_data = routed.__wrapped__(_Factory()) if hasattr(routed, "__wrapped__") else routed(_Factory())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmpdir.cleanup()
+
+    def test_all_registered_solver_boundaries(self):
+        r = self.routed_data
+        for family, spec in CASES:
+            test_registered_tool_reaches_each_family_without_changing_calculation(r, family, spec)
+            for prefix in ("empty-", "selector-only-", "no-selector-"):
+                test_registered_tool_refuses_unspecified_calculations(r, family, prefix)
+            test_unknown_keys_cannot_verify_an_unsupplied_physical_problem(r, family)
+        for family, spec in NEGATIVE_PHYSICS:
+            test_completed_transport_preserves_failed_physics(r, family, spec)
+        test_legacy_checks_and_explicit_family_contract(r)
+        test_default_capable_solvers_distinguish_unknown_keys_from_explicit_zero(r)
