@@ -72,6 +72,23 @@ class TestWave5PDEControlPsychroFEM(unittest.TestCase):
         self.assertAlmostEqual(r_lap["t_exact"], exact_mid, places=6)
         self.assertAlmostEqual(r_lap["t_fdm_sor"], exact_mid, delta=0.2)
 
+    def test_rectangular_laplace_uses_only_requested_boundary(self):
+        spec = dict(mode="laplace_2d_rect", width_m=2., height_m=1.,
+                    x_eval_m=.5, y_eval_m=1., t_top=100.)
+        for profile in ("cosine", "linear", "piecewise", "", None, {"power": 2}):
+            with self.subTest(profile=profile):
+                result = w5.verify_wave5_engineering(dict(spec, top_profile=profile))
+                self.assertFalse(result["passed"])
+                self.assertIn("top_profile", result["reason"])
+                self.assertNotIn("t_exact", result)
+        for fields, expected in (({}, 100 / math.sqrt(2)),
+                                 ({"top_profile": " Sine "}, 100 / math.sqrt(2)),
+                                 ({"top_profile": "uniform"}, 100.),
+                                 ({"top_profile": "constant"}, 100.)):
+            result = w5.verify_wave5_engineering(dict(spec, **fields))
+            self.assertTrue(result["passed"])
+            self.assertAlmostEqual(result["t_exact"], expected)
+
     def test_constant_hot_trace_and_discontinuous_corners(self):
         spec = dict(mode="laplace_2d_rect", top_profile="constant", width_m=1., height_m=1., t_top=100.)
         for x, y, expected in ((.001, 1., 100.), (.999, 1., 100.), (0., 1., 0.),
