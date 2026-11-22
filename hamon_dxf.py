@@ -265,6 +265,41 @@ def _angular_sector(groups, kind, picture=None):
     return None
 
 
+def _ordinate(groups, flags, row):
+    """Measure an axis-aligned ordinate from its UCS datum, never its leader."""
+    axis = 0 if flags & 64 else 1
+    datum = _point(groups, 10, 20, 30)
+    feature = _point(groups, 13, 23, 33)
+    leader = _point(groups, 14, 24, 34)
+    evidence = {"axis": ("x", "y")[axis], "datum_wcs": datum, "feature_wcs": feature,
+                "leader_endpoint_wcs": leader, "signed_coordinate_model_units": None}
+    row["ordinate"] = evidence
+    # Ambiguous or application-defined group values cannot establish a datum or axis.
+    relevant = {10, 20, 30, 13, 23, 33, 14, 24, 34, 42, 51, 70, 210, 220, 230}
+    codes = [c for c, _ in groups if c in relevant]
+    if (flags & ~(6 | 32 | 64 | 128) or len(codes) != len(set(codes)) or _get(groups, 102) is not None
+            or _float(groups, 51, 0.0) != 0.0
+            or tuple(_float(groups, c, v) for c, v in ((210, 0.), (220, 0.), (230, 1.))) != (0., 0., 1.)
+            or datum is None or feature is None or leader is None
+            or not datum[2] == feature[2] == leader[2] or datum == feature):
+        return
+    delta = feature[axis] - datum[axis]
+    if not math.isfinite(delta):
+        return
+    evidence["signed_coordinate_model_units"] = delta
+    magnitude = abs(delta)
+    row["computed_model_units"] = magnitude
+    cache = row["cad_measurement_model_units"]
+    if _get(groups, 42) is None:
+        row["geometry_status"] = "geometry_only"
+    elif cache is None or cache < 0 or not math.isclose(cache, magnitude, rel_tol=1e-8, abs_tol=1e-8):
+        row["geometry_status"] = "cad_measurement_mismatch"
+        return
+    else:
+        row["geometry_status"] = "geometry_and_cad_agree"
+    row["usable_qualified_value"] = magnitude
+
+
 def _dimension(groups,ordinal,offset,picture=None):
     try: t=int(_get(groups,70) or "0")
     except ValueError: t=-1
@@ -305,6 +340,9 @@ def _dimension(groups,ordinal,offset,picture=None):
       "text_override":raw[:240] if raw is not None else None,
       "text_override_is_unverified":True,
       "usable_qualified_value":calculated if status in ("geometry_only","geometry_and_cad_agree") else None}
+
+    if kind == "ordinate":
+        _ordinate(groups, t, row)
 
     if kind in ("angular", "angular_3point"):
         marker = _angular_sector(groups, kind)
