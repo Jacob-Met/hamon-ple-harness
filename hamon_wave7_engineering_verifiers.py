@@ -383,7 +383,7 @@ def _hx_eps_from_ntu(ntu: float, cr: float, arrangement: str) -> float:
         drop = -math.expm1(-ntu * delta)
         return drop / (delta + cr * drop)
     if cr <= 1e-12 or arrangement in ("condenser", "boiler"):
-        return 1.0 - math.exp(-ntu)
+        return -math.expm1(-ntu)
     if arrangement == "parallel":
         return (1.0 - math.exp(-ntu * (1.0 + cr))) / (1.0 + cr)
     if arrangement == "shell_tube_1_2":
@@ -426,13 +426,43 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
             sensible = [c_h]
         else:
             sensible = [c_h, c_c]
-        if not all(math.isfinite(c) and c > 0.0 for c in sensible):
+        if (not all(math.isfinite(c) and c > 0.0 for c in sensible)
+                or not (c_h >= 0.0 and c_c >= 0.0)):
             return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "non_positive_heat_capacity_rates"}
         c_min = min(sensible)
         cr = c_min / max(sensible) if len(sensible) == 2 else 0.0
 
         crossflow_inverse = None
         q_max = c_min * (t_hi - t_ci)
+        if not math.isfinite(q_max) or q_max <= 0.0:
+            return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "unrepresentable_duty_scale"}
+        # Admissibility applies to every supplied measurement, including those
+        # that are close to a computed answer only because it is near a pinch.
+        limit = 1.0
+        if arr == "parallel":
+            limit = 1.0 / (1.0 + cr)
+        elif arr == "shell_tube_1_2":
+            limit = 2.0 / (1.0 + cr + math.hypot(1.0, cr))
+        elif arr == "crossflow_cmax_mixed" and cr > 0.0:
+            limit = -math.expm1(-cr) / cr
+        elif arr == "crossflow_cmin_mixed" and cr > 0.0:
+            limit = -math.expm1(-1.0 / cr)
+        max_duty = limit * q_max
+        hot_low = t_hi if arr == "condenser" else max(t_ci, t_hi - max_duty / c_h)
+        cold_high = t_ci if arr == "boiler" else min(t_hi, t_ci + max_duty / c_c)
+        bounds = {"effectiveness": (0., limit), "Q": (0., max_duty),
+                  "T_h_out": (hot_low, t_hi), "T_c_out": (t_ci, cold_high)}
+        for key, (low, high) in bounds.items():
+            if key not in observed:
+                continue
+            # The finite-capacity ceiling can accumulate rounding, whereas zero
+            # duty and the unit effectiveness bound are exact physical limits.
+            low_error = 2 * math.ulp(low) if key.startswith("T_") else 0.0
+            high_error = 2 * math.ulp(high) if key.startswith("T_") or limit < 1.0 else 0.0
+            if not low - low_error <= observed[key] <= high + high_error:
+                return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False,
+                        "error": "second_law_crossover_or_unreachable_effectiveness",
+                        "invalid_observation": key}
         if "UA" in observed:
             ua = observed["UA"]
             if ua < 0.0:
@@ -451,11 +481,13 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
             else:
                 return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "missing_rating_or_sizing_spec"}
 
-            limit = 1.0 if arr in ("counterflow", "crossflow_unmixed") else _hx_eps_from_ntu(250.0, cr, arr) - 1e-11
-            if not 0.0 < eps_target < limit:
+            sizing_limit = limit if arr in ("counterflow", "crossflow_unmixed", "condenser", "boiler") else _hx_eps_from_ntu(250.0, cr, arr) - 1e-11
+            if not 0.0 < eps_target < sizing_limit:
                 return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "second_law_crossover_or_unreachable_effectiveness"}
             if arr == "crossflow_unmixed":
                 ntu, crossflow_inverse = _unmixed_crossflow_ntu(eps_target, cr)
+            elif arr in ("condenser", "boiler"):
+                ntu = -math.log1p(-eps_target)
             elif arr == "counterflow":
                 # Invert the counterflow relation at its physical limit, including C_r = 1.
                 odds = eps_target / (1.0 - eps_target)
@@ -466,6 +498,8 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
             ua = ntu * c_min
             eps = _hx_eps_from_ntu(ntu, cr, arr)
 
+        if not math.isfinite(ntu) or not math.isfinite(ua):
+            return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "unrepresentable_rating"}
         q_actual = eps * q_max
         t_ho = t_hi if arr == "condenser" else (t_hi - q_actual / c_h)
         t_co = t_ci if arr == "boiler" else (t_ci + q_actual / c_c)
@@ -478,7 +512,36 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
         eb_c = 0.0 if arr == "boiler" else abs(c_c * (t_co - t_ci) - q_actual) / max(q_actual, 1e-12)
         lmtd_res = 0.0
         lmtd_val = None
-        if arr in ("counterflow", "parallel", "condenser", "boiler") and q_actual > 0.0:
+        lmtd_bounds = None
+        if arr in ("condenser", "boiler") and q_actual > 0.0:
+            # Compare the required mean temperature difference with the interval
+            # independently implied by the rounded sensible-stream outlet.
+            # Near the pinch, the terminal gap can be smaller than one Kelvin ulp.
+            span = t_hi - t_ci
+            outlet = t_co if arr == "condenser" else t_ho
+            gap = t_hi - t_co if arr == "condenser" else t_ho - t_ci
+            rounding = 2 * max(math.ulp(t_hi), math.ulp(t_ci), math.ulp(outlet))
+
+            def log_mean(end):
+                if end <= 0.0:
+                    return 0.0
+                if end >= span:
+                    return span
+                diff = span - end
+                ratio_log = math.log1p(diff / end) if diff < end else math.log(span) - math.log(end)
+                return diff / ratio_log
+
+            lower, upper = log_mean(gap - rounding), log_mean(gap + rounding)
+            lmtd_bounds = [lower, upper]
+            lmtd_val = span * (-math.expm1(-ntu) / ntu)
+            required = q_actual / ua
+            if required == 0.0:
+                return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "unrepresentable_mean_temperature_difference"}
+            lmtd_res = max(lower - required, required - upper, 0.) / required
+            # A stream enthalpy difference inherits the same outlet rounding.
+            sensible_error = max(0., abs(c_min * (span - gap) - q_actual) - c_min * rounding)
+            eb_h = eb_c = sensible_error / q_actual
+        elif arr in ("counterflow", "parallel") and q_actual > 0.0:
             if arr == "parallel":
                 dt1, dt2 = t_hi - t_ci, t_ho - t_co
             else:
@@ -518,6 +581,7 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
             "T_h_out_K": float(t_ho),
             "T_c_out_K": float(t_co),
             "LMTD_K": lmtd_val,
+            **({"LMTD_bounds_K": lmtd_bounds} if lmtd_bounds is not None else {}),
             "observation_residuals": observation_residuals,
             **({"effectiveness_model": "ideal_single_pass_both_unmixed"} if arr == "crossflow_unmixed" else {}),
             **({"NTU_numerical_bracket": list(crossflow_inverse)} if crossflow_inverse is not None else {}),

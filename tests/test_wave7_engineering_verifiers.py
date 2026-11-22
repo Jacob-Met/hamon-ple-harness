@@ -171,7 +171,8 @@ def test_exchanger_checks_every_rating_and_sizing_observation():
         for field in fields[1:]:
             incorrect = solve({**values, field: observed[field] * 1.1})
             assert not incorrect["verified"], (first, field, incorrect)
-            assert incorrect["observation_residuals"][field] > 1e-9
+            assert (incorrect.get("invalid_observation") == field
+                    or incorrect["observation_residuals"][field] > 1e-9)
 
     for field in observed:
         for invalid in (float("nan"), None, True):
@@ -191,3 +192,46 @@ def test_phase_change_exchanger_uses_sensible_outlet_to_size_and_checks_both():
         capacity = "C_c" if arrangement == "condenser" else "C_h"
         for invalid in (0., -1000., float("inf")):
             assert not solve_exchanger_or_radiation({**base, "UA": 1000., capacity: invalid})["verified"]
+
+
+def test_phase_change_sizing_at_the_pinch_and_finite_rate_with_rounded_outlet():
+    for arr, sensible in (("condenser", "T_c_out"), ("boiler", "T_h_out")):
+        base = {"flow_arrangement": arr, "T_h_in": 400., "T_c_in": 300., "C_h": 1000., "C_c": 1000.}
+        ntu = 38 * math.log(2)
+        rated = solve_exchanger_or_radiation({**base, "UA": 1000 * ntu})
+        assert rated["verified"] and rated["effectiveness"] == 1.0 - 2.0**-38
+        for key, value in (("effectiveness", rated["effectiveness"]), ("Q", rated["Q_W"]),
+                           (sensible, rated[sensible + "_K"])):
+            sized = solve_exchanger_or_radiation({**base, key: value})
+            assert sized["verified"] and math.isclose(sized["NTU"], ntu, rel_tol=1e-6)
+        # Exactly saturated outlet temperatures cannot identify a finite inverse
+        # rating. A known finite conductance can nevertheless round to that outlet.
+        for extreme in (1e-16, 50., 1000.):
+            result = solve_exchanger_or_radiation({**base, "UA": 1000 * extreme})
+            assert result["verified"], result
+            lo, hi = result["LMTD_bounds_K"]
+            assert lo - 1e-13 <= result["LMTD_K"] <= hi + 1e-13
+        assert not solve_exchanger_or_radiation({**base, "effectiveness": 1.0})["verified"]
+
+def test_lower_priority_phase_observations_cannot_cross_physical_endpoints():
+    for arr, sensible, crossover in (("condenser", "T_c_out", 400.00000005),
+                                     ("boiler", "T_h_out", 299.99999995)):
+        base = {"flow_arrangement": arr, "T_h_in": 400., "T_c_in": 300., "C_h": 1000., "C_c": 1000.,
+                "UA": 38000. * math.log(2)}
+        assert solve_exchanger_or_radiation(base)["verified"]
+        for key, value in (("effectiveness", 1.0000000005), ("Q", 100000.00005), (sensible, crossover)):
+            failed = solve_exchanger_or_radiation({**base, key: value})
+            assert not failed["verified"] and failed["invalid_observation"] == key
+        inactive_capacity = "C_h" if arr == "condenser" else "C_c"
+        assert not solve_exchanger_or_radiation({**base, inactive_capacity: -1000.})["verified"]
+
+
+def test_parallel_flow_rejects_measured_crossovers_inside_global_duty_bounds():
+    base = {"flow_arrangement": "parallel", "T_h_in": 400., "T_c_in": 300., "C_h": 1000., "C_c": 1000.,
+            "UA": 16000. * math.log(2)}
+    assert solve_exchanger_or_radiation(base)["verified"]
+    # Equal-rate streams cannot cross their 350 K equilibrium in parallel flow.
+    for key, value in (("T_h_out", 349.99999999), ("T_c_out", 350.00000001),
+                       ("effectiveness", .50000000008), ("Q", 50000.000008)):
+        result = solve_exchanger_or_radiation({**base, key: value})
+        assert not result["verified"] and result["invalid_observation"] == key
