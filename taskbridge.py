@@ -53,7 +53,10 @@ try:
     from websockets.asyncio.server import serve as _ws_serve
 except ImportError:
     _ws_serve = None
-from websockets.exceptions import ConnectionClosed
+try:
+    from websockets.exceptions import ConnectionClosed
+except ImportError:
+    ConnectionClosed = Exception
 
 # Limits the evaluator enforces (docs/protocol.md). It counts a message past one
 # of them as malformed, or closes the connection.
