@@ -75,6 +75,15 @@ def main():
         require(output["status"] == "candidate_evidence" and output["pdf_sha256"] == PDF_SHA,
                 "Published drawing profile could not be read")
         predictions.append((output["wires"], output["wire_groups"]))
+    flat = json.loads(subprocess.check_output([
+        sys.executable, str(REPO / "engineering_toolkit.py"), "pdf-eagle-connectivity",
+        str(args.pdf), "--flat-document",
+    ]))
+    require(flat["status"] == "candidate_evidence" and flat["pdf_sha256"] == PDF_SHA,
+            "Document reader returned an unsupported profile or different drawing")
+    require([(p["wires"], p["wire_groups"]) for p in flat["pages"]] == predictions,
+            "Document mode changed page geometry or local membership")
+    require(len(flat["document_wire_groups"]) == len(predictions), "Document memberships omit sheets")
     require(sha256(args.vendor_archive.read_bytes()).hexdigest() == ZIP_SHA, "Unexpected vendor archive")
     with ZipFile(args.vendor_archive) as archive:
         cad = archive.read("MEGA2560_Rev3e.sch")
@@ -82,6 +91,7 @@ def main():
     sheets = ET.fromstring(cad).findall(".//sheets/sheet")
     require(len(sheets) == len(predictions), "Source sheet count differs")
     document = []
+    flat_rows = []
     for page, ((wires, groups), sheet, expected) in enumerate(
             zip(predictions, sheets, ((86, 82, 0, 74), (31, 31, 0, 0))), 1):
         names = align(wires, sheet)
@@ -91,10 +101,17 @@ def main():
                 f"Page {page} differs from the locked external result: {observed}")
         print(json.dumps({"page": page, "wire_sections": len(wires), **observed}))
         document.extend(rows)
+        stitched = flat["document_wire_groups"][page - 1]
+        require(len(stitched) == len(names), "Document memberships omit wires")
+        flat_rows.extend(zip(names, stitched))
     result = counts(document)
     require(result == {"nets": 111, "exact": 102, "false_connected": 0, "false_separated": 2040},
             "Complete document differs from the independent recount")
     print(json.dumps({"combined_pages_without_inter_sheet_stitching": result}))
+    result = counts(flat_rows)
+    require(result == {"nets": 111, "exact": 106, "false_connected": 0, "false_separated": 854},
+            f"Flat-document comparison differs: {result}")
+    print(json.dumps({"flat_document": result, "anchors": flat["inter_sheet_anchors"]}))
 
 
 if __name__ == "__main__":

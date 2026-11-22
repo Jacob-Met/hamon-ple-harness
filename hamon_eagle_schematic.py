@@ -1,4 +1,4 @@
-"""Page-local wire connectivity evidence for two-color EAGLE vector schematics."""
+"""Wire connectivity evidence for two-color EAGLE vector schematics."""
 from __future__ import annotations
 
 import hashlib
@@ -123,6 +123,10 @@ def _midpoint(a, b):
     return ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
 
 
+_GROUND_NAME = re.compile(r"(?:[AVDS]?GND|VSS)", re.I)
+_POWER_NAME = re.compile(r"(?:[+\-][A-Z0-9.]+|VCC|VDD|VIN|VBUS)", re.I)
+
+
 def _supply_anchors(wires, roots, lines, words):
     endpoints, ends, centers = Points(.13), Points(.13), Points(.13)
     for i, (a, b) in enumerate(wires):
@@ -135,8 +139,8 @@ def _supply_anchors(wires, roots, lines, words):
     supply_words = []
     for word in words:
         name = word["text"]
-        ground = bool(re.fullmatch(r"(?:[AVDS]?GND|VSS)", name, re.I))
-        power = bool(re.fullmatch(r"(?:[+\-][A-Z0-9.]+|VCC|VDD|VIN|VBUS)", name, re.I))
+        ground = bool(_GROUND_NAME.fullmatch(name))
+        power = bool(_POWER_NAME.fullmatch(name))
         if ground or power:
             box = word["page_bbox_pt"]
             supply_words.append((name, ground, _midpoint(box[:2], box[2:])))
@@ -220,3 +224,63 @@ def page_connectivity(filename, page=1):
     return {**result, "status": "candidate_evidence", "wire_groups": membership,
             "group_count": len(set(membership)), "supply_glyphs": marks,
             "printed_equivalence_anchors": anchors}
+
+
+def _stitch_pages(pages):
+    """Map sheet-local components onto flat-design nets using witnessed exact names."""
+    by_name = defaultdict(set)
+    by_component = defaultdict(set)
+    for page in pages:
+        membership = page["wire_groups"]
+        number = page["page"]
+        glyphs = {(mark["name"], membership[mark["wire_index"]])
+                  for mark in page["supply_glyphs"]}
+        for name, anchors in page["printed_equivalence_anchors"].items():
+            for index in anchors:
+                group = membership[index]
+                component = (number, group)
+                by_component[component].add(name)
+                # A printed supply word can lie on a different wire. Require
+                # physical glyph evidence on each sheet for a supply join.
+                supply_name = _GROUND_NAME.fullmatch(name) or _POWER_NAME.fullmatch(name)
+                if supply_name and (name, group) not in glyphs:
+                    continue
+                by_name[name].add(component)
+
+    canonical = {}
+    links = []
+    for name, components in sorted(by_name.items()):
+        if len(components) < 2 or len({page for page, _ in components}) != len(components):
+            continue
+        if any(by_component[component] != {name} for component in components):
+            continue
+        canonical.update(dict.fromkeys(components, min(components)))
+        links.append({"name": name, "page_groups": sorted(components)})
+
+    group_ids = {}
+    memberships = []
+    for page in pages:
+        wire_groups = []
+        for group in page["wire_groups"]:
+            key = (page["page"], group)
+            key = canonical.get(key, key)
+            wire_groups.append(group_ids.setdefault(key, len(group_ids)))
+        memberships.append(wire_groups)
+    return memberships, links
+
+
+def document_connectivity(filename):
+    """Connect witnessed names across sheets of a single flat EAGLE design."""
+    source = Path(filename)
+    total, _ = drawing._page_geometry(source, 1, 1)
+    if not 1 <= total <= 20:
+        raise ValueError("EAGLE document exceeds the 20-sheet processing bound")
+    pages = [page_connectivity(source, page) for page in range(1, total + 1)]
+    result = {"kind": "eagle-schematic-document-connectivity", "pages": pages,
+              "pdf_sha256": pages[0]["pdf_sha256"],
+              "scope": "Candidate visible wire groups for one flat EAGLE design. Device pins and hierarchical names are outside the result."}
+    if any(page["status"] != "candidate_evidence" for page in pages):
+        return {**result, "status": "unresolved_profile", "document_wire_groups": None}
+    memberships, links = _stitch_pages(pages)
+    return {**result, "status": "candidate_evidence", "document_wire_groups": memberships,
+            "inter_sheet_anchors": links, "group_count": len({g for sheet in memberships for g in sheet})}
