@@ -106,6 +106,28 @@ class TestConsolidation(unittest.TestCase):
         self.assertFalse(example(time_s=0, proposed_degree_consolidation=-1e-8)["conservation_verified"])
         self.assertFalse(example(time_s=1e16, proposed_degree_consolidation=1.+1e-8)["conservation_verified"])
 
+    def test_dual_domain_legacy_stress_history_and_solid_volume(self):
+        from hamon_dual_verifier import run_dual_verify_spec
+
+        spec = dict(H_m=2., e0=.5, Cc=1.2, Cr=.1, sigma_v0_Pa=10000.,
+                    sigma_p_Pa=10000., delta_sigma_Pa=990000., max_settlement_m=4.)
+        def verify(**updates):
+            return run_dual_verify_spec({"mode":"domain","kind":"consolidation_settlement",
+                                         "spec":{**spec, **updates}})
+
+        impossible = verify()
+        self.assertFalse(impossible["dual_verified"])
+        self.assertFalse(impossible["passes_limit"])
+        self.assertIn("negative final void ratio", impossible["reason"])
+        for prior in (0., 5000., 10000.):
+            result = verify(sigma_p_Pa=prior, delta_sigma_Pa=10000., Cc=.25, Cr=.05)
+            self.assertTrue(result["dual_verified"])
+            self.assertAlmostEqual(result["settlement_m"], 2./1.5*.25*math.log10(2.))
+        unloaded = verify(sigma_p_Pa=20000., delta_sigma_Pa=-5000., Cc=.25, Cr=.05)
+        self.assertTrue(unloaded["dual_verified"])
+        self.assertAlmostEqual(unloaded["settlement_m"], 2./1.5*.05*math.log10(.5))
+        self.assertEqual(verify(Cc=0.,Cr=0.)["settlement_m"], 0.)
+
     def test_claimed_results_and_domain(self):
         self.assertFalse(example(proposed_degree_consolidation=.5)["conservation_verified"])
         self.assertFalse(example(proposed_settlement_m=.4)["conservation_verified"])
