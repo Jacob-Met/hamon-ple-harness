@@ -15,7 +15,8 @@ numerical cross-verification suite for Physical Engineering's Last Exam (PLE):
        exact Bode gain/phase crossover frequencies, Gain Margin (dB), Phase Margin (deg),
        unity-feedback closed-loop stability, and static DC gain.
      - State-space Faddeev-LeVerrier characteristic polynomial (M_1 = I), Cayley-Hamilton
-       residual gate, Kalman controllability/observability matrix ranks, and continuous
+       residual gate, exact algebraic controllability/observability ranks of the supplied
+       finite binary64 coefficients, and continuous
        Lyapunov equation A^T P + P A = -Q Sylvester positive-definiteness check.
   3. Psychrometrics (`verify_psychrometric_process`):
      - ASHRAE Fundamentals (Hyland-Wexler 1983) saturation vapor pressure over ice & liquid,
@@ -94,33 +95,74 @@ def _solve_linear(a_in: Sequence[Sequence[float]], b_in: Sequence[float], tol: f
     return x
 
 
-def _matrix_rank(mat: Sequence[Sequence[float]], tol: float = 1e-9) -> int:
-    if not mat or not mat[0]:
-        return 0
-    rows = len(mat)
-    cols = len(mat[0])
-    work = [list(map(float, r)) for r in mat]
-    scale = max((abs(v) for r in work for v in r), default=0.0)
-    if scale == 0.0:
-        return 0
-    eps = tol * scale
-    rank = 0
-    r_idx = 0
-    for c_idx in range(cols):
-        if r_idx >= rows:
-            break
-        piv = max(range(r_idx, rows), key=lambda r: abs(work[r][c_idx]))
-        if abs(work[piv][c_idx]) <= eps:
-            continue
-        work[r_idx], work[piv] = work[piv], work[r_idx]
-        diag = work[r_idx][c_idx]
-        for r in range(r_idx + 1, rows):
-            f = work[r][c_idx] / diag
-            for c in range(c_idx, cols):
-                work[r][c] -= f * work[r_idx][c]
-        rank += 1
-        r_idx += 1
-    return rank
+def _primitive_integer_vector(values: Sequence[int]) -> List[int]:
+    """Remove only a nonzero scalar, preserving the represented direction."""
+    divisor = math.gcd(*values)
+    if not divisor:
+        return list(values)
+    if next(value for value in values if value) < 0:
+        divisor = -divisor
+    return [value // divisor for value in values]
+
+
+def _algebraic_reachable_rank(a: Sequence[Sequence[float]],
+                              ports: Sequence[Sequence[float]]) -> int:
+    """Exact reachable dimension for the finite binary64 values supplied.
+
+    A common dyadic denominator turns A into an integer matrix M = D*A.
+    Scaling A or individual input columns by nonzero scalars leaves the
+    reachable span unchanged. A primitive integer basis is closed under M;
+    every independent residual is queued once. At termination the span
+    contains the ports, is invariant under A, and consists of reachable
+    vectors, so it equals the Kalman span. No float Krylov products or
+    numerical rank threshold enter this calculation.
+
+    At most n basis vectors are retained. Integer bit lengths depend on the
+    supplied coefficients; this is algebraic rank, not a conditioning test.
+    """
+    n = len(a)
+    ratios = [[value.as_integer_ratio() for value in row] for row in a]
+    denominator = max(d for row in ratios for _, d in row)
+    operator = [[num * (denominator // den) for num, den in row] for row in ratios]
+    common = math.gcd(*(value for row in operator for value in row))
+    if common > 1:
+        operator = [[value // common for value in row] for row in operator]
+    basis: List[Tuple[int, List[int]]] = []
+    pending: List[List[int]] = []
+
+    def insert(candidate: List[int]) -> None:
+        candidate = _primitive_integer_vector(candidate)
+        for pivot, known in basis:
+            coefficient = candidate[pivot]
+            if coefficient:
+                divisor = math.gcd(known[pivot], coefficient)
+                left = known[pivot] // divisor
+                right = coefficient // divisor
+                candidate = _primitive_integer_vector(
+                    [left * x - right * y for x, y in zip(candidate, known)]
+                )
+        if not any(candidate):
+            return
+        pivot = next(i for i, value in enumerate(candidate) if value)
+        basis.append((pivot, candidate))
+        basis.sort(key=lambda entry: entry[0])
+        pending.append(candidate)
+
+    for column in zip(*ports):
+        ratios_column = [value.as_integer_ratio() for value in column]
+        denominator_column = max(d for _, d in ratios_column)
+        insert([num * (denominator_column // den) for num, den in ratios_column])
+        if len(basis) == n:
+            return n
+    index = 0
+    while index < len(pending):
+        vector = pending[index]
+        index += 1
+        insert([sum(coefficient * value for coefficient, value in zip(row, vector))
+                for row in operator])
+        if len(basis) == n:
+            return n
+    return len(basis)
 
 
 def _thomas_solve(lower: Sequence[float], diag: Sequence[float], upper: Sequence[float], rhs: Sequence[float]) -> List[float]:
@@ -854,8 +896,9 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
     if mode == "state_space":
         a_mat = [[float(v) for v in row] for row in spec["A"]]
         n = len(a_mat)
-        if n == 0 or any(len(r) != n for r in a_mat):
-            return {"passed": False, "domain": "control", "mode": mode, "reason": "Matrix A must be non-empty square"}
+        if (n == 0 or any(len(r) != n for r in a_mat)
+                or any(not math.isfinite(v) for row in a_mat for v in row)):
+            return {"passed": False, "domain": "control", "mode": mode, "reason": "Matrix A must be finite, non-empty and square"}
 
         m_cur = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
         char_poly = [1.0]
@@ -874,18 +917,11 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         ctrl_rank: Optional[int] = None
         if "B" in spec:
             b_mat = [[float(v) for v in (row if isinstance(row, list) else [row])] for row in spec["B"]]
-            blocks = [b_mat]
-            cur = b_mat
-            for _ in range(1, n):
-                cur = _mat_mul(a_mat, cur)
-                blocks.append(cur)
-            ctrb = []
-            for i in range(n):
-                row_full: List[float] = []
-                for blk in blocks:
-                    row_full.extend(blk[i])
-                ctrb.append(row_full)
-            ctrl_rank = _matrix_rank(ctrb)
+            if (len(b_mat) != n or any(len(row) != len(b_mat[0]) for row in b_mat)
+                    or any(not math.isfinite(v) for row in b_mat for v in row)):
+                return {"passed": False, "domain": "control", "mode": mode,
+                        "reason": "Matrix B must be finite and rectangular with one row per state"}
+            ctrl_rank = _algebraic_reachable_rank(a_mat, b_mat)
             controllable = ctrl_rank == n
 
         observable: Optional[bool] = None
@@ -893,13 +929,13 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         if "C" in spec:
             c_raw = spec["C"]
             c_mat = [[float(v) for v in c_raw]] if (c_raw and not isinstance(c_raw[0], list)) else [[float(v) for v in r] for r in c_raw]
-            obsv: List[List[float]] = []
-            cur = c_mat
-            for step in range(n):
-                obsv.extend(cur)
-                if step < n - 1:
-                    cur = _mat_mul(cur, a_mat)
-            obs_rank = _matrix_rank(obsv)
+            if (any(len(row) != n for row in c_mat)
+                    or any(not math.isfinite(v) for row in c_mat for v in row)):
+                return {"passed": False, "domain": "control", "mode": mode,
+                        "reason": "Matrix C must be finite with one column per state"}
+            transpose_a = [list(column) for column in zip(*a_mat)]
+            transpose_c = [[row[i] for row in c_mat] for i in range(n)]
+            obs_rank = _algebraic_reachable_rank(transpose_a, transpose_c)
             observable = obs_rank == n
 
         q_mat = [[float(v) for v in r] for r in spec["Q"]] if "Q" in spec else [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
