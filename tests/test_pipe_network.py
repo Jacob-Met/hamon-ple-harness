@@ -170,6 +170,35 @@ def test_tiny_head_gradient_and_mixed_scale_branch():
         assert result["conservation_verified"] is expected
         assert result["proposed_checks"]["junction_demands_match"] is expected
 
+@pytest.mark.parametrize("direction", [1, -1])
+def test_radial_capillary_and_low_resistance_tap(direction):
+    # Independent laminar Hagen–Poiseuille solution, with the tap pipe reversed.
+    feed, tap = direction * 5.1e-7, direction * 1e-8
+    coefficient = 128e-6 / (math.pi * 9.80665)
+    mid = 100 - coefficient * 10 * feed / 0.001**4
+    end = mid - coefficient * tap / 0.02**4
+    case = {
+        "nodes": [{"id": "M", "demand_m3_s": feed - tap}, {"id": "T", "demand_m3_s": tap},
+                  {"id": "R", "fixed_head_m": 100}],
+        "pipes": [{"id": "tap", "from": "T", "to": "M", "length_m": 1, "diameter_m": 0.02},
+                  {"id": "feed", "from": "R", "to": "M", "length_m": 10, "diameter_m": 0.001}],
+        "proposed_flows_m3_s": {"tap": -tap, "feed": feed},
+        "proposed_heads_m": {"R": 100., "M": mid, "T": end},
+    }
+    solved = verify_pipe_network(case)
+    assert solved["conservation_verified"], solved
+    assert solved["heads_m"] == pytest.approx(case["proposed_heads_m"], abs=1e-12, rel=0)
+    assert solved["flows_m3_s"] == pytest.approx(case["proposed_flows_m3_s"], abs=1e-20, rel=0)
+    assert max(solved["reynolds"].values()) < 2000
+    assert solved["max_nodal_cycle_flow_difference_m3_s"] < 1e-20
+    assert run_dual_verify_spec({"mode": "domain", "kind": "pipe_network", "spec": case})["dual_verified"]
+    case["proposed_heads_m"]["T"] = mid
+    assert not verify_pipe_network(case)["proposed_checks"]["pipe_head_drops_match"]
+    case["proposed_heads_m"]["T"] = end
+    case["proposed_flows_m3_s"]["tap"] = tap
+    assert not verify_pipe_network(case)["proposed_checks"]["junction_demands_match"]
+
+
 @pytest.mark.parametrize("left_length,right_length", [(200.0, 200.0), (100.0, 300.0)])
 def test_prescribed_heads_laminar_series(left_length, right_length):
     # Hagen–Poiseuille gives resistance proportional to length for equal diameters.

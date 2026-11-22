@@ -206,20 +206,31 @@ def network(spec):
     d = demands[junctions]
     scale = max(float(np.abs(d).sum()), 1e-12)
 
-    # The harmonic initial head includes imposed through-flow even without demand.
-    initial = np.linalg.lstsq(A.T, -boundary_drop, rcond=None)[0]
-    if np.any(boundary_drop):
-        initial_flow = inverse(A.T @ initial + boundary_drop, scale)
-        scale = max(scale, float(np.max(np.abs(initial_flow))))
+    # In a one-reservoir tree, each pipe drop is an independent pressure
+    # coordinate. Retain these local drops while balancing the junctions:
+    # subtracting two large node heads can erase a small downstream drop.
+    radial = len(reservoirs) == 1 and len(pipes) == len(nodes) - 1
+    if radial:
+        initial = np.zeros(len(pipes))
+    else:
+        # The harmonic initial head includes imposed reservoir through-flow.
+        initial = np.linalg.lstsq(A.T, -boundary_drop, rcond=None)[0]
+        if np.any(boundary_drop):
+            initial_flow = inverse(A.T @ initial + boundary_drop, scale)
+            scale = max(scale, float(np.max(np.abs(initial_flow))))
 
-    def nodal_equations(head):
-        flow = inverse(A.T @ head + boundary_drop, scale)
+    def pipe_drops(pressure):
+        return pressure if radial else A.T @ pressure + boundary_drop
+
+    def nodal_equations(pressure):
+        flow = inverse(pipe_drops(pressure), scale)
         residual = A @ flow + d
-        jacobian = (A / law(flow)[1]) @ A.T
-        return residual, jacobian
+        derivative = A / law(flow)[1]
+        return residual, derivative if radial else derivative @ A.T
 
-    head = newton(initial, nodal_equations, min(1e-12, 5e-13 * scale))
-    qnode = inverse(A.T @ head + boundary_drop, scale)
+    pressure = newton(initial, nodal_equations, min(1e-12, 5e-13 * scale))
+    qnode = inverse(pipe_drops(pressure), scale)
+    head = np.linalg.solve(A.T, pressure) if radial else pressure
     # The second formulation begins with continuity satisfied, and may change
     # only circulations and flows between reservoirs. Their prescribed head
     # differences supply the energy term on those boundary-to-boundary paths.
