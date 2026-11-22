@@ -122,3 +122,31 @@ class Wave7EngineeringVerifiersUnittest(unittest.TestCase):
 for _name, _fn in list(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         setattr(Wave7EngineeringVerifiersUnittest, _name, staticmethod(_fn))
+
+
+def test_inverse_counterflow_near_pinch_and_balanced_capacity_rates():
+    from decimal import Decimal, localcontext
+
+    # Independent heat-duty/LMTD sizing, including NTU far above 250.
+    for ratio in ("1", ".99999999999", ".99", ".9"):
+        for eff in (".2", ".997", ".9999"):
+            with localcontext() as context:
+                context.prec = 60
+                cr, target = Decimal(ratio), Decimal(eff)
+                cmin = Decimal(1200)
+                duty = cmin * 120 * target
+                for ch, cc in ((cmin, cmin / cr), (cmin / cr, cmin)):
+                    hot = 400 - duty / ch
+                    cold = 280 + duty / cc
+                    dh, dc = 400 - cold, hot - 280
+                    lmtd = dh if dh == dc else (dh - dc) / (dh / dc).ln()
+                    base = dict(subkind="heat_exchanger", flow_arrangement="counterflow",
+                                T_h_in=400, T_c_in=280, C_h=float(ch), C_c=float(cc))
+                    for field, value in (("effectiveness", target), ("Q", duty),
+                                         ("T_h_out", hot), ("T_c_out", cold)):
+                        result = solve_exchanger_or_radiation({**base, field: float(value)})
+                        assert result["verified"], (ratio, eff, field, result)
+                        assert math.isclose(result["UA_W_K"], float(duty / lmtd), rel_tol=1e-8)
+    for invalid in (0, 1, 1.01, float("nan")):
+        result = solve_exchanger_or_radiation({**base, "effectiveness": invalid})
+        assert result["verified"] is False

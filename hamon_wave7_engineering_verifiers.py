@@ -278,13 +278,14 @@ def solve_thermodynamic_cycle(params: Mapping[str, Any]) -> Dict[str, Any]:
 def _hx_eps_from_ntu(ntu: float, cr: float, arrangement: str) -> float:
     if ntu <= 0.0:
         return 0.0
+    if arrangement == "counterflow":
+        delta = 1.0 - cr
+        if delta == 0.0:
+            return ntu / (1.0 + ntu)
+        drop = -math.expm1(-ntu * delta)
+        return drop / (delta + cr * drop)
     if cr <= 1e-12 or arrangement in ("condenser", "boiler"):
         return 1.0 - math.exp(-ntu)
-    if arrangement == "counterflow":
-        if abs(1.0 - cr) < 1e-9:
-            return ntu / (1.0 + ntu)
-        e = math.exp(-ntu * (1.0 - cr))
-        return (1.0 - e) / (1.0 - cr * e)
     if arrangement == "parallel":
         return (1.0 - math.exp(-ntu * (1.0 + cr))) / (1.0 + cr)
     if arrangement == "shell_tube_1_2":
@@ -341,10 +342,16 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
             else:
                 return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "missing_rating_or_sizing_spec"}
 
-            eps_asymp = _hx_eps_from_ntu(250.0, cr, arr)
-            if eps_target <= 0.0 or eps_target >= eps_asymp - 1e-11:
+            limit = 1.0 if arr == "counterflow" else _hx_eps_from_ntu(250.0, cr, arr) - 1e-11
+            if not 0.0 < eps_target < limit:
                 return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "second_law_crossover_or_unreachable_effectiveness"}
-            ntu = float(optimize.brentq(lambda x: _hx_eps_from_ntu(x, cr, arr) - eps_target, 0.0, 250.0, xtol=1e-13, rtol=1e-13))
+            if arr == "counterflow":
+                # Invert the counterflow relation at its physical limit, including C_r = 1.
+                odds = eps_target / (1.0 - eps_target)
+                delta = 1.0 - cr
+                ntu = odds if delta == 0.0 else math.log1p(odds * delta) / delta
+            else:
+                ntu = float(optimize.brentq(lambda x: _hx_eps_from_ntu(x, cr, arr) - eps_target, 0.0, 250.0, xtol=1e-13, rtol=1e-13))
             ua = ntu * c_min
             eps = _hx_eps_from_ntu(ntu, cr, arr)
 
@@ -370,7 +377,9 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
             if abs(dt1 - dt2) < 1e-10 * max(dt1, dt2, 1.0):
                 lmtd_val = float(0.5 * (dt1 + dt2))
             else:
-                lmtd_val = float((dt1 - dt2) / math.log(dt1 / dt2))
+                smaller, larger = sorted((dt1, dt2))
+                difference = larger - smaller
+                lmtd_val = difference / math.log1p(difference / smaller)
             lmtd_res = abs(ua * lmtd_val - q_actual) / max(q_actual, 1e-12)
 
         residual = float(max(eb_h, eb_c, lmtd_res))
