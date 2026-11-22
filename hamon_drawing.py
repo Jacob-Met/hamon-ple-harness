@@ -458,8 +458,40 @@ def _svg_inventory(payload,limit_paths=2000,region=None,selected_vector_ids=None
             "region_svg_units":region}
 
 
+
+def _poppler_text_xml(payload):
+    """Keep an unreadable PDF text line out of reference matching."""
+    try:
+        return ET.fromstring(payload)
+    except ET.ParseError:
+        # Valid UTF-16, declared legacy encodings and callers supplying Unicode
+        # keep ElementTree's original input semantics.
+        raw = not isinstance(payload, str)
+        illegal = r"[\x00-\x08\x0b\x0c\x0e-\x1f]"
+        word = r"(<word(?:\s[^<>]*)?>)([^<>]*)(</word>)"
+        if raw:
+            illegal, word = illegal.encode("ascii"), word.encode("ascii")
+        if not re.search(illegal, payload):
+            raise
+        marker = b"&#xFFFD;" if raw else "&#xFFFD;"
+
+        def quarantine(match):
+            if re.search(illegal, match.group(2)):
+                return match.group(1) + marker + match.group(3)
+            return match.group()
+
+        # Word contents alone are eligible. Invalid markup remains a parse error.
+        root = ET.fromstring(re.sub(word, quarantine, payload))
+    for line in root.findall(".//{*}line"):
+        words = line.findall("{*}word")
+        if any(item.text and "\ufffd" in item.text for item in words):
+            for item in words:
+                item.text = "\ufffd"
+    return root
+
+
 def _word_inventory(data,max_words):
-    root=ET.fromstring(data)
+    root=_poppler_text_xml(data)
     words=[];page_box=None
     lines = (element for element in root.iter() if local(element.tag) == "line")
     source_lines = {word: index for index, line in enumerate(lines)
@@ -818,6 +850,8 @@ def _drawing_text_lines(page, page_no):
     rows = []
     for line in page.findall(".//{*}line"):
         text = " ".join(word.text or "" for word in line.findall("{*}word")).strip()
+        if "\ufffd" in text:
+            text = "\ufffd"
         box = [float(line.attrib[k]) for k in ("xMin", "yMin", "xMax", "yMax")]
         if not all(math.isfinite(v) for v in box) or box[0] >= box[2] or box[1] >= box[3]:
             continue
@@ -1813,7 +1847,7 @@ def detail_links(filename, target_sheet=None):
             raise ValueError("pdftotext failed to extract the document's native sheet text")
         if layout.stat().st_size > 64_000_000:
             raise ValueError("PDF native text layout exceeds 64 MB")
-        pages = ET.parse(layout).findall(".//{*}page")
+        pages = _poppler_text_xml(layout.read_bytes()).findall(".//{*}page")
         if len(pages) != total:
             raise ValueError("incomplete native page index")
         rows = [_drawing_text_lines(page, n) for n, page in enumerate(pages, 1)]
