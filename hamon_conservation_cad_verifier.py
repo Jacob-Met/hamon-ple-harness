@@ -778,8 +778,11 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
         ip, im = ni(vs["n_pos"]), ni(vs["n_neg"])
         if ip is not None: mna[ip, row] += 1.0; mna[row, ip] += 1.0
         if im is not None: mna[im, row] -= 1.0; mna[row, im] -= 1.0
+        value = float(vs["value"])
+        if not math.isfinite(value):
+            raise ValueError("Voltage-source and DC-inductor values must be finite")
         if str(vs["type"]).upper() == "V":
-            rhs[row] = cmath.rect(float(vs["value"]), math.radians(float(vs.get("phase_deg", 0.0))))
+            rhs[row] = cmath.rect(value, math.radians(float(vs.get("phase_deg", 0.0))))
 
     admittances = {}
     for index, br in enumerate(branches):

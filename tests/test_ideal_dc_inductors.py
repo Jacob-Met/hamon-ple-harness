@@ -28,6 +28,13 @@ class IdealInductorOperatingPointTests(unittest.TestCase):
             with self.subTest(deck=deck), self.assertRaisesRegex(ValueError, "Singular MNA"):
                 verify_circuit_conservation({"netlist": deck})
 
+    def test_dc_inductor_still_requires_a_numeric_component_value(self):
+        source = {"name": "I1", "type": "I", "n_pos": "0", "n_neg": "pin", "value": 1.0}
+        coil = {"name": "L1", "type": "L", "n_pos": "pin", "n_neg": "0"}
+        for fields in ({}, {"value": "invalid"}, {"value": float("nan")}):
+            with self.subTest(fields=fields), self.assertRaises((KeyError, ValueError)):
+                verify_circuit_conservation({"branches": [source, {**coil, **fields}]})
+
     def test_ac_inductor_retains_its_reactive_drop(self):
         freq = 50.0
         inductance = 0.1
