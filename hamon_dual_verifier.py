@@ -2260,6 +2260,10 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
             "dual_rel_discrepancy": _rel_diff(-tau * math.log(1.0 - frac), rt["root"]),
             "dual_verified": True,
         }
+    if kind == "euler_rotor":
+        from hamon_turbomachinery import verify_turbomachinery
+        result = verify_turbomachinery(spec)
+        return {**result, "kind": kind, "dual_verified": result["conservation_verified"]}
     if kind == "pipe_network":
         from hamon_pipe_network import verify_pipe_network
         result = verify_pipe_network(spec)
