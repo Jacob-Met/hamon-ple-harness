@@ -270,6 +270,30 @@ HEAT_PHASE_CASES = [
 ]
 
 
+HEAT_TIME_HARMONIC = 2**40
+HEAT_TIME_INPUTS = {
+    "underflow": {"alpha_m2_s": 2.0**-542, "length_m": 2.0**-500, "t_eval_s": 2.0**-542,
+                  "x_eval_m": 2.0**-541, "modes": [{"n": HEAT_TIME_HARMONIC, "amplitude": 1}]},
+    "overflow": {"alpha_m2_s": 2.0**512, "length_m": 2.0**511, "t_eval_s": 2.0**512,
+                 "x_eval_m": 2.0**510, "modes": [{"n": 1, "amplitude": 1}]},
+    "ordinary": {"alpha_m2_s": 1, "length_m": 1, "t_eval_s": 4,
+                 "x_eval_m": 0.5, "modes": [{"n": 1, "amplitude": 1}]},
+}
+HEAT_TIME_UNDERFLOW_TARGET = math.exp(-math.pi**2 / 16)
+HEAT_TIME_OVERFLOW_TARGET = math.exp(-4 * math.pi**2)
+HEAT_TIME_CASES = [
+    ("heat-time-underflow", "underflow", None, True),
+    ("heat-time-underflow-true", "underflow",
+     (HEAT_TIME_UNDERFLOW_TARGET, 2e-13 * HEAT_TIME_UNDERFLOW_TARGET), True),
+    ("heat-time-underflow-false", "underflow", (1, 0), False),
+    ("heat-time-overflow", "overflow", None, True),
+    ("heat-time-overflow-true", "overflow",
+     (HEAT_TIME_OVERFLOW_TARGET, 2e-13 * HEAT_TIME_OVERFLOW_TARGET), True),
+    ("heat-time-overflow-false", "overflow", (0, 0), False),
+    ("heat-time-ordinary-twin", "ordinary", None, True),
+]
+
+
 @pytest.fixture(scope="module")
 def routed(tmp_path_factory):
     workdir = tmp_path_factory.mktemp("registered-engineering")
@@ -402,6 +426,12 @@ def routed(tmp_path_factory):
         if claim is not None:
             field, value = claim
             spec.update(claimed_field=field, claimed_value=value, atol=0, rtol=0)
+        calls.append({"id": case, "mode": "pde", "spec": spec})
+    for case, system, claim, _ in HEAT_TIME_CASES:
+        spec = {"mode": "heat_1d_transient", **HEAT_TIME_INPUTS[system]}
+        if claim is not None:
+            value, atol = claim
+            spec.update(claimed_field="u_exact", claimed_value=value, atol=atol, rtol=0)
         calls.append({"id": case, "mode": "pde", "spec": spec})
     source = r"""
 import registerTaskTools, { PLE_DOMAIN_TOOL_NAMES } from './task-tools.ts';
@@ -1083,6 +1113,54 @@ def test_registered_heat_modal_phase(routed, case, harmonic, position, time, cla
             assert isinstance(result.get("reason"), str) and result["reason"].strip()
 
 
+@pytest.mark.parametrize("case,system,claim,passed", HEAT_TIME_CASES, ids=[row[0] for row in HEAT_TIME_CASES])
+def test_registered_heat_modal_time(routed, case, system, claim, passed):
+    reply = routed[case]
+    assert reply["completed"], reply
+    result = reply["details"]
+    assert result["domain"] == "pde" and result["mode"] == "heat_1d_transient"
+    assert result["passed"] is passed, result
+    assert result["error_measure"] == "whole-domain upper bound", result
+    for field in ("u_exact", "u_crank_nicolson", "query_abs_error", "linf_error"):
+        assert type(result[field]) in (int, float) and math.isfinite(result[field]), result
+
+    # All three positions are unit-peak nodes. The tabulated scales S and
+    # mesh/step counts come from the frozen dimensionless calculation.
+    if system == "underflow":
+        scale, cells_per_mode, steps = 1/16, 32, 1920
+        cells = 32 * HEAT_TIME_HARMONIC
+        continuum = HEAT_TIME_UNDERFLOW_TARGET
+    else:
+        scale, cells_per_mode, steps = 4, 120, 120
+        cells = 120
+        continuum = HEAT_TIME_OVERFLOW_TARGET
+    assert result["spatial_cells"] == cells and result["time_steps"] == steps, result
+    rate = 4 * scale * cells_per_mode**2 * math.sin(math.pi / (2 * cells_per_mode))**2
+    half_step = rate / (2 * steps)
+    discrete = ((1 - half_step) / (1 + half_step))**steps
+    actual, numeric = result["u_exact"], result["u_crank_nicolson"]
+    assert 0 < actual < 1 and math.isclose(actual, continuum, rel_tol=2e-13, abs_tol=0), result
+    assert 0 < numeric < 1 and math.isclose(numeric, discrete, rel_tol=2e-12, abs_tol=0), result
+    assert result["query_abs_error"] == abs(actual - numeric), result
+    assert 0 <= result["query_abs_error"] <= result["linf_error"] <= 0.003, result
+    if case == "heat-time-overflow":
+        twin = routed["heat-time-ordinary-twin"]
+        assert twin["completed"], twin
+        other = twin["details"]
+        assert other["passed"] is True, other
+        assert math.isclose(actual, other["u_exact"], rel_tol=2e-13, abs_tol=0), other
+        assert math.isclose(numeric, other["u_crank_nicolson"], rel_tol=2e-12, abs_tol=0), other
+        assert (other["spatial_cells"], other["time_steps"]) == (cells, steps), other
+    if claim is None:
+        assert "claim_check" not in result
+    else:
+        comparison = result["claim_check"]
+        assert comparison["field"] == "u_exact" and comparison["claimed"] == claim[0]
+        assert comparison["actual"] == actual and comparison["within_tolerance"] is passed
+        if not passed:
+            assert isinstance(result.get("reason"), str) and result["reason"].strip()
+
+
 class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1172,3 +1250,8 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
         for args in HEAT_PHASE_CASES:
             with self.subTest(case=args[0]):
                 test_registered_heat_modal_phase(self.routed_data, *args)
+
+    def test_registered_heat_modal_time(self):
+        for args in HEAT_TIME_CASES:
+            with self.subTest(case=args[0]):
+                test_registered_heat_modal_time(self.routed_data, *args)

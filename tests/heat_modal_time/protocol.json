@@ -1,0 +1,341 @@
+{
+  "course": "heat_modal_time_representation",
+  "version": 1,
+  "state": "frozen_before_first_numerical_execution",
+  "base_commit": "e6aff7826346fba47d725b3f522c137b0720faf5",
+  "base_tree": "25a235ed42d0b363a05e2ff634bd0ab916af198b",
+  "scope_sha256": "dff14587940bad6a89b76614e4d245bb9cdc37d5d3075380dbb271c48b6a4343",
+  "independent_plans": {
+    "design": "f4209a823d0b14ba042276453522b89b406f42ae1bf99f970e3cfb39c8b224d4",
+    "direct_v2": "4280bf0109e3157f8aa8103ec9f1625e930453ab0d6211a4f238243622a9e2ca",
+    "direct_unexecuted_v1": "3e29c20cebff7c4770320edbff1354d45fc83d6538f37a05717134da70e82762",
+    "registered": "1c26f16db439c1d15ba84ef32865aec906b0050c6127a9220f17729ee8891e2e"
+  },
+  "mechanism": {
+    "scope": "Temporal calculation inside _transient_heat_modes plus private time/rate helpers; qualified spatial sampler unchanged.",
+    "represented_scale": "S_n=Fraction(alpha)*Fraction(time)*abs(n)^2/Fraction(length)^2 from accepted binary64 scalars and validated integer n.",
+    "ordinary": "Preserve existing arithmetic order and results when dimensional product, squared length, quotient, squared frequency, exponent, rate and CN ratio are normal finite.",
+    "continuum": "H=S_n*Fraction(math.pi)^2; render once for exponential. H beyond binary64 gives zero attenuation.",
+    "discrete": "K=H*Fraction(sinc(y))^2, y=pi*(abs(n)/C)/2 using bounded integer ratio; finite final rendered K retains original M=max(minimum_steps,ceil(max(K))).",
+    "small_sinc": "Use sinc=1 for y<=2^-27, with 1-sinc(y)<=y^2/6.",
+    "cn": "Ordinary ratio/log1p order retained. Exceptional ratio or integer-step conversion uses exp(-K*atanh(r)/r), r=K/(2M), with removable limit1 and correction bounded by r^2/[3(1-r^2)].",
+    "shared_steps": "Exceptional CN propagation applies to every mode, including an ordinary low mode when another mode forces large shared M.",
+    "zeros": "Time0 or harmonic0 structurally yields unit damping; no dimensional product is required to establish it.",
+    "range": "Unrepresentable positive final scheduling rate follows the existing explicit refusal, with no partial solution or claim_check; no cap or substitute step count.",
+    "unchanged": [
+      "parser/defaults",
+      "spatial phase and virtual-grid interpolation",
+      "signed/zero/duplicate modes",
+      "cell and minimum-step initialization",
+      "sixteen refinements",
+      "step selection and doubling",
+      "whole-domain estimator and tolerance",
+      "claim handling",
+      "schema",
+      "all other domains"
+    ]
+  },
+  "direct": {
+    "route": "run_router_conservation_cad_verifier(mode=pde,spec.mode=heat_1d_transient)",
+    "ordinary_requests": 14,
+    "claimed_requests": 28,
+    "total_calls": 42,
+    "expected_ordinary": {
+      "approved": 13,
+      "refused": 1,
+      "complete_contracts": 14
+    },
+    "expected_claims": {
+      "approved": 13,
+      "refused": 15,
+      "complete_contracts": 28
+    },
+    "ordered_cases": [
+      {
+        "id": 1,
+        "name": "product/underflow",
+        "inputs": "alpha=t2^-542,L2^-500,x2^-541,n2^40,A1",
+        "scale": "1/16",
+        "cells": "32*2^40",
+        "steps": "1920",
+        "false_cn": "1"
+      },
+      {
+        "id": 2,
+        "name": "ordinary/high-mode-twin",
+        "inputs": "alpha1,t2^-84,L1,x2^-41,n2^40,A1",
+        "scale": "1/16",
+        "cells": "32*2^40",
+        "steps": "1920",
+        "false_cn": "1",
+        "whole_control": true
+      },
+      {
+        "id": 3,
+        "name": "product/overflow",
+        "inputs": "alpha=t2^512,L2^511,x2^510,n1,A1",
+        "scale": "4",
+        "cells": "120",
+        "steps": "120",
+        "false_cn": "0"
+      },
+      {
+        "id": 4,
+        "name": "ordinary/four-twin",
+        "inputs": "alpha4,t1,L1,x1/2,n1,A1",
+        "scale": "4",
+        "cells": "120",
+        "steps": "120",
+        "false_cn": "0",
+        "whole_control": true
+      },
+      {
+        "id": 5,
+        "name": "square/underflow",
+        "inputs": "alpha1,t2^-1074,L2^-538,x2^-539,n1,A1",
+        "scale": "4",
+        "cells": "120",
+        "steps": "120",
+        "false_cn": "0"
+      },
+      {
+        "id": 6,
+        "name": "square/overflow",
+        "inputs": "alpha2^512,t2^511,L2^512,x2^511,n1,A1",
+        "scale": "1/2",
+        "cells": "120",
+        "steps": "120",
+        "false_cn": "0"
+      },
+      {
+        "id": 7,
+        "name": "ordinary/half-twin",
+        "inputs": "alpha1/2,t1,L1,x1/2,n1,A1",
+        "scale": "1/2",
+        "cells": "120",
+        "steps": "120",
+        "false_cn": "0",
+        "whole_control": true
+      },
+      {
+        "id": 8,
+        "name": "quotient/below-minimum",
+        "inputs": "alpha1,t2^-1001,L2^37,x2^-474,n2^510,A1",
+        "scale": "2^-55",
+        "cells": "32*2^510",
+        "steps": "1920",
+        "false_cn": "1",
+        "exact_temperatures": "1-2*2^-53"
+      },
+      {
+        "id": 9,
+        "name": "ordinary/near-one-twin",
+        "inputs": "alpha1,t2^-135,L1,x2^-41,n2^40,A1",
+        "scale": "2^-55",
+        "cells": "32*2^40",
+        "steps": "1920",
+        "false_cn": "1",
+        "exact_temperatures": "1-2*2^-53",
+        "whole_control": true
+      },
+      {
+        "id": 10,
+        "name": "modes/signed-distinct-scales",
+        "inputs": "alpha=t2^-542,L2^-500,x2^-541,modes(2^40,1),(-3*2^40,1/2)",
+        "scale": "1/16 and9/16; both spatial sine1",
+        "cells": "24*2^40",
+        "steps": "480",
+        "false_cn": "3/2"
+      },
+      {
+        "id": 11,
+        "name": "zero/time-before-large-square",
+        "inputs": "alpha1,t0,L2^512,x2^511,n1,A1",
+        "scale": "0",
+        "cells": "120",
+        "steps": "reported0",
+        "false_cn": "0",
+        "exact_temperatures": "1"
+      },
+      {
+        "id": 12,
+        "name": "zero/harmonic-before-large-product",
+        "inputs": "alpha=t2^512,L1,x1/2,n0,A1",
+        "scale": "0",
+        "cells": "120",
+        "steps": "120",
+        "false_cn": "1",
+        "exact_temperatures": "0"
+      },
+      {
+        "id": 13,
+        "name": "range/unrepresentable-positive-rate",
+        "inputs": "alpha=t2^1023,L1,x1/2,n1,A1",
+        "scale": "2^2046",
+        "contract": "explicit refusal with nonempty reason; no partial fields/counts/claim_check; both claims refuse"
+      },
+      {
+        "id": 14,
+        "name": "shared-steps/subnormal-ratio",
+        "inputs": "alpha=L1,t2^-56,x1/2,modes(1,1),(2^537,1)",
+        "scale": "2^-56 and2^1018; spatial sine1 and0",
+        "cells": "2^538",
+        "steps": "integer in inclusive[2^1021-2^976,2^1021+2^976]",
+        "false_cn": "1-2*2^-53",
+        "exact_temperatures": "1-2^-53"
+      }
+    ],
+    "reference": "Independent Decimal80 with >=80-digit pi; tabulated exact S, frozen C/M; D=exp(-pi^2*S), K=4*(C/abs(n))^2*S*sin(pi*abs(n)/(2C))^2, Dcn=((1-K/(2M))/(1+K/(2M)))^M. No producer normalization, helpers or mesh search.",
+    "special_rounding": "Rows8/9 have analytically proved two downward ULPs. Row14 uses elementary sine/Cayley-log bounds: low decrement in(1.23h,1.24h),h2^-53, high sine0. Do not compute1±r at Decimal80 for row14; its exact reference is1-h.",
+    "mesh_proof": "S1/16: d16 bound>.003,d32<.003; S4:firstC120,M120,bound<1e-15; S1/2:firstC120,M120,bound<.00003; S2^-55:d16 interpolation>.004,d32<.0013; signed mix d6/12 fail,d24 total<.0022,M480. Row14 firstC2^538 qualifies and rate lies within the declared M interval.",
+    "bound": "B=sum(abs(A)*(abs(Dcn-D)+D*(pi*n/C)^2/8)); linf=max(B,independent pointwise error).",
+    "temperature_tolerance": "2e-13*abs(expected), no unit floor, except rows8/9/11/12/14 exact.",
+    "diagnostic_tolerance": "2e-13*max(abs(u_exact),abs(u_cn),abs(B)); finite nonnegative; exact query0 for8/9/11/12/14 and exact whole bound0 for12.",
+    "claims": "Truthful u_exact and false u_CN per row. rtol0; atol=min(temperature allowance,abs(true CN-false CN)/8). Exact rows use0. Row13 claims0 and1 both refuse before comparison.",
+    "full_hash_controls": [
+      2,
+      4,
+      7,
+      9
+    ],
+    "twins": [
+      [
+        1,
+        2
+      ],
+      [
+        3,
+        4
+      ],
+      [
+        4,
+        5
+      ],
+      [
+        3,
+        5
+      ],
+      [
+        6,
+        7
+      ],
+      [
+        8,
+        9
+      ]
+    ],
+    "reporting": "Complete all42 requests before inspecting or asserting. Preserve raw verdict before strict JSON; record solver/serialization errors, wrong decisions, physical failures and missing claim evidence independently.",
+    "count_transport": "Above-JavaScript-safe harmonic/count rows are direct Python only; no general wire round-trip promise."
+  },
+  "registered": {
+    "route": "Actual registered TypeScript/Python Pi tool",
+    "requests": 7,
+    "ordinary": {
+      "approved": 3,
+      "refused": 0
+    },
+    "claims": {
+      "approved": 2,
+      "refused": 2
+    },
+    "overall": {
+      "approved": 5,
+      "refused": 2
+    },
+    "cases": [
+      "heat-time-underflow",
+      "heat-time-underflow-true",
+      "heat-time-underflow-false",
+      "heat-time-overflow",
+      "heat-time-overflow-true",
+      "heat-time-overflow-false",
+      "heat-time-ordinary-twin"
+    ],
+    "systems": "U=direct row1; O=direct row3; T usesalpha1,t4,L1,x1/2,n1 (distinct body from direct row4). Allchosenharmonics/countsJS-safe.",
+    "continuum": "math.exp(-pi^2*S), relative2e-13 withabs0; strictlypositive and<1.",
+    "cn": "Independent centered-difference scalar Cayley power at frozen C/M, relative2e-12 withabs0.",
+    "claims_contract": "u_exact true usesatol2e-13*positive target,rtol0; false U1/O0 usezero tolerances. Assert physical fields, claim actual and within flag, nonempty reason for false.",
+    "diagnostics": "ExactC/M; query==abs(actual-numeric);0<=query<=linf<=.003; unchanged error_measure; no ordinary claim_check.",
+    "execution": "Allseven calls awaited before assertions; all inherited registered calls/assertions retained verbatim."
+  },
+  "preserved": {
+    "solver_boundaries": {
+      "prefix": true,
+      "parser": true,
+      "estimator_spatial_other_domains": true
+    },
+    "registered_pure_additions": true,
+    "inherited_case_counts": {
+      "BODE_RANGE_CASE": 11,
+      "DC_RANGE_CASE": 14,
+      "DEW_DOMAIN_CASE": 17,
+      "SCALAR_TOLERANCE_CASE": 29,
+      "LYAPUNOV_CASE": 32,
+      "TRANSFER_HURWITZ_CASE": 20,
+      "WET_DOMAIN_CASE": 32,
+      "HEAT_PHASE_CASE": 16,
+      "PASSIVE_NORM_CASE": 32,
+      "CONTROL_RANK_CASE": 49,
+      "CONTROL_DIAGNOSTIC_CASE": 17,
+      "TRUSS_FACTOR_CASE": 16
+    },
+    "inherited_direct_count": 285,
+    "inherited_total_count": 12,
+    "separate_beam_integration_count": 1,
+    "baseline_original_run": 45061326492,
+    "baseline_original_log_sha256": "f96f950a7d3822ad593442ed6f14239adb22f5aa85ec2992163bd241be27488e",
+    "requirement": "Every inherited record/total and separate beam witness exactly equal the successful combined heat-phase original."
+  },
+  "sources": {
+    "baseline_solver_sha256": "6a19384f56e8d754f1488649e4ade8851b1fa838e9fe32248f939b3ab22e73a9",
+    "baseline_solver_blob": "c9cdef9a6deb1b670eafdf6b4709d9f99a34f58e",
+    "baseline_registered_sha256": "f009264ab0cb0b1043e8d397f55666d0cc6b2e66d8a50f8f5724d060ebf1394b",
+    "candidate_solver_sha256": "f3648e181067418be34f2f3e88ec9f305695a0ca9301f1df1e4f463832ba6526",
+    "candidate_patch_sha256": "a03a35143aa55340c35b04b2b8e831411f355dc648c38353834d34efe654a26a",
+    "direct_receiver_sha256": "cec0cf845e5d11e2700ce04fe956f24fc0cec23aff0279885eb979a666f79d14",
+    "registered_receiver_sha256": "3d0200d900cd81cda86aca1096a9c04dc0b9113729ffedb06102f27ae3bbdfc5",
+    "registered_patch_sha256": "ed469ed4495237b9f743d27e02e78e2b524de50b9683a6c71a6f5c93ba82291e"
+  },
+  "source_review": {
+    "candidate": [
+      "root",
+      "p2",
+      "p3"
+    ],
+    "direct": [
+      "root",
+      "p1"
+    ],
+    "registered": [
+      "root",
+      "p1"
+    ],
+    "independent_receivers_frozen_before_candidate_read": true,
+    "no_numerical_execution_yet": true
+  },
+  "execution": {
+    "method": "Separate stock/candidate branches from the exact base, identical receiver/protocol files; only production solver differs. Preregister exact heads before opening PRs.",
+    "originals": "Retain both complete first CI logs once; no stock rerun or changing expectations after evidence.",
+    "gates": [
+      "unittest discovery",
+      "registered pytest/TypeScript/Python",
+      "compile",
+      "historical public output",
+      "pinned static kit",
+      "CAD/PDF",
+      "provenance"
+    ],
+    "landing": "Close stock comparator. Freeze and qualify any intervening main changes separately; prove actual checkout and exact landed tree."
+  },
+  "limitations": [
+    "Binary64 represented inputs and ordinary pi/sinc/exp approximations; no universal correctly rounded transcendental guarantee.",
+    "Finite final rendered scheduling rate; no exact ceil at arbitrary thresholds, cap, super-binary64 scheduler or universal count transport.",
+    "Unchanged floating modal amplitude sums and spatial evaluator; parked tiny spatial phase/amplitude underflow is outside this course.",
+    "No uniform convergence/runtime, model/contest score or timing claim."
+  ],
+  "primary_references": [
+    "https://math.mit.edu/~dyatlov/18.03/lectures/Section10-1.pdf",
+    "https://people.maths.ox.ac.uk/trefethen/4all.pdf"
+  ]
+}
+
