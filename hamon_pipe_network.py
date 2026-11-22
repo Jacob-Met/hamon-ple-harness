@@ -162,14 +162,12 @@ def network(spec):
     ):
         raise ValueError("Only passive pipes with fixed junction demands are supported")
     reservoirs = [i for i, row in enumerate(nodes) if "fixed_head_m" in row]
-    if len(reservoirs) != 1 or len(nodes) < 2:
-        raise ValueError(
-            "One fixed-head reservoir and at least one demand junction required"
-        )
-    reservoir = reservoirs[0]
-    datum = number(nodes[reservoir]["fixed_head_m"])
+    if not reservoirs or len(nodes) < 2:
+        raise ValueError("At least one prescribed head and two connected nodes required")
+    fixed_heads = np.array([number(nodes[i]["fixed_head_m"]) for i in reservoirs])
+    datum = fixed_heads[0]
     demands = np.array([number(n.get("demand_m3_s", 0)) for n in nodes])
-    if demands[reservoir] != 0:
+    if np.any(demands[reservoirs] != 0):
         raise ValueError(
             "Reservoir supply is calculated; put known demands at junctions"
         )
@@ -183,10 +181,12 @@ def network(spec):
         if a == b:
             raise ValueError("Pipe cannot connect a node to itself")
         incidence[a, k], incidence[b, k] = 1.0, -1.0
-    junctions = np.arange(len(nodes)) != reservoir
+    if np.linalg.matrix_rank(incidence[1:]) != len(nodes) - 1:
+        raise ValueError("All nodes must belong to one connected network")
+    junctions = np.ones(len(nodes), dtype=bool)
+    junctions[reservoirs] = False
     A = incidence[junctions]
-    if np.linalg.matrix_rank(A) != A.shape[0]:
-        raise ValueError("Every junction must be connected to the reservoir")
+    boundary_drop = incidence[reservoirs].T @ (fixed_heads - datum)
     length = np.array([number(p["length_m"]) for p in pipes])
     diameter = np.array([number(p["diameter_m"]) for p in pipes])
     roughness = np.array([number(p.get("roughness_m", 0)) for p in pipes])
@@ -205,31 +205,41 @@ def network(spec):
     d = demands[junctions]
     scale = max(float(np.abs(d).sum()), 1e-12)
 
+    # The harmonic initial head includes imposed through-flow even without demand.
+    initial = np.linalg.lstsq(A.T, -boundary_drop, rcond=None)[0]
+    if np.any(boundary_drop):
+        initial_flow = inverse(A.T @ initial + boundary_drop, scale)
+        scale = max(scale, float(np.max(np.abs(initial_flow))))
+
     def nodal_equations(head):
-        flow = inverse(A.T @ head, scale)
+        flow = inverse(A.T @ head + boundary_drop, scale)
         residual = A @ flow + d
         jacobian = (A / law(flow)[1]) @ A.T
         return residual, jacobian
 
-    head = newton(np.zeros(len(d)), nodal_equations, min(1e-12, 5e-13 * scale))
-    qnode = inverse(A.T @ head, scale)
+    head = newton(initial, nodal_equations, min(1e-12, 5e-13 * scale))
+    qnode = inverse(A.T @ head + boundary_drop, scale)
     # The second formulation begins with continuity satisfied, and may change
-    # only circulations. This is the coupled form of the Hardy Cross correction.
+    # only circulations and flows between reservoirs. Their prescribed head
+    # differences supply the energy term on those boundary-to-boundary paths.
     feasible = np.linalg.lstsq(A, -d, rcond=None)[0]
     cycles = null_space(A)
 
     def loop_equations(amount):
         drop, slope = law(feasible + cycles @ amount)
-        return cycles.T @ drop, (cycles.T * slope) @ cycles
+        return cycles.T @ (drop - boundary_drop), (cycles.T * slope) @ cycles
 
-    loss_scale = np.max(np.abs(law(feasible)[0]))
-    loop_tolerance = min(1e-13, max(1e-26, 1e-13 * loss_scale))
+    loss_scale = np.max(np.abs(law(feasible)[0] - boundary_drop))
+    loop_tolerance = max(32 * np.finfo(float).eps * loss_scale,
+                         min(1e-13, max(1e-26, 1e-13 * loss_scale)))
     amplitude = newton(np.zeros(cycles.shape[1]), loop_equations, loop_tolerance)
     qloop = feasible + cycles @ amplitude
     drop, _ = law(qloop)
     total_head = np.full(len(nodes), datum)
+    total_head[reservoirs] = fixed_heads
     total_head[junctions] += head
-    continuity = float(np.max(np.abs(A @ qloop + d)))
+    supply = incidence[reservoirs] @ qloop
+    continuity = float(np.max(np.abs(A @ qloop + d), initial=0.0))
     energy = float(np.max(np.abs(incidence.T @ total_head - drop)))
     agreement = float(np.max(np.abs(qnode - qloop)))
 
@@ -263,7 +273,8 @@ def network(spec):
         roundoff = np.abs(incidence.T) @ np.abs(np.spacing(heads))
         drop_tolerance = np.minimum(1e-6, 1e-7 * np.abs(drop) + roundoff)
         registered["reservoir_head_matches"] = bool(
-            abs(heads[reservoir] - datum) <= min(1e-6, abs(np.spacing(datum)))
+            np.all(np.abs(heads[reservoirs] - fixed_heads) <=
+                   np.minimum(1e-6, np.abs(np.spacing(fixed_heads))))
         )
         registered["pipe_head_drops_match"] = bool(
             np.all(np.abs(incidence.T @ heads - drop) <= drop_tolerance)
@@ -282,8 +293,9 @@ def network(spec):
         flows_m3_s=dict(zip(pipe_ids, qloop.tolist())),
         heads_m=dict(zip(node_ids, total_head.tolist())),
         reynolds=dict(zip(pipe_ids, (re_per_flow * np.abs(qloop)).tolist())),
-        reservoir_supply_m3_s=float(incidence[reservoir] @ qloop),
-        independent_cycles=cycles.shape[1],
+        reservoir_supply_m3_s=float(supply.sum()),
+        reservoir_supplies_m3_s=dict(zip((node_ids[i] for i in reservoirs), supply.tolist())),
+        independent_cycles=len(pipes) - len(nodes) + 1,
         max_mass_residual_m3_s=continuity,
         max_energy_residual_m=energy,
         max_nodal_cycle_flow_difference_m3_s=agreement,

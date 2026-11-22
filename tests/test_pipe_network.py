@@ -132,7 +132,8 @@ def test_isolated_participant_dual_verifier_cli(tmp_path):
         "spec": {"H_m": 2, "e0": .5, "Cc": .2, "Cr": .1, "sigma_v0_Pa": 10000,
                  "sigma_p_Pa": 10000, "delta_sigma_Pa": 10000, "max_settlement_m": .5},
     }
-    for problem in (water, soil):
+    multi = {"mode": "domain", "kind": "pipe_network", "spec": three_reservoir_case()}
+    for problem in (water, multi, soil):
         source = tmp_path / "problem.json"
         source.write_text(json.dumps(problem))
         run = subprocess.run(
@@ -168,3 +169,69 @@ def test_tiny_head_gradient_and_mixed_scale_branch():
         result = verify_pipe_network(case)
         assert result["conservation_verified"] is expected
         assert result["proposed_checks"]["junction_demands_match"] is expected
+
+@pytest.mark.parametrize("left_length,right_length", [(200.0, 200.0), (100.0, 300.0)])
+def test_prescribed_heads_laminar_series(left_length, right_length):
+    # Hagen–Poiseuille gives resistance proportional to length for equal diameters.
+    case = {
+        "nodes": [{"id": "H", "fixed_head_m": 10.02}, {"id": "M"},
+                  {"id": "L", "fixed_head_m": 10.0}],
+        "pipes": [{"id": "a", "from": "H", "to": "M", "length_m": left_length, "diameter_m": .02},
+                  {"id": "b", "from": "L", "to": "M", "length_m": right_length, "diameter_m": .02}],
+    }
+    total_length = left_length + right_length
+    flow = math.pi * 9.80665 * .02**4 * .02 / (128e-6 * total_length)
+    midpoint = 10.02 - .02 * left_length / total_length
+    case["proposed_heads_m"] = {"H": 10.02, "M": midpoint, "L": 10.0}
+    case["proposed_flows_m3_s"] = {"a": flow, "b": -flow}
+    result = run_dual_verify_spec({"mode": "domain", "kind": "pipe_network", "spec": case})
+    assert result["dual_verified"], result
+    solved = verify_pipe_network(case)
+    assert solved["heads_m"]["M"] == pytest.approx(midpoint, abs=1e-13)
+    assert solved["flows_m3_s"] == pytest.approx(case["proposed_flows_m3_s"], rel=1e-11)
+    assert solved["reservoir_supplies_m3_s"] == pytest.approx({"H": flow, "L": -flow}, rel=1e-11)
+    assert solved["independent_cycles"] == 0
+    assert max(solved["reynolds"].values()) < 2000
+    case["proposed_heads_m"]["L"] += .001
+    assert not verify_pipe_network(case)["proposed_checks"]["reservoir_head_matches"]
+
+
+def three_reservoir_case():
+    # Independent linear network: sum((Hi - Hj) / Ri) = demand.
+    lengths = [100, 200, 300]
+    imposed = [30.025, 30.01, 29.995]
+    resistance = [128e-6 * length / (math.pi * 9.80665 * .02**4) for length in lengths]
+    demand = 1.2e-6
+    junction = (sum(h / r for h, r in zip(imposed, resistance)) - demand) / sum(1/r for r in resistance)
+    supply = [(h - junction)/r for h, r in zip(imposed, resistance)]
+    names = ["upper", "middle", "lower"]
+    return {
+        "calculation": "pipe_network",
+        "nodes": [{"id": "tap", "demand_m3_s": demand}]
+                 + [{"id": name, "fixed_head_m": h} for name, h in zip(names, imposed)],
+        "pipes": [{"id": name, "from": name, "to": "tap", "length_m": length, "diameter_m": .02}
+                  for name, length in zip(names, lengths)],
+        "proposed_heads_m": dict(zip(names, imposed), tap=junction),
+        "proposed_flows_m3_s": dict(zip(names, supply)),
+    }
+
+
+def test_three_boundary_supplies_and_signed_demand():
+    case = three_reservoir_case()
+    result = run_router_conservation_cad_verifier({"spec": case})
+    assert result["conservation_verified"], result
+    supplied = result["reservoir_supplies_m3_s"]
+    assert supplied == pytest.approx(case["proposed_flows_m3_s"], rel=1e-10)
+    assert min(supplied.values()) < 0 < max(supplied.values())
+    assert sum(supplied.values()) == pytest.approx(1.2e-6, abs=1e-16)
+    assert result["max_nodal_cycle_flow_difference_m3_s"] < 1e-14
+
+
+def test_all_heads_prescribed_and_disconnected_reservoir_components():
+    nodes = [{"id": "a", "fixed_head_m": 2.0}, {"id": "b", "fixed_head_m": 2.0}]
+    pipe = {"id": "link", "from": "a", "to": "b", "length_m": 20, "diameter_m": .1}
+    result = verify_pipe_network({"nodes": nodes, "pipes": [pipe]})
+    assert result["conservation_verified"], result
+    assert result["flows_m3_s"] == {"link": 0.0}
+    nodes.append({"id": "c", "fixed_head_m": 1.0})
+    assert not verify_pipe_network({"nodes": nodes, "pipes": [pipe]})["ok"]
