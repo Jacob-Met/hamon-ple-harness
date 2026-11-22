@@ -1,8 +1,6 @@
 """Terzaghi primary consolidation for one layer and a uniform step in effective load."""
 import math
 
-import numpy as np
-from scipy.linalg import solve_banded
 
 
 def _number(spec, key):
@@ -27,6 +25,9 @@ def _average_fourier(tv):
 
 
 def _average_cn(tv, cells):
+    import numpy as np
+    from scipy.linalg import solve_banded
+
     if tv == 0.0:
         return 0.0
     # Work on one drainage path: zero excess pressure at x=0 and zero flux
@@ -56,6 +57,28 @@ def _average_cn(tv, cells):
     return length * float(np.mean(1.0 - state))
 
 
+def primary_settlement(h, e0, cc, initial, load, pc, cr):
+    """One-dimensional compression with fixed solid volume and nonnegative void space."""
+    if not all(math.isfinite(x) for x in (h, e0, cc, initial, load, pc, cr)):
+        raise ValueError("Layer properties and effective stresses must be finite")
+    if h <= 0 or initial <= 0 or cc <= 0 or min(e0, load) < 0:
+        raise ValueError("Invalid layer, void ratio, compression index, or stress increment")
+    if pc < initial or not 0 <= cr <= cc:
+        raise ValueError("Require preconsolidation stress >= initial effective stress and 0 <= Cr <= Cc")
+    recompression = min(load, pc - initial)
+    virgin = load - recompression
+    loss = (cr * math.log1p(recompression / initial)
+            + cc * math.log1p(virgin / (initial + recompression))) / math.log(10.0)
+    # e is the ratio of void to solid volume. No compression history can
+    # consume more than the initial voids (USACE EM 1110-2-1906, App. VIII).
+    if loss > e0 and not math.isclose(loss, e0, rel_tol=8 * math.ulp(1.0)):
+        raise ValueError("Compression curve predicts a negative final void ratio")
+    loss = min(loss, e0)
+    return {"primary_consolidation_settlement_m": h * (loss / (1.0 + e0)),
+            "initial_void_height_m": h * (e0 / (1.0 + e0)),
+            "final_void_ratio": e0 - loss}
+
+
 def verify_consolidation_1d(spec):
     """Check a settlement-time calculation in SI units, including compression history."""
     result = {"ok": False, "conservation_verified": False, "mode": "civil_geotech",
@@ -69,18 +92,13 @@ def verify_consolidation_1d(spec):
         cv = _number(spec, "cv_m2_s")
         elapsed = _number(spec, "time_s")
         drainage = spec["drainage"]
-        if h <= 0 or initial <= 0 or cv <= 0 or cc <= 0 or min(e0, load, elapsed) < 0:
-            raise ValueError("Invalid layer, effective stress, load increment, compression index, time, or Cv")
+        if cv <= 0 or elapsed < 0:
+            raise ValueError("Require positive Cv and nonnegative elapsed time")
         if drainage not in ("single", "double"):
             raise ValueError("drainage must be single or double")
         pc = _number(spec, "sigma_preconsolidation_Pa") if "sigma_preconsolidation_Pa" in spec else initial
         cr = _number(spec, "Cr") if "Cr" in spec or pc > initial else 0.0
-        if pc < initial or not 0 <= cr <= cc:
-            raise ValueError("Require preconsolidation stress >= initial effective stress and 0 <= Cr <= Cc")
-        recompression = min(load, pc - initial)
-        virgin = load - recompression
-        strain = (cr * math.log1p(recompression / initial)
-                  + cc * math.log1p(virgin / (initial + recompression))) / ((1.0 + e0) * math.log(10.0))
+        compression = primary_settlement(h, e0, cc, initial, load, pc, cr)
         path = h if drainage == "single" else h / 2.0
         tv = (cv / path) * (elapsed / path)
         if not math.isfinite(tv):
@@ -89,7 +107,7 @@ def verify_consolidation_1d(spec):
         coarse = _average_cn(tv, 128)
         fine = _average_cn(tv, 256)
         cn = fine + (fine - coarse) / 3.0
-        ultimate = h * strain
+        ultimate = compression["primary_consolidation_settlement_m"]
         settlement = degree * ultimate
         if not all(math.isfinite(v) for v in (degree, cn, ultimate, settlement)):
             raise ValueError("Nonfinite consolidation response")
@@ -100,7 +118,7 @@ def verify_consolidation_1d(spec):
                 valid = False
         result.update(ok=True, conservation_verified=valid, drainage_path_m=path, time_factor=tv,
                       degree_consolidation=degree, degree_consolidation_cn=cn,
-                      dual_solver_abs_residual=residual, primary_consolidation_settlement_m=ultimate,
+                      dual_solver_abs_residual=residual, **compression,
                       settlement_at_time_m=settlement)
         return result
     except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError) as exc:
