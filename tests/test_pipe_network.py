@@ -141,3 +141,30 @@ def test_isolated_participant_dual_verifier_cli(tmp_path):
         )
         assert run.returncode == 0, (run.stdout, run.stderr)
         assert json.loads(run.stdout)["dual_verified"] is True
+
+
+def test_tiny_head_gradient_and_mixed_scale_branch():
+    # Laminar Hagen–Poiseuille head from two equally loaded short pipes.
+    demand = 1e-8
+    loss = 128e-6 * (demand / 2) / (math.pi * 9.80665 * .1**4)
+    case = {
+        "nodes": [{"id": "R", "fixed_head_m": 0}, {"id": "J", "demand_m3_s": demand}],
+        "pipes": [{"id": i, "from": "R", "to": "J", "length_m": 1, "diameter_m": .1}
+                  for i in ("a", "b")],
+    }
+    for sign, expected in [(-1, True), (1, False)]:
+        case["proposed_heads_m"] = {"R": 0, "J": sign * loss}
+        result = verify_pipe_network(case)
+        assert result["conservation_verified"] is expected
+        assert result["proposed_checks"]["pipe_head_drops_match"] is expected
+    case = {
+        "nodes": [{"id": "R", "fixed_head_m": 10},
+                  {"id": "M", "demand_m3_s": .01}, {"id": "T", "demand_m3_s": 5e-10}],
+        "pipes": [{"id": i, "from": "R", "to": i, "length_m": 1, "diameter_m": .1}
+                  for i in ("M","T")],
+    }
+    for tap, expected in ((5e-10, True), (0, False)):
+        case["proposed_flows_m3_s"] = {"M": .01, "T": tap}
+        result = verify_pipe_network(case)
+        assert result["conservation_verified"] is expected
+        assert result["proposed_checks"]["junction_demands_match"] is expected
