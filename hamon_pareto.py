@@ -222,6 +222,9 @@ def _wave8_certificate(instruction, inventory, mcp_server_count, deliverable_cou
         or mcp_server_count
         or deliverable_count
         or inventory.get("schema") != "hamon.ple.intake.v1"
+        or type(inventory.get("scanned_files")) is not int
+        or type(inventory.get("engineering_file_count")) is not int
+        or inventory.get("metadata", {}) != {}
         or inventory.get("scanned_files") != 0
         or inventory.get("engineering_file_count") != 0
         or inventory.get("files") != []
