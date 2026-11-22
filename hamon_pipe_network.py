@@ -137,6 +137,28 @@ def newton(initial, evaluate, tolerance):
     raise ValueError("Hydraulic solve did not converge")
 
 
+def pressure_forest(node_count, endpoints, reservoirs, resistance):
+    """Choose the lowest-resistance forest with exactly one reservoir per tree."""
+    parents = list(range(node_count))
+    for node in reservoirs:
+        parents[node] = reservoirs[0]
+
+    def component(node):
+        while parents[node] != node:
+            parents[node] = parents[parents[node]]
+            node = parents[node]
+        return node
+
+    branches = []
+    for k in np.argsort(resistance, kind="stable"):
+        start, end = endpoints[k]
+        left, right = component(start), component(end)
+        if left != right:
+            parents[left] = right
+            branches.append(k)
+    return branches
+
+
 def network(spec):
     nodes, pipes = spec["nodes"], spec["pipes"]
     node_ids = identifiers(nodes, "Node")
@@ -177,8 +199,8 @@ def network(spec):
         raise ValueError("Kinematic viscosity must be positive")
     index = {name: i for i, name in enumerate(node_ids)}
     incidence = np.zeros((len(nodes), len(pipes)))
-    for k, p in enumerate(pipes):
-        a, b = index[p["from"]], index[p["to"]]
+    endpoints = [(index[p["from"]], index[p["to"]]) for p in pipes]
+    for k, (a, b) in enumerate(endpoints):
         if a == b:
             raise ValueError("Pipe cannot connect a node to itself")
         incidence[a, k], incidence[b, k] = 1.0, -1.0
@@ -206,31 +228,42 @@ def network(spec):
     d = demands[junctions]
     scale = max(float(np.abs(d).sum()), 1e-12)
 
-    # In a one-reservoir tree, each pipe drop is an independent pressure
-    # coordinate. Retain these local drops while balancing the junctions:
-    # subtracting two large node heads can erase a small downstream drop.
-    radial = len(reservoirs) == 1 and len(pipes) == len(nodes) - 1
+    # Use pressure drops on a forest rooted at the reservoirs as continuous
+    # coordinates. Prefer low-resistance pipes so a small pressure gradient
+    # survives even when both endpoint heads are far from the datum.
+    radial = len(pipes) == len(d)
+    initial = np.zeros(len(d))
     if radial:
-        initial = np.zeros(len(pipes))
+        # Every pipe is already an independent coordinate.
+        basis_incidence = A
     else:
+        basis = pressure_forest(len(nodes), endpoints, reservoirs, law(np.zeros(len(pipes)))[1])
+        basis_incidence = A[:, basis]
+        # Each pipe drop is a signed sum along a forest path, plus the
+        # prescribed head difference between roots if it connects two trees.
+        paths = np.linalg.solve(basis_incidence, A).T
+        fixed_drop = boundary_drop - paths @ boundary_drop[basis]
+
+    def pipe_drops(tree_drop):
+        return tree_drop if radial else paths @ tree_drop + fixed_drop
+
+    if np.any(boundary_drop):
         # The harmonic initial head includes imposed reservoir through-flow.
-        initial = np.linalg.lstsq(A.T, -boundary_drop, rcond=None)[0]
-        if np.any(boundary_drop):
-            initial_flow = inverse(A.T @ initial + boundary_drop, scale)
-            scale = max(scale, float(np.max(np.abs(initial_flow))))
+        initial_head = np.linalg.lstsq(A.T, -boundary_drop, rcond=None)[0]
+        initial = basis_incidence.T @ initial_head + boundary_drop[basis]
+        initial_flow = inverse(pipe_drops(initial), scale)
+        scale = max(scale, float(np.max(np.abs(initial_flow))))
 
-    def pipe_drops(pressure):
-        return pressure if radial else A.T @ pressure + boundary_drop
-
-    def nodal_equations(pressure):
-        flow = inverse(pipe_drops(pressure), scale)
+    def nodal_equations(tree_drop):
+        flow = inverse(pipe_drops(tree_drop), scale)
         residual = A @ flow + d
         derivative = A / law(flow)[1]
-        return residual, derivative if radial else derivative @ A.T
+        return residual, derivative if radial else derivative @ paths
 
-    pressure = newton(initial, nodal_equations, min(1e-12, 5e-13 * scale))
-    qnode = inverse(pipe_drops(pressure), scale)
-    head = np.linalg.solve(A.T, pressure) if radial else pressure
+    tree_drop = newton(initial, nodal_equations, min(1e-12, 5e-13 * scale))
+    qnode = inverse(pipe_drops(tree_drop), scale)
+    relative_tree_drop = tree_drop if radial else tree_drop - boundary_drop[basis]
+    head = np.linalg.solve(basis_incidence.T, relative_tree_drop)
     # The second formulation begins with continuity satisfied, and may change
     # only circulations and flows between reservoirs. Their prescribed head
     # differences supply the energy term on those boundary-to-boundary paths.
