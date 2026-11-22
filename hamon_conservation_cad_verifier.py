@@ -863,25 +863,13 @@ def verify_civil_geotech_balance(spec: Dict[str, Any]) -> Dict[str, Any]:
     if "cut_bank_m3" in spec or "fill_compacted_m3" in spec:
         cut_b, sh, fill_c = float(spec.get("cut_bank_m3", 0.0)), float(spec.get("shrink_factor", 0.90)), float(spec.get("fill_compacted_m3", 0.0))
         out["net_compacted_surplus_m3"] = cut_b * sh - fill_c
-    if "footing_B_m" in spec:
-        B, Df, gam = float(spec["footing_B_m"]), float(spec["depth_Df_m"]), float(spec["gamma_N_m3"])
-        gam_sat, dw = float(spec.get("gamma_sat_N_m3", gam)), float(spec.get("water_table_depth_m", 1e6))
-        c_p, phi_deg, fs = float(spec.get("c_prime_Pa", 0.0)), float(spec.get("phi_deg", 30.0)), float(spec.get("FS", 3.0))
-        gw = 9806.65
-        if phi_deg <= 1e-9:
-            nq, nc, ng = 1.0, 5.141592653589793, 0.0
-        else:
-            pr = math.radians(phi_deg)
-            nq = math.exp(math.pi * math.tan(pr)) * (math.tan(math.radians(45.0 + 0.5 * phi_deg)) ** 2)
-            nc, ng = (nq - 1.0) / math.tan(pr), 2.0 * (nq + 1.0) * math.tan(pr)
-        if dw <= Df:
-            sig_d, gam_z = gam * dw + (gam_sat - gw) * (Df - dw), gam_sat - gw
-        elif dw < Df + B:
-            sig_d, gam_z = gam * Df, (gam_sat - gw) + ((dw - Df) / B) * (gam - (gam_sat - gw))
-        else:
-            sig_d, gam_z = gam * Df, gam
-        q_ult = c_p * nc + sig_d * nq + 0.5 * gam_z * B * ng
-        out.update({"q_ult_Pa": q_ult, "q_allow_Pa": q_ult / fs})
+    if "footing_B_m" in spec or spec.get("calculation") == "bearing_capacity":
+        from hamon_bearing_capacity import verify_bearing_capacity
+        bearing = verify_bearing_capacity(spec)
+        out.update(bearing)
+        ok = ok and bearing["conservation_verified"]
+        if not bearing["ok"]:
+            return out
         if "Cc" in spec and "H_clay_m" in spec:
             from hamon_consolidation import primary_settlement
             try:
@@ -1137,7 +1125,7 @@ def run_router_conservation_cad_verifier(payload: Dict[str, Any]) -> Dict[str, A
         elif spec.get("netlist") or spec.get("branches") or fname.endswith((".cir", ".sp", ".spice", ".net")): mode = "circuit"
         elif "lhs" in spec and "rhs" in spec: mode = "dimensional"
         elif "span_m" in spec and "E_Pa" in spec: mode = "structural"
-        elif spec.get("calculation") in ("consolidation_1d", "rankine_layers") or any(k in spec for k in ("cut_bank_m3", "footing_B_m", "channel_B_m")): mode = "civil_geotech"
+        elif spec.get("calculation") in ("consolidation_1d", "rankine_layers", "bearing_capacity") or any(k in spec for k in ("cut_bank_m3", "footing_B_m", "channel_B_m")): mode = "civil_geotech"
         elif any(k in spec for k in ("inlets", "outlets", "pipe_D_m", *_HX_INPUTS, "UA_W_K")): mode = "thermal_fluid"
         elif spec.get("file_b64"):
             mode = "step_cad" if "ISO-10303-21" in base64.b64decode(spec["file_b64"])[:512].decode("utf-8", errors="replace") else "circuit"
