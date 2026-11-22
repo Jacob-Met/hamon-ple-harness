@@ -1,7 +1,7 @@
 """Balanced AC load flow and terminal faults of three-sequence Thevenin equivalents."""
 
 import cmath
-from collections import deque
+from collections import OrderedDict, deque
 import math
 
 import numpy as np
@@ -229,7 +229,49 @@ def network(spec):
             q[idx] = bound
         return dict(state), np.flatnonzero(bus_types == "PQ")
 
+    def independent_spoke_pivot():
+        # A fixed slack separates these one-bus branches electrically. Only
+        # prioritize the proposed regime; the full two-formulation solver
+        # still decides whether its voltages and all limits agree.
+        chosen = []
+        seed = initial.copy()
+        for idx, bounds in limits.items():
+            if adjacency[idx] != {slack}:
+                continue
+            y = ybus[idx, idx]
+            c = ybus[idx, slack] * initial[slack]
+            v = vset[idx]
+            if c == 0 or abs(p[idx] - y.real * v**2) <= abs(c) * v:
+                continue
+            options = []
+            for bound in dict.fromkeys(bounds):
+                power = complex(p[idx], bound)
+                scale = max(abs(y), abs(c), abs(power))
+                a, b, target = y / scale, c / scale, power / scale
+                if b == 0:
+                    continue
+                # From S=conj(Y)*z + V*conj(C), solve the real quadratic
+                # in z=|V|². np.roots also handles zero leading coefficients.
+                roots = np.roots([abs(a)**2,
+                                  -(2 * (target * a).real + abs(b)**2),
+                                  abs(target)**2])
+                for z in roots:
+                    if z.real <= 0 or abs(z.imag) > 1e-10 * z.real:
+                        continue
+                    phasor = (target - a.conjugate() * z.real) / b.conjugate()
+                    calculated = phasor * (a * phasor + b).conjugate()
+                    residual_scale = abs(target) + abs(phasor) * (abs(a * phasor) + abs(b))
+                    if (abs(abs(phasor)**2 - z.real) <= 1e-10 * z.real
+                            and abs(calculated - target) <= 1e-10 * residual_scale
+                            and not voltage_violation(idx, bound, abs(phasor))):
+                        options.append((abs(phasor - seed[idx]), bound, phasor))
+            if options:
+                _, bound, seed[idx] = min(options, key=lambda row: (row[0], row[1]))
+                chosen.append((idx, bound))
+        return tuple(sorted(chosen)), seed
+
     pending = deque([((), initial)])
+    failed_pivots = OrderedDict()
     seen = set()
     last_solved = None
     first_error = None
@@ -238,8 +280,12 @@ def network(spec):
     # Four bounded regulators have at most 3**4 possible states. For larger
     # networks keep the fallback work proportional to the number of regulators.
     regime_budget = max(81, 4 * len(limits) + 1)
-    while pending and len(seen) < regime_budget:
-        state, seed = pending.popleft()
+    while (pending or failed_pivots) and len(seen) < regime_budget:
+        # Exhaust pivots justified by a solved state's violations first.
+        if pending:
+            state, seed = pending.popleft()
+        else:
+            state, seed = failed_pivots.popitem(last=False)
         if state in seen:
             continue
         seen.add(state)
@@ -252,6 +298,30 @@ def network(spec):
         except (ValueError, np.linalg.LinAlgError) as exc:
             if first_error is None:
                 first_error = exc
+            # A voltage setpoint can be unreachable at the specified P even
+            # though a reactive limit admits a physical PQ solution. No Q
+            # mismatch exists to select a bound in this failed regime.
+            if not state:
+                try:
+                    spoke_state, spoke_seed = independent_spoke_pivot()
+                except (FloatingPointError, OverflowError, np.linalg.LinAlgError):
+                    # A numerically unresolved optional seed leaves the ordinary
+                    # bounded search and its acceptance checks available.
+                    spoke_state = ()
+                if spoke_state:
+                    pending.append((spoke_state, spoke_seed))
+            free = [(idx, bounds) for idx, bounds in limits.items() if idx not in limited]
+            pivots = [((idx, bound),) for idx, bounds in free for bound in bounds]
+            # Several regulators may have to leave their setpoints together.
+            # Try both common bound directions before all single-bus subsets
+            # consume the budget. Each trial still needs independent validation.
+            if len(free) > 1:
+                pivots[:0] = [tuple((idx, bounds[side]) for idx, bounds in free)
+                              for side in (0, 1)]
+            for additions in pivots:
+                key = tuple(sorted(state + additions))
+                if key not in seen:
+                    failed_pivots.setdefault(key, seed)
             continue
         injection = voltage * np.conj(ybus @ voltage)
         residual_floor = power_roundoff(voltage)
@@ -282,6 +352,14 @@ def network(spec):
             pending.appendleft(children[0])
             pending.extend(children[1:])
     else:
+        untried = any(key not in seen for key, _ in pending) or any(
+            key not in seen for key in failed_pivots
+        )
+        if untried:
+            return {"ok": False, "calculation": "ac_power_flow",
+                    "conservation_verified": False, "regime_search_budget_exhausted": True,
+                    "regimes_tried": len(seen),
+                    "reason": "AC regulator search budget exhausted; feasibility undetermined"}
         if last_solved is None:
             raise first_error or ValueError("No converged AC regulator state")
         state, voltage = last_solved

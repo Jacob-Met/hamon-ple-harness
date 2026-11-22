@@ -209,3 +209,75 @@ def test_alternative_reactive_pivot_after_inconsistent_intermediate(vb, angle, s
     result = verify_ac_power_flow(spec)
     assert result["conservation_verified"], result
     assert result["clamped_pv_q_pu"] == {"A": qa}
+
+
+@pytest.mark.parametrize("injections", [(1.2,), (-1.2,), (1.2, -1.4), (1.2,) * 5])
+def test_reactive_bound_can_solve_unreachable_pv_setpoint(injections):
+    # A unit slack and unit reactance give P=Im(V), Q=|V|²-Re(V).
+    # |P|>1 rules out the PV setpoint |V|=1. V=1+jP satisfies Qmin=P².
+    buses = [{"id": "S", "type": "slack", "vm_pu": 1}]
+    lines = []
+    expected = {}
+    proposed = {"S": {"vm_pu": 1, "va_deg": 0}}
+    for i, p in enumerate(injections):
+        name = f"G{i}"
+        buses.append({"id": name, "type": "PV", "p_injection_pu": p, "vm_pu": 1,
+                      "q_min_injection_pu": p * p, "q_max_injection_pu": 3})
+        lines.append({"id": name, "from": "S", "to": name, "r_pu": 0, "x_pu": 1})
+        expected[name] = p * p
+        proposed[name] = {"vm_pu": math.hypot(1, p), "va_deg": math.degrees(math.atan(p))}
+    spec = {"buses": buses, "lines": lines, "proposed_voltages": proposed}
+    answer = verify_ac_power_flow(spec)
+    assert answer["conservation_verified"], answer
+    assert answer["clamped_pv_q_pu"] == expected
+    proposed["G0"]["va_deg"] += 0.1
+    assert not verify_ac_power_flow(spec)["conservation_verified"]
+    # Q=Re(V)^2-Re(V)+P^2 >= P^2-1/4, so neither bound is attainable.
+    del spec["proposed_voltages"]
+    buses[1].update(q_min_injection_pu=-1, q_max_injection_pu=0)
+    rejected = verify_ac_power_flow(spec)
+    assert not rejected["conservation_verified"]
+    if len(injections) == 5:
+        assert rejected["regime_search_budget_exhausted"]
+        assert rejected["regimes_tried"] == 81
+
+
+@pytest.mark.parametrize("transformers", [False, True])
+def test_mixed_limits_on_five_independent_resistive_spokes(transformers):
+    # A unit resistor gives P=u²+v²-u and Q=-v. The first three buses
+    # require V=3 at Qmin, the last two require V=1 at Qmax. The wrong
+    # bounds are impossible because Q² cannot exceed P+1/4.
+    buses = [{"id": "S", "type": "slack", "vm_pu": 1}]
+    lines = []
+    expected_voltages, expected_bounds = {}, {}
+    for i in range(5):
+        name = f"G{i}"
+        lower_limit = i < 3
+        vm, actual = (1, 3) if lower_limit else (2, 1)
+        degrees = (7 if lower_limit else -4) if transformers else 0
+        voltage = cmath.rect(actual, math.radians(degrees))
+        from_leaf = bool(i % 2)
+        tap = cmath.rect(1.05, math.radians(9)) if transformers else 1
+        charging = 0.06 if transformers else 0
+        shunt = 0.03j if transformers else 0j
+        vf, vt = (voltage, 1) if from_leaf else (1, voltage)
+        series_current = vf / tap - vt  # unit series resistance
+        current = ((series_current + 0.5j * charging * vf / tap) / tap.conjugate()
+                   if from_leaf else -series_current + 0.5j * charging * vt)
+        power = voltage * (current + shunt * voltage).conjugate()
+        lower, upper = ((power.imag, power.imag + 3) if lower_limit
+                        else (power.imag - 1, power.imag))
+        buses.append({"id": name, "type": "PV", "p_injection_pu": power.real, "vm_pu": vm,
+                      "q_min_injection_pu": lower, "q_max_injection_pu": upper,
+                      "shunt_b_pu": shunt.imag})
+        f, t = (name, "S") if from_leaf else ("S", name)
+        lines.append({"id": name, "from": f, "to": t, "r_pu": 1, "x_pu": 0,
+                      "tap_ratio": abs(tap), "phase_shift_deg": math.degrees(cmath.phase(tap)),
+                      "line_charging_b_pu": charging})
+        expected_voltages[name] = {"vm_pu": actual, "va_deg": degrees}
+        expected_bounds[name] = power.imag
+    result = verify_ac_power_flow({"buses": buses, "lines": lines})
+    assert result["conservation_verified"], result
+    assert result["clamped_pv_q_pu"] == expected_bounds
+    for name, expectation in expected_voltages.items():
+        assert result["voltages"][name] == pytest.approx(expectation)
