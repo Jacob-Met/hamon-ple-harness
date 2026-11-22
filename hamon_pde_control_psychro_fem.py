@@ -10,8 +10,8 @@ numerical cross-verification suite for Physical Engineering's Last Exam (PLE):
      - 2D steady Laplace equation on rectangular domain exact harmonic eigenseries
        cross-checked against Gauss-Seidel SOR finite-difference solver.
   2. Control (`verify_control_system`):
-     - Continuous-time LTI transfer-function Routh-Hurwitz stability table (with epsilon
-       pivot regularization), companion/Durand-Kerner polished complex poles,
+     - Continuous-time LTI transfer-function half-plane pole counts from exact shifted
+       Hurwitz minors, separate numerical pole approximations,
        exact Bode gain/phase crossover frequencies, Gain Margin (dB), Phase Margin (deg),
        unity-feedback closed-loop stability, and static DC gain.
      - State-space exact Faddeev-LeVerrier characteristic polynomial, Cayley-Hamilton
@@ -1028,12 +1028,89 @@ def _lyapunov_float_matrix(p):
     return matrix, "finite"
 
 
+def _transfer_root_certificate(monic):
+    """Count roots on both sides of the imaginary axis, including multiplicities."""
+    degree = len(monic) - 1
+    certificate = {
+        "method": "infinitesimal_shift_hurwitz",
+        "status": "classified" if degree > 0 else "constant_nonzero",
+        "degree": degree,
+        "normalized_coefficients": [_fraction_text(v) for v in monic],
+        "minor_leading_terms": [],
+    }
+    if not monic:
+        return {**certificate, "status": "identically_zero", "degree": None,
+                "first_column_signs_plus": None, "first_column_signs_minus": None,
+                "rhp_poles": None, "jw_axis_poles": None, "lhp_poles": None,
+                "hurwitz_stable": None, "reason": "Identically zero characteristic polynomial"}
+
+    # Coefficients of s**(degree-k) in p(s+t), each in ascending powers of t.
+    shifted = [[monic[k-u] * math.comb(degree-k+u, u) for u in range(k+1)]
+               for k in range(degree+1)]
+    matrix = [[shifted[2*c-r+1] if 0 <= 2*c-r+1 <= degree else []
+               for c in range(degree)] for r in range(degree)]
+    previous = [1]
+    previous_plus = previous_minus = 1
+    plus, minus = [1], [1]
+    for k in range(degree):
+        # Bareiss pivots are the leading Hurwitz minors. Each is a nonzero
+        # polynomial since p(s+t) is strictly Hurwitz for sufficiently large t.
+        pivot = matrix[k][k]
+        power, coefficient = next((i, v) for i, v in enumerate(pivot) if v)
+        certificate["minor_leading_terms"].append(
+            {"power": power, "coefficient": _fraction_text(coefficient)})
+        delta_plus = 1 if coefficient > 0 else -1
+        delta_minus = -delta_plus if power % 2 else delta_plus
+        # The kth Routh first-column entry is Delta_k / Delta_(k-1).
+        plus.append(delta_plus * previous_plus)
+        minus.append(delta_minus * previous_minus)
+        previous_plus, previous_minus = delta_plus, delta_minus
+        for r in range(k+1, degree):
+            for c in range(k+1, degree):
+                numerator = _poly_sum(_poly_product(pivot, matrix[r][c]),
+                                      _poly_product(matrix[r][k], matrix[k][c]), -1)
+                if previous != [1]:
+                    numerator, remainder = _poly_divrem(numerator, previous)
+                    if remainder:
+                        raise ArithmeticError("Inexact division of a shifted Hurwitz minor")
+                    _trim_poly(numerator)
+                matrix[r][c] = numerator
+        previous = pivot
+
+    # A positive shift moves axis roots left. A negative shift moves them
+    # right. Off-axis roots stay in their original half-plane near t=0.
+    right = sum(a != b for a, b in zip(plus, plus[1:]))
+    right_and_axis = sum(a != b for a, b in zip(minus, minus[1:]))
+    return {**certificate, "first_column_signs_plus": plus, "first_column_signs_minus": minus,
+            "rhp_poles": right, "jw_axis_poles": right_and_axis - right,
+            "lhp_poles": degree - right_and_axis, "hurwitz_stable": right_and_axis == 0}
+
+
+def _transfer_pole_diagnostics(monic):
+    if not monic:
+        return None, "undefined_characteristic"
+    exponent = max((_binary_exponent(abs(v)) // i for i, v in enumerate(monic[1:], 1) if v),
+                   default=0)
+    poles, status, _ = _state_pole_diagnostics(monic, Fraction(2) ** exponent)
+    return poles, status
+
+
 def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "transfer_function" if "den" in spec else "state_space")).strip().lower()
 
     if mode == "transfer_function":
-        num = [float(c) for c in spec.get("num", [1.0])]
-        den = [float(c) for c in spec["den"]]
+        try:
+            raw_num, raw_den = spec.get("num", [1.0]), spec["den"]
+            if any(not isinstance(row, (list, tuple)) or any(isinstance(c, bool) for c in row)
+                   for row in (raw_num, raw_den)):
+                raise ValueError
+            num = [float(c) for c in raw_num]
+            den = [float(c) for c in raw_den]
+            if not all(math.isfinite(c) for row in (num, den) for c in row):
+                raise ValueError
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {"passed": False, "domain": "control", "mode": mode,
+                    "reason": "Transfer coefficients must be finite numeric arrays"}
         while len(den) > 1 and abs(den[0]) == 0.0:
             den.pop(0)
         if len(den) < 2:
@@ -1042,22 +1119,17 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             den = [-c for c in den]
             num = [-c for c in num]
 
-        _, rhp_routh, zero_row = _routh_table(den)
-        poles = _poly_roots(den)
-        rhp_roots = sum(1 for p in poles if p.real > 1e-6)
-        imag_roots = sum(1 for p in poles if abs(p.real) <= 1e-6)
-        open_loop_hurwitz = (rhp_routh == 0) and (not zero_row) and all(p.real < -1e-6 for p in poles)
-        routh_root_consistent = (rhp_routh == rhp_roots) or zero_row
-
-        cl_len = max(len(den), len(num))
-        den_pad = [0.0] * (cl_len - len(den)) + den
-        num_pad = [0.0] * (cl_len - len(num)) + num
-        cl_poly = [den_pad[i] + num_pad[i] for i in range(cl_len)]
-        while len(cl_poly) > 1 and abs(cl_poly[0]) == 0.0:
-            cl_poly.pop(0)
-        cl_poles = _poly_roots(cl_poly)
-        _, cl_rhp_routh, cl_zero_row = _routh_table(cl_poly if cl_poly[0] > 0 else [-c for c in cl_poly])
-        closed_loop_hurwitz = (cl_rhp_routh == 0) and (not cl_zero_row) and all(p.real < -1e-6 for p in cl_poles)
+        den_exact = [Fraction(c) for c in den]
+        num_exact = [Fraction(c) for c in num]
+        # Add in the original coefficient units before making either polynomial
+        # monic. Leading cancellations lower the closed-loop degree exactly.
+        closed = list(reversed(_poly_sum(list(reversed(den_exact)), list(reversed(num_exact)))))
+        open_monic = [c / den_exact[0] for c in den_exact]
+        closed_monic = [c / closed[0] for c in closed]
+        open_certificate = _transfer_root_certificate(open_monic)
+        closed_certificate = _transfer_root_certificate(closed_monic)
+        poles, pole_status = _transfer_pole_diagnostics(open_monic)
+        cl_poles, cl_pole_status = _transfer_pole_diagnostics(closed_monic)
 
         margins = _bode_margins(spec.get("num", [1.0]), spec["den"])
         # Infinity is invalid on the JSON tool wire. Cancel origin factors before
@@ -1077,21 +1149,33 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             dc_gain, dc_status = None, "pole_at_zero"
 
         res: Dict[str, Any] = {
-            "passed": bool(routh_root_consistent),
+            "passed": bool(closed_monic),
             "domain": "control",
             "mode": mode,
-            "hurwitz_stable": open_loop_hurwitz,
-            "closed_loop_hurwitz_stable": closed_loop_hurwitz,
-            "rhp_poles_routh": rhp_routh,
-            "rhp_poles_eigen": rhp_roots,
-            "jw_axis_poles": imag_roots,
+            "open_loop_root_certificate": open_certificate,
+            "closed_loop_root_certificate": closed_certificate,
+            "hurwitz_stable": open_certificate["hurwitz_stable"],
+            "closed_loop_hurwitz_stable": closed_certificate["hurwitz_stable"],
+            "rhp_poles_routh": open_certificate["rhp_poles"],
+            "rhp_poles_eigen": sum(re > 0 for re, _ in poles) if poles is not None else None,
+            "rhp_poles_eigen_is_approximate": True,
+            "jw_axis_poles": open_certificate["jw_axis_poles"],
             "dc_gain": dc_gain,
             "dc_gain_status": dc_status,
-            "poles_real_imag": [[p.real, p.imag] for p in sorted(poles, key=lambda z: (round(z.real, 7), round(z.imag, 7)))],
-            "closed_loop_poles_real_imag": [[p.real, p.imag] for p in sorted(cl_poles, key=lambda z: (round(z.real, 7), round(z.imag, 7)))],
+            "poles_real_imag": poles,
+            "poles_status": pole_status,
+            "closed_loop_poles_real_imag": cl_poles,
+            "closed_loop_poles_status": cl_pole_status,
             **margins,
         }
-        _check_claimed(res, spec)
+        if not closed_monic:
+            res["reason"] = closed_certificate["reason"]
+        field = spec.get("claimed_field")
+        if "claimed_value" in spec and field in res and res[field] is None:
+            res["passed"] = False
+            res["reason"] = f"Cannot verify claimed {field}: the result is undefined or unavailable"
+        else:
+            _check_claimed(res, spec)
         return res
 
     if mode == "state_space":

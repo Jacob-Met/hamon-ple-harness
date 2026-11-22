@@ -1,0 +1,585 @@
+{
+  "schema": "ple.control.exact-transfer-hurwitz-v1",
+  "source_base": "beb98262f623430673e3ac56f22bc8918ffb9a63",
+  "source_base_tree": "d759dd0261994c6385f555aa9cf28a725d74fe20",
+  "source_solver_sha256": "d8bbb26b60412f1a72905c820558d7c28760335125e7df290ff73d459cd9cc59",
+  "candidate_solver_sha256": "03b5a98c97a4f0e83f9d7038fc659876469dce9049b45a8a20936703e5c60a9a",
+  "independent_receiver_sha256": "fc3bcd0546d2fd40f37f9293c025a2d106b752947e9fbab172417953c1a2a2e4",
+  "registered_receiver_sha256": "c67b28bf743bd42373ea9d369999343e96a692a11bc152bb4bc50091bdab75cc",
+  "question": "Can transfer-function stability and complete half-plane root multiplicities be decided from exact accepted coefficients, including slow poles, singular Routh arrays, and feedback additions lost by floating arithmetic?",
+  "constants": {
+    "delta": "2^-55",
+    "common_gains": [
+      "1",
+      "-2^50",
+      "2^-50"
+    ]
+  },
+  "input_semantics": [
+    "The existing finite float conversion defines the accepted binary64 coefficient values. The exact stability calculation interprets those values as rational numbers; it does not recover an intended decimal value before conversion.",
+    "D and N are aligned by descending degree and added in their common original units before either resulting polynomial is normalized. A negative leading denominator changes the signs of both D and N together.",
+    "Leading zero coefficients are removed exactly. The existing open denominator degree >= 1 requirement remains. Empty or all-zero numerators represent zero. An omitted numerator defaults to one.",
+    "Counts classify the authored D and formal unity negative-feedback characteristic D+N, including common factors. No numerator/denominator cancellation is used to erase an authored pole.",
+    "A nonzero constant D+N has zero finite roots and a true strict-Hurwitz flag under this finite-root convention. This does not establish causality, properness, or descriptor-system well-posedness.",
+    "An identically zero D+N has undefined degree, root counts, and closed-loop stability. Its valid open certificate may be displayed, but the overall result and all four Boolean claims must refuse."
+  ],
+  "algorithm": {
+    "coefficient_order": "Monic descending rational coefficients a_0,...,a_n, with a_0=1.",
+    "shifted_coefficients": "For p(s+t), c_k(t)=sum_{j=0}^k a_j*binom(n-j,k-j)*t^(k-j).",
+    "hurwitz_matrix": "Zero-based H[r,c](t)=c_(2*c-r+1)(t), with out-of-range indices zero.",
+    "determinants": "One fraction-free Bareiss elimination over rational polynomials records every leading principal determinant Delta_k(t); all polynomial divisions must have zero remainder.",
+    "nonzero_minors": "Every Delta_k(t) is a nonzero polynomial because a sufficiently large positive t makes p(s+t) strictly Hurwitz.",
+    "local_signs": "For the first nonzero term b_k*t^v_k, sign at +t is sign(b_k), and sign at -t is (-1)^v_k*sign(b_k).",
+    "first_column": "The Routh first-column sign sequence is [1, sign(Delta_1), sign(Delta_2)*sign(Delta_1), ..., sign(Delta_n)*sign(Delta_(n-1))].",
+    "multiplicities": "For sufficiently small positive t, R=variations(+t), J=variations(-t)-R, and L=n-R-J. Root translation preserves algebraic multiplicity.",
+    "attribution": "The regular-array Routh sign theorem and consecutive-minor ratio are classical. The two-sided infinitesimal specialization and its use here are a deduction explained in the README, not a quotation from the primary references."
+  },
+  "output_contract": {
+    "certificate_fields": {
+      "method": "infinitesimal_shift_hurwitz",
+      "status": [
+        "classified",
+        "constant_nonzero",
+        "identically_zero"
+      ],
+      "degree": "Integer degree for every defined polynomial; null if identically zero.",
+      "normalized_coefficients": "Exact monic descending rational strings; ['1'] for a nonzero constant; [] if identically zero.",
+      "minor_leading_terms": "One {power: nonnegative integer, coefficient: nonzero rational string} per leading Hurwitz minor; [] for constants or undefined polynomials.",
+      "first_column_signs_plus": "List of +/-1 of length degree+1, [1] for a constant, null if identically zero.",
+      "first_column_signs_minus": "Same shape, for the negative infinitesimal shift.",
+      "rhp_poles": "Exact algebraic multiplicity in Re(s)>0, or null if undefined.",
+      "jw_axis_poles": "Exact algebraic multiplicity in Re(s)=0, including origins and repeated pairs, or null if undefined.",
+      "lhp_poles": "Exact algebraic multiplicity in Re(s)<0, or null if undefined.",
+      "hurwitz_stable": "True iff R=J=0 for a defined polynomial; null if undefined."
+    },
+    "certificate_names": [
+      "open_loop_root_certificate",
+      "closed_loop_root_certificate"
+    ],
+    "top_level_exact": [
+      "hurwitz_stable",
+      "closed_loop_hurwitz_stable",
+      "rhp_poles_routh",
+      "jw_axis_poles"
+    ],
+    "approximate_roots": "poles_real_imag and closed_loop_poles_real_imag are finite approximate pairs with multiplicity or null; numeric agreement never gates the exact certificate.",
+    "numeric_status_fields": [
+      "poles_status",
+      "closed_loop_poles_status"
+    ],
+    "numeric_status_values": [
+      "finite_approximation",
+      "outside_float_range",
+      "unavailable_numerical_diagnostic",
+      "undefined_characteristic"
+    ],
+    "approximate_count": "rhp_poles_eigen counts strictly positive rendered real components when a numeric list is available; otherwise null. rhp_poles_eigen_is_approximate must be true.",
+    "undefined_claims": "A claim against a null field refuses explicitly with a reason, without attempting float(None). An identically zero feedback characteristic refuses every Boolean claim, including a true open-loop flag.",
+    "invalid_input": "Invalid or nonfinite coefficient arrays, and open denominators of degree <1, return passed=false with an explicit reason.",
+    "retained": "The Bode and DC calculations remain unchanged, including their existing input interpretation. State-space exact rank, Lyapunov, characteristic, and diagnostic code remains unchanged."
+  },
+  "count_order": [
+    "rhp",
+    "imaginary_axis",
+    "lhp"
+  ],
+  "cases": [
+    {
+      "name": "slow/1/0",
+      "D": [
+        "1",
+        "delta"
+      ],
+      "N": [
+        "0"
+      ],
+      "open": [
+        0,
+        0,
+        1
+      ],
+      "closed": [
+        0,
+        0,
+        1
+      ],
+      "basis": "D+N=s+delta"
+    },
+    {
+      "name": "slow/1/1",
+      "D": [
+        "1",
+        "delta"
+      ],
+      "N": [
+        "1"
+      ],
+      "open": [
+        0,
+        0,
+        1
+      ],
+      "closed": [
+        0,
+        0,
+        1
+      ],
+      "basis": "D+N=s+(1+delta), with exact addition"
+    },
+    {
+      "name": "slow/-1/0",
+      "D": [
+        "1",
+        "-delta"
+      ],
+      "N": [
+        "0"
+      ],
+      "open": [
+        1,
+        0,
+        0
+      ],
+      "closed": [
+        1,
+        0,
+        0
+      ],
+      "basis": "D+N=s-delta"
+    },
+    {
+      "name": "slow/-1/1",
+      "D": [
+        "1",
+        "-delta"
+      ],
+      "N": [
+        "1"
+      ],
+      "open": [
+        1,
+        0,
+        0
+      ],
+      "closed": [
+        0,
+        0,
+        1
+      ],
+      "basis": "D+N=s+(1-delta), with exact addition"
+    },
+    {
+      "name": "origin-cube",
+      "D": [
+        "1",
+        "2",
+        "0",
+        "0",
+        "0"
+      ],
+      "N": [
+        "0"
+      ],
+      "open": [
+        0,
+        3,
+        1
+      ],
+      "closed": [
+        0,
+        3,
+        1
+      ],
+      "basis": "s^3*(s+2)"
+    },
+    {
+      "name": "repeated-axis",
+      "D": [
+        "1",
+        "2",
+        "2",
+        "4",
+        "1",
+        "2"
+      ],
+      "N": [
+        "0"
+      ],
+      "open": [
+        0,
+        4,
+        1
+      ],
+      "closed": [
+        0,
+        4,
+        1
+      ],
+      "basis": "(s^2+1)^2*(s+2)"
+    },
+    {
+      "name": "symmetric-real-and-axis",
+      "D": [
+        "1",
+        "0",
+        "3",
+        "0",
+        "-4"
+      ],
+      "N": [
+        "0"
+      ],
+      "open": [
+        1,
+        2,
+        1
+      ],
+      "closed": [
+        1,
+        2,
+        1
+      ],
+      "basis": "(s^2-1)*(s^2+4)"
+    },
+    {
+      "name": "repeated-symmetric-real",
+      "D": [
+        "1",
+        "0",
+        "-2",
+        "0",
+        "1"
+      ],
+      "N": [
+        "0"
+      ],
+      "open": [
+        2,
+        0,
+        2
+      ],
+      "closed": [
+        2,
+        0,
+        2
+      ],
+      "basis": "(s^2-1)^2; a zero Routh row does not imply imaginary-axis roots"
+    },
+    {
+      "name": "double-origin-repeated-axis",
+      "D": [
+        "1",
+        "0",
+        "2",
+        "0",
+        "1",
+        "0",
+        "0"
+      ],
+      "N": [
+        "0"
+      ],
+      "open": [
+        0,
+        6,
+        0
+      ],
+      "closed": [
+        0,
+        6,
+        0
+      ],
+      "basis": "s^2*(s^2+1)^2"
+    },
+    {
+      "name": "zero-first-pivot",
+      "D": [
+        "1",
+        "2",
+        "3",
+        "6",
+        "2"
+      ],
+      "N": [
+        "0"
+      ],
+      "open": [
+        2,
+        0,
+        2
+      ],
+      "closed": [
+        2,
+        0,
+        2
+      ],
+      "basis": "p_k=s*(s+2)*(s^2+3)+k,k=2. For k>0, imaginary-axis candidates 0,+/-sqrt(3) have nonzero real residual k; for large k, two roots lie in each strict half-plane."
+    },
+    {
+      "name": "common-gain/1/0",
+      "D": [
+        "1",
+        "3",
+        "2"
+      ],
+      "N": [
+        "1"
+      ],
+      "open": [
+        0,
+        0,
+        2
+      ],
+      "closed": [
+        0,
+        0,
+        2
+      ],
+      "basis": "D=(s+1)*(s+2), D+N=s^2+3s+3"
+    },
+    {
+      "name": "common-gain/-1/50",
+      "D": [
+        "-2^50",
+        "-3*2^50",
+        "-2*2^50"
+      ],
+      "N": [
+        "-2^50"
+      ],
+      "open": [
+        0,
+        0,
+        2
+      ],
+      "closed": [
+        0,
+        0,
+        2
+      ],
+      "basis": "Common nonzero gain leaves both normalized polynomials unchanged"
+    },
+    {
+      "name": "common-gain/1/-50",
+      "D": [
+        "2^-50",
+        "3*2^-50",
+        "2*2^-50"
+      ],
+      "N": [
+        "2^-50"
+      ],
+      "open": [
+        0,
+        0,
+        2
+      ],
+      "closed": [
+        0,
+        0,
+        2
+      ],
+      "basis": "Common nonzero gain leaves both normalized polynomials unchanged"
+    },
+    {
+      "name": "authored-common-rhp",
+      "D": [
+        "1",
+        "1",
+        "-2"
+      ],
+      "N": [
+        "1",
+        "-1"
+      ],
+      "open": [
+        1,
+        0,
+        1
+      ],
+      "closed": [
+        1,
+        0,
+        1
+      ],
+      "basis": "D=(s-1)*(s+2), N=s-1, D+N=(s-1)*(s+3); common RHP factor is retained"
+    },
+    {
+      "name": "feedback-boundary/below",
+      "D": [
+        "1",
+        "1",
+        "1",
+        "1"
+      ],
+      "N": [
+        "-delta"
+      ],
+      "open": [
+        0,
+        2,
+        1
+      ],
+      "closed": [
+        0,
+        0,
+        3
+      ],
+      "basis": "D=(s+1)*(s^2+1); closed constant 1-delta and Hurwitz Delta_2=delta"
+    },
+    {
+      "name": "feedback-boundary/above",
+      "D": [
+        "1",
+        "1",
+        "1",
+        "1"
+      ],
+      "N": [
+        "delta"
+      ],
+      "open": [
+        0,
+        2,
+        1
+      ],
+      "closed": [
+        2,
+        0,
+        1
+      ],
+      "basis": "Closed constant 1+delta and Hurwitz Delta_2=-delta"
+    },
+    {
+      "name": "feedback-boundary/on",
+      "D": [
+        "1",
+        "1",
+        "1",
+        "1"
+      ],
+      "N": [
+        "0"
+      ],
+      "open": [
+        0,
+        2,
+        1
+      ],
+      "closed": [
+        0,
+        2,
+        1
+      ],
+      "basis": "(s+1)*(s^2+1)"
+    },
+    {
+      "name": "constant-feedback",
+      "D": [
+        "1",
+        "1"
+      ],
+      "N": [
+        "-1",
+        "0"
+      ],
+      "open": [
+        0,
+        0,
+        1
+      ],
+      "closed": [
+        0,
+        0,
+        0
+      ],
+      "basis": "D+N=1; finite-root convention"
+    },
+    {
+      "name": "identically-zero-feedback",
+      "D": [
+        "1",
+        "1"
+      ],
+      "N": [
+        "-1",
+        "-1"
+      ],
+      "open": [
+        0,
+        0,
+        1
+      ],
+      "closed": null,
+      "basis": "D+N is identically zero; all claims refuse"
+    },
+    {
+      "name": "invalid-input-constant",
+      "D": [
+        "1"
+      ],
+      "N": [
+        "0"
+      ],
+      "open": null,
+      "closed": null,
+      "basis": "Existing denominator-degree rule requires explicit refusal"
+    }
+  ],
+  "physical_case_count": 20,
+  "fully_defined_case_count": 18,
+  "undefined_feedback_case_count": 1,
+  "invalid_input_case_count": 1,
+  "boolean_claim_fields": [
+    "hurwitz_stable",
+    "closed_loop_hurwitz_stable"
+  ],
+  "boolean_claim_count": 80,
+  "unclaimed_route_count": 20,
+  "total_route_calls": 100,
+  "expected_approvals": 36,
+  "expected_refusals": 44,
+  "oracle": [
+    "Known factors and the independent quartic homotopy determine the expected half-plane multiplicities. Neither numerical roots nor the producer's Routh/Bareiss recurrence defines these outcomes.",
+    "Independently expand every shifted Hurwitz leading minor by the Leibniz permutation formula for these degree-at-most-six cases. Compare its least nonzero coefficient and power exactly.",
+    "Reconstruct both first-column sign sequences from the independently expanded minors and compare the returned certificate, exact counts, top-level flags, and output types.",
+    "Exercise every system unclaimed and with false/true for both Boolean fields. Collect all100 calls before the aggregate assertion. Check claimed actual values, mismatch evidence for wrong defined claims, and explicit reasons for invalid/undefined refusals.",
+    "Check strict JSON serialization, finite or explicitly unavailable numeric pole rendering, and the raw-sign provenance of the approximate eigen count. No general root accuracy claim is made by this course.",
+    "Four representative real registered Pi fixtures add20 actual calls in both maintained unittest and pytest entry points: slow stable, exact feedback boundary, repeated axis pair, and undefined feedback.",
+    "Preserve and report all stock solver exceptions, serialization errors, false approvals, false refusals, and missing new schema separately. A missing new certificate is not evidence that every historical stability output was wrong."
+  ],
+  "paired_bode_dc_fields": [
+    "w_gc_rad_s",
+    "phase_margin_deg",
+    "w_pc_rad_s",
+    "gain_margin_db",
+    "gain_crossovers",
+    "phase_crossovers",
+    "unity_gain_intervals_rad_s",
+    "negative_real_intervals_rad_s",
+    "imaginary_axis_poles_rad_s",
+    "removable_holes_rad_s",
+    "dc_gain",
+    "dc_gain_status"
+  ],
+  "paired_bode_dc_rule": "Record exact per-case and aggregate digests. Require equality for every case returning these outputs in both branches; investigate every difference before integration. If stock aborts before returning, retain that failure and do not claim a paired output equivalence for that case. Source identity of the Bode/DC routines is checked separately.",
+  "decision": "Require20/20 full system contracts,80/80 Boolean outcomes,36 approvals/44 refusals,zero solver/JSON errors,independent minor agreement,real Pi success,and all maintained CI gates. No case,coefficient,tolerance,or expected outcome changes after first execution.",
+  "execution": "Source-only native preparation followed by one matched stock/candidate pair in maintained repository PR CI. Both branches contain identical tests and protocol; only the solver differs. No local solver/test execution, organizer/dev/scored run, or workflow changes.",
+  "integration": "The base already combines PR165 diagnostic repair and concurrent PR163 AC changes. The new substantive candidate's full maintained CI must qualify that combined base. Compare the actual CI merge tree and actual landed merge tree independently; do not assume either is equal to the feature head.",
+  "limitations": [
+    "This finite synthetic course does not establish uniform runtime, symbolic numerical roots, conditioning-independent root accuracy, physical closed-loop well-posedness, or any benchmark score improvement.",
+    "The unchanged Bode code still uses its prior decimal-string rational interpretation and has inherited range limits. A finite coefficient array can imply an unrepresentable crossover frequency and raise before the whole result is assembled. This repair does not claim unconditional end-to-end serialization for all finite input arrays."
+  ],
+  "references": [
+    {
+      "url": "https://webhomes.maths.ed.ac.uk/~v1ranick/papers/barnett.pdf",
+      "title": "S. Barnett, A New Formulation of the Theorems of Hurwitz, Routh and Sturm (1971)",
+      "section": "Section3, regular Routh arrays and equations25-28; Section2 Hurwitz criterion"
+    },
+    {
+      "url": "https://www.egr.msu.edu/classes/me451/jchoi/2010/notes/ME451_L10_RouthHurwitz.pdf",
+      "title": "Jongeun Choi, ME451 Lecture10",
+      "section": "Routh sign criterion and zero-pivot/zero-row cautions"
+    }
+  ]
+}
