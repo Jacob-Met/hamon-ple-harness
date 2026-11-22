@@ -32,7 +32,7 @@ def brentq_fallback(f, a: float, b: float, args=(), xtol: float = 2e-12, rtol: f
     for _ in range(maxiter):
         if fcur == 0.0:
             return xcur
-        if (fpre > 0.0) == (fcur > 0.0):
+        if (fpre > 0.0) != (fcur > 0.0):
             xblk, fblk = xpre, fpre
             spre = scur = xcur - xpre
         if abs(fblk) < abs(fcur):
@@ -106,8 +106,8 @@ def _gk15_panel(f, a: float, b: float, args):
         dx = half * _GK15_X[idx]
         s = float(f(mid - dx, *args)) + float(f(mid + dx, *args))
         ik += _GK15_W[idx] * s
-        if idx % 2 == 1:
-            ig += _G7_W[(idx + 1) // 2] * s
+        if idx % 2 == 0:
+            ig += _G7_W[idx // 2] * s
     ik *= half
     ig *= half
     err = abs(ik - ig)
