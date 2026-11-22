@@ -564,40 +564,33 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
         lmtd_res = 0.0
         lmtd_val = None
         lmtd_bounds = None
-        if arr in ("parallel", "condenser", "boiler") and q_actual > 0.0:
-            # Compare the required mean temperature difference with the interval
-            # independently implied by the rounded sensible-stream outlet.
-            # Near the pinch, the terminal gap can be smaller than one Kelvin ulp.
+        if arr in ("counterflow", "parallel", "condenser", "boiler") and q_actual > 0.0:
+            # LMTD is monotone in both ends. The rounded outlet temperatures
+            # independently bound Q/UA even when a true pinch gap rounds to zero.
+            ends = ((t_hi, t_ci), (t_ho, t_co)) if arr == "parallel" else ((t_hi, t_co), (t_ho, t_ci))
             span = t_hi - t_ci
-            gap = t_ho - t_co
-            rounding = 2 * (math.ulp(t_ho) + math.ulp(t_co))
+            bounds_at_ends = []
+            for hot, cold in ends:
+                gap = hot - cold
+                rounding = 2 * (math.ulp(hot) + math.ulp(cold))
+                bounds_at_ends.append((max(0., gap - rounding), min(span, gap + rounding)))
 
-            def log_mean(end):
-                if end <= 0.0:
+            def log_mean(x, y):
+                low, high = sorted((x, y))
+                if low <= 0.0:
                     return 0.0
-                if end >= span:
-                    return span
-                diff = span - end
-                ratio_log = math.log1p(diff / end) if diff < end else math.log(span) - math.log(end)
+                if low == high:
+                    return low
+                diff = high - low
+                ratio_log = math.log1p(diff / low) if diff < low else math.log(high) - math.log(low)
                 return diff / ratio_log
 
-            lower, upper = log_mean(gap - rounding), log_mean(gap + rounding)
+            lower, upper = (log_mean(*pair) for pair in zip(*bounds_at_ends))
             lmtd_bounds = [lower, upper]
             lmtd_val = q_actual / ua
             if lmtd_val == 0.0:
                 return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "unrepresentable_mean_temperature_difference"}
             lmtd_res = max(lower - lmtd_val, lmtd_val - upper, 0.) / lmtd_val
-        elif arr == "counterflow" and q_actual > 0.0:
-            dt1, dt2 = t_hi - t_co, t_ho - t_ci
-            if dt1 <= 0.0 or dt2 <= 0.0:
-                return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "non_positive_terminal_delta_T"}
-            if abs(dt1 - dt2) < 1e-10 * max(dt1, dt2, 1.0):
-                lmtd_val = float(0.5 * (dt1 + dt2))
-            else:
-                smaller, larger = sorted((dt1, dt2))
-                difference = larger - smaller
-                lmtd_val = difference / math.log1p(difference / smaller)
-            lmtd_res = abs(ua * lmtd_val - q_actual) / max(q_actual, 1e-12)
 
         # A supplied rating can determine the state while other observations test it.
         # Compare each outlet on its actual stream temperature-change scale.

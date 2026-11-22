@@ -269,3 +269,14 @@ def test_phase_inverse_preserves_deficit_in_supplied_units():
         for key, measurement, gap in zip(("Q", "T_c_out"), (duty, outlet), gaps):
             sized = solve_exchanger_or_radiation({**base, key: measurement})
             assert sized["verified"] and math.isclose(sized["NTU"], float(-gap.ln()), rel_tol=1e-14)
+
+
+def test_counterflow_mean_temperature_check_handles_a_rounded_terminal_pinch():
+    for hot_capacity, cold_capacity in ((1000., 2000.), (2000., 1000.), (1000., 1000.)):
+        base = {"flow_arrangement": "counterflow", "T_h_in": 400., "T_c_in": 300.,
+                "C_h": hot_capacity, "C_c": cold_capacity}
+        for ntu in (40., 80., 1e17):
+            result = solve_exchanger_or_radiation({**base, "UA": ntu * min(hot_capacity, cold_capacity)})
+            assert result["verified"], result
+            low, high = result["LMTD_bounds_K"]
+            assert low <= result["LMTD_K"] <= high
