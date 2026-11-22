@@ -737,6 +737,9 @@ def _complex_gauss_solve(a_mat: np.ndarray, b_vec: np.ndarray) -> np.ndarray:
 
 
 def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
+    if spec.get("calculation") == "ac_power_flow":
+        from hamon_ac_power_flow import verify_ac_power_flow
+        return {**verify_ac_power_flow(spec), "mode": "circuit", "tool": "hamon_conservation_cad_verifier"}
     if spec.get("netlist") or spec.get("file_b64"):
         netlist = str(spec["netlist"]) if spec.get("netlist") else base64.b64decode(spec["file_b64"]).decode("utf-8", errors="replace")
         branches, freq_hz = _parse_spice_netlist(netlist, spec.get("freq_hz"))
@@ -1127,6 +1130,7 @@ def run_router_conservation_cad_verifier(payload: Dict[str, Any]) -> Dict[str, A
         if spec.get("step_text") or fname.endswith((".step", ".stp", ".p21")): mode = "step_cad"
         elif spec.get("calculation") == "euler_rotor": mode = "thermal_fluid"
         elif spec.get("calculation") == "pipe_network" or ("nodes" in spec and "pipes" in spec): mode = "thermal_fluid"
+        elif spec.get("calculation") == "ac_power_flow": mode = "circuit"
         elif spec.get("netlist") or spec.get("branches") or fname.endswith((".cir", ".sp", ".spice", ".net")): mode = "circuit"
         elif "lhs" in spec and "rhs" in spec: mode = "dimensional"
         elif "span_m" in spec and "E_Pa" in spec: mode = "structural"

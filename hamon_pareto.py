@@ -159,7 +159,7 @@ PLE_DOMAIN_TOOLS = (
 )
 
 _WAVE4_EXTS = (".step", ".stp", ".p21", ".cir", ".sp", ".spice", ".net")
-_WAVE4_TERMS = ('step', 'stp', 'brep', 'mass moment', 'inertia', 'stress', 'deflection', 'buckling', 'von mises', 'kcl', 'kvl', 'spice', 'nodal', 'tellegen', 'phasor', 'conservation', 'enthalpy', 'entropy', 'mass balance', 'energy balance', 'species balance', 'head loss', 'colebrook', 'pipe network', 'hardy cross', 'hardy-cross', 'turbomachinery', 'velocity triangle', 'rothalpy', 'bearing capacity', 'consolidation', 'earthwork', 'seepage', 'dimensional')
+_WAVE4_TERMS = ('step', 'stp', 'brep', 'mass moment', 'inertia', 'stress', 'deflection', 'buckling', 'von mises', 'kcl', 'kvl', 'spice', 'nodal', 'tellegen', 'phasor', 'conservation', 'enthalpy', 'entropy', 'mass balance', 'energy balance', 'species balance', 'head loss', 'colebrook', 'pipe network', 'hardy cross', 'hardy-cross', 'ac power flow', 'load flow', 'turbomachinery', 'velocity triangle', 'rothalpy', 'bearing capacity', 'consolidation', 'earthwork', 'seepage', 'dimensional')
 
 
 def select_domain_tools(prompt: str = "", file_paths=()) -> tuple[str, ...]:
