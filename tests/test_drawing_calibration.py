@@ -71,6 +71,18 @@ class AnchoredMeasureContracts(unittest.TestCase):
                          "conditional_source_anchored_length")
         self.assertEqual(result["reference_max_relative_residual"], 0.0)
 
+    def test_overlapping_printed_reference_words(self):
+        page = inventory()
+        page["words"] = [{"text": part} for part in ("SPAN", "1000", "mm")]
+        spec = specification()
+        for ref, label in zip(spec["references"], ("SPAN 1000 mm", "1000 mm")):
+            ref["source_label"] = label
+        with self.assertRaisesRegex(ValueError, "independent"):
+            self.calculate(page=page, spec=spec)
+
+        page["words"] += [{"text": "1000"}, {"text": "mm"}]
+        self.assertAlmostEqual(self.calculate(page=page, spec=spec)["targets"][0]["estimate"], 500)
+
     def test_printed_nts_does_not_invent_or_invalidate_independent_dimensions(self):
         self.assertIn("NTS", inventory()["words"][-1]["text"])
         self.assertFalse(self.calculate()["physical_scale_verified"])
