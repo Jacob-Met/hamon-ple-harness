@@ -1,6 +1,7 @@
 """Wire connectivity evidence for two-color EAGLE vector schematics."""
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 import hashlib
 import math
 import re
@@ -59,13 +60,13 @@ def _color(value):
     return ""
 
 
-def _ink(svg):
+def _ink(svg, glyph_origins=None):
     wires, symbol_lines = [], []
     unsupported = Counter()
     fills = 0
-    stack = [(ElementTree.fromstring(svg), drawing._ID, "none", "black", True)]
+    stack = [(ElementTree.fromstring(svg), drawing._ID, "none", "black", True, True)]
     while stack:
-        element, matrix, stroke, fill, visible = stack.pop()
+        element, matrix, stroke, fill, visible, glyph_visible = stack.pop()
         tag = drawing.local(element.tag)
         if tag in ("defs", "clipPath", "symbol"):
             continue
@@ -74,7 +75,15 @@ def _ink(svg):
         stroke = element.get("stroke", stroke)
         fill = element.get("fill", fill)
         visible = visible and all(element.get(k, "1") == "1" for k in ("opacity", "stroke-opacity"))
-        stack.extend((child, matrix, stroke, fill, visible) for child in reversed(list(element)))
+        glyph_visible = glyph_visible and element.get("fill-opacity", "1") == "1"
+        stack.extend((child, matrix, stroke, fill, visible, glyph_visible) for child in reversed(list(element)))
+        if (tag == "use" and glyph_origins is not None and matrix is not None
+                and visible and glyph_visible and fill != "none"):
+            ref = element.get("{http://www.w3.org/1999/xlink}href", element.get("href", ""))
+            if re.fullmatch(r"#(?:glyph-?\d+|symbol\d+)-\d+", ref):
+                point = drawing.transform_point(matrix, (float(element.get("x", 0)),
+                                                        float(element.get("y", 0))))
+                glyph_origins.append((point, ref.rsplit("-", 1)[0]))
         color = _color(stroke)
         if not color or tag not in ("path", "line", "circle", "ellipse", "polygon", "polyline"):
             continue
@@ -100,22 +109,62 @@ def _ink(svg):
     return wires, symbol_lines, fills, dict(unsupported)
 
 
-def _label_anchors(wires, roots, words):
-    anchors = defaultdict(set)
-    horizontal = [(roots[i], min(a[0], b[0]), max(a[0], b[0]), a[1])
-                  for i, (a, b) in enumerate(wires) if abs(a[1] - b[1]) < .08]
+def _word_directions(words, glyphs):
+    """Orient native word boxes from contiguous Cairo glyph origins in paint order."""
+    x_order = sorted((point[0], i) for i, (point, _) in enumerate(glyphs))
+    xs = [x for x, _ in x_order]
     for word in words:
         name = word["text"]
         if not re.fullmatch(r"[+A-Z][A-Z0-9_+/\-]{1,16}", name):
             continue
         left, top, right, bottom = word["page_bbox_pt"]
+        # Poppler reports boxes and Cairo glyph origins to different decimal precision.
+        tol = .01
+        lo, hi = bisect_left(xs, left - tol), bisect_right(xs, right + tol)
+        indices = sorted(i for _, i in x_order[lo:hi]
+                         if top - tol <= glyphs[i][0][1] <= bottom + tol)
+        if len(indices) != len(name) or indices[-1] - indices[0] + 1 != len(indices):
+            continue
+        run = [glyphs[i] for i in indices]
+        if len({font for _, font in run}) != 1:
+            continue
+        steps = [(b[0][0] - a[0][0], b[0][1] - a[0][1]) for a, b in zip(run, run[1:])]
+        for dx, dy in ((1, 0), (0, 1), (-1, 0), (0, -1)):
+            if all(dx * x + dy * y > tol and abs(dx * y - dy * x) <= tol for x, y in steps):
+                word["baseline_direction"] = (dx, dy)
+                break
+
+
+def _label_frame(point, direction):
+    x, y = point
+    dx, dy = direction
+    return (dx * x + dy * y, dx * y - dy * x)
+
+
+def _label_anchors(wires, roots, words):
+    anchors = defaultdict(set)
+    parallel = defaultdict(list)
+    for direction in {w["baseline_direction"] for w in words if "baseline_direction" in w}:
+        for root, (a, b) in zip(roots, wires):
+            a, b = _label_frame(a, direction), _label_frame(b, direction)
+            if abs(a[1] - b[1]) < .08:
+                parallel[direction].append((root, min(a[0], b[0]), max(a[0], b[0]), a[1]))
+    for word in words:
+        direction = word.get("baseline_direction")
+        if not direction:
+            continue
+        x, y, u, v = word["page_bbox_pt"]
+        ax, ay = _label_frame((x, y), direction)
+        bx, by = _label_frame((u, v), direction)
+        left, right = sorted((ax, bx))
+        top, bottom = sorted((ay, by))
         height = bottom - top
-        hits = {root for root, start, end, y in horizontal
+        hits = {root for root, start, end, y in parallel[direction]
                 if -.22 * height < y - bottom < .07 * height
                 and start - .35 * height <= left <= end - .35 * height
                 and min(right, end) - max(left, start) > .55 * min(right - left, end - start)}
         if len(hits) == 1:
-            anchors[name].update(hits)
+            anchors[word["text"]].update(hits)
     return anchors
 
 
@@ -206,7 +255,8 @@ def page_connectivity(filename, page=1):
     source = Path(filename)
     stock = drawing.scan_pdf(source, page, page, limit_paths=1, limit_words=5000)["pages"][0]
     with tempfile.TemporaryDirectory(prefix="hamon-eagle-") as directory:
-        wires, red, fills, unsupported = _ink(drawing._page_svg(source, page, directory))
+        glyphs = []
+        wires, red, fills, unsupported = _ink(drawing._page_svg(source, page, directory), glyphs)
     if len(wires) > 2000 or len(red) > 5000 or len(stock["words"]) >= 5000:
         raise ValueError("EAGLE schematic exceeds the registered page processing bounds")
     result = {"kind": "eagle-schematic-page-connectivity", "page": page,
@@ -220,6 +270,7 @@ def page_connectivity(filename, page=1):
     result["pdf_creator"] = creator
     if not re.search(r"\bEAGLE\b", creator, re.I) or not wires or not red or unsupported or stock["embedded_images"]:
         return {**result, "status": "unresolved_profile", "wire_groups": None}
+    _word_directions(stock["words"], glyphs)
     membership, marks, anchors = _graph(wires, red, stock["words"])
     return {**result, "status": "candidate_evidence", "wire_groups": membership,
             "group_count": len(set(membership)), "supply_glyphs": marks,
@@ -280,12 +331,13 @@ def _stitch_pages(pages):
         if len(components) < 2 or len({page for page, _ in components}) != len(components):
             continue
         conflicting_text = any(set(by_component[component]) != {name} for component in components)
-        if conflicting_text and not _ground_glyph_precedence(
-                name, components, glyph_evidence, by_component, occurrences):
+        traced_ground = _ground_glyph_precedence(
+            name, components, glyph_evidence, by_component, occurrences)
+        if conflicting_text and not traced_ground:
             continue
         canonical.update(dict.fromkeys(components, min(components)))
         link = {"name": name, "page_groups": sorted(components)}
-        if conflicting_text:
+        if traced_ground:
             link["ground_bar_witnesses"] = [
                 {"page": page, "group": group,
                  "wire_islands": sorted(glyph_evidence[page, group][name, "ground_bar"]),
