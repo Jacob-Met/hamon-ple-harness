@@ -884,6 +884,9 @@ def verify_civil_geotech_balance(spec: Dict[str, Any]) -> Dict[str, Any]:
         from hamon_consolidation import verify_consolidation_1d
         return verify_consolidation_1d(spec)
     out: Dict[str, Any] = {"ok": True, "tool": "hamon_conservation_cad_verifier", "mode": "civil_geotech"}
+    if spec.get("calculation") not in (None, "bearing_capacity"):
+        out.update(ok=False, conservation_verified=False, reason="Unsupported civil/geotechnical calculation")
+        return out
     evaluated = False
     ok = True
     if "cut_bank_m3" in spec or "fill_compacted_m3" in spec:

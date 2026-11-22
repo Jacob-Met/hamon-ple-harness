@@ -62,6 +62,8 @@ class AtRestPlaneStressTest(unittest.TestCase):
     def test_unsupported_and_empty_cases_refuse_certification(self):
         for spec in ({}, {"calculation": "unimplemented_plane",
                           "proposed_horizontal_effective_stress_Pa": -1},
+                     {"calculation": "unimplemented_plane", "cut_bank_m3": 10,
+                      "proposed_horizontal_effective_stress_Pa": -1},
                      example(coefficient_model="active"), example(receiving_phi_deg=90),
                      example(overburden_layers=[]), example(overconsolidation_ratio=2),
                      example(overburden_layers=[{"thickness_m": 2, "gamma_above_water_N_m3": 15000}])):
