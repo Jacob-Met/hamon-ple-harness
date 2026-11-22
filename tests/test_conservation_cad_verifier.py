@@ -81,7 +81,7 @@ def test_router_dispatch_step_hygiene_and_zero_write_relay():
     here = Path(__file__).resolve().parent.parent
     relay_ops = []
     with tempfile.TemporaryDirectory() as td:
-        wdir = Path(td)
+        wdir = Path(td).resolve()
         (wdir / "part.step").write_text(SAMPLE_STEP_BREP, encoding="utf-8")
         (wdir / "bad.step").write_text("INVALID", encoding="utf-8")
         assert hamon_pareto.audit_local_deliverable(wdir / "part.step")["ok"] is True
