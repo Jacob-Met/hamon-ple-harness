@@ -1824,124 +1824,185 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
     return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": f"Unknown psychrometric mode: {mode}"}
 
 
+def _truss_node_index(value, node_count):
+    index = int(value)
+    if (isinstance(value, bool) or (not isinstance(value, str) and index != value)
+            or not 0 <= index < node_count):
+        raise ValueError("Invalid truss node index")
+    return index
+
+
+class _TrussMember:
+    """Raw compatibility row and material factors of one represented member."""
+
+    def __init__(self, element, nodes):
+        i = _truss_node_index(element["i"], len(nodes))
+        j = _truss_node_index(element["j"], len(nodes))
+        xi, yi = nodes[i]
+        xj, yj = nodes[j]
+        dx, dy = xj - xi, yj - yi
+        # Retain the established numerical length. The compatibility factors
+        # use differences of accepted coordinates, never rounded unit vectors.
+        length = math.hypot(float(xj) - float(xi), float(yj) - float(yi))
+        modulus = Fraction(float(element["E_pa"]))
+        self.area = Fraction(float(element["A_m2"]))
+        if not math.isfinite(length) or length <= 1e-12 or modulus <= 0 or self.area <= 0:
+            raise ValueError("Degenerate truss member geometry or stiffness")
+        self.length = Fraction(length)
+        self.ea = modulus * self.area
+        self.weight = self.ea / self.length**3
+        self.row = [(dof, value) for dof, value in
+                    ((2*i, -dx), (2*i+1, -dy), (2*j, dx), (2*j+1, dy)) if value]
+        alpha = Fraction(float(element.get("alpha_per_K", 0.0)))
+        delta_t = Fraction(float(element.get("dT_K", 0.0)))
+        self.thermal_extension = alpha * delta_t * self.length
+
+
+def _truss_free_rank(rows, free_count):
+    """Exact echelon basis of free compatibility rows; no stiffness weights enter."""
+    basis = {}
+    for entries in rows:
+        row = dict(entries)
+        while row:
+            pivot = min(row)
+            coefficient = row[pivot]
+            if pivot not in basis:
+                basis[pivot] = {j: v / coefficient for j, v in row.items()}
+                break
+            for j, value in basis[pivot].items():
+                remaining = row.get(j, 0) - coefficient * value
+                if remaining:
+                    row[j] = remaining
+                else:
+                    row.pop(j, None)
+        if len(basis) == free_count:
+            break
+    return len(basis)
+
+
+def _truss_solve(members, applied, prescribed, free):
+    positions = {d: i for i, d in enumerate(free)}
+    rows = [[(positions[d], v) for d, v in member.row if d in positions] for member in members]
+    n = len(free)
+    if _truss_free_rank(rows, n) < n:
+        return None
+    gram = [[Fraction(0) for _ in free] for _ in free]
+    rhs = [applied[d] for d in free]
+    for member, row in zip(members, rows):
+        fixed_projection = sum(v * prescribed[d] for d, v in member.row if d in prescribed)
+        natural_projection = member.thermal_extension * member.length
+        for i, vi in row:
+            weighted = member.weight * vi
+            rhs[i] += weighted * (natural_projection - fixed_projection)
+            for j, vj in row:
+                gram[i][j] += weighted * vj
+
+    # The exact full-rank Gram is positive definite, so its leading pivots
+    # are positive. No numerical threshold or row regularization is needed.
+    for k in range(n):
+        for i in range(k+1, n):
+            if gram[i][k]:
+                factor = gram[i][k] / gram[k][k]
+                rhs[i] -= factor * rhs[k]
+                for j in range(k+1, n):
+                    gram[i][j] -= factor * gram[k][j]
+    solution = [Fraction(0)] * n
+    for i in reversed(range(n)):
+        remaining = rhs[i] - sum(gram[i][j] * solution[j] for j in range(i+1, n))
+        solution[i] = remaining / gram[i][i]
+    return solution
+
+
+class _TrussOutputRangeError(ArithmeticError):
+    pass
+
+
+def _truss_render(field, value, index=()):
+    if isinstance(value, (list, tuple)):
+        return [_truss_render(field, v, index + (i,)) for i, v in enumerate(value)]
+    try:
+        return _diagnostic_float(value)
+    except OverflowError:
+        raise _TrussOutputRangeError(field, list(index)) from None
+
+
+def _truss_response(spec):
+    identity = {"domain": "fem", "mode": "truss_2d"}
+    try:
+        nodes = [(Fraction(float(point[0])), Fraction(float(point[1]))) for point in spec["nodes"]]
+        members = [_TrussMember(element, nodes) for element in spec["elements"]]
+        applied = [Fraction(0)] * (2 * len(nodes))
+        for load in spec.get("loads", []):
+            i = _truss_node_index(load["node"], len(nodes))
+            applied[2*i] += Fraction(float(load.get("fx_N", 0.0)))
+            applied[2*i+1] += Fraction(float(load.get("fy_N", 0.0)))
+        prescribed = {}
+        for support in spec.get("supports", []):
+            i = _truss_node_index(support["node"], len(nodes))
+            if support.get("fix_x", False):
+                prescribed[2*i] = Fraction(float(support.get("ux_m", 0.0)))
+            if support.get("fix_y", False):
+                prescribed[2*i+1] = Fraction(float(support.get("uy_m", 0.0)))
+    except (IndexError, KeyError, TypeError, ValueError, OverflowError) as exc:
+        return {**identity, "passed": False, "reason": f"Invalid truss input: {exc}"}
+
+    free = [d for d in range(len(applied)) if d not in prescribed]
+    solution = _truss_solve(members, applied, prescribed, free)
+    if solution is None:
+        return {**identity, "passed": False,
+                "reason": "Singular stiffness matrix (kinematic mechanism or insufficient supports)"}
+    u = [prescribed.get(d, 0) for d in range(len(applied))]
+    for d, value in zip(free, solution):
+        u[d] = value
+
+    internal = [Fraction(0)] * len(applied)
+    forces, stresses = [], []
+    energy = thermal_work = Fraction(0)
+    for member in members:
+        extension = sum(v * u[d] for d, v in member.row) / member.length
+        force = member.ea * (extension - member.thermal_extension) / member.length
+        forces.append(force)
+        stresses.append(force / member.area)
+        energy += force**2 * member.length / (2 * member.ea)
+        thermal_work += force * member.thermal_extension
+        for d, v in member.row:
+            internal[d] += v * force / member.length
+
+    reactions = [total - applied_force for total, applied_force in zip(internal, applied)]
+    fx, fy = sum(internal[::2]), sum(internal[1::2])
+    moment = sum(x * internal[2*i+1] - y * internal[2*i] for i, (x, y) in enumerate(nodes))
+    free_equilibrium = all(reactions[d] == 0 for d in free)
+    work = sum(force * value for force, value in zip(applied, u)) * Fraction(1, 2)
+    member_work = sum(total * value for total, value in zip(internal, u)) - thermal_work
+    passed = free_equilibrium and fx == fy == moment == 0 and member_work == 2 * energy
+
+    fields = {
+        "displacements_xy_m": list(zip(u[::2], u[1::2])),
+        "axial_forces_N": forces,
+        "axial_stresses_Pa": stresses,
+        "reactions_xy_N": list(zip(reactions[::2], reactions[1::2])),
+        "strain_energy_J": energy,
+        "external_work_J": work,
+        "equilibrium_residual_N": max(abs(fx), abs(fy)),
+    }
+    try:
+        rendered = {key: _truss_render(key, value) for key, value in fields.items()}
+    except _TrussOutputRangeError as exc:
+        field, index = exc.args
+        return {**identity, "passed": False, "response_status": "outside_float_range",
+                "range_field": field, "range_index": index,
+                "reason": f"Truss output {field} at {index} is outside the nonzero binary64 range"}
+    result = {**identity, "passed": passed, **rendered,
+              "equilibrium_residual_basis": "represented_member_factors_before_float_rounding"}
+    _check_claimed(result, spec)
+    return result
+
+
 def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "truss_2d")).strip().lower()
 
     if mode == "truss_2d":
-        nodes = [[float(c[0]), float(c[1])] for c in spec["nodes"]]
-        elements = spec["elements"]
-        n_nodes = len(nodes)
-        ndof = 2 * n_nodes
-        k_glob = [[0.0] * ndof for _ in range(ndof)]
-        f_ext = [0.0] * ndof
-        f_th = [0.0] * ndof
-
-        elem_meta = []
-        for el in elements:
-            ni = int(el["i"])
-            nj = int(el["j"])
-            e_mod = float(el["E_pa"])
-            area = float(el["A_m2"])
-            alpha = float(el.get("alpha_per_K", 0.0))
-            dt_k = float(el.get("dT_K", 0.0))
-            dx = nodes[nj][0] - nodes[ni][0]
-            dy = nodes[nj][1] - nodes[ni][1]
-            length = math.hypot(dx, dy)
-            if length <= 1e-12 or e_mod <= 0.0 or area <= 0.0:
-                return {"passed": False, "domain": "fem", "mode": mode, "reason": "Degenerate truss member geometry or stiffness"}
-            c = dx / length
-            s = dy / length
-            k_axial = e_mod * area / length
-            dofs = [2 * ni, 2 * ni + 1, 2 * nj, 2 * nj + 1]
-            b_vec = [-c, -s, c, s]
-            for a_idx in range(4):
-                for b_idx in range(4):
-                    k_glob[dofs[a_idx]][dofs[b_idx]] += k_axial * b_vec[a_idx] * b_vec[b_idx]
-            nth = e_mod * area * alpha * dt_k
-            for a_idx in range(4):
-                f_th[dofs[a_idx]] += nth * b_vec[a_idx]
-            elem_meta.append((ni, nj, e_mod, area, length, c, s, alpha, dt_k, dofs, b_vec))
-
-        for ld in spec.get("loads", []):
-            nd = int(ld["node"])
-            f_ext[2 * nd] += float(ld.get("fx_N", 0.0))
-            f_ext[2 * nd + 1] += float(ld.get("fy_N", 0.0))
-
-        prescribed: Dict[int, float] = {}
-        for sup in spec.get("supports", []):
-            nd = int(sup["node"])
-            if sup.get("fix_x", False):
-                prescribed[2 * nd] = float(sup.get("ux_m", 0.0))
-            if sup.get("fix_y", False):
-                prescribed[2 * nd + 1] = float(sup.get("uy_m", 0.0))
-
-        free_dofs = [d for d in range(ndof) if d not in prescribed]
-        if not free_dofs:
-            u_full = [prescribed.get(d, 0.0) for d in range(ndof)]
-        else:
-            k_ff = [[k_glob[r][c] for c in free_dofs] for r in free_dofs]
-            rhs_f = []
-            for r in free_dofs:
-                val = f_ext[r] + f_th[r]
-                for p_dof, u_val in prescribed.items():
-                    val -= k_glob[r][p_dof] * u_val
-                rhs_f.append(val)
-            u_free = _solve_free_stiffness(k_ff, rhs_f)
-            if u_free is None:
-                return {"passed": False, "domain": "fem", "mode": mode, "reason": "Free truss stiffness is singular or numerically unresolved (check mechanisms and supports)"}
-            u_full = [0.0] * ndof
-            for d, u_val in prescribed.items():
-                u_full[d] = u_val
-            for idx, d in enumerate(free_dofs):
-                u_full[d] = u_free[idx]
-
-        reactions = [
-            sum(k_glob[i][j] * u_full[j] for j in range(ndof)) - f_ext[i] - f_th[i]
-            for i in range(ndof)
-        ]
-
-        axial_forces: List[float] = []
-        axial_stresses: List[float] = []
-        strain_energy = 0.0
-        has_thermal_or_settlement = any(abs(v) > 0.0 for v in prescribed.values())
-        for (_, _, e_mod, area, length, _, _, alpha, dt_k, dofs, b_vec) in elem_meta:
-            ext_m = sum(b_vec[idx] * u_full[dofs[idx]] for idx in range(4))
-            mech_ext = ext_m - alpha * dt_k * length
-            if abs(dt_k) > 0.0 and abs(alpha) > 0.0:
-                has_thermal_or_settlement = True
-            n_force = (e_mod * area / length) * mech_ext
-            axial_forces.append(n_force)
-            axial_stresses.append(n_force / area)
-            strain_energy += 0.5 * (n_force ** 2) * length / (e_mod * area)
-
-        fx_sum = sum(f_ext[2 * i] + reactions[2 * i] for i in range(n_nodes))
-        fy_sum = sum(f_ext[2 * i + 1] + reactions[2 * i + 1] for i in range(n_nodes))
-        mom_z = sum(
-            nodes[i][0] * (f_ext[2 * i + 1] + reactions[2 * i + 1]) - nodes[i][1] * (f_ext[2 * i] + reactions[2 * i])
-            for i in range(n_nodes)
-        )
-        load_scale = max((abs(v) for v in f_ext), default=1.0)
-        eq_ok = max(abs(fx_sum), abs(fy_sum), abs(mom_z)) <= 1e-6 * max(1.0, load_scale)
-
-        ext_work = 0.5 * sum(f_ext[d] * u_full[d] for d in range(ndof))
-        clapeyron_ok = True
-        if not has_thermal_or_settlement:
-            clapeyron_ok = abs(strain_energy - ext_work) <= 1e-7 * max(abs(strain_energy), 1e-12)
-
-        res: Dict[str, Any] = {
-            "passed": bool(eq_ok and clapeyron_ok),
-            "domain": "fem",
-            "mode": mode,
-            "displacements_xy_m": [[u_full[2 * i], u_full[2 * i + 1]] for i in range(n_nodes)],
-            "axial_forces_N": axial_forces,
-            "axial_stresses_Pa": axial_stresses,
-            "reactions_xy_N": [[reactions[2 * i], reactions[2 * i + 1]] for i in range(n_nodes)],
-            "strain_energy_J": strain_energy,
-            "external_work_J": ext_work,
-            "equilibrium_residual_N": max(abs(fx_sum), abs(fy_sum)),
-        }
-        _check_claimed(res, spec)
-        return res
+        return _truss_response(spec)
 
     if mode == "euler_bernoulli_beam_1d":
         x_nodes = [float(x) for x in spec["x_nodes_m"]]

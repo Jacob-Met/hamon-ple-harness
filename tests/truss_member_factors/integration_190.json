@@ -1,0 +1,77 @@
+{
+  "state": "frozen_before_second_combined_numerical_execution",
+  "version": 1,
+  "reason": "Other owner's PR190 landed after the original pair and PR187 combination both fully passed; qualify the new combined tree before landing PR189.",
+  "original_candidate": "d512440ccdb55cf216c4548c260faa87451b885d",
+  "first_combined_head": "cb56c330384cf1030001808baf86c324200fbfed",
+  "first_combined_tree": "f491f1af799f2387d9df06e12c6a7c5ff39e1f1a",
+  "first_combined_log_sha256": "534398e1d5ae0f7a8fbe05c40687392ff7cd91b7e0ae67ec88f897b1a3ff76ad",
+  "incoming_main": "9838401012faeb4139e8b41ab06356d46bcd6c53",
+  "incoming_tree": "d3da57fb5ec03c377c545d2d593232e0ea619999",
+  "incoming_pr": 190,
+  "incoming_owner_credit": "Other owner's unit-diagonal elastic-energy scaling of the floating FEM solve, including beam stability tests.",
+  "incoming_files": [
+    {
+      "path": "hamon_pde_control_psychro_fem.py",
+      "blob": "c8854dbcf5afa86fffadf02b8972a882bdfa2f0b"
+    },
+    {
+      "path": "tests/test_wave5_pde_control_psychro_fem.py",
+      "blob": "2288e0e3f8c87e25a2df0918b2f5f5a3f846c187"
+    }
+  ],
+  "source_equivalence": {
+    "new_helper": "def _solve_free_stiffness through the blank lines before def _primitive_integer_vector must exactly match incoming190.",
+    "prefix": "After removing exactly that inserted helper, the entire pre-beam prefix must equal original truss candidate and first combined prefix.",
+    "beam": "From the euler_bernoulli_beam_1d delimiter through EOF must exactly match incoming190.",
+    "truss": "Original exact member-factor solver remains unchanged and solely used for truss; incoming floating truss-call/reason hunk is superseded by the already frozen exact branch.",
+    "shared_solve_linear": "Unchanged",
+    "wave5": "Incoming190 complete test blob, including187 additions, retained exactly.",
+    "own_files": "All six pre-existing own receiver, registered Pi, protocol and integration files remain unchanged."
+  },
+  "combined_exception": {
+    "case": "beam/cantilever",
+    "allowed_changed_keys": [
+      "full_sha256"
+    ],
+    "reason": "PR190 beam stiffness scaling changes floating operation order, so its complete response hash may or may not change within the already frozen numeric tolerances.",
+    "qualification": "Keep original receiver and one-call integration gate byte-identical. Original numeric comparisons and integration gate must both pass; their same-run full beam hashes must agree. Do not force the old hash or require a change."
+  },
+  "integration_gate": {
+    "path": "tests/test_truss_beam_integration.py",
+    "sha256": "59f0142624682e89c010ffd68cd0fb366d3c86872e7bd3df43fdecd50dba90e5",
+    "git_blob": "1c95ac1dc177d3f673954f613961d51d61094b8a",
+    "requests": 1,
+    "expected": {
+      "tip": "1/3",
+      "rotation": "1/2",
+      "midpoint": "5/48",
+      "strain_energy": "1/6",
+      "external_work": "1/6",
+      "support_work": "0",
+      "reactions": [
+        [
+          -1,
+          -1
+        ],
+        [
+          0,
+          0
+        ]
+      ]
+    },
+    "numeric_tolerance": "16 ULPs of reference; fixed zeros exact; reaction residuals16ULPs on unit load/moment",
+    "hash_gate": "TRUSS_BEAM_INTEGRATION_CASE.full_sha256 must equal same-run TRUSS_FACTOR_CASE for beam/cantilever"
+  },
+  "required": [
+    "All other15 TRUSS_FACTOR_CASE records, every claim record and TRUSS_FACTOR_TOTAL equal original and first combined candidate.",
+    "All253 inherited rows andten totals unchanged.",
+    "All five actual registered Pi truss contracts pass.",
+    "Both incoming190 scale/mechanism tests and all187 beam tests pass.",
+    "All maintained gates pass; retain complete original second-combined log.",
+    "Prove actual CI checkout tree and landed merge tree, and source equivalence before push."
+  ],
+  "operation": "Normal merge pinned incoming main. If the sole expected conflict is in the solver file, resolve only it using the frozen exact-prefix-plus-incoming-helper-and-tail composition; verify every preserved blob before commit. Add only this protocol. No original receiver edits, stock replay, force push, or direct-main write.",
+  "scope_limit": "Finite represented linear-truss qualification and coexistence with incoming beam source; no model-score, timing, universal-runtime or broad beam-conditioning claim.",
+  "independent_review": "P3 confirmed frozen gate adequacy for the unit cantilever; retain incoming separate multiscale/mechanism tests."
+}
