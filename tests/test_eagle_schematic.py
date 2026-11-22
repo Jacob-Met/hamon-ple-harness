@@ -2,11 +2,11 @@ import unittest
 
 from unittest.mock import patch
 
-from hamon_eagle_schematic import _graph, _ink, _stitch_pages, document_connectivity
+from hamon_eagle_schematic import _graph, _ink, _stitch_pages, _word_directions, document_connectivity
 
 
 def word(name, box):
-    return {"text": name, "page_bbox_pt": box}
+    return {"text": name, "page_bbox_pt": box, "baseline_direction": (1, 0)}
 
 
 class EagleSchematicTests(unittest.TestCase):
@@ -104,3 +104,38 @@ class EagleSchematicTests(unittest.TestCase):
             with self.subTest(trial=trial):
                 left, right = _stitch_pages([a, b])[0]
                 self.assertNotEqual(left[0], right[0])
+
+    def test_wire_anchor_uses_actual_glyph_direction_under_quarter_turns(self):
+        wires = [[(0, 10), (22, 10)], [(50, 40), (72, 40)]]
+        boxes = [(0, 3, 14, 11), (50, 33, 64, 41)]
+        good = [(0, 9), (4, 9), (9, 9)]
+        for rotation in range(4):
+            def rotate(point):
+                x, y = point
+                for _ in range(rotation):
+                    x, y = -y, x
+                return x, y
+
+            paths = [[rotate(a), rotate(b)] for a, b in wires]
+            for perpendicular in (False, True):
+                words = []
+                for x, y, u, v in boxes:
+                    corners = [rotate((x, y)), rotate((u, v))]
+                    lo, hi = zip(*corners)
+                    words.append({"text": "CLK", "page_bbox_pt": (min(lo), min(hi), max(lo), max(hi))})
+                second = [(53, 40), (53, 37), (53, 34)] if perpendicular else [(50, 39), (54, 39), (59, 39)]
+                _word_directions(words, [(rotate(pt), "font") for pt in good + second])
+                with self.subTest(rotation=rotation, perpendicular=perpendicular):
+                    self.assertEqual(_graph(paths, [], words)[0], [0, int(perpendicular)])
+
+    def test_ambiguous_incomplete_or_bent_glyph_runs_abstain(self):
+        for glyphs in (
+            [((0, 1), "f"), ((4, 1), "f")],
+            [((0, 1), "f"), ((4, 1), "g"), ((8, 1), "f")],
+            [((0, 1), "f"), ((4, 1), "f"), ((8, 3), "f")],
+            [((0, 1), "f"), ((42, 40), "f"), ((4, 1), "f"), ((8, 1), "f")],
+            [((0, 1), "f"), ((4, 1), "f"), ((8, 1), "f"), ((4, 2), "f")],
+        ):
+            words = [{"text": "CLK", "page_bbox_pt": (0, 0, 12, 7)}]
+            _word_directions(words, glyphs)
+            self.assertNotIn("baseline_direction", words[0])

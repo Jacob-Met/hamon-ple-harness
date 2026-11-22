@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from zipfile import ZipFile
 
@@ -61,10 +62,39 @@ def counts(rows):
     }
 
 
+def check_quarter_turns(pdf, original):
+    """Compare physical endpoints and both wire partitions after rotating the PDF itself."""
+    from pypdf import PdfWriter
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for turn in (1, 2, 3):
+            writer = PdfWriter(clone_from=pdf)
+            sizes = [(float(p.cropbox.width), float(p.cropbox.height)) for p in writer.pages]
+            for page in writer.pages:
+                page.rotate(90 * turn)
+            target = Path(tmp) / f"turned-{turn}.pdf"
+            writer.write(target)
+            actual = json.loads(subprocess.check_output([
+                sys.executable, str(REPO / "engineering_toolkit.py"), "pdf-eagle-connectivity",
+                str(target), "--flat-document",
+            ]))
+            require(actual["document_wire_groups"] == original["document_wire_groups"]
+                    and actual["inter_sheet_anchors"] == original["inter_sheet_anchors"],
+                    "Rotated document changed qualified joins or their witness groups")
+            for old, new, (width, height) in zip(original["pages"], actual["pages"], sizes, strict=True):
+                require(old["wire_groups"] == new["wire_groups"], "Rotated page changed local groups")
+                for previous, current in zip(old["wires"], new["wires"], strict=True):
+                    for (x, y), observed in zip(previous, current, strict=True):
+                        expected = ((height - y, x), (width - x, height - y), (y, width - x))[turn - 1]
+                        require(math.dist(expected, observed) < .01, "Rotated wire endpoint differs")
+            print(json.dumps({"rotation_degrees": turn * 90, "covariant": True}))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pdf", type=Path)
     parser.add_argument("vendor_archive", type=Path)
+    parser.add_argument("--quarter-turns", action="store_true", help="Also replay all quarter-turn rotations using pypdf")
     args = parser.parse_args()
     require(sha256(args.pdf.read_bytes()).hexdigest() == PDF_SHA, "Unexpected vendor PDF")
     predictions = []
@@ -84,6 +114,8 @@ def main():
     require([(p["wires"], p["wire_groups"]) for p in flat["pages"]] == predictions,
             "Document mode changed page geometry or local membership")
     require(len(flat["document_wire_groups"]) == len(predictions), "Document memberships omit sheets")
+    if args.quarter_turns:
+        check_quarter_turns(args.pdf, flat)
     require(sha256(args.vendor_archive.read_bytes()).hexdigest() == ZIP_SHA, "Unexpected vendor archive")
     with ZipFile(args.vendor_archive) as archive:
         cad = archive.read("MEGA2560_Rev3e.sch")
@@ -109,14 +141,14 @@ def main():
             "Complete document differs from the independent recount")
     print(json.dumps({"combined_pages_without_inter_sheet_stitching": result}))
     result = counts(flat_rows)
-    require(result == {"nets": 111, "exact": 106, "false_connected": 0, "false_separated": 165},
+    require(result == {"nets": 111, "exact": 107, "false_connected": 0, "false_separated": 87},
             f"Flat-document comparison differs: {result}")
     pairs_by_name = defaultdict(list)
     for name, group in flat_rows:
         pairs_by_name[name].append((name, group))
     missing = {name: total for name, rows in pairs_by_name.items()
                if (total := counts(rows)["false_separated"])}
-    require(missing == {"RESET": 78, "GND": 66, "+3V3": 11, "VIN": 8, "AREF": 2},
+    require(missing == {"GND": 66, "+3V3": 11, "VIN": 8, "AREF": 2},
             f"Remaining per-net separations differ: {missing}")
     print(json.dumps({"flat_document": result, "anchors": flat["inter_sheet_anchors"], "missing_by_net": missing}))
 
