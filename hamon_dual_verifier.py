@@ -958,8 +958,8 @@ def solve_diaphragm_torsion(spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def solve_nodal_kcl(spec: dict[str, Any]) -> dict[str, Any]:
-    """Dual-solve general DC or complex AC nodal KCL/KVL network (Admittance Y*V = I)."""
+def solve_nodal_kcl(spec: dict[str, Any], *, omega: float | None = None) -> dict[str, Any]:
+    """Return directed n1-to-n2 currents and net current supplied at prescribed nodes."""
     vs_raw = spec.get("voltage_sources_to_ground", {})
     prescribed = (list(vs_raw.items()) if isinstance(vs_raw, dict) else [
         (vs["node"], vs.get("V", vs.get("V_V", 0.0))) for vs in (vs_raw or [])
@@ -988,33 +988,43 @@ def solve_nodal_kcl(spec: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"conflicting fixed voltages at node {node!r}")
         fixed_v[nd] = voltage
 
-    branches: list[tuple[str, str, complex]] = []
-    for r in spec.get("resistors", []):
+    branches: list[tuple[str, int, str, str, complex]] = []
+    for index, r in enumerate(spec.get("resistors", [])):
         n1 = _norm_node(r.get("n1", r.get("from", 0)))
         n2 = _norm_node(r.get("n2", r.get("to", 0)))
         r_ohm = float(r.get("R_ohm", r.get("R", 0.0)))
         if r_ohm <= 0.0:
             raise ValueError("resistor R_ohm must be positive")
-        branches.append((n1, n2, complex(1.0 / r_ohm, 0.0)))
+        branches.append(("resistors", index, n1, n2, complex(1.0 / r_ohm, 0.0)))
 
-    for z_item in spec.get("impedances", []):
+    for index, z_item in enumerate(spec.get("impedances", [])):
         n1 = _norm_node(z_item.get("n1", z_item.get("from", 0)))
         n2 = _norm_node(z_item.get("n2", z_item.get("to", 0)))
         z_c = _to_c(z_item.get("Z", z_item.get("Z_ohm", 0.0)))
         if abs(z_c) == 0.0:
             raise ValueError("zero branch impedance")
-        branches.append((n1, n2, 1.0 / z_c))
+        branches.append(("impedances", index, n1, n2, 1.0 / z_c))
 
-    for y_item in spec.get("admittances", []):
+    if omega is not None:
+        for index, ind in enumerate(spec.get("inductors", [])):
+            z = complex(float(ind.get("R_series_ohm", 0.0)), omega * float(ind["L_H"]))
+            if z == 0:
+                raise ValueError("zero branch impedance")
+            branches.append(("inductors", index, _norm_node(ind["n1"]), _norm_node(ind["n2"]), 1.0 / z))
+        for index, cap in enumerate(spec.get("capacitors", [])):
+            z = complex(0.0, -1.0 / (omega * float(cap["C_F"])))
+            branches.append(("capacitors", index, _norm_node(cap["n1"]), _norm_node(cap["n2"]), 1.0 / z))
+
+    for index, y_item in enumerate(spec.get("admittances", [])):
         n1 = _norm_node(y_item.get("n1", y_item.get("from", 0)))
         n2 = _norm_node(y_item.get("n2", y_item.get("to", 0)))
         y_c = _to_c(y_item.get("Y", y_item.get("Y_S", 0.0)))
-        branches.append((n1, n2, y_c))
+        branches.append(("admittances", index, n1, n2, y_c))
 
     all_nodes = set(fixed_v)
     for i in range(1, int(spec.get("num_nodes", 0)) + 1):
         all_nodes.add(str(i))
-    for n1, n2, _ in branches:
+    for _, _, n1, n2, _ in branches:
         all_nodes.update((n1, n2))
     for cs in spec.get("current_sources", []) + spec.get("current_injections", []):
         all_nodes.add(_norm_node(cs["node"]))
@@ -1026,13 +1036,16 @@ def solve_nodal_kcl(spec: dict[str, Any]) -> dict[str, Any]:
     Y = [[0j] * m for _ in range(m)]
     I_rhs = [0j] * m
 
+    fixed_supply = dict.fromkeys(fixed_v, 0j)
     for cs in spec.get("current_sources", []) + spec.get("current_injections", []):
         nd = _norm_node(cs["node"])
         i_c = _to_c(cs.get("I_A", cs.get("I", 0.0)))
         if nd in idx:
             I_rhs[idx[nd]] += i_c
+        else:
+            fixed_supply[nd] -= i_c
 
-    for n1, n2, y_val in branches:
+    for _, _, n1, n2, y_val in branches:
         if n1 in idx:
             i1 = idx[n1]
             Y[i1][i1] += y_val
@@ -1050,6 +1063,7 @@ def solve_nodal_kcl(spec: dict[str, Any]) -> dict[str, Any]:
 
     complex_system = any(v.imag != 0 for row in Y for v in row) or any(v.imag != 0 for v in I_rhs)
     is_ac = (complex_system or bool(spec.get("impedances") or spec.get("admittances"))
+             or (omega is not None and bool(spec.get("inductors") or spec.get("capacitors")))
              or any(v.imag != 0 for v in fixed_v.values()))
     V_all: dict[str, complex] = dict(fixed_v)
     if m > 0:
@@ -1072,11 +1086,29 @@ def solve_nodal_kcl(spec: dict[str, Any]) -> dict[str, Any]:
     }
     for nd in sorted(all_nodes):
         out[f"V{nd}_V"] = [V_all[nd].real, V_all[nd].imag] if is_ac else float(V_all[nd].real)
-    for n1, n2, y_val in branches:
+
+    def current_value(value: complex):
+        return [value.real, value.imag] if is_ac or value.imag else float(value.real)
+
+    currents = []
+    for collection, index, n1, n2, y_val in branches:
         i_br = (V_all[n1] - V_all[n2]) * y_val
-        key = f"I_branch_{n1}{n2}_A"
-        if key not in out:
-            out[key] = [i_br.real, i_br.imag] if is_ac else float(i_br.real)
+        value = current_value(i_br)
+        currents.append({"collection": collection, "index": index, "n1": n1, "n2": n2,
+                         "current_A": value})
+        # Legacy endpoints-only names expose the first matching branch.
+        out.setdefault(f"I_branch_{n1}{n2}_A", value)
+        if n1 in fixed_supply:
+            fixed_supply[n1] += i_br
+        if n2 in fixed_supply:
+            fixed_supply[n2] -= i_br
+    out["branch_currents"] = currents
+    # Each node reports the net supplied by its prescribed voltage, after
+    # subtracting independent injections. Parallel ideal supplies at one node
+    # do not individually have a determined current.
+    out["prescribed_node_supply_A"] = {
+        node: current_value(value) for node, value in fixed_supply.items() if node != "__GND__"
+    }
     return out
 
 def solve_pipe_colebrook_dual(spec: dict[str, Any]) -> dict[str, Any]:
@@ -1650,25 +1682,8 @@ def solve_bolt_group_eccentric_dual(spec: dict[str, Any]) -> dict[str, Any]:
 
 def solve_ac_phasor_rlc_dual(spec: dict[str, Any]) -> dict[str, Any]:
     """Steady-state AC RLC nodal phasor network with complex power conservation verification."""
-    freq = float(spec["freq_Hz"])
-    omega = 2.0 * math.pi * freq
-    impedances = list(spec.get("impedances", []))
-    for ind in spec.get("inductors", []):
-        l_h = float(ind["L_H"])
-        r_ser = float(ind.get("R_series_ohm", 0.0))
-        impedances.append({"n1": ind["n1"], "n2": ind["n2"], "Z": [r_ser, omega * l_h]})
-    for cap in spec.get("capacitors", []):
-        c_f = float(cap["C_F"])
-        impedances.append({"n1": cap["n1"], "n2": cap["n2"], "Z": [0.0, -1.0 / (omega * c_f)]})
-    net_spec = {
-        "num_nodes": spec.get("num_nodes", 0),
-        "voltage_sources_to_ground": spec.get("voltage_sources_to_ground", {}),
-        "current_sources": spec.get("current_sources", []),
-        "resistors": spec.get("resistors", []),
-        "impedances": impedances,
-        "admittances": spec.get("admittances", []),
-    }
-    res = solve_nodal_kcl(net_spec)
+    omega = 2.0 * math.pi * float(spec["freq_Hz"])
+    res = solve_nodal_kcl(spec, omega=omega)
     out = dict(res)
     for k, val in list(res.items()):
         if k.startswith("V") and k.endswith("_V") and isinstance(val, list):

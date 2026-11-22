@@ -754,10 +754,8 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
     rhs = np.zeros(dim, dtype=np.complex128)
     ni = lambda s: None if str(s) in gnd else n_idx[str(s)]
 
-    vs_map: Dict[str, int] = {}
     for k, vs in enumerate(v_sources):
         row = len(nodes) + k
-        vs_map[str(vs["name"])] = row
         ip, im = ni(vs["n_pos"]), ni(vs["n_neg"])
         if ip is not None: mna[ip, row] += 1.0; mna[row, ip] += 1.0
         if im is not None: mna[im, row] -= 1.0; mna[row, im] -= 1.0
@@ -793,11 +791,13 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
     kvl_max = 0.0
     s_tot = 0j
     s_deliv = 0j
-    for br in branches:
+    branch_currents = []
+    voltage_source_currents = iter(sol_lu[len(nodes):])
+    for index, br in enumerate(branches):
         nm, bt = str(br["name"]), str(br["type"]).upper()
         vd = v_node.get(str(br["n_pos"]), 0j) - v_node.get(str(br["n_neg"]), 0j)
         if bt == "V":
-            ibr = complex(sol_lu[vs_map[nm]])
+            ibr = complex(next(voltage_source_currents))
             kvl_max = max(kvl_max, abs(vd - cmath.rect(float(br["value"]), math.radians(float(br.get("phase_deg", 0.0))))))
             s_deliv += vd * (-ibr).conjugate()
         elif bt == "I":
@@ -809,6 +809,11 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
             val = float(br["value"])
             y = (1.0 / val) if bt == "R" else ((1.0 / (1j * omega * val) if omega > 0 else 1e12) if bt == "L" else (1j * omega * val if omega > 0 else 0.0))
             ibr = y * vd
+        branch_currents.append({
+            "collection": "branches", "index": index, "name": nm, "type": bt,
+            "n1": str(br["n_pos"]), "n2": str(br["n_neg"]),
+            "current_A": [float(ibr.real), float(ibr.imag)] if omega > 0 else float(ibr.real),
+        })
         s_tot += vd * ibr.conjugate()
         if str(br["n_pos"]) in kcl_sum: kcl_sum[str(br["n_pos"])] += ibr
         if str(br["n_neg"]) in kcl_sum: kcl_sum[str(br["n_neg"])] -= ibr
@@ -828,6 +833,7 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
         "tool": "hamon_conservation_cad_verifier",
         "mode": "circuit",
         "freq_hz": freq_hz,
+        "branch_currents": branch_currents,
         "node_voltages": {nm: ([v.real, v.imag] if omega > 0 else v.real) for nm, v in v_node.items() if nm != "GND"},
         "kcl_max_residual_A": kcl_max,
         "kvl_max_residual_V": kvl_max,
