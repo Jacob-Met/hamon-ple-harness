@@ -288,7 +288,7 @@ async def provision_engineering_cli(session: Any) -> str:
             session.write_file("/tmp/hamon_dxf.py", dxf_bytes), timeout=12)
         if dxf_size != len(dxf_bytes):
             return ""
-        for filename in ("hamon_consolidation.py", "hamon_pipe_network.py", "hamon_turbomachinery.py", "hamon_ac_power_flow.py", "hamon_bearing_capacity.py"):
+        for filename in ("hamon_consolidation.py", "hamon_pipe_network.py", "hamon_diaphragm.py", "hamon_turbomachinery.py", "hamon_ac_power_flow.py", "hamon_bearing_capacity.py"):
             module = pathlib.Path(__file__).with_name(filename).read_bytes()
             copied = await asyncio.wait_for(
                 session.write_file("/tmp/" + filename, module), timeout=12)
@@ -387,6 +387,11 @@ async def provision_engineering_cli(session: Any) -> str:
         " solvers (SI rational exponents & transcendental guards via mode:si-eval,"
         " complex/real KCL/KVL & FEM systems via mode:linear-system, nonlinear roots"
         " via mode:scalar-root, and equilibrium/beam/hydraulics/geotech checks via mode:domain)."
+        " For semi-rigid roof load paths use domain kind diaphragm_membrane: nodes_m [[x,y],...],"
+        " panels {nodes:[SW,SE,NE,NW],Dx_N_m,Dy_N_m,G_N_m}, bars {nodes:[a,b],EA_N},"
+        " springs {node,axis:x or y,k_N_m}, loads {node,force_N:[Fx,Fy]}. Indices are zero-based;"
+        " omit cells over openings. Results follow input order (center shear, bar tension,"
+        " force transmitted to supports)."
         " DXF-TAKEOFF computes INSUNITS-calibrated lengths, Shoelace closed polygon areas,"
         " and INSERT block BOM counts. Always run format-guard on deliverables before finishing."
         "\n  python3 /tmp/hamon-engineering-toolkit.py calc-pack design_checks.json"

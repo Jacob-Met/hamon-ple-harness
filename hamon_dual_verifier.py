@@ -2098,6 +2098,9 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
         return solve_static_equilibrium_2d(spec)
     if kind == "truss_2d":
         return solve_truss_2d(spec)
+    if kind == "diaphragm_membrane":
+        from hamon_diaphragm import solve_diaphragm
+        return solve_diaphragm(spec)
     if kind == "diaphragm_torsion":
         res = solve_diaphragm_torsion(spec)
         for wid, v in res["wall_shears_N"].items():
