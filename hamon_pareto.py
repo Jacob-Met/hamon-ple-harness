@@ -136,7 +136,9 @@ def route_from_intake_prompt(
             except ValueError:
                 return None
             exts = rec.get("by_extension") if isinstance(rec.get("by_extension"), dict) else {}
-            fcount = len(rec.get("files") or []) if isinstance(rec.get("files"), list) else sum(int(v) for v in exts.values())
+            fcount = rec.get("engineering_file_count")
+            if not isinstance(fcount, int) or fcount < 0:
+                fcount = sum(int(v) for v in exts.values()) if exts else len(rec.get("files") or [])
             pre_ok = bool(presolve_verified or rec.get("presolve_verified", False))
             return route_task_budget(
                 by_extension=exts,
