@@ -3,36 +3,6 @@ on:
   push:
     branches: ["gpt6-mwmq0uei7cnnu3o7/ple-official-static"]
   pull_request:
-    paths:
-      - "requirements.txt"
-      - "engineering_intake.py"
-      - "delivery_guard.py"
-      - "delivery_materialize.py"
-      - "archive_checkpoint.py"
-      - "archive_contract.py"
-      - "engineering_toolkit.py"
-      - "hamon_drawing.py"
-      - "hamon_dxf.py"
-      - "hamon_scale.py"
-      - "hamon_affine_metric.py"
-      - "hamon_callout.py"
-      - "hamon_dual_verifier.py"
-      - "hamon_cad_takeoff.py"
-      - "hamon_pareto.py"
-      - "hamon_conservation_cad_verifier.py"
-      - "hamon_pde_control_psychro_fem.py"
-      - "hamon_wave6_physics_verifiers.py"
-      - "hamon_wave7_engineering_verifiers.py"
-      - "task-tools.ts"
-      - "package.json"
-      - "package-lock.json"
-      - "harness.py"
-      - "ship/check_artifact_provenance.py"
-      - "ship/audit_ple_delivery.py"
-      - "ship/verify_native_dxf_corpus.py"
-      - "ship/verify_pdf_window_corpus.py"
-      - "tests/**"
-      - ".github/workflows/engineering-intake.yml"
 jobs:
   test:
     runs-on: ubuntu-latest
