@@ -4,6 +4,7 @@ on:
     branches: ["gpt6-mwmq0uei7cnnu3o7/ple-official-static"]
   pull_request:
     paths:
+      - "requirements.txt"
       - "engineering_intake.py"
       - "delivery_guard.py"
       - "delivery_materialize.py"
