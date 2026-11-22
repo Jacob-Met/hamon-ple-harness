@@ -39,6 +39,17 @@ class TestWarmFog(unittest.TestCase):
         self.assertEqual(out["w_condensate_kg_per_kgda"], 0.0)
         self.assertEqual(out["w_vapor_kg_per_kgda"], out["w_mix_kg_per_kgda"])
 
+    def test_unbracketed_above_saturation_inlets_decline(self):
+        # PsychroLib 2.5.0 humidity ratio at 25°C, 101325 Pa and RH 1.00005.
+        # This inlet is inside the existing moisture-input roundoff allowance.
+        inlet = {"t_db_c": 25.0, "w_kg_per_kgda": 0.02008215922474159, "m_da_kg_s": 1.0}
+        out = verify_psychrometric_process({
+            "mode": "adiabatic_mixing", "p_atm_pa": 101325.0,
+            "stream1": inlet, "stream2": inlet,
+        })
+        self.assertFalse(out["passed"])
+        self.assertIn("bracket", out["reason"])
+
     def test_subfreezing_fog_declines(self):
         out = mix(-25, -5, pressure=101325, flow1=1.0)
         self.assertFalse(out["passed"])
