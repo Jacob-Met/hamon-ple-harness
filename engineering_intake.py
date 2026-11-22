@@ -249,6 +249,7 @@ async def provision_engineering_cli(session: Any) -> str:
     import pathlib
     import_bytes = pathlib.Path(__file__).with_name("hamon_geometry.py").read_bytes()
     drawing_bytes = pathlib.Path(__file__).with_name("hamon_drawing.py").read_bytes()
+    schematic_bytes = pathlib.Path(__file__).with_name("hamon_eagle_schematic.py").read_bytes()
     scale_bytes = pathlib.Path(__file__).with_name("hamon_scale.py").read_bytes()
     affine_bytes = pathlib.Path(__file__).with_name("hamon_affine_metric.py").read_bytes()
     callout_bytes = pathlib.Path(__file__).with_name("hamon_callout.py").read_bytes()
@@ -266,6 +267,10 @@ async def provision_engineering_cli(session: Any) -> str:
         drawing_size = await asyncio.wait_for(
             session.write_file("/tmp/hamon_drawing.py", drawing_bytes), timeout=12)
         if drawing_size != len(drawing_bytes):
+            return ""
+        schematic_size = await asyncio.wait_for(
+            session.write_file("/tmp/hamon_eagle_schematic.py", schematic_bytes), timeout=12)
+        if schematic_size != len(schematic_bytes):
             return ""
         scale_size = await asyncio.wait_for(
             session.write_file("/tmp/hamon_scale.py", scale_bytes), timeout=12)
@@ -314,6 +319,8 @@ async def provision_engineering_cli(session: Any) -> str:
         "\n  python3 /tmp/hamon-engineering-toolkit.py xlsx-audit FILE.xlsx"
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-words DRAWING.pdf --page 1"
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-vector DRAWING.pdf --from-page 1 --to-page 3"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-eagle-connectivity SCHEMATIC.pdf --page 1"
+        "\nRead page-local wire-group and supply-glyph evidence. Device pins and cross-sheet connectivity require independent evidence."
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-detail-links DRAWING.pdf [--target-sheet S4]"
         "\nFollow the printed sheet/detail evidence. sheet_only locates the sheet; inspect the target graphic before using it."
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-window DRAWING.pdf --page 1 --output /tmp/drawing-window.png"
