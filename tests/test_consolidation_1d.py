@@ -85,6 +85,49 @@ class TestConsolidation(unittest.TestCase):
                 self.assertAlmostEqual(r["primary_consolidation_settlement_m"], expected_strain)
         self.assertEqual(example(delta_sigma_v_Pa=0)["settlement_at_time_m"],0)
 
+    def test_solid_volume_limits_all_primary_settlement_routes(self):
+        base = dict(H_clay_m=2., e0=.5, Cc=1.2, sigma_v0_eff_Pa=10000.,
+                    delta_sigma_v_Pa=990000., cv_m2_s=1e-7, time_s=8000000., drainage="double")
+        footing = dict(footing_B_m=1., depth_Df_m=1., gamma_N_m3=18000.)
+        for options in ({"calculation": "consolidation_1d"}, footing):
+            result = route({"mode": "civil_geotech", "spec": {**base, **options}})
+            self.assertFalse(result["conservation_verified"])
+            self.assertIn("negative final void ratio", result["reason"])
+            for cc, final_void in ((.20, .10), (.25, 0.)):
+                result = route({"mode": "civil_geotech", "spec": {**base, **options, "Cc": cc}})
+                self.assertTrue(result["conservation_verified"])
+                self.assertAlmostEqual(result["final_void_ratio"], final_void)
+                self.assertAlmostEqual(result["initial_void_height_m"], 2./3.)
+                self.assertAlmostEqual(result["primary_consolidation_settlement_m"],
+                                       2. * (.5-final_void)/1.5)
+
+    def test_impossible_rounded_claims_do_not_pass_the_residual_tolerance(self):
+        self.assertFalse(example(time_s=0, proposed_settlement_m=-1e-8)["conservation_verified"])
+        self.assertFalse(example(time_s=0, proposed_degree_consolidation=-1e-8)["conservation_verified"])
+        self.assertFalse(example(time_s=1e16, proposed_degree_consolidation=1.+1e-8)["conservation_verified"])
+
+    def test_dual_domain_legacy_stress_history_and_solid_volume(self):
+        from hamon_dual_verifier import run_dual_verify_spec
+
+        spec = dict(H_m=2., e0=.5, Cc=1.2, Cr=.1, sigma_v0_Pa=10000.,
+                    sigma_p_Pa=10000., delta_sigma_Pa=990000., max_settlement_m=4.)
+        def verify(**updates):
+            return run_dual_verify_spec({"mode":"domain","kind":"consolidation_settlement",
+                                         "spec":{**spec, **updates}})
+
+        impossible = verify()
+        self.assertFalse(impossible["dual_verified"])
+        self.assertFalse(impossible["passes_limit"])
+        self.assertIn("negative final void ratio", impossible["reason"])
+        for prior in (0., 5000., 10000.):
+            result = verify(sigma_p_Pa=prior, delta_sigma_Pa=10000., Cc=.25, Cr=.05)
+            self.assertTrue(result["dual_verified"])
+            self.assertAlmostEqual(result["settlement_m"], 2./1.5*.25*math.log10(2.))
+        unloaded = verify(sigma_p_Pa=20000., delta_sigma_Pa=-5000., Cc=.25, Cr=.05)
+        self.assertTrue(unloaded["dual_verified"])
+        self.assertAlmostEqual(unloaded["settlement_m"], 2./1.5*.05*math.log10(.5))
+        self.assertEqual(verify(Cc=0.,Cr=0.)["settlement_m"], 0.)
+
     def test_claimed_results_and_domain(self):
         self.assertFalse(example(proposed_degree_consolidation=.5)["conservation_verified"])
         self.assertFalse(example(proposed_settlement_m=.4)["conservation_verified"])
