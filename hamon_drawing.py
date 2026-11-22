@@ -1018,7 +1018,7 @@ def _resolve_ruled_captions(result, pages, target, source, directory):
                                  else "candidate_detail")
 
 
-def _detail_symbol_inventory(source, page, directory):
+def _detail_symbol_inventory(source, page, directory, stroke_vectors=None):
     try:
         inventory = _svg_inventory(_page_svg(source, page, directory), 30000)
     except (OSError, ValueError, subprocess.TimeoutExpired, ET.ParseError):
@@ -1030,6 +1030,8 @@ def _detail_symbol_inventory(source, page, directory):
         if v.get("stroke") in (None, "none") or not v["bbox_exact_for_centerline"]:
             continue
         a, b, c, d = v["svg_bbox"]
+        if stroke_vectors is not None and 0 <= c-a < 80 and 0 < d-b < 80:
+            stroke_vectors.append(v)
         if 5 <= c-a <= 80 and abs(c-a-(d-b)) < .03*(c-a) and _round_marker(v):
             markers.append({"id": v["id"], "box": [a,b,c,d]})
         points = v.get("svg_points") or []
@@ -1273,7 +1275,7 @@ def _read_caption_words(pgm, psm, digits=False):
     cmd=["tesseract","stdin","stdout","--psm",str(psm)]
     if digits:
         cmd.extend(["-c","tessedit_char_whitelist=0123456789"])
-    call=subprocess.run(cmd+["tsv"],input=pgm,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
+    call=subprocess.run(cmd+["-c", "tessedit_create_tsv=1"],input=pgm,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
     words=[]
     if call.returncode==0:
         for line in call.stdout.decode(errors="replace").splitlines()[1:]:
@@ -1330,13 +1332,176 @@ def _read_ruled_detail(source, page, region, *, record_number_only=False):
             if len(words) != 1 or words[0][0] != detail or words[0][1] < 80:
                 return None
             recognized.append(words[0])
-    title=_read_caption_words(_caption_raster(source,page,region["caption_box"],3),7)
     label = dict(region, detail=detail, digit_confidences=[x[1] for x in recognized], page=page)
+    return _qualify_detail_title(source, page, region, label, record_number_only)
+
+
+def _qualify_detail_title(source, page, region, label, record_number_only):
+    title=_read_caption_words(_caption_raster(source,page,region["caption_box"],3),7)
     if sum(bool(re.search(r"[A-Za-z]{2}", word)) and confidence >= 70
            for word, confidence in title) < 2:
         # A printed number can veto uniqueness without qualifying its caption as a destination.
         return label if record_number_only else None
     return dict(label, caption=" ".join(word for word, confidence in title))
+
+
+def _caption_stroke_anchors(source, page, region, vectors):
+    """Align confident rendered words to complete vector glyphs on their own title rule."""
+    box = region["caption_box"]
+    scale = 3
+    crop = _caption_raster(source, page, box, scale)
+    if crop is None:
+        return []
+    call = subprocess.run(["tesseract", "stdin", "stdout", "--psm", "7", "-c", "tessedit_create_tsv=1"],
+                          input=crop, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+    if call.returncode != 0:
+        return []
+    left, top = math.floor(box[0] * scale), math.floor(box[1] * scale)
+    anchors = []
+    for line in call.stdout.decode(errors="replace").splitlines()[1:]:
+        parts = line.split("\t", 11)
+        if len(parts) != 12 or parts[0] != "5":
+            continue
+        word = parts[11].strip()
+        if not re.fullmatch(r"[A-Z0-9]{2,18}", word) or float(parts[10]) < 90:
+            continue
+        x, y, w, h = [int(n) for n in parts[6:10]]
+        x0, y0 = (left + x) / scale, (top + y) / scale
+        x1, y1 = x0 + w / scale, y0 + h / scale
+        slop = .1 * (y1 - y0) + 1 / scale
+        glyphs = []
+        for v in vectors:
+            a,b,c,d = v["svg_bbox"]
+            height = d-b
+            if not (a >= x0-slop and c <= x1+slop and abs(b-y0) <= slop and abs(d-y1) <= slop):
+                continue
+            points = v.get("svg_points")
+            pairs = v.get("svg_segment_vertex_pairs")
+            if not points or not pairs or height <= 0:
+                continue
+            shape = _normalized_stroke_shape(points, pairs, a, b, height)
+            if shape:
+                glyphs.append((a,c,shape))
+        glyphs.sort(key=lambda g: g[0])
+        if (len(glyphs) != len(word) or not glyphs
+                or any(g[1] >= k[0] for g,k in zip(glyphs,glyphs[1:]))
+                or abs(glyphs[0][0]-x0) > slop or abs(glyphs[-1][1]-x1) > slop):
+            continue
+        anchors.extend((letter, g[2], word) for g,letter in zip(glyphs,word))
+    return anchors
+
+
+def _normalized_stroke_shape(points, pairs, x0, y0, height):
+    """Retain segment connectivity and scale both axes by the printed character height."""
+    return tuple(((points[i][0]-x0)/height, (points[i][1]-y0)/height,
+                  (points[j][0]-x0)/height, (points[j][1]-y0)/height)
+                 for i,j in pairs if points[i] != points[j])
+
+
+def _detail_strokes(region, vectors, ink):
+    """Recover complete straight-stroke glyphs and confirm their ink on the rendered page."""
+    if not ink:
+        return []
+    a, b, c, d = region["ring"]["box"]
+    diameter = d - b
+    cx, cy = (a + c) / 2, (b + d) / 2
+    glyphs = []
+    for v in vectors:
+        x0, y0, x1, y1 = v["svg_bbox"]
+        if not (a < x0 <= x1 < c and b < y0 <= y1 < d):
+            continue
+        points = v.get("svg_points")
+        pairs = v.get("svg_segment_vertex_pairs")
+        height = y1 - y0
+        if not (points and pairs and 0.24 * diameter <= height <= 0.69 * diameter
+                and 0.08 * height <= x1 - x0 <= 1.2 * height):
+            return []
+        edges = [(points[i], points[j]) for i, j in pairs if points[i] != points[j]]
+        if not 1 <= len(edges) <= 64:
+            return []
+        shape = _normalized_stroke_shape(points, pairs, x0, y0, height)
+        glyphs.append((x0, x1, height, edges, shape, v["id"]))
+    glyphs.sort(key=lambda g: g[0])
+    if not 1 <= len(glyphs) <= 3 or any(g[1] >= h[0] for g,h in zip(glyphs, glyphs[1:])):
+        return []
+    if max(g[2] for g in glyphs) > 1.12 * min(g[2] for g in glyphs):
+        return []
+    left, top, scale, width, height, pixels = ink
+    expected = set()
+    for _, _, _, edges, _, _ in glyphs:
+        for (x0,y0), (x1,y1) in edges:
+            steps = max(1, math.ceil(math.hypot(x1-x0, y1-y0)*scale*2))
+            for n in range(steps+1):
+                x, y = x0+(x1-x0)*n/steps, y0+(y1-y0)*n/steps
+                expected.add((math.floor((x-left)*scale), math.floor((y-top)*scale)))
+    actual = set()
+    rad = .45*diameter
+    for j in range(max(0,math.floor((cy-rad-top)*scale)), min(height,math.ceil((cy+rad-top)*scale))):
+        for i in range(max(0,math.floor((cx-rad-left)*scale)), min(width,math.ceil((cx+rad-left)*scale))):
+            if ((i+.5)/scale+left-cx)**2 + ((j+.5)/scale+top-cy)**2 <= rad**2 and pixels[j*width+i] <= 150:
+                actual.add((i,j))
+    def supported(points, support):
+        return bool(points) and sum(any((i+dx,j+dy) in support for dx in (-1,0,1) for dy in (-1,0,1))
+                                    for i,j in points) >= .95 * len(points)
+    if not (supported(expected,actual) and supported(actual,expected)):
+        return []
+    return [(g[4],g[5]) for g in glyphs]
+
+
+def _same_detail_stroke(a, b):
+    if len(a) != len(b):
+        return False
+    def close(p, q):
+        return max(abs(x-y) for x,y in zip(p,q)) <= .028
+    def covers(first, second):
+        return all(any(close(p,q) or close(p,q[2:]+q[:2]) for q in second) for p in first)
+    return covers(a,b) and covers(b,a)
+
+
+def _stroke_reference_pages(result, target_page):
+    """Use other independently stamped sheets with repeated incoming drawing references."""
+    references = Counter(r["target_sheet"] for r in result["references"]
+                         if r["reference_form"] == "stacked_text_candidate")
+    choices = []
+    for sheet, count in references.items():
+        locations = result["sheets"].get(sheet, [])
+        if len(locations) == 1 and locations[0]["sheet_ids_on_page"] == [sheet]:
+            page = locations[0]["page"]
+            if page != target_page and count >= 2:
+                choices.append((-count, abs(page-target_page), page, sheet))
+    return [(page,sheet) for _,_,page,sheet in sorted(choices)[:3]]
+
+
+def _other_sheet_strokes(source, directory, pages):
+    anchors, words = [], []
+    for page, sheet in pages:
+        vectors = []
+        markers, lines = _detail_symbol_inventory(source,page,directory,vectors)
+        regions = _ruled_detail_regions(markers,lines)
+        if not 2 <= len(regions) <= 64:
+            continue
+        ink = _ink_window(source,page,[r["ring"] for r in regions])
+        for r in regions:
+            if not _printed_mark(ink,r["ring"],right_rule=True):
+                continue
+            try:
+                words.extend((ch,shape,word,page,r["ring"]["id"]) for ch,shape,word
+                             in _caption_stroke_anchors(source,page,r,vectors))
+                evidence = _read_ruled_detail(source,page,r,record_number_only=True)
+            except (OSError,ValueError,subprocess.TimeoutExpired):
+                continue
+            if not evidence:
+                continue
+            strokes = _detail_strokes(r,vectors,ink)
+            if len(strokes) == len(evidence["detail"]):
+                for char,(shape,vector_id) in zip(evidence["detail"],strokes):
+                    anchors.append((char,shape,(page,vector_id)))
+    for char,shape,word,page,ring in words:
+        # Word diversity keeps one OCR spelling from becoming its own confirmation.
+        if any(ch == char and other != word and _same_detail_stroke(shape,ref)
+               for ch,ref,other,_,_ in words):
+            anchors.append((char,shape,(page,ring)))
+    return anchors
 
 
 def _resolve_rendered_stacked(result, target, source, directory):
@@ -1369,12 +1534,14 @@ def _resolve_rendered_stacked(result, target, source, directory):
                 verified.append(ref)
     if not verified or not shutil.which("pdftoppm") or not shutil.which("tesseract"):
         return
-    markers,lines=_detail_symbol_inventory(source,target_page,directory)
+    stroke_vectors=[]
+    markers,lines=_detail_symbol_inventory(source,target_page,directory,stroke_vectors)
     regions=_ruled_detail_regions(markers,lines)
     if not 2<=len(regions)<=64:
         return
     identified={}
     unconfirmed={}
+    unread=[]
     ink=_ink_window(source,target_page,[reg["ring"] for reg in regions])
     for region in regions:
         visible=_printed_mark(ink,region["ring"],right_rule=True)
@@ -1388,6 +1555,28 @@ def _resolve_rendered_stacked(result, target, source, directory):
         if evidence:
             pool = identified if "caption" in evidence else unconfirmed
             pool.setdefault(evidence["detail"], []).append(evidence)
+        else:
+            strokes = _detail_strokes(region,stroke_vectors,ink)
+            if strokes:
+                unread.append((region,strokes))
+    templates = _other_sheet_strokes(source,directory,_stroke_reference_pages(result,target_page)) if unread else []
+    for region, strokes in unread:
+        matches = [[(c,witness) for c,ref,witness in templates if _same_detail_stroke(shape,ref)]
+                   for shape,_ in strokes]
+        classes = [{c for c,_ in options} for options in matches]
+        if any(len(options) != 1 for options in classes):
+            continue
+        detail = "".join(next(iter(options)) for options in classes)
+        if not re.fullmatch(r"[1-9]\d?[A-Z]?",detail):
+            continue
+        label = dict(region,detail=detail,page=target_page,stroke_vectors=[v for _,v in strokes],
+                     exemplar_pages=[sorted({w[0] for _,w in options}) for options in matches])
+        try:
+            evidence = _qualify_detail_title(source,target_page,region,label,True)
+        except (OSError,ValueError,subprocess.TimeoutExpired):
+            evidence = label
+        pool = identified if "caption" in evidence else unconfirmed
+        pool.setdefault(detail,[]).append(evidence)
     for ref in verified:
         hits=identified.get(ref["target_detail"],[])
         if hits:
