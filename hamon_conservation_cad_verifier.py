@@ -1002,6 +1002,9 @@ def _heat_exchanger_balance(spec: Dict[str, Any], rtol: float) -> Dict[str, Any]
 
 
 def verify_thermal_fluid_chemical_balance(spec: Dict[str, Any]) -> Dict[str, Any]:
+    if spec.get("calculation") == "euler_rotor":
+        from hamon_turbomachinery import verify_turbomachinery
+        return {**verify_turbomachinery(spec), "mode": "thermal_fluid", "tool": "hamon_conservation_cad_verifier"}
     if spec.get("calculation") == "pipe_network" or ("nodes" in spec and "pipes" in spec):
         from hamon_pipe_network import verify_pipe_network
         return {**verify_pipe_network(spec), "mode": "thermal_fluid", "tool": "hamon_conservation_cad_verifier"}
@@ -1122,6 +1125,7 @@ def run_router_conservation_cad_verifier(payload: Dict[str, Any]) -> Dict[str, A
     fname = str(spec.get("filename") or spec.get("path") or "").lower()
     if mode == "auto":
         if spec.get("step_text") or fname.endswith((".step", ".stp", ".p21")): mode = "step_cad"
+        elif spec.get("calculation") == "euler_rotor": mode = "thermal_fluid"
         elif spec.get("calculation") == "pipe_network" or ("nodes" in spec and "pipes" in spec): mode = "thermal_fluid"
         elif spec.get("netlist") or spec.get("branches") or fname.endswith((".cir", ".sp", ".spice", ".net")): mode = "circuit"
         elif "lhs" in spec and "rhs" in spec: mode = "dimensional"
