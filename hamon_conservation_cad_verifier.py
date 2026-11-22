@@ -956,27 +956,58 @@ def verify_civil_geotech_balance(spec: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def parse_chemical_formula(formula: str) -> Dict[str, float]:
-    tokens = re.findall(r"([A-Z][a-z]?|\(|\)|\d+(?:\.\d+)?)", formula.strip())
-    stack: List[Dict[str, float]] = [{}]
-    i = 0
-    while i < len(tokens):
-        t = tokens[i]
-        if t == "(":
-            stack.append({}); i += 1
-        elif t == ")":
-            grp = stack.pop(); mult = 1.0
-            if i + 1 < len(tokens) and re.fullmatch(r"\d+(?:\.\d+)?", tokens[i + 1]):
-                mult = float(tokens[i + 1]); i += 1
-            for el, cnt in grp.items(): stack[-1][el] = stack[-1].get(el, 0.0) + cnt * mult
+    """Count a neutral formula with grouped subscripts and explicit hydrate dots.
+
+    A period between digits is a decimal point. Use a middle dot for an
+    adduct, for example CaSO4·2H2O. A component coefficient scales every
+    atom in that component. Molar flow supplies the whole-formula amount.
+    """
+    token_pattern = r"[A-Z][a-z]?|[0-9]+(?:\.[0-9]+)?|[()]"
+    totals: Dict[str, float] = {}
+    for component_index, part in enumerate(formula.strip().split("·")):
+        tokens = re.findall(token_pattern, part)
+        if not tokens or "".join(tokens) != re.sub(r"\s+", "", part):
+            raise ValueError("Empty hydrate component or unsupported formula character")
+        i = 0
+
+        def count():
+            nonlocal i
+            if i == len(tokens) or not tokens[i][0].isdigit():
+                return 1.0
+            value = float(tokens[i])
             i += 1
-        elif re.fullmatch(r"[A-Z][a-z]?", t):
-            mult = 1.0
-            if i + 1 < len(tokens) and re.fullmatch(r"\d+(?:\.\d+)?", tokens[i + 1]):
-                mult = float(tokens[i + 1]); i += 1
-            stack[-1][t] = stack[-1].get(t, 0.0) + mult; i += 1
-        else:
+            if not math.isfinite(value) or value < 0:
+                raise ValueError("Formula counts must be finite and nonnegative")
+            return value
+
+        multiplier = count() if component_index else 1.0
+        if multiplier == 0:
+            raise ValueError("A hydrate component coefficient must be positive")
+        groups: List[Dict[str, float]] = [{}]
+        while i < len(tokens):
+            token = tokens[i]
             i += 1
-    return stack[0]
+            if token == "(":
+                groups.append({})
+                continue
+            if token == ")":
+                if len(groups) == 1 or not groups[-1]:
+                    raise ValueError("Unmatched or empty group in chemical formula")
+                atoms = groups.pop()
+            elif token[0].isupper():
+                atoms = {token: 1.0}
+            else:
+                raise ValueError("Unexpected coefficient in chemical formula")
+            factor = count()
+            for element, amount in atoms.items():
+                groups[-1][element] = groups[-1].get(element, 0.0) + factor * amount
+        if len(groups) != 1 or not any(groups[0].values()):
+            raise ValueError("Incomplete group or hydrate component in chemical formula")
+        for element, amount in groups[0].items():
+            totals[element] = totals.get(element, 0.0) + multiplier * amount
+            if not math.isfinite(totals[element]):
+                raise ValueError("Chemical formula atom count exceeds numerical range")
+    return totals
 
 
 def _colebrook_dual_friction(re_num: float, rel_rough: float) -> Tuple[float, float]:
@@ -1132,9 +1163,12 @@ def verify_thermal_fluid_chemical_balance(spec: Dict[str, Any]) -> Dict[str, Any
                 ai, ao = {}, {}
                 for side, totals in ((ins, ai), (outs, ao)):
                     for stream in side:
-                        elements = parse_chemical_formula(str(stream["formula"]))
-                        if not elements:
+                        try:
+                            elements = parse_chemical_formula(str(stream["formula"]))
+                        except ValueError as exc:
                             species_ok = False
+                            out.setdefault("species_balance_error", str(exc))
+                            continue
                         for element, count in elements.items():
                             totals[element] = totals.get(element, 0.0) + float(stream["ndot_mol_s"]) * count
                 species_ok = species_ok and all(
