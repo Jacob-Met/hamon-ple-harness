@@ -1030,7 +1030,7 @@ def _detail_symbol_inventory(source, page, directory, stroke_vectors=None):
         if v.get("stroke") in (None, "none") or not v["bbox_exact_for_centerline"]:
             continue
         a, b, c, d = v["svg_bbox"]
-        if stroke_vectors is not None and 0 <= c-a < 80 and 0 < d-b < 80:
+        if stroke_vectors is not None and 0 < c-a < 80 and 0 < d-b < 80:
             stroke_vectors.append(v)
         if 5 <= c-a <= 80 and abs(c-a-(d-b)) < .03*(c-a) and _round_marker(v):
             markers.append({"id": v["id"], "box": [a,b,c,d]})
@@ -1345,59 +1345,6 @@ def _qualify_detail_title(source, page, region, label, record_number_only):
     return dict(label, caption=" ".join(word for word, confidence in title))
 
 
-def _caption_stroke_anchors(source, page, region, vectors):
-    """Align confident rendered words to complete vector glyphs on their own title rule."""
-    box = region["caption_box"]
-    scale = 3
-    crop = _caption_raster(source, page, box, scale)
-    if crop is None:
-        return []
-    call = subprocess.run(["tesseract", "stdin", "stdout", "--psm", "7", "-c", "tessedit_create_tsv=1"],
-                          input=crop, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
-    if call.returncode != 0:
-        return []
-    left, top = math.floor(box[0] * scale), math.floor(box[1] * scale)
-    anchors = []
-    for line in call.stdout.decode(errors="replace").splitlines()[1:]:
-        parts = line.split("\t", 11)
-        if len(parts) != 12 or parts[0] != "5":
-            continue
-        word = parts[11].strip()
-        if not re.fullmatch(r"[A-Z0-9]{2,18}", word) or float(parts[10]) < 90:
-            continue
-        x, y, w, h = [int(n) for n in parts[6:10]]
-        x0, y0 = (left + x) / scale, (top + y) / scale
-        x1, y1 = x0 + w / scale, y0 + h / scale
-        slop = .1 * (y1 - y0) + 1 / scale
-        glyphs = []
-        for v in vectors:
-            a,b,c,d = v["svg_bbox"]
-            height = d-b
-            if not (a >= x0-slop and c <= x1+slop and abs(b-y0) <= slop and abs(d-y1) <= slop):
-                continue
-            points = v.get("svg_points")
-            pairs = v.get("svg_segment_vertex_pairs")
-            if not points or not pairs or height <= 0:
-                continue
-            shape = _normalized_stroke_shape(points, pairs, a, b, height)
-            if shape:
-                glyphs.append((a,c,shape))
-        glyphs.sort(key=lambda g: g[0])
-        if (len(glyphs) != len(word) or not glyphs
-                or any(g[1] >= k[0] for g,k in zip(glyphs,glyphs[1:]))
-                or abs(glyphs[0][0]-x0) > slop or abs(glyphs[-1][1]-x1) > slop):
-            continue
-        anchors.extend((letter, g[2], word) for g,letter in zip(glyphs,word))
-    return anchors
-
-
-def _normalized_stroke_shape(points, pairs, x0, y0, height):
-    """Retain segment connectivity and scale both axes by the printed character height."""
-    return tuple(((points[i][0]-x0)/height, (points[i][1]-y0)/height,
-                  (points[j][0]-x0)/height, (points[j][1]-y0)/height)
-                 for i,j in pairs if points[i] != points[j])
-
-
 def _detail_strokes(region, vectors, ink):
     """Recover complete straight-stroke glyphs and confirm their ink on the rendered page."""
     if not ink:
@@ -1419,7 +1366,8 @@ def _detail_strokes(region, vectors, ink):
         edges = [(points[i], points[j]) for i, j in pairs if points[i] != points[j]]
         if not 1 <= len(edges) <= 64:
             return []
-        shape = _normalized_stroke_shape(points, pairs, x0, y0, height)
+        shape = tuple(tuple((x-x0) / height if k == 0 else (x-y0) / height
+                            for pt in edge for k, x in enumerate(pt)) for edge in edges)
         glyphs.append((x0, x1, height, edges, shape, v["id"]))
     glyphs.sort(key=lambda g: g[0])
     if not 1 <= len(glyphs) <= 3 or any(g[1] >= h[0] for g,h in zip(glyphs, glyphs[1:])):
@@ -1428,14 +1376,20 @@ def _detail_strokes(region, vectors, ink):
         return []
     left, top, scale, width, height, pixels = ink
     expected = set()
+    rad = .45*diameter
     for _, _, _, edges, _, _ in glyphs:
+        glyph_pixels = set()
         for (x0,y0), (x1,y1) in edges:
             steps = max(1, math.ceil(math.hypot(x1-x0, y1-y0)*scale*2))
             for n in range(steps+1):
                 x, y = x0+(x1-x0)*n/steps, y0+(y1-y0)*n/steps
-                expected.add((math.floor((x-left)*scale), math.floor((y-top)*scale)))
+                glyph_pixels.add((math.floor((x-left)*scale), math.floor((y-top)*scale)))
+        interior = {(i,j) for i,j in glyph_pixels if
+                    ((i+.5)/scale+left-cx)**2 + ((j+.5)/scale+top-cy)**2 <= rad**2}
+        if not glyph_pixels or len(interior) < .8*len(glyph_pixels):
+            return []
+        expected.update(interior)
     actual = set()
-    rad = .45*diameter
     for j in range(max(0,math.floor((cy-rad-top)*scale)), min(height,math.ceil((cy+rad-top)*scale))):
         for i in range(max(0,math.floor((cx-rad-left)*scale)), min(width,math.ceil((cx+rad-left)*scale))):
             if ((i+.5)/scale+left-cx)**2 + ((j+.5)/scale+top-cy)**2 <= rad**2 and pixels[j*width+i] <= 150:
@@ -1448,60 +1402,233 @@ def _detail_strokes(region, vectors, ink):
     return [(g[4],g[5]) for g in glyphs]
 
 
-def _same_detail_stroke(a, b):
-    if len(a) != len(b):
-        return False
-    def close(p, q):
-        return max(abs(x-y) for x,y in zip(p,q)) <= .028
-    def covers(first, second):
-        return all(any(close(p,q) or close(p,q[2:]+q[:2]) for q in second) for p in first)
-    return covers(a,b) and covers(b,a)
+# OpenCV 4.10.0, modules/imgproc/src/hershey_fonts.cpp and drawing.cpp.
+# The following table is the complete printable ASCII Hershey Simplex face.
+# Source content SHA-256 values are 5fa0d65264f72e5b166d07973aabd49f27cc54d0074062a8efc312bf9ab95432
+# and fdfb8bb141c7138ce0e448f0e034c4f83cded209d7501f737404bbaf3fbbcba4, respectively.
+#
+#  IMPORTANT: READ BEFORE DOWNLOADING, COPYING, INSTALLING OR USING.
+#
+#  By downloading, copying, installing or using the software you agree to this license.
+#  If you do not agree to this license, do not download, install,
+#  copy or use the software.
+#
+#
+#                           License Agreement
+#                For Open Source Computer Vision Library
+#
+# Copyright (C) 2000-2008, Intel Corporation, all rights reserved.
+# Copyright (C) 2009, Willow Garage Inc., all rights reserved.
+# Third party copyrights are property of their respective owners.
+#
+# Redistribution and use in source and binary forms, with or without modification,
+# are permitted provided that the following conditions are met:
+#
+#   * Redistribution's of source code must retain the above copyright notice,
+#     this list of conditions and the following disclaimer.
+#
+#   * Redistribution's in binary form must reproduce the above copyright notice,
+#     this list of conditions and the following disclaimer in the documentation
+#     and/or other materials provided with the distribution.
+#
+#   * The name of the copyright holders may not be used to endorse or promote products
+#     derived from this software without specific prior written permission.
+#
+# This software is provided by the copyright holders and contributors "as is" and
+# any express or implied warranties, including, but not limited to, the implied
+# warranties of merchantability and fitness for a particular purpose are disclaimed.
+# In no event shall the Intel Corporation or contributors be liable for any direct,
+# indirect, incidental, special, exemplary, or consequential damages
+# (including, but not limited to, procurement of substitute goods or services;
+# loss of use, data, or profits; or business interruption) however caused
+# and on any theory of liability, whether in contract, strict liability,
+# or tort (including negligence or otherwise) arising in any way out of
+# the use of this software, even if advised of the possibility of such damage.
+#
+#
+
+_SIMPLEX_PRINTABLE = (
+    'JZ',
+    'MWRFRT RYQZR[SZRY',
+    'JZNFNM VFVM',
+    'G]OFOb UFUb JQZQ JWZW',
+    'H\\PBP_ TBT_ YIWGTFPFMGKIKKLMMNOOUQWRXSYUYXWZT[P[MZKX',
+    'F^[FYGVHSHPGNFLFJGIIIKKMMMOLPJPHNF [FI[ YTWTUUTWTYV[X[ZZ[X[VYT',
+    'E_\\O\\N[MZMYNXPVUTXRZP[L[JZIYHWHUISJRQNRMSKSIRGPFNGMIMKNNPQUXWZY[[[\\Z\\Y',
+    'NVRFRM',
+    'KYVBTDRGPKOPOTPYR]T`Vb',
+    'KYNBPDRGTKUPUTTYR]P`Nb',
+    'JZRLRX MOWU WOMU',
+    'E_RIR[ IR[R',
+    'MWSZR[QZRYSZS\\R^Q_',
+    'E_IR[R',
+    'MWRYQZR[SZRY',
+    'G][BIb',
+    'H\\QFNGLJKOKRLWNZQ[S[VZXWYRYOXJVGSFQF',
+    'H\\NJPISFS[',
+    'H\\LKLJMHNGPFTFVGWHXJXLWNUQK[Y[',
+    'H\\MFXFRNUNWOXPYSYUXXVZS[P[MZLYKW',
+    'H\\UFKTZT UFU[',
+    'H\\WFMFLOMNPMSMVNXPYSYUXXVZS[P[MZLYKW',
+    'H\\XIWGTFRFOGMJLOLTMXOZR[S[VZXXYUYTXQVOSNRNOOMQLT',
+    'H\\YFO[ KFYF',
+    'H\\PFMGLILKMMONSOVPXRYTYWXYWZT[P[MZLYKWKTLRNPQOUNWMXKXIWGTFPF',
+    'H\\XMWPURRSQSNRLPKMKLLINGQFRFUGWIXMXRWWUZR[P[MZLX',
+    'MWRMQNROSNRM RYQZR[SZRY',
+    'MWRMQNROSNRM SZR[QZRYSZS\\R^Q_',
+    'F^ZIJRZ[',
+    'E_IO[O IU[U',
+    'F^JIZRJ[',
+    'I[LKLJMHNGPFTFVGWHXJXLWNVORQRT RYQZR[SZRY',
+    'DaWNVLTKQKOLNMMOMRNTOUQVTVVUWS WKWSXUYV[V\\U]S]O\\L[JYHWGTFQFNGLHJJILHOHRIUJWLYNZQ[T[WZYY',
+    'I[RFJ[ RFZ[ MTWT',
+    'G\\KFK[ KFTFWGXHYJYLXNWOTP KPTPWQXRYTYWXYWZT[K[',
+    'H]ZKYIWGUFQFOGMILKKNKSLVMXOZQ[U[WZYXZV',
+    'G\\KFK[ KFRFUGWIXKYNYSXVWXUZR[K[',
+    'H[LFL[ LFYF LPTP L[Y[',
+    'HZLFL[ LFYF LPTP',
+    'H]ZKYIWGUFQFOGMILKKNKSLVMXOZQ[U[WZYXZVZS USZS',
+    'G]KFK[ YFY[ KPYP',
+    'NVRFR[',
+    'JZVFVVUYTZR[P[NZMYLVLT',
+    'G\\KFK[ YFKT POY[',
+    'HYLFL[ L[X[',
+    'F^JFJ[ JFR[ ZFR[ ZFZ[',
+    'G]KFK[ KFY[ YFY[',
+    'G]PFNGLIKKJNJSKVLXNZP[T[VZXXYVZSZNYKXIVGTFPF',
+    'G\\KFK[ KFTFWGXHYJYMXOWPTQKQ',
+    'G]PFNGLIKKJNJSKVLXNZP[T[VZXXYVZSZNYKXIVGTFPF SWY]',
+    'G\\KFK[ KFTFWGXHYJYLXNWOTPKP RPY[',
+    'H\\YIWGTFPFMGKIKKLMMNOOUQWRXSYUYXWZT[P[MZKX',
+    'JZRFR[ KFYF',
+    'G]KFKULXNZQ[S[VZXXYUYF',
+    'I[JFR[ ZFR[',
+    'F^HFM[ RFM[ RFW[ \\FW[',
+    'H\\KFY[ YFK[',
+    'I[JFRPR[ ZFRP',
+    'H\\YFK[ KFYF K[Y[',
+    'KYOBOb OBVB ObVb',
+    'G]IL[b',
+    'KYUBUb NBUB NbUb',
+    'G]JTROZT JTRPZT',
+    'I[J[Z[',
+    'LXPFUL PFOGUL',
+    'I\\XMX[ XPVNTMQMONMPLSLUMXOZQ[T[VZXX',
+    'H[LFL[ LPNNPMSMUNWPXSXUWXUZS[P[NZLX',
+    'I[XPVNTMQMONMPLSLUMXOZQ[T[VZXX',
+    'I\\XFX[ XPVNTMQMONMPLSLUMXOZQ[T[VZXX',
+    'I[LSXSXQWOVNTMQMONMPLSLUMXOZQ[T[VZXX',
+    'MYWFUFSGRJR[ OMVM',
+    'I\\XMX]W`VaTbQbOa XPVNTMQMONMPLSLUMXOZQ[T[VZXX',
+    'I\\MFM[ MQPNRMUMWNXQX[',
+    'NVQFRGSFREQF RMR[',
+    'MWRFSGTFSERF SMS^RaPbNb',
+    'IZMFM[ WMMW QSX[',
+    'NVRFR[',
+    'CaGMG[ GQJNLMOMQNRQR[ RQUNWMZM\\N]Q][',
+    'I\\MMM[ MQPNRMUMWNXQX[',
+    'I\\QMONMPLSLUMXOZQ[T[VZXXYUYSXPVNTMQM',
+    'H[LMLb LPNNPMSMUNWPXSXUWXUZS[P[NZLX',
+    'I\\XMXb XPVNTMQMONMPLSLUMXOZQ[T[VZXX',
+    'KXOMO[ OSPPRNTMWM',
+    'J[XPWNTMQMNNMPNRPSUTWUXWXXWZT[Q[NZMX',
+    'MYRFRWSZU[W[ OMVM',
+    'I\\MMMWNZP[S[UZXW XMX[',
+    'JZLMR[ XMR[',
+    'G]JMN[ RMN[ RMV[ ZMV[',
+    'J[MMX[ XMM[',
+    'JZLMR[ XMR[P_NaLbKb',
+    'J[XMM[ MMXM M[X[',
+    'KYTBQEPHPJQMSOSPORSTSUQWPZP\\Q_Tb',
+    'NVRBRb',
+    'KYPBSETHTJSMQOQPURQTQUSWTZT\\S_Pb',
+    'F^IUISJPLONOPPTSVTXTZS[Q ISJQLPNPPQTTVUXUZT[Q[O',
+)
 
 
-def _stroke_reference_pages(result, target_page):
-    """Use other independently stamped sheets with repeated incoming drawing references."""
-    references = Counter(r["target_sheet"] for r in result["references"]
-                         if r["reference_form"] == "stacked_text_candidate")
-    choices = []
-    for sheet, count in references.items():
-        locations = result["sheets"].get(sheet, [])
-        if len(locations) == 1 and locations[0]["sheet_ids_on_page"] == [sheet]:
-            page = locations[0]["page"]
-            if page != target_page and count >= 2:
-                choices.append((-count, abs(page-target_page), page, sheet))
-    return [(page,sheet) for _,_,page,sheet in sorted(choices)[:3]]
-
-
-def _other_sheet_strokes(source, directory, pages):
-    anchors, words = [], []
-    for page, sheet in pages:
-        vectors = []
-        markers, lines = _detail_symbol_inventory(source,page,directory,vectors)
-        regions = _ruled_detail_regions(markers,lines)
-        if not 2 <= len(regions) <= 64:
+def _simplex_strokes():
+    """Decode the reference face independent of any destination sheet or OCR output."""
+    symbols = []
+    for i, record in enumerate(_SIMPLEX_PRINTABLE):
+        strokes = [[(ord(x)-82, ord(y)-82) for x,y in zip(line[::2],line[1::2])]
+                   for line in record[2:].split()]
+        points = [p for stroke in strokes for p in stroke]
+        if not points:
             continue
-        ink = _ink_window(source,page,[r["ring"] for r in regions])
-        for r in regions:
-            if not _printed_mark(ink,r["ring"],right_rule=True):
+        x0 = min(x for x,y in points)
+        y0 = min(y for x,y in points)
+        height = max(y for x,y in points) - y0
+        if height == 0:
+            continue
+        segments = tuple(((a[0]-x0)/height, (a[1]-y0)/height,
+                          (b[0]-x0)/height, (b[1]-y0)/height)
+                         for line in strokes for a,b in zip(line,line[1:]) if a != b)
+        width = (max(x for x,y in points)-x0)/height
+        if segments and width:
+            symbols.append((chr(i+32),width,segments))
+    return symbols
+
+
+def _same_stroke_graph(observed, prototype, stretch):
+    """Match every edge once, in either drawing direction, including both endpoints."""
+    if len(observed) != len(prototype):
+        return False
+    edges = [(a*stretch,b,c*stretch,d) for a,b,c,d in prototype]
+    def near(p, q):
+        return all(abs(x-y) <= .028 for x,y in zip(p,q))
+    neighbors = [[j for j,q in enumerate(edges) if near(p,q) or near(p,(q[2],q[3],q[0],q[1]))]
+                 for p in observed]
+    if any(not matches for matches in neighbors):
+        return False
+    owners = {}
+    def assign(i, seen):
+        for j in neighbors[i]:
+            if j in seen:
                 continue
-            try:
-                words.extend((ch,shape,word,page,r["ring"]["id"]) for ch,shape,word
-                             in _caption_stroke_anchors(source,page,r,vectors))
-                evidence = _read_ruled_detail(source,page,r,record_number_only=True)
-            except (OSError,ValueError,subprocess.TimeoutExpired):
+            seen.add(j)
+            if j not in owners or assign(owners[j],seen):
+                owners[j] = i
+                return True
+        return False
+    return all(assign(i,set()) for i in range(len(observed)))
+
+
+def _recognize_stroke_label(glyphs, alphabet):
+    """One horizontal text scale must explain the complete token without a second reading."""
+    if not glyphs:
+        return None
+    choices = []
+    for observed,_ in glyphs:
+        width = max(max(e[0],e[2]) for e in observed)
+        fits = []
+        for char,ref_width,prototype in alphabet:
+            if len(observed) != len(prototype):
                 continue
-            if not evidence:
-                continue
-            strokes = _detail_strokes(r,vectors,ink)
-            if len(strokes) == len(evidence["detail"]):
-                for char,(shape,vector_id) in zip(evidence["detail"],strokes):
-                    anchors.append((char,shape,(page,vector_id)))
-    for char,shape,word,page,ring in words:
-        # Word diversity keeps one OCR spelling from becoming its own confirmation.
-        if any(ch == char and other != word and _same_detail_stroke(shape,ref)
-               for ch,ref,other,_,_ in words):
-            anchors.append((char,shape,(page,ring)))
-    return anchors
+            ratio = width/ref_width
+            if .65 <= ratio <= 1.5 and _same_stroke_graph(observed,prototype,ratio):
+                fits.append((char,ratio,prototype))
+        if not fits:
+            return None
+        choices.append(fits)
+    labels = set()
+    for _,scale,_ in choices[0]:
+        compatible = []
+        for (observed, _), fits in zip(glyphs, choices):
+            characters = {char for char, ratio, prototype in fits
+                          if abs(ratio - scale) <= .03 and _same_stroke_graph(observed, prototype, scale)}
+            if not characters:
+                break
+            compatible.append(characters)
+        if len(compatible) != len(glyphs):
+            continue
+        if any(len(characters) != 1 for characters in compatible):
+            return None
+        labels.add("".join(next(iter(characters)) for characters in compatible))
+    if len(labels) == 1:
+        label = next(iter(labels))
+        if re.fullmatch(r"[1-9]\d?[A-Z]?",label):
+            return label
+    return None
 
 
 def _resolve_rendered_stacked(result, target, source, directory):
@@ -1541,7 +1668,7 @@ def _resolve_rendered_stacked(result, target, source, directory):
         return
     identified={}
     unconfirmed={}
-    unread=[]
+    alphabet = _simplex_strokes()
     ink=_ink_window(source,target_page,[reg["ring"] for reg in regions])
     for region in regions:
         visible=_printed_mark(ink,region["ring"],right_rule=True)
@@ -1552,31 +1679,22 @@ def _resolve_rendered_stacked(result, target, source, directory):
             evidence=_read_ruled_detail(source,target_page,region,record_number_only=True)
         except (OSError, ValueError, subprocess.TimeoutExpired):
             continue
+        strokes = _detail_strokes(region,stroke_vectors,ink)
+        detail = _recognize_stroke_label(strokes,alphabet)
+        if detail and evidence and evidence["detail"] != detail:
+            for value in (detail,evidence["detail"]):
+                unconfirmed.setdefault(value,[]).append(dict(region,detail=value,page=target_page))
+            continue
+        if detail and not evidence:
+            label = dict(region,detail=detail,page=target_page,stroke_vectors=[v for _,v in strokes],
+                         reference_face="Hershey Simplex")
+            try:
+                evidence = _qualify_detail_title(source,target_page,region,label,True)
+            except (OSError,ValueError,subprocess.TimeoutExpired):
+                evidence = label
         if evidence:
             pool = identified if "caption" in evidence else unconfirmed
             pool.setdefault(evidence["detail"], []).append(evidence)
-        else:
-            strokes = _detail_strokes(region,stroke_vectors,ink)
-            if strokes:
-                unread.append((region,strokes))
-    templates = _other_sheet_strokes(source,directory,_stroke_reference_pages(result,target_page)) if unread else []
-    for region, strokes in unread:
-        matches = [[(c,witness) for c,ref,witness in templates if _same_detail_stroke(shape,ref)]
-                   for shape,_ in strokes]
-        classes = [{c for c,_ in options} for options in matches]
-        if any(len(options) != 1 for options in classes):
-            continue
-        detail = "".join(next(iter(options)) for options in classes)
-        if not re.fullmatch(r"[1-9]\d?[A-Z]?",detail):
-            continue
-        label = dict(region,detail=detail,page=target_page,stroke_vectors=[v for _,v in strokes],
-                     exemplar_pages=[sorted({w[0] for _,w in options}) for options in matches])
-        try:
-            evidence = _qualify_detail_title(source,target_page,region,label,True)
-        except (OSError,ValueError,subprocess.TimeoutExpired):
-            evidence = label
-        pool = identified if "caption" in evidence else unconfirmed
-        pool.setdefault(detail,[]).append(evidence)
     for ref in verified:
         hits=identified.get(ref["target_detail"],[])
         if hits:
