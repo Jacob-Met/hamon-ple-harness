@@ -758,29 +758,42 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
         branches = list(spec.get("branches") or [])
         freq_hz = float(spec.get("freq_hz", 0.0))
 
+    if not math.isfinite(freq_hz) or freq_hz < 0:
+        raise ValueError("Circuit frequency must be finite and nonnegative")
     omega = 2.0 * math.pi * freq_hz
     gnd = {"0", "GND", "gnd"}
     nodes = sorted({str(br[k]) for br in branches for k in ("n_pos", "n_neg", "nc_pos", "nc_neg") if k in br and str(br[k]) not in gnd})
     n_idx = {nm: i for i, nm in enumerate(nodes)}
-    v_sources = [br for br in branches if str(br["type"]).upper() == "V"]
-    dim = len(nodes) + len(v_sources)
+    # An ideal inductor has zero terminal voltage at DC. Its current, like
+    # the current of a voltage source, is an independent MNA unknown.
+    constraint_types = {"V", "L"} if freq_hz == 0 else {"V"}
+    voltage_constraints = [br for br in branches if str(br["type"]).upper() in constraint_types]
+    dim = len(nodes) + len(voltage_constraints)
     mna = np.zeros((dim, dim), dtype=np.complex128)
     rhs = np.zeros(dim, dtype=np.complex128)
     ni = lambda s: None if str(s) in gnd else n_idx[str(s)]
 
-    for k, vs in enumerate(v_sources):
+    for k, vs in enumerate(voltage_constraints):
         row = len(nodes) + k
         ip, im = ni(vs["n_pos"]), ni(vs["n_neg"])
         if ip is not None: mna[ip, row] += 1.0; mna[row, ip] += 1.0
         if im is not None: mna[im, row] -= 1.0; mna[row, im] -= 1.0
-        rhs[row] = cmath.rect(float(vs["value"]), math.radians(float(vs.get("phase_deg", 0.0))))
+        value = float(vs["value"])
+        if not math.isfinite(value):
+            raise ValueError("Voltage-source and DC-inductor values must be finite")
+        if str(vs["type"]).upper() == "V":
+            rhs[row] = cmath.rect(value, math.radians(float(vs.get("phase_deg", 0.0))))
 
-    for br in branches:
+    admittances = {}
+    for index, br in enumerate(branches):
         bt = str(br["type"]).upper()
         ip, im = ni(br["n_pos"]), ni(br["n_neg"])
+        if bt in constraint_types:
+            continue
         if bt in ("R", "L", "C"):
             val = float(br["value"])
-            y = (1.0 / val) if bt == "R" else ((1.0 / (1j * omega * val) if omega > 0 else 1e12) if bt == "L" else (1j * omega * val if omega > 0 else 0.0))
+            y = (1.0 / val) if bt == "R" else (1.0 / (1j * omega * val) if bt == "L" else 1j * omega * val)
+            admittances[index] = y
             if ip is not None: mna[ip, ip] += y
             if im is not None: mna[im, im] += y
             if ip is not None and im is not None: mna[ip, im] -= y; mna[im, ip] -= y
@@ -806,23 +819,24 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
     s_tot = 0j
     s_deliv = 0j
     branch_currents = []
-    voltage_source_currents = iter(sol_lu[len(nodes):])
+    constraint_currents = iter(sol_lu[len(nodes):])
     for index, br in enumerate(branches):
         nm, bt = str(br["name"]), str(br["type"]).upper()
         vd = v_node.get(str(br["n_pos"]), 0j) - v_node.get(str(br["n_neg"]), 0j)
-        if bt == "V":
-            ibr = complex(next(voltage_source_currents))
-            kvl_max = max(kvl_max, abs(vd - cmath.rect(float(br["value"]), math.radians(float(br.get("phase_deg", 0.0))))))
-            s_deliv += vd * (-ibr).conjugate()
+        if bt in constraint_types:
+            ibr = complex(next(constraint_currents))
+            expected_voltage = 0j
+            if bt == "V":
+                expected_voltage = cmath.rect(float(br["value"]), math.radians(float(br.get("phase_deg", 0.0))))
+                s_deliv += vd * (-ibr).conjugate()
+            kvl_max = max(kvl_max, abs(vd - expected_voltage))
         elif bt == "I":
             ibr = cmath.rect(float(br["value"]), math.radians(float(br.get("phase_deg", 0.0))))
             s_deliv += vd * (-ibr).conjugate()
         elif bt == "G":
             ibr = float(br["value"]) * (v_node.get(str(br["nc_pos"]), 0j) - v_node.get(str(br["nc_neg"]), 0j))
         else:
-            val = float(br["value"])
-            y = (1.0 / val) if bt == "R" else ((1.0 / (1j * omega * val) if omega > 0 else 1e12) if bt == "L" else (1j * omega * val if omega > 0 else 0.0))
-            ibr = y * vd
+            ibr = admittances[index] * vd
         branch_currents.append({
             "collection": "branches", "index": index, "name": nm, "type": bt,
             "n1": str(br["n_pos"]), "n2": str(br["n_neg"]),
