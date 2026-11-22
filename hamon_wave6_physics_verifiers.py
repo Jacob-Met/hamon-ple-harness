@@ -1080,8 +1080,13 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
                     return Decimal(q.numerator)/Decimal(q.denominator)
 
             def log_interval(a_, b_):
-                return (decimal_bound(a_, ROUND_FLOOR).ln().next_minus(),
-                        decimal_bound(b_, ROUND_CEILING).ln().next_plus())
+                lo = decimal_bound(a_, ROUND_FLOOR)
+                hi = decimal_bound(b_, ROUND_CEILING)
+                # ln(1) is exact. Its adjacent Decimal is a context-minimum
+                # subnormal, whose Fraction denominator can have a million
+                # digits; it is neither needed nor useful for this enclosure.
+                return (Decimal(0) if lo == 1 else lo.ln().next_minus(),
+                        Decimal(0) if hi == 1 else hi.ln().next_plus())
 
             terms = [(Fraction(1), log_interval(F(feed), F(feed))),
                      (Fraction(1), log_interval(a, b)),
