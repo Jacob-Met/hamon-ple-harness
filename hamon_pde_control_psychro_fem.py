@@ -879,14 +879,47 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
         pw3 = p_atm * w3 / (0.621945 + w3)
         rh3 = pw3 / pws3
         fogged = rh3 > 1.0
+        vapor = w3
+        if fogged:
+            # The split across vapor and liquid must conserve total water and
+            # total enthalpy. Use the same liquid datum as the cooling coil.
+            def saturated_outlet(temp: float) -> Tuple[float, float]:
+                pws = _pws_ashrae_pa(temp)
+                w_sat = 0.621945 * pws / (p_atm - pws)
+                h_air = 1.006 * temp + w_sat * (2501.0 + 1.86 * temp)
+                return w_sat, h_air + (w3 - w_sat) * 4.186 * temp
+
+            # Condensation releases latent heat. The inlet enthalpy average
+            # bounds the equilibrium temperature above by the warmer inlet.
+            hi = max(s1["t_db_c"], s2["t_db_c"])
+            lo = max(0.0, min(t_db3, hi))
+            enthalpy_roundoff = 8.0 * math.ulp(max(abs(h3), 1.0))
+            if hi < 0.0 or (t_db3 < 0.0 and saturated_outlet(lo)[1] > h3 + enthalpy_roundoff):
+                return {"passed": False, "domain": "psychrometrics", "mode": mode,
+                        "reason": "Fog equilibrium requires an ice or mixed-phase model"}
+            if (saturated_outlet(lo)[1] > h3 + enthalpy_roundoff
+                    or saturated_outlet(hi)[1] < h3 - enthalpy_roundoff):
+                return {"passed": False, "domain": "psychrometrics", "mode": mode,
+                        "reason": "Inlets do not bracket a saturated liquid-water equilibrium"}
+            for _ in range(64):
+                mid = 0.5 * (lo + hi)
+                if saturated_outlet(mid)[1] < h3:
+                    lo = mid
+                else:
+                    hi = mid
+            t_db3 = 0.5 * (lo + hi)
+            vapor = min(w3, saturated_outlet(t_db3)[0])
+            rh3 = 1.0
         res: Dict[str, Any] = {
             "passed": True,
             "domain": "psychrometrics",
             "mode": mode,
             "m_da_total_kg_s": m3,
             "t_db_mix_c": t_db3,
-            "w_mix_kg_per_kgda": w3,
-            "h_mix_kj_per_kgda": h3,
+            "w_mix_kg_per_kgda": w3,  # total water, including any condensate
+            "w_vapor_kg_per_kgda": vapor,
+            "w_condensate_kg_per_kgda": w3 - vapor,
+            "h_mix_kj_per_kgda": h3,  # total stream enthalpy per kg dry air
             "rh_mix": min(rh3, 1.0),
             "fog_saturated": fogged,
         }
