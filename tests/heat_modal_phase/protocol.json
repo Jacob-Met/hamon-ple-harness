@@ -1,0 +1,260 @@
+{
+  "course": "heat_modal_spatial_phase",
+  "version": 1,
+  "state": "frozen_before_first_numerical_execution",
+  "scope_sha256": "58a5d331a7bf1a8e5c0c4030d275750e4fe0a2369749dcbaebed6edcdbf7e1d8",
+  "independent_plans": {
+    "design": "5f7ab1be0c498bb9934730fdd7bf9b1d8215c66e760eb80d8779eb5772fd1ff1",
+    "direct": "9e52b0d8f05d9a39dfbd2c2963088cf9ff17007d63313e666a615c430c4e303f",
+    "registered": "5f86cfc34eb537cfe65e4072071adfd228b9a8d7ddd1db2ba46fdda8bdb351dc"
+  },
+  "mechanism": {
+    "scope": "_transient_heat_modes spatial query and private bounded rational sine helper only",
+    "input_model": "Exact rational values of accepted binary64 position and length; unchanged accepted integer harmonics and amplitudes.",
+    "analytical": "sin(pi*n*p/q), phase reduced modulo2q using integer arithmetic before floating evaluation.",
+    "virtual_grid": "divmod(p*C,q) retains left node and fractional location; separately rounded rational complementary weights and exact node phases.",
+    "special_phases": "Both Dirichlet ends and integer phases exactly zero; half-integer phases exactly plus or minus one.",
+    "unchanged": [
+      "input validation/defaults",
+      "signed/zero/duplicate harmonics and amplitudes",
+      "continuous decay",
+      "discrete eigenvalues",
+      "Crank-Nicolson damping",
+      "step schedule",
+      "cell refinement and sixteen-attempt limit",
+      "tolerance",
+      "whole-domain modal bound and query-error check",
+      "all other domains and existing output schema"
+    ]
+  },
+  "direct": {
+    "route": "run_router_conservation_cad_verifier(mode=pde,spec.mode=heat_1d_transient)",
+    "ordinary_requests": 16,
+    "claimed_requests": 32,
+    "total_calls": 48,
+    "expected_ordinary": {
+      "approved": 12,
+      "refused": 4,
+      "complete_contracts": 16
+    },
+    "expected_claims": {
+      "approved": 12,
+      "refused": 20,
+      "complete_contracts": 32
+    },
+    "ordered_cases": [
+      "phase/safe-positive",
+      "phase/signed-mode",
+      "phase/reflection",
+      "boundary/left",
+      "boundary/right",
+      "interpolation/non-dyadic-position-ratio",
+      "time/positive-high-mode",
+      "ordinary/midpoint",
+      "ordinary/decaying-midpoint",
+      "modes/signed-zero-duplicates",
+      "defaults/empty-modes",
+      "phase/exact-large-authoring-witness",
+      "invalid/nonintegral-mode",
+      "invalid/boolean-mode",
+      "invalid/unrepresentable-integer-mode",
+      "invalid/outside-rod"
+    ],
+    "harmonics": {
+      "N": "2^53-2 (9007199254740990), JavaScript-safe",
+      "J": "2^53-1 (9007199254740991), JavaScript-safe",
+      "authoring_only": "2^54+4, exactly binary64 representable but above JS-safe integer range; direct Python route only",
+      "parser_control": "2^53+1 JSON integer presented directly to Python; existing int/float check refuses"
+    },
+    "primary_reference": "alpha=L=A1,t0,x3/4,N: exact phase modulo2=1/2, both fields1; signed harmonic or x1/4 yields-1.",
+    "non_dyadic": {
+      "inputs": "n=J,L3,x1,t0,A1",
+      "analytical": "sqrt(3)/2",
+      "numerical": "[sin(5pi/16)+2sin(11pi/32)]/3",
+      "independent_oracle": "Decimal80 radicals; exact weights1/3 and2/3; no producer helper."
+    },
+    "time_reference": {
+      "continuum": "D=exp(-alpha*t*(n*pi/L)^2)",
+      "discrete": "K=4*alpha*t*(C/L)^2*sin(n*pi/(2C))^2; Dcn=((1-K/(2M))/(1+K/(2M)))^M",
+      "evaluation": "Decimal80, >=80-digit literal pi, elementary sine series on small angle; independently frozen C/M, no mesh search.",
+      "high": {
+        "t": "2^-110",
+        "cells": "32N",
+        "steps": 1920,
+        "bound_margins": "At d16 B>.003; at d32 B<.003 from independent sine/Cayley-log inequalities; all earlier d fail from interpolation term."
+      },
+      "ordinary": {
+        "n": 1,
+        "x": "1/2",
+        "t": "1/8",
+        "cells": 120,
+        "steps": 120
+      }
+    },
+    "mixed_modes": [
+      [
+        "N",
+        "1"
+      ],
+      [
+        "N",
+        "-1/4"
+      ],
+      [
+        "-N",
+        "1/2"
+      ],
+      [
+        "0",
+        "1/8"
+      ]
+    ],
+    "fields": [
+      "passed",
+      "u_exact",
+      "u_crank_nicolson",
+      "query_abs_error",
+      "linf_error",
+      "error_measure",
+      "spatial_cells",
+      "time_steps"
+    ],
+    "bound_reference": "B=sum(abs(A)*(abs(Dcn-D)+D*(pi*n/C)^2/8)); linf_error=max(B,independent query error).",
+    "temperature_tolerance": "5e-13*max(1,sum(abs(amplitude))); literal zero endpoints exact.",
+    "diagnostic_tolerance": "same absolute allowance; all values finite, query error and linf error nonnegative; C and M exact integers.",
+    "claims": "One truthful u_exact claim and one false u_crank_nicolson claim per admitted case, rtol0, atol below one quarter of true/false gap. False target0 except endpoints1 and non-dyadic sqrt(3)/2. Invalid inputs receive claims0 and1, both refuse before claim_check.",
+    "reporting": "Complete all48 requests before aggregate assertion. Record raw verdict before strict JSON; separate solver/serialization errors, wrong verdicts and physical/claim failures.",
+    "full_hash_controls": [
+      "boundary/left",
+      "ordinary/midpoint",
+      "ordinary/decaying-midpoint",
+      "defaults/empty-modes",
+      "invalid/nonintegral-mode",
+      "invalid/boolean-mode",
+      "invalid/unrepresentable-integer-mode",
+      "invalid/outside-rod"
+    ],
+    "other_admitted_projection_excludes_only": [
+      "u_exact",
+      "u_crank_nicolson",
+      "query_abs_error",
+      "linf_error",
+      "passed"
+    ]
+  },
+  "registered": {
+    "route": "actual registered TypeScript/Python Pi tool",
+    "requests": 5,
+    "unclaimed": {
+      "approved": 3,
+      "refused": 0
+    },
+    "claims": {
+      "approved": 1,
+      "refused": 1
+    },
+    "overall": {
+      "approved": 4,
+      "refused": 1
+    },
+    "cases": [
+      "heat-phase-large",
+      "heat-phase-true",
+      "heat-phase-false",
+      "heat-phase-right",
+      "heat-phase-ordinary"
+    ],
+    "wire": "All actual harmonic integers JavaScript-safe.",
+    "special": "Primary fields1 and right-endpoint fields0 exactly, query discrepancy0, time_steps0.",
+    "ordinary": "u_exact exp(-pi^2/8) rel2e-14 atol0; numeric between0 and1, discrepancy covered by bound with stated roundoff allowance; positive steps.",
+    "bounds": "finite0<=linf_error<=.003; error_measure whole-domain upper bound; claim actual1 and expected flags; all calls completed before assertions."
+  },
+  "preserved": {
+    "solver": "All bytes outside new phase helper and spatial block; upstream time/refinement logic exact.",
+    "registered": "Pure additions, all prior calls and assertions unchanged.",
+    "inherited_case_counts": {
+      "DEW_DOMAIN_CASE": 17,
+      "WET_DOMAIN_CASE": 32,
+      "BODE_RANGE_CASE": 11,
+      "DC_RANGE_CASE": 14,
+      "SCALAR_TOLERANCE_CASE": 29,
+      "LYAPUNOV_CASE": 32,
+      "TRANSFER_HURWITZ_CASE": 20,
+      "PASSIVE_NORM_CASE": 32,
+      "CONTROL_RANK_CASE": 49,
+      "CONTROL_DIAGNOSTIC_CASE": 17,
+      "TRUSS_FACTOR_CASE": 16
+    },
+    "inherited_direct_count": 269,
+    "inherited_total_count": 11,
+    "separate_beam_integration_count": 1,
+    "baseline": "Final original third combined truss run45059866844, exact landed tree; every inherited record equals second combined including beam47199ee518a5f0939e54b624d24f5f3345b5fc1106b692064b6897e161de7b4a.",
+    "all_inherited_records_and_totals_equal": true
+  },
+  "execution": {
+    "method": "Identical-receiver stock/candidate maintained PR CI; only production solver differs.",
+    "first_originals": "Retain both complete original logs once and actual checkout trees; no stock replay or oracle edits after observing results.",
+    "gates": [
+      "unittest discovery",
+      "registered pytest/TypeScript/Python",
+      "compile",
+      "historical public output contract",
+      "pinned static kit",
+      "CAD/PDF",
+      "provenance"
+    ],
+    "merge": "Close stock comparator; separately freeze and qualify intervening changes; prove landed tree equals successful CI tree."
+  },
+  "limitations": [
+    "Represented coordinates only; cannot reconstruct pre-binary64 physical position.",
+    "Non-special sine, decay and sums remain floating approximations; no rigorous floating error certificate.",
+    "No repair of rate/decay/step overflow, extension of mode parsing, uniform runtime or universal convergence claim.",
+    "No measured model uplift, contest score, hosted submission or timing comparison."
+  ],
+  "primary_references": [
+    "https://math.mit.edu/~dyatlov/18.03/lectures/Section10-1.pdf",
+    "https://people.maths.ox.ac.uk/trefethen/4all.pdf"
+  ],
+  "sources": {
+    "baseline_solver_sha256": "11b02f0d9256109e3511f1d47b6013623b169a98f5c30544e80ecd3485af263a",
+    "candidate_solver_sha256": "6a19384f56e8d754f1488649e4ade8851b1fa838e9fe32248f939b3ab22e73a9",
+    "candidate_patch_sha256": "e857730e28f3ee5f10ff9a53f0103d65126c2973e1b308d75a224e686bd5e151",
+    "direct_receiver_sha256": "cec1f6273afcdb7c45c284ccf700fb0bc2b958961d34a1189c20a1ec5e7afc4d",
+    "registered_receiver_sha256": "f009264ab0cb0b1043e8d397f55666d0cc6b2e66d8a50f8f5724d060ebf1394b",
+    "registered_patch_sha256": "053428082147369bc253c7162745ed67822e94d8b113ed91ca10790c37cfb0d9"
+  },
+  "source_review": {
+    "candidate": [
+      "root",
+      "p2",
+      "p3"
+    ],
+    "direct": [
+      "root",
+      "p1"
+    ],
+    "registered": [
+      "root",
+      "p1"
+    ],
+    "candidate_unread_by_independent_receiver_authors_until_sources_frozen": true,
+    "no_numerical_execution_before_preregistration": true,
+    "bytewise_preservation": {
+      "prefix": true,
+      "time_and_refinement": true,
+      "query_result_and_all_later_domains": true
+    },
+    "registered_inherited_bytes_preserved": true
+  },
+  "base_commit": "25b9d37a17939843e25c50d98f55f1012f82be88",
+  "base_tree": "b18866938cf9169ad30e1359462e06f85401d69c",
+  "original_source_scope_candidate": "8caea5e7e6ef6f8a1148e78f08b40dfb43169a92",
+  "baseline_composition": {
+    "original_scope_source_candidate": "8caea5e7e6ef6f8a1148e78f08b40dfb43169a92",
+    "later_disjoint_pr": 191,
+    "final_source_candidate": "aa0badf7d72635a5fcc27b420e8ca6f4e0e5dc1e",
+    "landed_tree_exactly_qualified": true,
+    "solver_and_registered_blobs_unchanged": true,
+    "qualification_original_log_sha256": "a4032886a9574889da9cb0549b6c4e2a922646bf640a11af22c53ad765ce55bb"
+  }
+}

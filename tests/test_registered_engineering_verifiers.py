@@ -260,6 +260,16 @@ TRUSS_CASES = [
 ]
 
 
+HEAT_LARGE_MODE = 2**53 - 2  # Retains its integer value through the registered JSON route.
+HEAT_PHASE_CASES = [
+    ("heat-phase-large", HEAT_LARGE_MODE, 0.75, 0, None, True),
+    ("heat-phase-true", HEAT_LARGE_MODE, 0.75, 0, ("u_exact", 1), True),
+    ("heat-phase-false", HEAT_LARGE_MODE, 0.75, 0, ("u_crank_nicolson", 0), False),
+    ("heat-phase-right", HEAT_LARGE_MODE, 1, 0, None, True),
+    ("heat-phase-ordinary", 1, 0.5, 0.125, None, True),
+]
+
+
 @pytest.fixture(scope="module")
 def routed(tmp_path_factory):
     workdir = tmp_path_factory.mktemp("registered-engineering")
@@ -386,6 +396,13 @@ def routed(tmp_path_factory):
         if claim is not None:
             spec.update(claimed_field="strain_energy_J", claimed_value=claim, atol=0, rtol=0)
         calls.append({"id": case, "mode": "fem", "spec": spec})
+    for case, harmonic, position, time, claim, _ in HEAT_PHASE_CASES:
+        spec = {"mode": "heat_1d_transient", "alpha_m2_s": 1, "length_m": 1,
+                "t_eval_s": time, "x_eval_m": position, "modes": [{"n": harmonic, "amplitude": 1}]}
+        if claim is not None:
+            field, value = claim
+            spec.update(claimed_field=field, claimed_value=value, atol=0, rtol=0)
+        calls.append({"id": case, "mode": "pde", "spec": spec})
     source = r"""
 import registerTaskTools, { PLE_DOMAIN_TOOL_NAMES } from './task-tools.ts';
 const tools = new Map();
@@ -1027,6 +1044,45 @@ def test_registered_truss_factor_loss(routed, case, direction, claim, passed):
         assert comparison["within_tolerance"] is passed
 
 
+@pytest.mark.parametrize("case,harmonic,position,time,claim,passed", HEAT_PHASE_CASES,
+                         ids=[row[0] for row in HEAT_PHASE_CASES])
+def test_registered_heat_modal_phase(routed, case, harmonic, position, time, claim, passed):
+    reply = routed[case]
+    assert reply["completed"], reply
+    result = reply["details"]
+    assert result["domain"] == "pde" and result["mode"] == "heat_1d_transient"
+    assert result["passed"] is passed, result
+    assert result["error_measure"] == "whole-domain upper bound"
+    for key in ("u_exact", "u_crank_nicolson", "query_abs_error", "linf_error", "spatial_cells", "time_steps"):
+        assert type(result[key]) in (int, float) and math.isfinite(result[key])
+    assert 0 <= result["linf_error"] <= 0.003
+    exact = result["u_exact"]
+    numeric = result["u_crank_nicolson"]
+    if harmonic == HEAT_LARGE_MODE:
+        # N = 6 (mod 8), hence 3N/4 = 1/2 (mod 2). The refined grids have
+        # a node at 3/4. Both decays equal one at time zero. At x=1 the temperature is fixed at zero.
+        expected = 1 if position == 0.75 else 0
+        assert exact == numeric == expected
+        assert result["time_steps"] == result["query_abs_error"] == 0
+    else:
+        # For the unit rod, the fundamental mode at its midpoint decays by exp(-pi^2*t).
+        reference = math.exp(-math.pi**2 * time)
+        assert math.isclose(exact, reference, rel_tol=2e-14, abs_tol=0)
+        assert 0 < numeric < 1 and result["time_steps"] > 0
+        assert abs(numeric - reference) <= result["linf_error"] + 2e-14 * abs(reference)
+        assert result["query_abs_error"] == abs(numeric - exact)
+    if claim is None:
+        assert "claim_check" not in result
+    else:
+        field, value = claim
+        comparison = result["claim_check"]
+        assert comparison["field"] == field and comparison["claimed"] == value
+        assert comparison["actual"] == result[field] == 1
+        assert comparison["within_tolerance"] is passed
+        if not passed:
+            assert isinstance(result.get("reason"), str) and result["reason"].strip()
+
+
 class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1111,3 +1167,8 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
         for args in TRUSS_CASES:
             with self.subTest(case=args[0]):
                 test_registered_truss_factor_loss(self.routed_data, *args)
+
+    def test_registered_heat_modal_phase(self):
+        for args in HEAT_PHASE_CASES:
+            with self.subTest(case=args[0]):
+                test_registered_heat_modal_phase(self.routed_data, *args)
