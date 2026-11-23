@@ -22,6 +22,10 @@ jobs:
         run: npm ci --no-fund --no-audit
       - name: System PDF vector tools for real two-sheet drawing contract
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends poppler-utils
+      - name: Independent stadium copper and task provisioning controls
+        run: |
+          python ship/verify_eagle_stadium_hole.py --repo . --out "$RUNNER_TEMP/eagle-stadium"
+          python ship/verify_eagle_provisioned.py --repo . --stadium
       - run: python -m unittest discover -s tests -v
       - name: Registered thin polygon pressure and support-distance controls
         run: python ship/verify_polygon_contact_slacks.py --repo . --out "$RUNNER_TEMP/polygon-contact-slacks" --require-all
