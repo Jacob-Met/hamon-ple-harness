@@ -410,6 +410,22 @@ def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, densi
     }
 
 
+def _extrude_rectangular_ring(outer, inner, origin, x_axis, y_axis, direction, depth):
+    """Oriented annular caps and both wall loops; the void has no closing face."""
+    profile = np.vstack((outer, inner))
+    vertices = np.array([origin + x*x_axis + y*y_axis + offset*direction
+                         for offset in (0., depth) for x, y in profile])
+    faces = []
+    for i in range(4):
+        n = (i+1) % 4
+        a, b, c, d = i, n, n+4, i+4
+        for u, v, w in ((a,b,c), (a,c,d)):
+            faces.extend(((u,w,v), (u+8,v+8,w+8)))
+        faces.extend(((i,n,n+8), (i,n+8,i+8)))
+        faces.extend(((n+4,i+4,i+12), (n+4,i+12,n+12)))
+    return vertices, np.asarray(faces, dtype=np.int32)
+
+
 def _rectangular_sweep(entities, et, args, unit_scale, frame=None, magnification=1.):
     prof_id = _ref_id(args[0] if et == "IFCEXTRUDEDAREASOLID" else args[1])
     pos_id = _ref_id(args[1] if et == "IFCEXTRUDEDAREASOLID" else args[2])
@@ -419,20 +435,39 @@ def _rectangular_sweep(entities, et, args, unit_scale, frame=None, magnification
     origin, x_ax, y_ax, z_ax = frame
     if prof_id in entities:
         pet, pargs = entities[prof_id]
-        if pet in ("RECTANGLE_PROFILE_DEF", "IFCRECTANGLEPROFILEDEF") and len(pargs) >= 5:
+        if pet in ("RECTANGLE_PROFILE_DEF", "IFCRECTANGLEPROFILEDEF", "IFCRECTANGLEHOLLOWPROFILEDEF") and len(pargs) >= 5:
             lx, ly = float(pargs[3]) * unit_scale, float(pargs[4]) * unit_scale
             poly = np.array([[-0.5*lx,-0.5*ly],[0.5*lx,-0.5*ly],[0.5*lx,0.5*ly],[-0.5*lx,0.5*ly]])
             direction, normal = z_ax, 1.0
+            inner = None
+            area = None
+            if pet == "IFCRECTANGLEHOLLOWPROFILEDEF" and et != "IFCEXTRUDEDAREASOLID":
+                raise ValueError("IFC hollow profiles require an IFC swept solid")
             if et == "IFCEXTRUDEDAREASOLID":
                 if min(lx, ly, depth) <= 0 or not all(map(math.isfinite, (lx, ly, depth))):
                     raise ValueError("Rectangular IFC extrusion dimensions must be finite and positive")
+                if pet == "IFCRECTANGLEHOLLOWPROFILEDEF":
+                    if len(pargs) != 8 or any(v != "$" and float(v) != 0 for v in pargs[6:8]):
+                        raise ValueError("Only sharp-corner rectangular hollow profiles are qualified")
+                    wall = float(pargs[5]) * unit_scale
+                    if not math.isfinite(wall) or not 0 < wall < min(lx, ly)/2:
+                        raise ValueError("Hollow wall thickness must leave a positive rectangular void")
+                    ix, iy = (float(Fraction(length)-2*Fraction(wall)) for length in (lx, ly))
+                    inner = np.array([[-ix/2,-iy/2],[ix/2,-iy/2],[ix/2,iy/2],[-ix/2,iy/2]])
+                    inner = _position_ifc_profile(inner, entities, pargs[2], unit_scale)
+                    area = 2*Fraction(wall)*(Fraction(lx)+Fraction(ly)-2*Fraction(wall))
                 poly = _position_ifc_profile(poly, entities, pargs[2], unit_scale)
                 local = _ifc_extrusion_direction(entities, args[2])
                 direction = local[0] * x_ax + local[1] * y_ax + local[2] * z_ax
                 normal = local[2]
-            vertices, faces = _extrude_polygon_2d(poly, origin, x_ax, y_ax, direction, depth)
+            if inner is None:
+                vertices, faces = _extrude_polygon_2d(poly, origin, x_ax, y_ax, direction, depth)
+            else:
+                vertices, faces = _extrude_rectangular_ring(poly, inner, origin, x_ax, y_ax, direction, depth)
             # Keep the scale product exact until physical volume is rounded.
-            volume = float(Fraction(lx) * Fraction(ly) * Fraction(depth) * Fraction(abs(normal))
+            if area is None:
+                area = Fraction(lx) * Fraction(ly)
+            volume = float(area * Fraction(depth) * Fraction(abs(normal))
                            * Fraction(magnification) ** 3)
             return vertices, faces if normal > 0 else faces[:, ::-1], volume
 
@@ -506,8 +541,12 @@ def _ifc_mass_mapped_body(entities, product, unit_scale):
         if kind == "IFCEXTRUDEDAREASOLID":
             if len(args) != 4:
                 raise ValueError("Incomplete IFC swept Body")
-            profile = required(args[0], "IFCRECTANGLEPROFILEDEF")
-            if len(profile) != 5 or str(profile[0]).upper() != "AREA":
+            profile_kind = entities.get(args[0][1], (None,))[0] if isinstance(args[0], tuple) else None
+            if profile_kind not in ("IFCRECTANGLEPROFILEDEF", "IFCRECTANGLEHOLLOWPROFILEDEF"):
+                raise ValueError("IFC mass requires a rectangular area profile")
+            profile = required(args[0], profile_kind)
+            count = 8 if profile_kind == "IFCRECTANGLEHOLLOWPROFILEDEF" else 5
+            if len(profile) != count or str(profile[0]).upper() != "AREA":
                 raise ValueError("IFC mass requires a rectangular area profile")
             return current[1], mapping, magnification
         if kind != "IFCMAPPEDITEM" or len(args) != 2:
