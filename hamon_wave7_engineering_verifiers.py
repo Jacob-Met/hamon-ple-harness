@@ -1341,47 +1341,60 @@ def _symmetric_euler_motion(moments, initial, torque, duration, axis):
             work = [tau*t*(w+v)/2 for tau,w,v in zip(torque,start,end)]
             return end, sum(work), sum(I*d for I,d in zip(moments,work))
         phase_size = max(abs(alpha), abs(beta), Fraction(1))
-        if beta and (fx or fy):
-            # Completing the square introduces another phase, even when
-            # the net spin sweep is tiny. Retain its absolute accuracy.
+        force = (t*fx, t*fy)
+        imbalance = (force[0]-alpha*start[j], force[1]+alpha*start[i])
+        if beta and any(force):
+            # Completing the square introduces an absolute phase alpha²/(4 beta).
             phase_size = max(phase_size, abs(alpha*alpha/(4*beta)))
+        # Near a force-balanced endpoint the first nonzero coordinate can be
+        # quadratic in a small spin phase, and full and split intervals could
+        # otherwise round that same coordinate to zero before comparison.
+        small_phase = max(abs(alpha), abs(beta))
+        if any(force) and small_phase < 1:
+            phase_size = max(phase_size, 1/small_phase**2)
         ctx.prec = guard + max(0, phase_size.numerator.bit_length()-phase_size.denominator.bit_length())
         turn = number(alpha+beta)
-        phase = ctx.expj(turn)
         z0 = ctx.mpc(number(start[i]), number(start[j]))
-        impulse = ctx.mpc(number(t*fx), number(t*fy))
+        impulse = ctx.mpc(*(number(v) for v in force))
         if not impulse:
-            z1, lateral_work = z0*phase, Fraction(0)
-        elif not beta and (t*fx == alpha*start[j] and t*fy == -alpha*start[i]):
-            # Exact steady transverse rotation under a balancing body torque.
-            z1, lateral_work = z0, Fraction(0)
+            z1, lateral_work = z0*ctx.expj(turn), Fraction(0)
+        elif not beta:
+            # Propagate the exact unbalanced initial acceleration. Separate its
+            # small increment from the finite initial state when computing work.
+            change = ctx.expm1(ctx.j*turn)/(ctx.j*turn) * ctx.mpc(*(number(v) for v in imbalance))
+            z1 = z0+change
+            dx, dy = rational(change.real), rational(change.imag)
+            lateral_work = it*(start[i]*dx + start[j]*dy + (dx*dx+dy*dy)/2)
         else:
-            # J = integral_0^1 exp(i*(alpha*s + beta*s²)) ds. The signed
-            # transverse work follows by integrating tau.omega over time.
-            if not beta:
-                integral = ctx.expm1(ctx.j*turn)/(ctx.j*turn) if turn else ctx.mpf(1)
-            else:
-                b = number(beta)
-                factor = ctx.sqrt(2*abs(b)/ctx.pi)
-                v0 = factor*number(alpha/(2*beta))
-                v1 = v0+factor
-                delta = (ctx.fresnelc(v1)-ctx.fresnelc(v0)
-                         + ctx.j*ctx.sign(b)*(ctx.fresnels(v1)-ctx.fresnels(v0)))
-                integral = ctx.expj(number(-alpha*alpha/(4*beta))) * delta/factor
+            # J = integral_0^1 exp(i*(alpha*s + beta*s²)) ds. Evaluate
+            # impulse work separately from the endpoint kinetic energy.
+            b = number(beta)
+            factor = ctx.sqrt(2*abs(b)/ctx.pi)
+            v0 = factor*number(alpha/(2*beta))
+            v1 = v0+factor
+            delta = (ctx.fresnelc(v1)-ctx.fresnelc(v0)
+                     + ctx.j*ctx.sign(b)*(ctx.fresnels(v1)-ctx.fresnels(v0)))
+            integral = ctx.expj(number(-alpha*alpha/(4*beta))) * delta/factor
             transported = impulse*ctx.conj(integral)
-            z1 = phase*(z0+transported)
+            z1 = ctx.expj(turn)*(z0+transported)
             lateral_work = it*rational(ctx.re(ctx.conj(impulse)*z0*integral) + abs(transported)**2/2)
         end = list(start)
         end[i], end[j], end[axis] = rational(z1.real), rational(z1.imag), start[axis]+az*t
         axial_work = torque[axis]*t*(start[axis]+end[axis])/2
         return end, lateral_work+axial_work, it*lateral_work+iz*axial_work
 
-    full, work, impulse_h2 = advance(initial, duration, 150)
-    middle, _, _ = advance(initial, duration/2, 220)
-    halves, _, _ = advance(middle, duration/2, 220)
-    lateral_scale = max(abs(v[k]) for v in (initial,full,halves) for k in (i,j))
-    error = max(abs(full[k]-halves[k]) for k in (i,j))
-    return full, work, impulse_h2, float(error/lateral_scale) if lateral_scale else 0.
+    # Resolve each signed observable against a separate split-interval evaluation.
+    # The smallest wire value sets only the absolute floor for a mathematical zero.
+    floor = Fraction(2)**-1074
+    for guard in (150, 300, 600, 1200, 2400, 4800):
+        full, work, impulse_h2 = advance(initial, duration, guard)
+        middle, w1, h1 = advance(initial, duration/2, guard+80)
+        halves, w2, h2 = advance(middle, duration/2, guard+80)
+        pairs = list(zip(full, halves)) + [(work, w1+w2), (impulse_h2, h1+h2)]
+        residual = max(abs(v-u)/max(abs(v), abs(u), floor) for v,u in pairs)
+        if residual < Fraction(1, 10**15):
+            return full, work, impulse_h2, float(residual)
+    raise ArithmeticError("unresolved_symmetric_top_motion")
 
 
 def _euler_rigid_body(params: Mapping[str, Any]) -> Dict[str, Any]:

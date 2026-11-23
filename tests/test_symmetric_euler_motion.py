@@ -65,6 +65,39 @@ class SymmetricTop(unittest.TestCase):
                                     (r["work_done_J"],wt+wz),(r["torque_half_H2_change_Nms2"],it*wt+iz*wz)]:
                         self.assertAlmostEqual(got,float(ref),places=13)
 
+    def test_signed_changes_around_torque_balanced_top(self):
+        ctx = mp.clone()
+        ctx.dps = 220
+        for epsilon in (1e-60, -1e-150):
+            for lateral, axial in ((epsilon, 0.), (0., epsilon), (epsilon, epsilon)):
+                with self.subTest(lateral=lateral, axial=axial):
+                    r = solve([1,1,2], [0,1,1], [1,lateral,axial], 1., 1)
+                    self.assertTrue(r["verified"], r)
+                    # Direct Euler-series integration about the initial state.
+                    # The recurrence integrates angular velocity and torque power.
+                    terms = [ctx.j, ctx.j*ctx.mpf(lateral)]
+                    chirp = ctx.mpf(axial)/2
+                    for n in range(1, 160):
+                        terms.append(ctx.j*(terms[n]+chirp*terms[n-1])/(n+1))
+                    z = ctx.fsum(terms)
+                    mean = ctx.fsum(c/(n+1) for n,c in enumerate(terms))
+                    wz = ctx.mpf(axial)*(1+ctx.mpf(axial)/4)
+                    wt = mean.real+ctx.mpf(lateral)*mean.imag
+                    for got, ref in zip(r["omega_final_rad_s"][:2] +
+                                        [r["work_done_J"], r["torque_half_H2_change_Nms2"]],
+                                        [z.real, z.imag, wt+wz, wt+2*wz]):
+                        self.assertEqual(got, float(ref))
+
+    def test_second_order_coordinate_at_nearly_cancelled_endpoint(self):
+        ctx = mp.clone()
+        ctx.dps = 220
+        angle = 1e-80
+        a = ctx.j*ctx.mpf(angle)
+        endpoint = -ctx.exp(a)+ctx.expm1(a)/a
+        r = solve([1,1,2], [-1,0,angle], [1,0,0], 1, 1)
+        self.assertTrue(r["verified"], r)
+        self.assertEqual(r["omega_final_rad_s"][:2], [float(endpoint.real), float(endpoint.imag)])
+
     def test_false_free_triaxial_wobble_cannot_borrow_axial_spin_scale(self):
         r=solve([1,1+2**-24,1.5],[1e-10,0.,8.],[0,0,0],1.,1)
         self.assertFalse(r["verified"],r)
