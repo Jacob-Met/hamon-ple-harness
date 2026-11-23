@@ -2859,26 +2859,11 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
             "dual_verified": True,
         }
     if kind == "rc_beam_aci318":
-        b = eval_quantity(str(spec["b"])).val
-        d = eval_quantity(str(spec["d"])).val
-        As = eval_quantity(str(spec["As"])).val
-        fc = eval_quantity(str(spec["fc"])).val
-        fy = eval_quantity(str(spec["fy"])).val
-        fc_mpa = fc / 1e6
-        beta1 = 0.85 if fc_mpa <= 28.0 else max(0.65, 0.85 - 0.05 * (fc_mpa - 28.0) / 7.0)
-        a = (As * fy) / (0.85 * fc * b)
-        c = a / beta1
-        eps_t = 0.003 * (d - c) / c
-        phi = 0.9 if eps_t >= 0.005 else max(0.65, 0.65 + 0.25 * (eps_t - 0.002) / 0.003)
-        phi_Mn = phi * As * fy * (d - 0.5 * a)
-        return {
-            "whitney_a_m": a,
-            "neutral_axis_c_m": c,
-            "tensile_strain": eps_t,
-            "phi": phi,
-            "phi_Mn_Nm": phi_Mn,
-            "dual_verified": True,
-        }
+        from hamon_rc_section import rectangular_rc_section
+        dimensions = (("b","m"), ("d","m"), ("As","m2"), ("fc","Pa"), ("fy","Pa"))
+        values = [_column_quantity(spec, key, unit) for key, unit in dimensions]
+        modulus = _column_quantity(spec, "Es", "Pa") if "Es" in spec else 200e9
+        return rectangular_rc_section(*values, modulus)
     if kind == "dc_nodal_kcl":
         return solve_nodal_kcl(spec)
     if kind == "three_phase_vdrop":
