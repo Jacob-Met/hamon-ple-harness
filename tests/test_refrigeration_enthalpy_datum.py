@@ -67,3 +67,33 @@ class RefrigerationDatumTests(unittest.TestCase):
         for change in [dict(h1=float("inf")), dict(T_L=-5.,T_H=300.), dict(eta_c=0.),
                        dict(m_dot=float("nan"))]:
             self.assertFalse(solve(**dict(dict(h1=2.,h2s=3.,h3=1.), **change))["verified"])
+
+    def test_specific_balance_does_not_set_equipment_capacity(self):
+        states = dict(h1=250000., h2s=280000., h3=100000., eta_c=.75)
+        result = solve(**states)
+        self.assertTrue(result["verified"])
+        self.assertFalse(result["rates_identified"])
+        self.assertEqual((result["COP_R"], result["q_evap"], result["w_comp"]), (3.75, 150000., 40000.))
+        for key in ("m_dot_kg_s", "Q_evap_W", "W_comp_W", "Q_cond_W", "rate_basis"):
+            self.assertIsNone(result[key], key)
+
+        observations = {"m_dot": .5, "Q_evap_W": 75000., "W_comp_W": 20000., "Q_cond_W": 95000.}
+        for name, measurement in observations.items():
+            with self.subTest(basis=name):
+                rated = solve(**states, **{name: measurement})
+                self.assertTrue(rated["verified"])
+                self.assertTrue(rated["rates_identified"])
+                self.assertEqual(rated["rate_basis"], name)
+                self.assertEqual(rated["m_dot_kg_s"], .5)
+                for field in ("Q_evap_W", "W_comp_W", "Q_cond_W"):
+                    self.assertEqual(rated[field], observations[field])
+        self.assertTrue(solve(**states, **observations)["verified"])
+
+    def test_inconsistent_measurements_and_partial_reservoirs_fail(self):
+        states = dict(h1=250000., h2s=280000., h3=100000., eta_c=.75)
+        for supplied in ({"Q_evap_W": 75000., "W_comp_W": 21000.},
+                         {"m_dot": 2., "Q_cond_W": 95000.},
+                         {"Q_evap_W": False}, {"W_comp_W": float("nan")},
+                         {"Q_cond_W": -1.}, {"T_L": 270.}, {"T_H": 310.}):
+            with self.subTest(supplied=supplied):
+                self.assertFalse(solve(**states, **supplied)["verified"])
