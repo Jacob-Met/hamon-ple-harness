@@ -728,6 +728,97 @@ def _isolate_pump_root(residual, low, high, a, slope, constant, coordinates):
     return (low + high) / 2
 
 
+def _pump_output(value):
+    result = float(value)
+    if result == 0 and value:
+        raise ValueError("A nonzero operating point value is below the output range")
+    return result
+
+
+def _heterogeneous_pump_bank(spec):
+    """Independent decreasing pump curves on a common header with check valves."""
+    allowed = {"mode", "calculation", "pump_curves", "check_valves",
+               "static_head_m", "system_resistance_s2_m5"}
+    if spec.keys() - allowed or spec.get("check_valves", True) is not True:
+        raise ValueError("Independent parallel curves require a check valve on each pump")
+    tables = spec["pump_curves"]
+    if not isinstance(tables, list) or not tables:
+        raise ValueError("Supply at least one pump curve")
+    static = Fraction(number(spec["static_head_m"]))
+    resistance = Fraction(number(spec["system_resistance_s2_m5"]))
+    if resistance < 0:
+        raise ValueError("System curve resistance must be nonnegative")
+
+    curves = []
+    for table in tables:
+        q, h = pump_curve(table)
+        if q[0] != 0 or any(left <= right for left, right in zip(h, h[1:])):
+            raise ValueError("Each independent curve must begin at shutoff and decrease strictly in head")
+        curves.append((list(map(Fraction, reversed(h))), list(map(Fraction, reversed(q)))))
+
+    def rates(head):
+        flows = []
+        for heads, discharges in curves:
+            if head >= heads[-1]:
+                flows.append(Fraction(0))
+                continue
+            j = bisect_left(heads, head, lo=1)
+            t = (head-heads[j-1])/(heads[j]-heads[j-1])
+            flows.append(discharges[j-1]+t*(discharges[j]-discharges[j-1]))
+        return flows
+
+    def residual(head):
+        return head-static-resistance*sum(rates(head))**2
+
+    # Below this head at least one open pump would exceed its final rated
+    # flow. Above every shutoff the closed bank can still support zero flow.
+    floor = max(h[0] for h, _ in curves)
+    ceiling = max(static, max(h[-1] for h, _ in curves))
+    knots = sorted({floor, ceiling} | {x for heads, _ in curves for x in heads if x >= floor})
+    base = {"ok": True, "continuous_total_flow_intervals_m3_s": []}
+    if residual(floor) > 0:
+        return dict(base, has_rated_intersection=False, operating_points=[],
+                    reason="Common-header intersection would require pump-curve extrapolation")
+
+    # Q(H) is continuous, nonincreasing and piecewise affine. The system
+    # residual is strictly increasing, so exactly one interval can contain it.
+    j = bisect_left(knots, 0, key=residual)
+    if residual(knots[j]) == 0:
+        head = knots[j]
+        flows = rates(head)
+    else:
+        lower, upper = knots[j-1:j+1]
+        flow_low, flow_high = rates(lower), rates(upper)
+        total_low, total_high = sum(flow_low), sum(flow_high)
+        slope = (upper-lower)/(total_high-total_low)
+        intercept = lower-slope*total_low
+        constant = static-intercept
+
+        def at_total(total):
+            h = intercept+slope*total
+            t = (total-total_high)/(total_low-total_high)
+            qs = [b+t*(a-b) for a,b in zip(flow_low,flow_high)]
+            return h, qs
+
+        def coordinates(total):
+            h, qs = at_total(total)
+            return (total, h, *qs, *(heads[-1]-h for heads, _ in curves))
+
+        total = _isolate_pump_root(lambda q: (resistance*q-slope)*q+constant,
+                                   total_high, total_low, resistance, slope, constant, coordinates)
+        head, flows = at_total(total)
+
+    units = []
+    for i, ((heads, _), flow) in enumerate(zip(curves, flows)):
+        margin = heads[-1]-head
+        state = "open" if flow else "closed" if margin < 0 else "at_shutoff"
+        units.append({"pump_index": i, "flow_m3_s": _pump_output(flow),
+                      "check_valve_state": state, "shutoff_head_minus_header_m": _pump_output(margin)})
+    point = {"head_m": _pump_output(head), "total_flow_m3_s": _pump_output(sum(flows)),
+             "delivering_flow": any(flows), "pumps": units}
+    return dict(base, has_rated_intersection=True, operating_points=[point])
+
+
 def verify_pump_operating_point(spec):
     """All rated intersections of a fixed-speed pump bank with Hstatic + K Q².
 
@@ -737,6 +828,8 @@ def verify_pump_operating_point(spec):
     result = {"calculation": "pump_operating_point", "mode": "thermal_fluid",
               "tool": "hamon_conservation_cad_verifier", "ok": False}
     try:
+        if "pump_curves" in spec:
+            return {**result, **_heterogeneous_pump_bank(spec)}
         allowed = {"mode", "calculation", "curve", "identical_pumps", "static_head_m",
                    "system_resistance_s2_m5"}
         if spec.keys() - allowed:
@@ -780,12 +873,6 @@ def verify_pump_operating_point(spec):
                 if flo * fhi < 0:
                     roots.add(_isolate_pump_root(residual, lo, hi, a, slope, constant, coordinates))
 
-        def rendered(value):
-            as_float = float(value)
-            if as_float == 0 and value:
-                raise ValueError("A nonzero operating point value is below the output range")
-            return as_float
-
         # Only shared table knots can occur in two adjacent segments.
         for lo, hi in intervals:
             roots.discard(lo)
@@ -796,10 +883,10 @@ def verify_pump_operating_point(spec):
             j = min(bisect_left(flows, q, lo=1), len(flows)-1)
             (q0, h0), (q1, h1) = points[j-1:j+1]
             head = h0 + (h1-h0)*(q-q0)/(q1-q0)
-            operating_points.append({"flow_per_pump_m3_s": rendered(q),
-                                     "total_flow_m3_s": rendered(total),
-                                     "head_m": rendered(head)})
-        ranges = [[rendered(count*lo), rendered(count*hi)] for lo, hi in intervals]
+            operating_points.append({"flow_per_pump_m3_s": _pump_output(q),
+                                     "total_flow_m3_s": _pump_output(total),
+                                     "head_m": _pump_output(head)})
+        ranges = [[_pump_output(count*lo), _pump_output(count*hi)] for lo, hi in intervals]
         return {**result, "ok": True, "has_rated_intersection": bool(operating_points or ranges),
                 "operating_points": operating_points,
                 "continuous_total_flow_intervals_m3_s": ranges}
