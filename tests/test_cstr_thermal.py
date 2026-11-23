@@ -162,7 +162,8 @@ class JacketedCstr(unittest.TestCase):
     def test_thermal_contract_never_silently_ignores_incompatible_inputs(self):
         changes = [dict(reactor_type="pfr"), dict(gas_phase=True), dict(epsilon_A=.01),
                    dict(conversion=.5), dict(T=350), dict(volume=0), dict(order=-1),
-                   dict(F_A0=100), dict(k=1), dict(heat_transfer={})]
+                   dict(F_A0=100), dict(k=1), dict(heat_transfer={}),
+                   dict(jacket_to_feed_heat_capacity_ratio=0), dict(coolant_T_K=600)]
         for change in changes:
             with self.subTest(change=change), self.assertRaises(ValueError):
                 solve_reactor_kinetics({**benchmark(), **change})

@@ -51,6 +51,11 @@ gradients, a dynamic coolant jacket, or nonlinear stability beyond the local
 linearization. Numeric strings, booleans, nonfinite values and unrepresentable
 output coordinates are refused.
 
+The existing top-level `jacket_to_feed_heat_capacity_ratio` and `coolant_T_K`
+interface remains available, including its inverse-design behavior. Do not mix
+that interface with `heat_transfer`. The full dynamic classification documented
+here accompanies the physical-SI `heat_transfer` model.
+
 With several steady states, select `"all"` or a zero-based index in ascending
 conversion order. Omitting the choice is an error. A unique state is selected
 automatically. Each row reports both conversion and remaining reactant to

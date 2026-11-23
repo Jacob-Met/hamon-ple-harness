@@ -122,6 +122,8 @@ def solve_jacketed_cstr(params, *, root_solver):
     """Fixed-volume power-law CSTR; all rates and heat transfer use SI units."""
     if params.get("reactor_type") != "cstr":
         raise ValueError("heat_transfer currently requires one fixed-volume CSTR")
+    if any(key in params for key in ("jacket_to_feed_heat_capacity_ratio", "coolant_T_K")):
+        raise ValueError("supply either heat_transfer or the dimensionless jacket inputs, not both")
     heat = params.get("heat_transfer")
     fields = {"UA_W_K", "rho_kg_m3", "Cp_J_kg_K", "coolant_T_K"}
     if not isinstance(heat, Mapping) or set(heat) != fields:

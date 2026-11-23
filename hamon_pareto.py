@@ -356,11 +356,13 @@ def _nernst_equilibrium_result(req):
 def _distillation_result(req):
     """Admit only closed binary-column calculations with consistent stream flows."""
     spec = req["spec"]
-    required = {"z_F", "x_D", "x_B", "alpha"}
-    numeric = required | {"F_mol_s", "q", "R", "R_mult"}
+    required = {"z_F", "x_D", "x_B"}
+    numeric = required | {"alpha", "F_mol_s", "q", "R", "R_mult"}
+    tabulated = "equilibrium_table" in spec
     if (spec.get("subkind") != "distillation"
             or spec.get("domain", req["mode"]) != req["mode"]
-            or not required <= spec.keys() <= numeric | {"subkind", "domain"}
+            or not required <= spec.keys() <= numeric | {"subkind", "domain", "equilibrium_table"}
+            or tabulated == ("alpha" in spec)
             or {"R", "R_mult"} <= spec.keys()
             or not all(type(spec[k]) in (float, int) and math.isfinite(spec[k])
                        for k in numeric & spec.keys())):
@@ -370,6 +372,29 @@ def _distillation_result(req):
     if (result.get("verified") is not True or result.get("domain") != req["mode"]
             or result.get("subkind") != "distillation" or not 0 <= result["residual"] < 1e-10):
         return None
+
+    if tabulated:
+        if result.get("equilibrium_model") != "piecewise_linear_table":
+            return None
+        count = result["N_stages_integer"]
+        fractional = result["N_theoretical"]
+        feed_stage = result["feed_stage"]
+        if (type(count) is not int or type(feed_stage) is not int
+                or type(fractional) not in (int, float)
+                or not 1 <= feed_stage <= count or not count - 1 < fractional <= count):
+            return None
+        circulation = result["L_rect_mol_s"] > 0, result["V_strip_mol_s"] > 0
+        section = {(True, True): "two_section", (True, False): "rectifying_only",
+                   (False, True): "stripping_only", (False, False): "single_equilibrium_flash"}
+        if result["section_mode"] != section[circulation]:
+            return None
+        if not any(circulation):
+            if count != 1 or fractional != 1:
+                return None
+        else:
+            gap = result["min_operating_gap"]
+            if type(gap) not in (int, float) or not math.isfinite(gap) or gap <= 0:
+                return None
 
     feed = spec.get("F_mol_s", 100.0)
     q = spec.get("q", 1.0)
@@ -395,6 +420,39 @@ def _distillation_result(req):
     return result
 
 
+def _jacketed_cstr_certificate(spec):
+    """Admit a complete first-order liquid jacket model and check every reported balance."""
+    required = {"reactor_type", "order", "C_A0", "v0", "T0", "delta_T_adiabatic",
+                "jacket_to_feed_heat_capacity_ratio", "coolant_T_K", "volume"}
+    optional = {"steady_state_branch", "gas_phase"}
+    rate_laws = ({"k"}, {"k_ref", "T_ref", "E_a"}, {"A_preexp", "E_a"})
+    if (not any(required | law == spec.keys() - optional for law in rate_laws)
+            or spec["reactor_type"] != "cstr" or spec["order"] != 1
+            or spec.get("gas_phase", False) is not False):
+        return None
+    for key in spec.keys() - {"reactor_type", "gas_phase", "steady_state_branch"}:
+        if type(spec[key]) not in (int, float) or not math.isfinite(spec[key]):
+            return None
+    branch = spec.get("steady_state_branch")
+    if "steady_state_branch" in spec and not (branch == "all" or type(branch) is int and branch >= 0):
+        return None
+    result = dispatch_ple_tool("hamon_conservation_cad_verifier", {"mode": "reactor_kinetics", "spec": spec})
+    if not isinstance(result, dict):
+        return None
+    states = result.get("steady_states")
+    if (result.get("verified") is not True or not isinstance(states, list)
+            or not states or len(states) != result.get("steady_state_count")):
+        return None
+    for row in states:
+        if not isinstance(row, dict) or row.get("verified") is not True:
+            return None
+        for key in ("mass_balance_residual", "energy_balance_residual"):
+            value = row.get(key)
+            if type(value) not in (int, float) or not 0 <= value < 1e-9:
+                return None
+    return result
+
+
 def _wave8_result(req):
     """Check one existing operation and its physical residuals."""
     if (
@@ -404,6 +462,8 @@ def _wave8_result(req):
     ):
         return None
     spec = req["spec"]
+    if req["mode"] == "reactor_kinetics":
+        return _jacketed_cstr_certificate(spec)
     if req["mode"] == "electrochem_separations":
         if spec.get("subkind") == "electrochemistry":
             return _nernst_equilibrium_result(req)
