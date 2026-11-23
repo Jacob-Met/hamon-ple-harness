@@ -1481,6 +1481,184 @@ def _electrochemistry(params: Mapping[str, Any]) -> Dict[str, Any]:
                 "verified": False, "error": str(exc)}
 
 
+def _distillation_underwood(z, xd, xb, volatility, quality):
+    """Solve in u=(theta-1)/(alpha-1), keeping both distances to the poles."""
+    width = volatility-1
+    a = width*(1-quality)
+    b = 1+width*z-a
+    c = 1-z
+    # P(u)=a*u²+b*u-c is negative at zero and positive at one. Using its
+    # exact sign avoids evaluating the rational Underwood law at either pole.
+    lo, hi = Fraction(0), Fraction(1)
+    while hi-lo > min(lo, 1-hi)/2**75:
+        mid = (lo+hi)/2
+        value = (a*mid+b)*mid-c
+        if not value:
+            lo = hi = mid
+            break
+        if value < 0:
+            lo = mid
+        else:
+            hi = mid
+    u = (lo+hi)/2
+    v = 1-u
+    with localcontext() as context:
+        context.prec = 90
+        def dec(q):
+            return Decimal(q.numerator)/Decimal(q.denominator)
+
+        disc = dec(b*b+4*a*c).sqrt()
+        def positive_root(aa, bb, cc):
+            if bb >= 0:
+                return 2*dec(cc)/(disc+dec(bb))
+            return (disc-dec(bb))/(2*dec(aa))
+
+        # A second solution for each complementary distance, using the
+        # non-cancelling quadratic form for P(u) and for -P(1-v).
+        ua = positive_root(a, b, c)
+        va = positive_root(-a, 2*a+b, volatility*z)
+        error = max(abs(dec(u)/ua-1), abs(dec(v)/va-1))
+        # Fenske in the same round-trip decimal input convention as the
+        # section balances; preserve log(alpha) when the keys are close.
+        n_min = float((dec(xd)*(1-dec(xb))/(dec(xb)*(1-dec(xd)))).ln()/dec(volatility).ln())
+    uw, vw = float(u), float(v)
+    wire_error = max(abs(Fraction(uw)/u-1),abs(Fraction(vw)/v-1))
+    # Rebuild the reported root from its smaller coordinate, exactly as
+    # reported. Qualify the physical feed equation in that coordinate.
+    public_u = Fraction(uw) if u <= v else 1-Fraction(vw)
+    public_v = 1-public_u
+    terms = (volatility*z*public_u, -(1-z)*public_v, -a*public_u*public_v)
+    law_error = abs(sum(terms))/sum(map(abs,terms))
+    pinch = volatility*xd/(width*v) - (1-xd)/(width*u) - 1
+    return n_min, float(1+width*u), uw, vw, float(pinch), max(float(error),float(wire_error),float(law_error))
+
+
+class _TrayPrecisionError(ArithmeticError):
+    pass
+
+
+def _distillation_trays(xd, xb, alpha, intersection, rect_slope, strip_slope, one_stage):
+    """Cross each section by doubling its equilibrium/operating-line map."""
+    from mpmath import mp
+    from mpmath.ctx_iv import MPIntervalContext
+
+    wire = mp.clone()
+    wire.prec = 53
+
+    def solve(ctx):
+        def number(q):
+            return q if ctx is None else ctx.mpf(q.numerator)/q.denominator
+
+        def less(a, b):
+            if ctx is None:
+                return a < b
+            if a.b < b.a:
+                return True
+            if a.a >= b.b:
+                return False
+            raise _TrayPrecisionError
+
+        def reported(value):
+            if ctx is None:
+                return float(value)
+            low, high = float(wire.mpf(value.a)), float(wire.mpf(value.b))
+            if low != high:
+                raise _TrayPrecisionError
+            return low
+
+        top, bottom, volatility, contact = map(number, (xd, xb, alpha, intersection))
+        zero, one = number(Fraction(0)), number(Fraction(1))
+        rect = number(rect_slope)
+        strip = None if strip_slope is None else number(strip_slope)
+
+        def cross(start, target, slope, intercept):
+            # M(x) = (s*x+b)/(alpha-(alpha-1)*(s*x+b)). Its denominator is
+            # positive throughout the traversed section. M(x)-x has a convex
+            # quadratic numerator. Negative endpoint signs prove descent over
+            # the entire interval; contact with a fixed point takes infinite trays.
+            y0 = slope*start + intercept
+            den = volatility - (volatility-one)*y0
+            if not slope:
+                endpoint = y0/den
+                if less(target, endpoint):
+                    raise ValueError("unreachable_distillation_section")
+                return 1, start, endpoint
+            yt = slope*target + intercept
+            if (not less(yt, target*(volatility-(volatility-one)*yt))
+                    or not less(y0, start*den)):
+                raise ValueError("infinite_or_unreachable_distillation_section")
+
+            # Work with distance traveled from the starting composition. All
+            # four entries are nonnegative, avoiding cancellation under powering.
+            matrix = (slope*(one+(volatility-one)*start), start*den-y0,
+                      (volatility-one)*slope, den)
+            gap = start-target
+
+            def advance(m, distance):
+                a,b,c,d = m
+                return (a*distance+b)/(c*distance+d)
+
+            powers = [matrix]
+            while less(advance(powers[-1], zero), gap):
+                a,b,c,d = powers[-1]
+                entries = (a*a+b*c, b*(a+d), c*(a+d), b*c+d*d)
+                # A common positive normalization leaves the map unchanged.
+                scale = entries[3] if ctx is None else entries[3].b
+                squared = tuple(e/scale for e in entries)
+                if ctx is None and any(max(e.numerator.bit_length(),e.denominator.bit_length()) > 4096
+                                       for e in squared):
+                    raise _TrayPrecisionError
+                powers.append(squared)
+
+            steps, distance = 0, zero
+            for bit in reversed(range(len(powers)-1)):
+                candidate = advance(powers[bit], distance)
+                if less(candidate, gap):
+                    steps += 1 << bit
+                    distance = candidate
+            return steps+1, start-distance, start-advance(matrix, distance)
+
+        first = xd/(alpha-(alpha-1)*xd)
+        previous, current = top, number(first)
+        count = 1
+        feed_stage = 1 if first <= intersection < xd else None
+        if one_stage:
+            return 1, 1., 1
+        reached_bottom = first <= xb
+        if not reached_bottom and first > intersection:
+            # A zero-boilup section meets the rectifier exactly at xB. Use
+            # input-rational endpoint identities before interval conversion.
+            feed_before_product = intersection > xb
+            target = contact if feed_before_product else bottom
+            steps, previous, current = cross(current, target, rect, (one-rect)*top)
+            count += steps
+            if intersection >= xb:
+                feed_stage = count
+            reached_bottom = not feed_before_product or not less(bottom, current)
+        if not reached_bottom:
+            slope, intercept = ((rect,(one-rect)*top) if strip is None else (strip,(one-strip)*bottom))
+            steps, previous, current = cross(current, bottom, slope, intercept)
+            count += steps
+        fraction = (previous-bottom)/(previous-current)
+        return count, reported((count-1)+fraction), feed_stage or count
+
+    # Exact rational arithmetic handles an exact arrival at a feed or product
+    # composition. On long columns switch from expanding integers to outward
+    # rounded intervals and certify both sides of each counted crossing.
+    try:
+        return solve(None)
+    except _TrayPrecisionError:
+        pass
+    for digits in (80, 160, 320, 640):
+        ctx = MPIntervalContext()
+        ctx.dps = digits
+        try:
+            return solve(ctx)
+        except _TrayPrecisionError:
+            continue
+    raise ValueError("unresolved_distillation_tray_boundary")
+
+
 def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]:
     subkind = str(
         params.get("subkind") or ("distillation" if "alpha" in params else "electrochemistry")
@@ -1509,28 +1687,8 @@ def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]
         bottoms = feed - distillate
         d_flow, b_flow = float(distillate), float(bottoms)
 
-        n_min = math.log((x_d * (1.0 - x_b)) / ((1.0 - x_d) * x_b)) / math.log(alpha)
-
-        def underwood_fn(th: float) -> float:
-            return (alpha * z_f) / (alpha - th) + (1.0 - z_f) / (1.0 - th) - (1.0 - q)
-
-        eps_b = 1e-12 * (alpha - 1.0)
-        theta_brent = float(optimize.brentq(underwood_fn, 1.0 + eps_b, alpha - eps_b, xtol=1e-14, rtol=1e-14))
-
-        a_q = 1.0 - q
-        b_q = -((1.0 - q) * (alpha + 1.0) - (alpha - 1.0) * z_f - 1.0)
-        c_q = -alpha * q
-        if a_q == 0.0:
-            theta_alg = -c_q / b_q
-        else:
-            disc = math.sqrt(max(0.0, b_q * b_q - 4.0 * a_q * c_q))
-            # Use the non-cancelling numerator for one root and Vieta's
-            # product for the other, especially as q approaches unity.
-            half_numerator = -0.5 * (b_q + math.copysign(disc, b_q))
-            root = half_numerator / a_q
-            theta_alg = root if 1.0 < root < alpha else c_q / half_numerator
-
-        pinch_reflux = (alpha * x_d) / (alpha - theta_brent) + (1.0 - x_d) / (1.0 - theta_brent) - 1.0
+        n_min, theta_brent, theta_fraction, theta_complement, pinch_reflux, theta_err = (
+            _distillation_underwood(z, xd, xb, volatility, quality))
         # L = R D >= 0 and V' = (R+1)D - (1-q)F >= 0. Then L' = V' + B > 0.
         flow_floor = max(Fraction(0), (1 - quality) * feed / distillate - 1)
 
@@ -1572,13 +1730,12 @@ def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]
             return {"domain": "electrochem_separations", "subkind": subkind, "verified": False,
                     "error": "negative_internal_section_flow", **conditions}
         xi, yi, gap = feed_contact(reflux)
-        x_int, y_int = float(xi), float(yi)
         one_stage = xd * (1 + (volatility - 1) * xb) == volatility * xb
         flash = liquid == 0 and strip_vapor == 0
         if flash and gap:
             return {"domain": "electrochem_separations", "subkind": subkind, "verified": False,
                     "error": "zero_circulation_flash_products_not_in_equilibrium", **conditions}
-        if not flash and (gap <= 0 or (floor_gap < 0 and r_op <= r_min * (1.0 + 1e-7))):
+        if not flash and gap <= 0:
             return {"domain": "electrochem_separations", "subkind": subkind, "verified": False,
                     "error": "reflux_below_minimum_pinch", **conditions}
         if flash:
@@ -1590,45 +1747,30 @@ def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]
         else:
             section_mode = "two_section"
 
-        y_cur = x_d
-        x_prev = x_d
-        stages = 0
-        feed_stage = None
-        frac_stages = 0.0
-        for step in range(1, 500):
-            x_eq = y_cur / (alpha - (alpha - 1.0) * y_cur)
-            stages = step
-            if feed_stage is None and x_eq <= x_int and x_prev > x_int:
-                feed_stage = step
-            if one_stage:
-                # These exact products share an equilibrium tie line; Fenske equality is attainable.
-                frac_stages = 1.0
-                break
-            if x_eq <= x_b:
-                frac = (x_prev - x_b) / (x_prev - x_eq)
-                frac_stages = (step - 1) + frac
-                break
-            x_prev = x_eq
-            if strip_vapor == 0 or x_eq > x_int:
-                y_cur = (r_op / (r_op + 1.0)) * x_eq + x_d / (r_op + 1.0)
-            else:
-                # The stripping component balance, defined also when top reflux is zero.
-                y_cur = x_b + float(strip_liquid / strip_vapor) * (x_eq - x_b)
-        else:
-            return {"domain": "electrochem_separations", "subkind": subkind, "verified": False, "error": "mccabe_thiele_did_not_converge"}
+        try:
+            stages, frac_stages, feed_stage = _distillation_trays(
+                xd, xb, volatility, xi, reflux/(reflux+1),
+                strip_liquid/strip_vapor if strip_vapor else None, one_stage)
+        except ValueError as exc:
+            return {"domain": "electrochem_separations", "subkind": subkind,
+                    "verified": False, "error": str(exc), **conditions}
 
         mb_err = abs(d_flow * x_d + b_flow * x_b - f_flow * z_f) / max(f_flow * z_f, 1e-12)
-        theta_err = abs(theta_brent - theta_alg) / max(theta_brent, 1.0)
         # Verify the section component balance without dividing by vanishing boilup.
-        strip_err = abs(float(strip_vapor) * (y_int - x_b) - float(strip_liquid) * (x_int - x_b)) / f_flow
-        residual = float(max(mb_err, theta_err, strip_err))
+        strip_err = abs(Fraction(flow_report["V_strip_mol_s"])*(yi-xb) -
+                        Fraction(flow_report["L_strip_mol_s"])*(xi-xb))/feed
+        rect_err = abs(Fraction(flow_report["V_rect_mol_s"])*yi -
+                       Fraction(flow_report["L_rect_mol_s"])*xi - Fraction(d_flow)*xd)/feed
+        residual = float(max(mb_err, theta_err, strip_err, rect_err))
         return {
             "domain": "electrochem_separations",
             "subkind": subkind,
             "D_mol_s": float(d_flow),
             "B_mol_s": float(b_flow),
             "N_min_fenske": float(n_min),
-            "underwood_theta": float(theta_brent),
+            "underwood_theta": theta_brent,
+            "underwood_theta_fraction": theta_fraction,
+            "underwood_complement_fraction": theta_complement,
             **conditions,
             "section_mode": section_mode,
             "N_stages_integer": int(stages),
