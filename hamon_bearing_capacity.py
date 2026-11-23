@@ -347,3 +347,184 @@ def verify_bearing_capacity(spec, *, legacy_rectangle=False):
             "calculation": "bearing_capacity",
             "reason": str(exc),
         }
+
+
+def _strip_quantity(value, field, unit):
+    """Numbers are SI; text must carry the dimensions of the named input."""
+    if isinstance(value, str):
+        from hamon_dual_verifier import eval_quantity
+        quantity = eval_quantity(value)
+        if quantity.dim != eval_quantity(unit).dim:
+            raise ValueError(f"{field} must have dimensions {unit}")
+        value = quantity.val
+    return numeric(value, field)
+
+
+def verify_rigid_strip_contact(spec):
+    """Rigid strip on a compression-only bed: p(x) = max(0, a + b*x).
+
+    x is measured from the base center; integral(p)=N and integral(x*p)=M.
+    This is contact equilibrium, not soil bearing capacity or settlement.
+    """
+    from fractions import Fraction
+
+    calculation = "rigid_strip_contact"
+    out = {"ok": False, "calculation": calculation, "conservation_verified": False}
+    units = {
+        "base_width_m": "m",
+        "vertical_resultant_N_m": "N/m",
+        "moment_Nm_m": "N*m/m",
+        "contact_width_m": "m",
+        "eccentricity_m": "m",
+        "q_min_Pa": "Pa",
+        "q_max_Pa": "Pa",
+        "q_left_Pa": "Pa",
+        "q_right_Pa": "Pa",
+    }
+    scalars = ("contact_width_m", "eccentricity_m", "q_min_Pa",
+               "q_max_Pa", "q_left_Pa", "q_right_Pa")
+    allowed = {"mode", "kind", "calculation", "pressure_model",
+               "base_width_m", "vertical_resultant_N_m", "moment_Nm_m",
+               "proposed_contact_interval_m", "proposed_contact_regime"}
+    allowed.update("proposed_" + key for key in scalars)
+
+    def rendered(value, name):
+        if value is None:
+            return None
+        result = float(value)
+        if not math.isfinite(result) or (value and not result):
+            raise ValueError(f"{name} is outside the representable numeric range")
+        return result
+
+    def claim_matches(value, expected, key):
+        if expected is None:
+            return value is None
+        supplied = Fraction(_strip_quantity(value, "proposed_" + key, units[key]))
+        rounded = rendered(expected, key)
+        tolerance = abs(expected) / 10**9 + 8 * Fraction(math.ulp(rounded))
+        return abs(supplied - expected) <= tolerance
+
+    try:
+        unknown = set(spec) - allowed
+        if unknown:
+            raise ValueError("Unsupported rigid strip inputs: " + ", ".join(sorted(unknown)))
+        if spec.get("calculation", calculation) != calculation:
+            raise ValueError("Expected calculation=rigid_strip_contact")
+        if spec.get("pressure_model", "positive_part_affine") != "positive_part_affine":
+            raise ValueError("Only pressure_model=positive_part_affine is represented")
+        b, normal, moment = (
+            Fraction(_strip_quantity(spec[key], key, units[key]))
+            for key in ("base_width_m", "vertical_resultant_N_m", "moment_Nm_m")
+        )
+        if b <= 0:
+            raise ValueError("base_width_m must be positive")
+        if normal < 0 or (normal == 0 and moment != 0):
+            return {**out, "equilibrium_status": "no_finite_equilibrium",
+                    "reason": "Nonnegative contact pressure cannot supply this normal force and moment"}
+        half = b / 2
+        if normal > 0 and abs(moment) >= normal * half:
+            return {**out, "equilibrium_status": "no_finite_equilibrium",
+                    "reason": "The resultant is at or beyond a base edge; no finite contact pressure equilibrates it"}
+
+        if normal == 0:
+            regime = "unloaded"
+            width = eccentricity = interval = None
+            q_left = q_right = Fraction(0)
+            contact_pressures = [Fraction(0), Fraction(0)]
+            integrated_force = integrated_moment = Fraction(0)
+        else:
+            eccentricity = moment / normal
+            if 6 * abs(moment) <= normal * b:
+                regime = "full_contact"
+                width = b
+                left, right = -half, half
+                q_left = normal / b - 6 * moment / b**2
+                q_right = normal / b + 6 * moment / b**2
+                contact_pressures = [q_left, q_right]
+            else:
+                regime = "partial_contact"
+                width = 3 * (half - abs(eccentricity))
+                peak = 2 * normal / width
+                if moment > 0:
+                    left, right = half - width, half
+                    q_left, q_right = Fraction(0), peak
+                    contact_pressures = [Fraction(0), peak]
+                else:
+                    left, right = -half, -half + width
+                    q_left, q_right = peak, Fraction(0)
+                    contact_pressures = [peak, Fraction(0)]
+            interval = [left, right]
+            pa, pb = contact_pressures
+            # Integrate the actual returned affine segment independently of
+            # the inverse formulas. Keep regime decisions on the parsed data
+            # exact: a rounded M/N can otherwise hide a valid narrow contact.
+            integrated_force = width * (pa + pb) / 2
+            integrated_moment = width * ((2 * left + right) * pa
+                                         + (left + 2 * right) * pb) / 6
+            if integrated_force != normal or integrated_moment != moment:
+                raise ArithmeticError("Contact pressure does not satisfy both equilibrium integrals")
+
+        exact = {
+            "contact_width_m": width, "eccentricity_m": eccentricity,
+            "q_min_Pa": min(q_left, q_right), "q_max_Pa": max(q_left, q_right),
+            "q_left_Pa": q_left, "q_right_Pa": q_right,
+        }
+        coordinates = None if interval is None else [
+            rendered(value, "contact_interval_m") for value in interval
+        ]
+        if coordinates is not None and coordinates[0] >= coordinates[1]:
+            raise ValueError("Contact interval is unresolved in the numeric output precision")
+        out.update({
+            "ok": True, "equilibrium_status": "finite",
+            "pressure_model": "positive_part_affine", "contact_regime": regime,
+            "base_width_m": rendered(b, "base_width_m"),
+            "vertical_resultant_N_m": rendered(normal, "vertical_resultant_N_m"),
+            "moment_Nm_m": rendered(moment, "moment_Nm_m"),
+            **{key: rendered(value, key) for key, value in exact.items()},
+            "contact_interval_m": coordinates,
+            "contact_edge_pressure_Pa": [
+                rendered(value, "contact_edge_pressure_Pa") for value in contact_pressures
+            ],
+            "integrated_vertical_resultant_N_m": rendered(integrated_force, "integrated_vertical_resultant_N_m"),
+            "integrated_moment_Nm_m": rendered(integrated_moment, "integrated_moment_Nm_m"),
+            "force_residual_N_m": 0.0, "moment_residual_Nm_m": 0.0,
+        })
+
+        output_geometry_verified = True
+        if coordinates is not None:
+            a, z = map(Fraction, coordinates)
+            pa, pz = map(Fraction, out["contact_edge_pressure_Pa"])
+            displayed_force = (z-a)*(pa+pz)/2
+            displayed_moment = (z-a)*((2*a+z)*pa+(a+2*z)*pz)/6
+            force_error = abs(displayed_force-normal)
+            moment_error = abs(displayed_moment-moment)
+            output_geometry_verified = (
+                force_error <= abs(normal)/10**9
+                and moment_error <= abs(normal*b)/10**9
+            )
+            out["displayed_force_residual_N_m"] = rendered(displayed_force-normal, "displayed_force_residual_N_m")
+            out["displayed_moment_residual_Nm_m"] = rendered(displayed_moment-moment, "displayed_moment_residual_Nm_m")
+        out["output_geometry_verified"] = output_geometry_verified
+        checks = {}
+        for key in scalars:
+            proposed = "proposed_" + key
+            if proposed in spec:
+                checks[proposed] = claim_matches(spec[proposed], exact[key], key)
+        if "proposed_contact_interval_m" in spec:
+            value = spec["proposed_contact_interval_m"]
+            if interval is None:
+                checks["proposed_contact_interval_m"] = value is None
+            else:
+                checks["proposed_contact_interval_m"] = (
+                    isinstance(value, (list, tuple)) and len(value) == 2
+                    and all(claim_matches(v, expected, "contact_width_m")
+                            for v, expected in zip(value, interval))
+                )
+        if "proposed_contact_regime" in spec:
+            checks["proposed_contact_regime"] = spec["proposed_contact_regime"] == regime
+        out["claim_checks"] = checks
+        out["conservation_verified"] = output_geometry_verified and all(checks.values())
+        return out
+    except (KeyError, TypeError, ValueError, ArithmeticError, SyntaxError) as exc:
+        return {"ok": False, "calculation": calculation,
+                "conservation_verified": False, "reason": str(exc)}

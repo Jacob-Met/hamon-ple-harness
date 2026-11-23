@@ -59,6 +59,8 @@ for its sign. The displayed ratio uses the solver’s working precision and is
 rounded to binary64. It can read 1.0 on either side of the limit. Error in the
 reported force relative to the exact equilibrium solution is outside this comparison.
 
+The [rigid strip contact solver](docs/rigid_strip_contact.md) computes full or partial compression-only base contact from a signed force and moment. It is distinct from soil bearing capacity.
+
 ## Files
 
 | File | Purpose |
