@@ -803,14 +803,26 @@ def _rlc_overdamped_modes(r, l, c, vs, v0, i0, time_):
         return float(voltage), float(current_end)
 
 
-def _rlc_analytic_state(alpha, omega, impedance, vs, v0, i0, time_, r, l, c):
+def _rlc_scales(r, l, c):
+    """Use the same physical component values as the independent matrix reference."""
+    rd, ld, cd = (Decimal(str(value)) for value in (r, l, c))
+    resistance, inductance, capacitance = map(Fraction, (rd, ld, cd))
+    discriminant = resistance**2 * capacitance - 4 * inductance
+    with localcontext() as context:
+        context.prec = 50
+        alpha = float(rd / (2 * ld))
+        omega = float(1 / (ld * cd).sqrt())
+        impedance = float((ld / cd).sqrt())
+        if discriminant == 0:
+            return alpha, omega, impedance, "critically_damped", 0.0
+        squared_rate = abs(discriminant) / (4 * inductance**2 * capacitance)
+        rate = (Decimal(squared_rate.numerator) / Decimal(squared_rate.denominator)).sqrt()
+    regime = "overdamped" if discriminant > 0 else "underdamped"
+    return alpha, omega, impedance, regime, float(rate)
+
+
+def _rlc_analytic_state(alpha, omega, impedance, vs, v0, i0, time_, r, l, c, regime, modal_rate):
     """Stable modal propagator; voltage and impedance-scaled current."""
-    if alpha == omega:
-        regime = "critically_damped"
-    elif alpha < omega:
-        regime = "underdamped"
-    else:
-        regime = "overdamped"
     if time_ == 0 or (v0 == vs and i0 == 0):
         return v0, i0, regime
     wt, at = omega * time_, alpha * time_
@@ -836,7 +848,7 @@ def _rlc_analytic_state(alpha, omega, impedance, vs, v0, i0, time_, r, l, c):
             endpoint = _rlc_overdamped_modes(r, l, c, vs, v0, i0, time_)
             if endpoint is not None:
                 return endpoint[0], endpoint[1], regime
-        beta = math.sqrt(alpha - omega) * math.sqrt(alpha + omega)
+        beta = modal_rate
         denominator = alpha + beta
         slow = -omega * (omega / denominator)
         fast = -denominator
@@ -859,8 +871,7 @@ def _rlc_analytic_state(alpha, omega, impedance, vs, v0, i0, time_, r, l, c):
             cosine = decay
             source_gain = -math.expm1(-alpha * time_) - alpha * k
         else:
-            frequency = math.sqrt(omega - alpha) * math.sqrt(omega + alpha)
-            phase = frequency * time_
+            phase = modal_rate * time_
             if not math.isfinite(phase):
                 raise ValueError("RLC oscillation phase exceeds the supported finite range")
             sinc = math.sin(phase) / phase if phase else 1.0
@@ -885,11 +896,7 @@ def _solve_rlc_transient(params):
         raise ValueError("RLC parameters must be finite")
     if r < 0 or l <= 0 or c <= 0 or time_ < 0:
         raise ValueError("Passive RLC requires R >= 0, L > 0, C > 0 and t >= 0")
-    alpha = (0.5 * r) / l
-    lc = l * c
-    omega = (1.0 / math.sqrt(lc) if math.isfinite(lc) and lc > 0
-             else (1.0 / math.sqrt(l)) / math.sqrt(c))
-    impedance = math.sqrt(l) / math.sqrt(c)
+    alpha, omega, impedance, regime, modal_rate = _rlc_scales(r, l, c)
     if not all(math.isfinite(value) and value > 0 for value in (omega, impedance)):
         raise ValueError("RLC natural scales exceed the supported finite range")
     if not math.isfinite(alpha) or not math.isfinite(alpha / omega):
@@ -897,7 +904,7 @@ def _solve_rlc_transient(params):
     if not math.isfinite(v0 - vs) or not math.isfinite(i0 * impedance):
         raise ValueError("RLC initial state exceeds the supported finite range")
     voltage, current, regime = _rlc_analytic_state(
-        alpha, omega, impedance, vs, v0, i0, time_, r, l, c)
+        alpha, omega, impedance, vs, v0, i0, time_, r, l, c, regime, modal_rate)
     if not math.isfinite(voltage) or not math.isfinite(current):
         raise ValueError("RLC solution exceeds the supported finite range")
     decayed = regime == "overdamped" and (abs(voltage) < abs(v0) or abs(current) < abs(i0))
@@ -928,9 +935,8 @@ def _solve_rlc_transient(params):
     residual = max(abs(voltage - reference_v) / voltage_scale,
                    abs(current - reference_i) / current_scale)
     zeta = alpha / omega
-    if alpha < omega:
-        frequency = math.sqrt(omega - alpha) * math.sqrt(omega + alpha)
-        overshoot = 100.0 * math.exp(-math.pi * alpha / frequency)
+    if regime == "underdamped" and modal_rate:
+        overshoot = 100.0 * math.exp(-math.pi * (alpha / modal_rate))
     else:
         overshoot = 0.0
     return {
