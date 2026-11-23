@@ -329,6 +329,8 @@ async def provision_engineering_cli(session: Any) -> str:
         "\nRead exact native EAGLE pin, package pad and net mappings. Inspect board_comparison.agreement and mismatches when a layout is supplied."
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-eagle-connectivity SCHEMATIC.pdf --page 1"
         "\nRead page-local wire-group and supply-glyph evidence. Device pins and cross-sheet connectivity require independent evidence."
+        "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-bom-sheet DRAWING.pdf --equipment LABEL --part-id MODEL --title SHEET_TITLE"
+        "\nRead the BOM row, printed destination title block and part callout from the returned page boxes."
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-detail-links DRAWING.pdf [--target-sheet S4]"
         "\nFollow the printed sheet/detail evidence. sheet_only locates the sheet; inspect the target graphic before using it."
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-window DRAWING.pdf --page 1 --output /tmp/drawing-window.png"

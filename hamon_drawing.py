@@ -2485,8 +2485,7 @@ def _resolve_rendered_stacked(result, target, source, directory):
                 ref["status"]="candidate_detail"
 
 
-def detail_links(filename, target_sheet=None):
-    """Document-wide native text index. All boxes refer to Poppler crop-box text coordinates."""
+def _drawing_document(filename, directory):
     source = pathlib.Path(filename)
     with source.open("rb") as stream:
         data = stream.read(50_000_001)
@@ -2496,29 +2495,35 @@ def detail_links(filename, target_sheet=None):
     if not exe:
         raise RuntimeError("pdftotext required (Poppler)")
     # Hash and extract precisely the same bytes even if the supplied path changes.
+    frozen = pathlib.Path(directory) / "source.pdf"
+    layout = frozen.with_suffix(".xml")
+    frozen.write_bytes(data)
+    total, _ = _page_geometry(frozen, 1, 1)
+    if not 1 <= total <= 256:
+        raise ValueError("document-wide detail index supports at most 256 pages")
+    extract = subprocess.run([exe, "-cropbox", "-bbox-layout", str(frozen), str(layout)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=45)
+    if extract.returncode:
+        raise ValueError("pdftotext failed to extract the document's native sheet text")
+    if layout.stat().st_size > 64_000_000:
+        raise ValueError("PDF native text layout exceeds 64 MB")
+    pages = _poppler_text_xml(layout.read_bytes()).findall(".//{*}page")
+    if len(pages) != total:
+        raise ValueError("incomplete native page index")
+    rows = [_drawing_text_lines(page, n) for n, page in enumerate(pages, 1)]
+    return frozen, hashlib.sha256(data).hexdigest(), rows
+
+
+def detail_links(filename, target_sheet=None):
+    """Document-wide native text index. All boxes refer to Poppler crop-box text coordinates."""
     with tempfile.TemporaryDirectory(prefix="hamon-detail-") as directory:
-        frozen = pathlib.Path(directory) / "source.pdf"
-        layout = frozen.with_suffix(".xml")
-        frozen.write_bytes(data)
-        total, _ = _page_geometry(frozen, 1, 1)
-        if not 1 <= total <= 256:
-            raise ValueError("document-wide detail index supports at most 256 pages")
-        extract = subprocess.run([exe, "-cropbox", "-bbox-layout", str(frozen), str(layout)],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=45)
-        if extract.returncode:
-            raise ValueError("pdftotext failed to extract the document's native sheet text")
-        if layout.stat().st_size > 64_000_000:
-            raise ValueError("PDF native text layout exceeds 64 MB")
-        pages = _poppler_text_xml(layout.read_bytes()).findall(".//{*}page")
-        if len(pages) != total:
-            raise ValueError("incomplete native page index")
-        rows = [_drawing_text_lines(page, n) for n, page in enumerate(pages, 1)]
+        frozen, digest, rows = _drawing_document(filename, directory)
         result = _detail_graph(rows)
         if target_sheet is not None:
             _resolve_ruled_captions(result, rows, target_sheet.upper(), frozen, directory)
             _resolve_rendered_stacked(result, target_sheet.upper(), frozen, directory)
-    result.update(kind="pdf-detail-links", source_sha256=hashlib.sha256(data).hexdigest(),
-                  page_count=total, coordinate_frame="Poppler pdftotext -cropbox -bbox-layout",
+    result.update(kind="pdf-detail-links", source_sha256=digest,
+                  page_count=len(rows), coordinate_frame="Poppler pdftotext -cropbox -bbox-layout",
                   coverage="Native-text headings and numbered vector captions are indexed. A selected target sheet may also include verified split source symbols and OCR-nominated caption boxes. Inspect optical candidates against the printed detail before use.")
     if target_sheet is not None:
         target = target_sheet.upper()
@@ -2527,4 +2532,123 @@ def detail_links(filename, target_sheet=None):
         result["references"] = selected
         result["sheets"] = {s: pages for s, pages in result["sheets"].items() if s in needed}
         result["target_sheet_filter"] = target
+    return result
+
+
+def _bom_titleblocks(rows):
+    """Pair printed SHEET NAME and SHEET NUMBER labels within one title-block column."""
+    def center(row):
+        return (row["box"][0] + row["box"][2]) / 2
+
+    def below(label, row, heights):
+        left, top, right, bottom = label["box"]
+        height = bottom - top
+        return (bottom <= row["box"][1] <= bottom + heights * height and
+                abs(center(row) - center(label)) <= max(right - left, 3 * height))
+
+    blocks = []
+    for number in (r for r in rows if r["text"].upper() == "SHEET NUMBER"):
+        values = [r for r in rows if re.fullmatch(_SHEET_ID, r["text"], re.I) and below(number, r, 4)]
+        for name in (r for r in rows if r["text"].upper() == "SHEET NAME" and below(r, number, 18)):
+            end = min((r["box"][1] for r in rows if r["text"].upper() == "SHEET SIZE" and
+                       below(name, r, 12)), default=number["box"][1])
+            lines = sorted((r for r in rows if below(name, r, 6) and r["box"][1] < end),
+                           key=lambda r: (r["box"][1], r["box"][0]))
+            for value in values:
+                blocks.append({"title": " ".join(r["text"] for r in lines).upper(),
+                               "sheet": value["text"].upper(), "page": number["page"],
+                               "evidence": [name, *lines, number, value]})
+    return blocks
+
+
+def _bom_rows(rows, equipment, part):
+    """Bind the requested item, quantity and identifier to the same printed schedule row."""
+    def midpoint(row, axis):
+        return (row["box"][axis] + row["box"][axis + 2]) / 2
+
+    def height(row):
+        return row["box"][3] - row["box"][1]
+
+    def same_band(row, reference, tolerance):
+        return abs(midpoint(row, 1) - midpoint(reference, 1)) <= tolerance * height(reference)
+
+    def exact(label):
+        return [row for row in rows if row["text"].upper() == label]
+
+    matches = []
+    for heading in exact("BILL OF MATERIALS"):
+        for qty in exact("QTY"):
+            if not 0 <= qty["box"][1] - heading["box"][3] <= 2 * height(heading):
+                continue
+            items = [r for r in exact("EQUIPMENT") if same_band(r, qty, 0.5) and
+                     r["box"][2] < qty["box"][0]]
+            descriptions = [r for r in exact("DESCRIPTION") if same_band(r, qty, 0.5) and
+                            r["box"][0] > qty["box"][2]]
+            if len(items) != 1 or len(descriptions) != 1:
+                continue
+            item = items[0]
+            if not item["box"][0] <= midpoint(heading, 0) <= descriptions[0]["box"][2]:
+                continue
+            item_width = item["box"][2] - item["box"][0]
+            for source in exact(equipment):
+                if (source["box"][1] <= qty["box"][3] or source["box"][2] >= qty["box"][0] or
+                        not source["box"][0] <= midpoint(item, 0) <= source["box"][2] + item_width):
+                    continue
+                quantities = [r for r in rows if re.fullmatch(r"[1-9]\d*", r["text"]) and
+                              qty["box"][0] <= midpoint(r, 0) <= qty["box"][2] and same_band(r, source, 0.55)]
+                description = [r for r in rows if part.search(r["text"]) and
+                               qty["box"][2] <= r["box"][0] <= descriptions[0]["box"][2] and
+                               same_band(r, source, 1.05)]
+                if len(quantities) == len(description) == 1:
+                    matches.append({"page": source["page"], "equipment": source,
+                                    "quantity": quantities[0], "description": description[0],
+                                    "headers": [heading, item, qty, descriptions[0]]})
+    return matches
+
+
+def bom_sheet(filename, equipment, part_id, title):
+    """Find a BOM component on a uniquely titled sheet that actually prints its part ID."""
+    equipment = " ".join(equipment.upper().split())
+    title = " ".join(title.upper().split())
+    if not equipment or not title or not re.fullmatch(r"(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9][A-Za-z0-9./_-]{2,79}", part_id):
+        raise ValueError("Provide the printed equipment label, alphanumeric part ID and destination sheet title")
+    part = re.compile(r"(?<![\w./-])" + re.escape(part_id) + r"(?![\w./-])", re.I)
+    with tempfile.TemporaryDirectory(prefix="hamon-bom-") as directory:
+        _, digest, pages = _drawing_document(filename, directory)
+    sources = [r for rows in pages for r in _bom_rows(rows, equipment, part)]
+    by_page = [_bom_titleblocks(rows) for rows in pages]
+    blocks = [b for group in by_page for b in group]
+    sheet_ids = [set(_sheet_stamps(rows)) | {b["sheet"] for b in group}
+                 for rows, group in zip(pages, by_page)]
+    result = {"kind": "pdf-bom-sheet", "source_sha256": digest, "page_count": len(pages),
+              "equipment": equipment, "part_id": part_id, "requested_title": title,
+              "coordinate_frame": "Poppler pdftotext -cropbox -bbox-layout",
+              "source_rows": sources, "destination": None}
+    if len(sources) != 1:
+        result["status"] = "ambiguous_bom_row" if sources else "bom_row_not_found"
+        return result
+    source_page = sources[0]["page"]
+    origins = by_page[source_page - 1]
+    if len(origins) != 1 or len(sheet_ids[source_page - 1]) != 1:
+        result["status"] = "ambiguous_source_sheet" if origins else "source_sheet_not_found"
+        return result
+    result["source_sheet"] = origins[0]
+    if sum(origins[0]["sheet"] in ids for ids in sheet_ids) != 1:
+        result["status"] = "ambiguous_source_sheet"
+        return result
+    titles = [b for b in blocks if b["title"] == title and b["page"] != source_page]
+    if not titles:
+        result["status"] = "destination_title_not_found"
+        return result
+    chosen = titles[0]
+    if (len(titles) != 1 or len(by_page[chosen["page"] - 1]) != 1 or
+            len(sheet_ids[chosen["page"] - 1]) != 1 or
+            sum(chosen["sheet"] in ids for ids in sheet_ids) != 1):
+        result["status"] = "ambiguous_destination"
+        return result
+    witnesses = [r for r in pages[chosen["page"] - 1] if part.search(r["text"])]
+    if not witnesses:
+        result["status"] = "part_not_on_destination"
+        return result
+    result.update(status="resolved", destination=dict(chosen, part_witnesses=witnesses))
     return result
