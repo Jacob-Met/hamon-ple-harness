@@ -1159,6 +1159,9 @@ def _heat_exchanger_balance(spec: Dict[str, Any], rtol: float) -> Dict[str, Any]
 
 
 def verify_thermal_fluid_chemical_balance(spec: Dict[str, Any]) -> Dict[str, Any]:
+    if spec.get("calculation") == "pump_operating_point":
+        from hamon_pipe_network import verify_pump_operating_point
+        return verify_pump_operating_point(spec)
     if spec.get("calculation") == "pump_duty":
         from hamon_pipe_network import verify_pump_duty
         return verify_pump_duty(spec)
@@ -1286,7 +1289,7 @@ def run_router_conservation_cad_verifier(payload: Dict[str, Any]) -> Dict[str, A
     fname = str(spec.get("filename") or spec.get("path") or "").lower()
     if mode == "auto":
         if spec.get("step_text") or fname.endswith((".step", ".stp", ".p21")): mode = "step_cad"
-        elif spec.get("calculation") in ("euler_rotor", "pump_duty"): mode = "thermal_fluid"
+        elif spec.get("calculation") in ("euler_rotor", "pump_duty", "pump_operating_point"): mode = "thermal_fluid"
         elif spec.get("calculation") == "pipe_network" or ("nodes" in spec and "pipes" in spec): mode = "thermal_fluid"
         elif spec.get("calculation") in ("ac_power_flow", "symmetrical_fault"): mode = "circuit"
         elif spec.get("netlist") or spec.get("branches") or fname.endswith((".cir", ".sp", ".spice", ".net")): mode = "circuit"
