@@ -69,8 +69,8 @@ class ConversionChains(TestCase):
             ("G", None, 7), ("H", 'CONVERT(G1,"m","kg")', 7), ("I", 'CONVERT(H1,"kg","g")', 7000)])
         for address in ("A1", "B1", "C1", "F1"):
             self.assertEqual(result[address]["reason"], "cyclic_reference")
-        self.assertEqual((counts["dimension_mismatch"], counts["unverified"]), (1, 6))
-        self.assertEqual(result["E1"]["reason"], "unsupported_or_missing_dependency")
+        self.assertEqual((counts["dimension_mismatch"], counts["unverified"]), (1, 5))
+        self.assertEqual((result["E1"]["status"], result["E1"]["expected"]), ("matched", 4000))
         self.assertEqual(result["I1"]["status"], "unverified")
 
     def test_array_result_region_cannot_supply_formula(self):

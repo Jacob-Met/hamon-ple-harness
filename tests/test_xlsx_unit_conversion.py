@@ -44,7 +44,7 @@ class UnitConversionTests(TestCase):
                              ("Field's Data", "A1", 1, 25.4))
             self.assertFalse(audit_local_deliverable(str(path))["ok"])
 
-    def test_derived_external_unknown_and_missing_cache_are_unverified(self):
+    def test_arithmetic_is_reconstructed_while_other_dependencies_stay_unverified(self):
         sheet = "'Field''s Data'!"
         with TemporaryDirectory() as directory:
             path = Path(directory) / "unknown.xlsx"
@@ -57,5 +57,5 @@ class UnitConversionTests(TestCase):
                 (f'CONVERT({sheet}XFE1,"mm","in")', 999),
                 (f'CONVERT({sheet}A1+1,"mm","in")', 999)])
             counts = xlsx_audit(str(path))["conversion_audit"]["counts"]
-            self.assertEqual(counts, dict(matched=0, mismatch=0, dimension_mismatch=0, unverified=7))
-            self.assertTrue(audit_local_deliverable(str(path))["ok"])
+            self.assertEqual(counts, dict(matched=0, mismatch=2, dimension_mismatch=0, unverified=5))
+            self.assertFalse(audit_local_deliverable(str(path))["ok"])
