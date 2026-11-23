@@ -245,10 +245,23 @@ def regular(path):
             return False
     return True
 
-def scan_file(p, root_members):
+def scan_file(p, root_members, observe_loose_baseline=False):
     try:
         if not p.is_file():
-            return {"state":"missing"}
+            row = {"state":"missing"}
+            if observe_loose_baseline and root_members:
+                try:
+                    p.lstat()
+                except FileNotFoundError:
+                    for name in root_members:
+                        try:
+                            (p.parent / name).lstat()
+                        except FileNotFoundError:
+                            continue
+                        break
+                    else:
+                        row["loose_members_initially_absent"] = True
+            return row
         st = p.stat()
         if st.st_size == 0:
             return {"state":"empty"}
@@ -344,7 +357,7 @@ for item in targets[:24]:
     elif kind == "dir":
         result[path] = scan_dir(p)
     else:
-        result[path] = scan_file(p, item.get("root_members"))
+        result[path] = scan_file(p, item.get("root_members"), item.get("observe_loose_baseline", False))
 print(json.dumps(result,separators=(",",":")))
 '''
 
