@@ -1917,26 +1917,43 @@ def _seg_aabb_dist_3d_dual(
 
 
 def solve_continuous_beam_2span_dual(spec: dict[str, Any]) -> dict[str, Any]:
-    """Cross-check three-moment statics against two prismatic Hermite beam elements."""
+    """Cross-check three-moment statics against two prismatic Hermite elements.
+
+    Set span_EI to [EI_AB, EI_BC] in N m² (numbers in SI or unit expressions).
+    Without span_EI, the common E and I retain their usual values and defaults.
+    """
     # JSON numbers are coherent SI. An expression carries its own units.
-    def read_si(field: str, unit: str, default: str | None = None) -> Fraction:
-        value = spec[field] if default is None else spec.get(field, default)
+    def read_si(value: Any, field: str, unit: str) -> Fraction:
         quantity = eval_quantity(str(value))
         if type(value) not in (int, float) and quantity.dim != eval_quantity(unit).dim:
             raise ValueError(f"{field} must have units compatible with {unit}, got {quantity.dim_list()}")
         return Fraction(quantity.val)
 
-    L1 = read_si("span1", "m")
-    L2 = read_si("span2", "m")
-    q1 = read_si("udl1", "N/m", "0*N/m")
-    q2 = read_si("udl2", "N/m", "0*N/m")
-    E = read_si("E", "Pa", "200*GPa")
-    I = read_si("I", "m**4", "1e-4*m**4")
-    if min(L1, L2, E, I) <= 0:
-        raise ValueError("two-span beam requires positive span lengths, modulus and inertia")
+    L1 = read_si(spec["span1"], "span1", "m")
+    L2 = read_si(spec["span2"], "span2", "m")
+    q1 = read_si(spec.get("udl1", "0*N/m"), "udl1", "N/m")
+    q2 = read_si(spec.get("udl2", "0*N/m"), "udl2", "N/m")
+    if min(L1, L2) <= 0:
+        raise ValueError("two-span beam requires positive span lengths")
+
+    if "span_EI" in spec:
+        values = spec["span_EI"]
+        if "E" in spec or "I" in spec:
+            raise ValueError("specify span_EI or the common E and I, not both")
+        if not isinstance(values, list) or len(values) != 2:
+            raise ValueError("span_EI requires two flexural rigidities in span order")
+        rigidities = tuple(read_si(v, f"span_EI[{i}]", "N*m**2") for i, v in enumerate(values))
+        if min(rigidities) <= 0:
+            raise ValueError("span_EI requires two positive flexural rigidities")
+    else:
+        E = read_si(spec.get("E", "200*GPa"), "E", "Pa")
+        I = read_si(spec.get("I", "1e-4*m**4"), "I", "m**4")
+        if min(E, I) <= 0:
+            raise ValueError("two-span beam requires positive modulus and inertia")
+        rigidities = (E * I, E * I)
 
     from hamon_two_span_beam import two_span_beam
-    return two_span_beam(L1, L2, q1, q2, E * I, spec.get("support_conditions", {}))
+    return two_span_beam(L1, L2, q1, q2, rigidities, spec.get("support_conditions", {}))
 
 
 def solve_bolt_group_eccentric_dual(spec: dict[str, Any]) -> dict[str, Any]:
