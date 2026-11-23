@@ -143,15 +143,13 @@ def main():
         require(all(x["wires"] == y["wires"] for x, y in zip(one["pages"], baseline["pages"]))
                 and len(set(one["document_wire_groups"][0])) > len(set(baseline["document_wire_groups"][0])),
                 "Erasing one physical junction did not split its incident wires")
-        before, after = baseline["document_wire_groups"][0], one["document_wire_groups"][0]
-        lost, gained = set(), set()
-        for i in range(len(before)):
-            for j in range(i):
-                if (before[i] == before[j]) != (after[i] == after[j]):
-                    (lost if before[i] == before[j] else gained).add((i, j))
-        require(lost == {(i, j) for i in (12, 13, 14) for j in (9, 10, 11)} | {(14, 12), (14, 13)}
-                and not gained and one["pages"][1]["wire_groups"] == baseline["pages"][1]["wire_groups"],
-                "Single junction deletion changed unexpected wire pairs")
+        expected = sum(baseline["document_wire_groups"], [])
+        for i in (9, 10, 11):
+            expected[i] = -1
+        for i in (12, 13):
+            expected[i] = -2
+        require(partition(sum(one["document_wire_groups"], [])) == partition(expected),
+                "Deleting the junction must detach only the three- and two-wire branches from +5V")
         require(controls["erase_terminal_mark"]["document_wire_groups"] == baseline["document_wire_groups"],
                 "Erasing a mark at a single wire end changed membership")
         require(erased["document_wire_groups"] is None and extra["document_wire_groups"] is None,
@@ -172,13 +170,12 @@ def main():
             require(all(a["wires"] == b["wires"] for a, b in zip(changed["pages"], baseline["pages"]))
                     and index not in anchors.get(name, []) and "JTAG" not in anchors
                     and anchors["JTAG_TCK"] == [231], f"{edit} retained the erased evidence or joined a prefix")
-            old = sum(baseline["document_wire_groups"], [])
-            new = sum(changed["document_wire_groups"], [])
-            by_group = defaultdict(set)
-            for before, after in zip(old, new, strict=True):
-                by_group[after].add(before)
-            require(all(len(previous) == 1 for previous in by_group.values())
-                    and len(set(new)) > len(set(old)), f"{edit} failed to withdraw precisely supported connectivity")
+            expected = sum(baseline["document_wire_groups"], [])
+            separated = range(195, 202) if edit == "erase_voltage_stroke" else [230]
+            for wire in separated:
+                expected[wire] = -1
+            require(partition(sum(changed["document_wire_groups"], [])) == partition(expected),
+                    f"{edit} changed an unrelated pair or retained the erased witness")
     require(sha256(args.vendor_archive.read_bytes()).hexdigest() == ARCHIVE_SHA, "Unexpected CAD archive")
     with ZipFile(args.vendor_archive) as archive:
         cad = archive.read("A000056-cad-files/DUE_V02g.sch")

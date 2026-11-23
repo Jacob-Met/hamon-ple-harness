@@ -1020,7 +1020,7 @@ def page_connectivity(filename, page=1):
         if evidence:
             wires, membership, profile, marks, anchors = evidence
             return {**result, "status": "candidate_evidence", "wires": wires, "wire_groups": membership,
-                    "scope": "Page-local grid wires and witnessed junctions. Outlined labels and device pins remain unresolved.",
+                    "scope": "Page-local grid wires, witnessed junctions, and registered outlined signal and supply names. Device pins require separate evidence.",
                     "junction_grid": profile, "group_count": len(set(membership)), "supply_glyphs": marks,
                     "wire_end_label_witnesses": [], "printed_equivalence_anchors": anchors}
         return {**result, "status": "unresolved_profile", "wire_groups": None}
