@@ -2067,6 +2067,9 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
                 concentration *= Fraction(t0_k)/Fraction(inlet_t)
             return _constant_rate_pfr(params, concentration, f_a0, v0, order_n,
                                       k_at_temp(inlet_t), inlet_t, heat_rise)
+        from hamon_pfr_trajectory import solve_variable_rate_pfr
+        return solve_variable_rate_pfr(params, c_a0, f_a0, v0, order_n, inlet_t,
+                                       heat_rise, eps_a, gas_phase, t0_k)
 
     elif reactor_type not in ("cstr", "cstr_series"):
         raise ValueError(f"Unsupported reactor_type: {reactor_type}")
@@ -2083,9 +2086,6 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
             return 0.0
         if reactor_type == "cstr":
             return f_a0 * x_conv / rate_minus_ra(x_conv)
-        if reactor_type == "pfr":
-            val, _ = integrate.quad(lambda xi: f_a0 / rate_minus_ra(xi), 0.0, x_conv, epsabs=1e-12, epsrel=1e-12, limit=200)
-            return float(val)
         raise ValueError(f"Unsupported reactor_type: {reactor_type}")
 
     cstr_branches = None
@@ -2183,31 +2183,6 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
             if type(branch) is not int or not 0 <= branch < len(cstr_branches):
                 raise ValueError("steady_state_branch must be 'all' or a valid ascending zero-based branch index")
             x_out = cstr_branches[branch]["conversion_X"]
-        elif vol_m3 <= 0.0:
-            x_out = 0.0
-        else:
-            fn_v = lambda x: volume_for_conversion(x) - vol_m3
-            limit = Fraction(1)
-            if heat_rise < 0:
-                limit = min(limit, -Fraction(inlet_t)/Fraction(heat_rise))
-            if eps_a < 0:
-                limit = min(limit, -1/Fraction(eps_a))
-            # Search only through the actual physical domain. A temperature
-            # or expansion singularity beyond the outlet is not traversed.
-            largest = float(limit)
-            closed = (limit == 1 and order_n == 0 and 1+Fraction(eps_a) > 0 and
-                      Fraction(inlet_t)+Fraction(heat_rise) > 0)
-            if not closed and Fraction(largest) >= limit:
-                largest = math.nextafter(largest, 0.)
-            gap = float(limit)
-            for _ in range(60):
-                gap *= .5
-                x_hi = min(float(limit)-gap, largest)
-                if fn_v(x_hi) >= 0.0:
-                    break
-                if x_hi == largest:
-                    raise ValueError("no representable PFR outlet in the physical integration interval")
-            x_out = float(optimize.brentq(fn_v, 0.0, x_hi, xtol=1e-13, rtol=1e-13))
         if cstr_branches is not None:
             residual = cstr_branches[branch]["residual"]
         else:
