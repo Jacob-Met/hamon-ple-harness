@@ -128,5 +128,40 @@ class StepSolidRootTests(unittest.TestCase):
             self.verify(combined)
 
 
+
+    def test_explicit_mixed_and_boolean_construction_cannot_be_partially_certified(self):
+        original = model()
+        solid = int(re.search(r"#(\d+)=MANIFOLD_SOLID_BREP", original)[1])
+        records = ["#900001=CARTESIAN_POINT('',(20.,0.,0.));",
+                   "#900002=AXIS2_PLACEMENT_3D('',#900001,$,$);",
+                   "#900003=BLOCK('',#900002,1.,1.,1.);",
+                   "#900004=CSG_SOLID('second',#900003);",
+                   "#900005=(GEOMETRIC_REPRESENTATION_CONTEXT(3)REPRESENTATION_CONTEXT('','3D'));",
+                   f"#900006=SHAPE_REPRESENTATION('mixed',(#{solid},#900004),#900005);"]
+        mixed = add_records(original, records)
+        self.assert_withheld(mixed)
+        self.assert_properties(self.verify(mixed, solid_entity_id=solid), self.verify(original))
+        boolean = ["#1=CARTESIAN_POINT('',(0.,0.,0.));",
+                   "#2=AXIS2_PLACEMENT_3D('',#1,$,$);",
+                   "#3=BLOCK('',#2,2.,2.,2.);", "#4=BLOCK('',#2,1.,1.,1.);",
+                   "#5=BOOLEAN_RESULT(.DIFFERENCE.,#3,#4);", "#6=CSG_SOLID('',#5);"]
+        self.assert_withheld("ISO-10303-21;DATA;" + "".join(boolean) + "ENDSEC;END-ISO-10303-21;")
+
+    def test_every_selected_reference_and_surface_sense_must_be_valid(self):
+        original = model()
+        edge = prism_step([(0., 0.), (2., 0.), (2., 2.), (0., 2.)], height=2., edge_loops=True)
+        cases = [
+            re.sub(r"(FACE_SURFACE\('',\([^()]*)(\),)", r"\1,$\2", original, count=1),
+            re.sub(r"(POLY_LOOP\('',\([^()]*)(\)\);)", r"\1,$\2", original, count=1),
+            re.sub(r"(EDGE_LOOP\('',\([^()]*)(\)\);)", r"\1,$\2", edge, count=1),
+            re.sub(r"(FACE_SURFACE\([^;\n]+),\.T\.\);", r"\1,.U.);", original, count=1),
+            re.sub(r"ADVANCED_FACE\('',\(([^()]*)\),#\d+,\.T\.\)",
+                   r"FACE('',(\1))", edge),
+        ]
+        for index, text in enumerate(cases):
+            with self.subTest(case=index):
+                self.assert_withheld(text)
+
+
 if __name__ == "__main__":
     unittest.main()

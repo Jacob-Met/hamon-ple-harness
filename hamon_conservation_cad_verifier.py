@@ -754,10 +754,35 @@ def _step_face_region(boundaries):
     return vertices, np.asarray(faces, dtype=np.int32)
 
 
+def _step_topology_refs(token, context):
+    """Read every selected member; unsupported tokens cannot disappear."""
+    if not (token.startswith("(") and token.endswith(")")):
+        raise ValueError(f"STEP {context} requires a reference aggregate")
+    result = [_ref_id(value) for value in _split_step_top_args(token[1:-1])]
+    if not result or any(value is None for value in result) or len(set(result)) != len(result):
+        raise ValueError(f"STEP {context} has missing, malformed or repeated references")
+    return result
+
+
 def _step_solid_faces(entities, selector):
     """Resolve one solid definition and its complete oriented shell topology."""
     solid_kinds = {"MANIFOLD_SOLID_BREP", "FACETED_BREP", "BREP_WITH_VOIDS"}
     roots = [eid for eid, (kind, _) in entities.items() if kind in solid_kinds]
+    if selector is None:
+        construction = {"CSG_SOLID", "BOOLEAN_RESULT", "BOOLEAN_CLIPPING_RESULT", "SOLID_REPLICA"}
+        if any(kind in construction for kind, _ in entities.values()):
+            raise ValueError("STEP CSG/Boolean construction is unsupported; select a BRep definition explicitly")
+        if roots:
+            if any(kind.endswith("_SOLID") for kind, _ in entities.values()):
+                raise ValueError("STEP has additional solid definitions; select a BRep explicitly")
+            for kind, values in entities.values():
+                if kind == "SHAPE_REPRESENTATION" or kind.endswith("_SHAPE_REPRESENTATION"):
+                    if len(values) != 3:
+                        raise ValueError("STEP shape representation is unsupported or incomplete")
+                    for item in _step_topology_refs(values[1], "represented items"):
+                        item_kind = entities.get(item, (None, []))[0]
+                        if item not in roots and item_kind != "AXIS2_PLACEMENT_3D":
+                            raise ValueError("STEP representation contains unsupported material; select a BRep explicitly")
     if selector is not None:
         if isinstance(selector, bool) or not isinstance(selector, int) or selector not in roots:
             raise ValueError("STEP solid_entity_id must identify a declared solid definition")
@@ -781,14 +806,6 @@ def _step_solid_faces(entities, selector):
     if len(args) != 2:
         raise ValueError("STEP solid requires one complete outer shell reference")
 
-    def refs(token):
-        if not (token.startswith("(") and token.endswith(")")):
-            raise ValueError("STEP shell requires a face reference set")
-        result = [_ref_id(value) for value in _split_step_top_args(token[1:-1])]
-        if not result or any(value is None for value in result) or len(set(result)) != len(result):
-            raise ValueError("STEP shell has missing or repeated face references")
-        return result
-
     seen = set()
 
     def face(eid, forward, path):
@@ -802,6 +819,8 @@ def _step_solid_faces(entities, selector):
         expected = 2 if kind == "FACE" else 4
         if kind not in {"FACE", "FACE_SURFACE", "ADVANCED_FACE"} or len(values) != expected:
             raise ValueError("STEP shell includes an unsupported or incomplete face")
+        if kind != "FACE" and values[3] not in (".T.", ".F."):
+            raise ValueError("STEP face has an invalid surface sense")
         if eid in seen:
             raise ValueError("STEP shell references the same underlying face more than once")
         seen.add(eid)
@@ -817,7 +836,7 @@ def _step_solid_faces(entities, selector):
             return shell(_ref_id(values[2]), forward == (values[3] == ".T."), path | {eid})
         if kind != "CLOSED_SHELL" or len(values) != 2:
             raise ValueError("STEP solid requires a declared closed shell")
-        return [entry for fid in refs(values[1]) for entry in face(fid, forward, set())]
+        return [entry for fid in _step_topology_refs(values[1], "shell faces") for entry in face(fid, forward, set())]
 
     return selected, shell(_ref_id(args[1]), True, set())
 
@@ -911,7 +930,7 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
             if len(args) >= 3 and args[2] != "$":
                 if entities.get(_ref_id(args[2]), (None, []))[0] != "PLANE":
                     raise ValueError("STEP face requires a planar surface; curved faces cannot use boundary chords")
-            for bid in _ref_list(args[1]):
+            for bid in _step_topology_refs(args[1], "face bounds"):
                 if bid not in entities:
                     raise ValueError("STEP face references a missing boundary")
                 bet, bargs = entities[bid]
@@ -923,14 +942,16 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
                     raise ValueError("STEP face references a missing loop")
                 let, largs = entities[lid]
                 lpts: List[np.ndarray] = []
-                if let == "POLY_LOOP" and len(largs) >= 2:
-                    pids = _ref_list(largs[1])
+                if let == "POLY_LOOP" and len(largs) == 2:
+                    pids = _step_topology_refs(largs[1], "polygon loop")
                     if any(pid not in pts for pid in pids):
                         raise ValueError("STEP polygon loop references a missing point")
                     lpts = [pts[pid] for pid in pids]
-                elif let == "EDGE_LOOP" and len(largs) >= 2:
+                elif let == "EDGE_LOOP" and len(largs) == 2:
+                    if et == "FACE" or len(args) < 3 or args[2] == "$":
+                        raise ValueError("STEP edge-loop face requires a declared supporting plane")
                     endpoints = []
-                    for oe_id in _ref_list(largs[1]):
+                    for oe_id in _step_topology_refs(largs[1], "edge loop"):
                         oe_kind, oargs = entities.get(oe_id, (None, []))
                         if oe_kind != "ORIENTED_EDGE" or len(oargs) != 5 or oargs[4] not in (".T.", ".F."):
                             raise ValueError("STEP edge loop requires complete oriented edges")
