@@ -6,7 +6,6 @@ from fractions import Fraction
 from functools import partial
 import re
 
-from hamon_eagle_walk import rooted_tree
 from hamon_eagle_netlist import _named, _physical_pads, _read
 
 
@@ -232,6 +231,18 @@ def connect_landings(interior, edges, surface):
                     point = parent
                 edges[b].append((center, reverse))
                 edges[center].append((b, [(v, u, w, plating_ref) for u, v, w, plating_ref in reversed(reverse)]))
+
+
+def rooted_tree(edges, root):
+    previous = {root: None}
+    queue = deque([root])
+    while queue:
+        current = queue.popleft()
+        for neighbor, source in edges[current]:
+            if neighbor not in previous:
+                previous[neighbor] = current, source
+                queue.append(neighbor)
+    return previous
 
 
 def routed_continuity(prediction, board_path, signal_name):
