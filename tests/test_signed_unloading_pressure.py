@@ -48,9 +48,11 @@ class SignedUnloadingPressure(unittest.TestCase):
                                              for t, load in ((0, 100000), (start, 100000), (end, level))]}
                     answer = verify_consolidation_history(spec)
                     self.assertTrue(answer["conservation_verified"], answer)
-                    self.assertTrue(math.isclose(answer["mean_excess_pore_pressure_Pa"], expected,
-                                                 rel_tol=1e-10, abs_tol=0), (expected, answer))
+                    with self.subTest(check="reported pressure"):
+                        self.assertTrue(math.isclose(answer["mean_excess_pore_pressure_Pa"], expected,
+                                                     rel_tol=1e-10, abs_tol=0), (expected, answer))
                     for claimed, accepted in ((expected, True), (-expected, False), (0.0, False)):
                         result = verify_consolidation_history(
                             {**spec, "proposed_mean_excess_pore_pressure_Pa": claimed})
-                        self.assertEqual(result["conservation_verified"], accepted, result)
+                        with self.subTest(claim=claimed):
+                            self.assertEqual(result["conservation_verified"], accepted, result)
