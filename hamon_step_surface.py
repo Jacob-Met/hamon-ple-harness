@@ -178,7 +178,7 @@ def integrate_closed_surface(vertices, triangles, density):
     """
     if not math.isfinite(density) or density < 0:
         return {"reason": "Solid density must be finite and nonnegative"}
-    raw = [tuple(Fraction(float(x)) for x in point) for point in vertices]
+    raw = [tuple(x if isinstance(x, Fraction) else Fraction(float(x)) for x in point) for point in vertices]
     anchor = raw[0]
     local = [_sub(point, anchor) for point in raw]
     total = Fraction(0)
@@ -222,7 +222,7 @@ def integrate_closed_surface(vertices, triangles, density):
             "mass_kg": wire(rho*volume, density > 0),
             "density_kg_m3": density,
             "centroid_m": [wire(x+y) for x, y in zip(anchor, center)],
-            "aabb_extents_m": [wire(max(p[k] for p in raw) - min(p[k] for p in raw)) for k in range(3)],
+            "aabb_extents_m": [wire(max(p[k] for p in raw) - min(p[k] for p in raw), True) for k in range(3)],
             "inertia_tensor_centroid_kg_m2": [[wire(x) for x in row] for row in inertia],
             "mass_moment_method": "exact_polyhedral_integrals",
         }

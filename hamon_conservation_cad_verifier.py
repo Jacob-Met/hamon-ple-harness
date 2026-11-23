@@ -914,6 +914,18 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError("unit_scale_m must be finite and positive")
         unit_metadata = {"unit_scale_source": "explicit_override"}
 
+    from hamon_step_csg import select_csg_root, csg_mass_properties
+    selected_csg = select_csg_root(entities, spec.get("solid_entity_id"))
+    if selected_csg is not None:
+        if spec.get("unit_scale_m") is None:
+            from hamon_step_units import resolve_step_length_scale
+            unit_scale, unit_metadata = resolve_step_length_scale(components, [selected_csg])
+        properties, analytic_volume = csg_mass_properties(entities, selected_csg, unit_scale, density)
+        report = _cad_report(properties, analytic_volume, unit_scale, len(entities))
+        report.update(unit_metadata)
+        report.update(selected_solid_entity_id=selected_csg, solid_geometry_kind="rectilinear_csg")
+        return report
+
     selected_solid, face_occurrences = _step_solid_faces(entities, spec.get("solid_entity_id"))
     has_ifc = any(kind.startswith("IFC") for kind, _ in entities.values())
     if selected_solid is None and has_ifc:
