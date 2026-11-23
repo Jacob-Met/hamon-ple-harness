@@ -73,3 +73,23 @@ A label qualified this way can extend a separately established same-page net. A 
 | Arduino Uno TH Rev3e, single sheet | 447 | 59 → 60 of 61 | 0 | 353 → 302 |
 
 The Mega result recovers AREF and GND in full, plus two pairs on +3V3. Its 17 remaining separations comprise eight VIN pairs and nine +3V3 pairs. The Uno result recovers its remaining GND wire. All 302 outstanding Uno pairs belong to +5V. The comparisons use manufacturer CAD membership as the reference for PDF-only predictions. The Mega endpoint coordinates and group memberships also pass the three quarter-turn replays.
+
+
+### Power names printed beside supply arrows
+
+A supply value can be rotated independently of its arrow and printed beside the stem. The reader now recognizes this placement from the native glyph run. It still requires the complete red stem and both arrow wings at a green wire endpoint. The word must run parallel to the stem, lie entirely on one side, and cover at least half of the stem in projection. In units of stem length, its nearest box edge must be more than 0.1 and less than 1 away, and its farthest edge may be at most 2 away.
+
+This evidence can extend only a power name already established by an independent ordinary supply glyph on the same page. Ambiguous ordinary tip labels, competing side words, other names on either wire component, and reuse of one printed occurrence all prevent the proposed join. A plausible nearby power word whose native direction is unknown can veto a match but cannot establish one. Negative and decimal voltage spellings receive a separate power-only baseline field; they do not broaden the older wire-label spelling rule.
+
+An occurrence already used by an ordinary tip glyph or an ordinary wire-label anchor cannot also supply a side name. A word proposed for both a loose wire end and a different arrow is rejected by both extension paths. These checks use the original component and occurrence evidence before applying proposed joins. Accepted entries in `supply_glyphs` retain the stem endpoints, the printed box and baseline, and `label_placement: "side"`.
+
+On the same Uno TH Rev3e drawing, the two remaining +5V islands have complete arrows with values printed vertically beside their stems. Recognizing their two distinct values recovers all 302 outstanding native wire pairs:
+
+| Manufacturer drawing | Visible wire sections | Complete native nets, before → after | False joins | Missed native wire pairs, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| Arduino Uno TH Rev3e | 447 | 60 → 61 of 61 | 0 → 0 | 302 → 0 |
+| Arduino Mega 2560 Rev3e, flat document | 483 | 109 → 109 of 111 | 0 → 0 | 17 → 17 |
+
+An independent receiver froze the PDF-only predictions for each original drawing and all three quarter-turns before opening the corresponding manufacturer CAD. All 930 visible wire sections had unique geometric matches. Page and document membership, wire endpoints, glyph stems and the side-label boxes were covariant under rotation. The three-sheet Due export remained unresolved. A separate receiver checked distinct labels and shared-occurrence counterexamples under four rotations and both source orders.
+
+These are measured visible-wire connectivity results on the named drawings. They do not establish device-pin connectivity, support for another export profile, or a PLE competition score.
