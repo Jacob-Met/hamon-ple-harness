@@ -108,6 +108,24 @@ class RlcTransientStabilityTests(unittest.TestCase):
                 expected = "underdamped" if ratio < 1 else "overdamped"
                 self.assertEqual(actual["regime"], expected)
 
+    def test_exact_component_discriminant_across_adjacent_floats_and_scales(self):
+        for exponent in (-250, -100, 0, 100, 250):
+            component = float(f"1e{exponent}")
+            for capacitance, expected in (
+                (math.nextafter(component, 0.), "underdamped"),
+                (component, "critically_damped"),
+                (math.nextafter(component, math.inf), "overdamped"),
+            ):
+                with self.subTest(exponent=exponent, expected=expected):
+                    spec = dict(R=2., L=component, C=capacitance, t=.25*component,
+                                V_s=1., v_c0=.25, i_l0=.5)
+                    actual = self.assert_solution(spec)
+                    self.assertEqual(actual["regime"], expected)
+
+    def test_decimal_critical_components_with_unequal_rounded_rates(self):
+        actual = self.assert_solution(dict(R=.14, L=.0049, C=1., V_s=1., t=.025))
+        self.assertEqual(actual["regime"], "critically_damped")
+
     def test_initial_state_and_equilibrium_are_exact(self):
         spec = dict(subkind="rlc_transient", R=1e9, L=.001, C=1e-6,
                     V_s=3., v_c0=-2., i_l0=.7, t=0.)

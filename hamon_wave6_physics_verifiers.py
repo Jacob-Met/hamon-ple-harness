@@ -803,14 +803,21 @@ def _rlc_overdamped_modes(r, l, c, vs, v0, i0, time_):
         return float(voltage), float(current_end)
 
 
-def _rlc_analytic_state(alpha, omega, impedance, vs, v0, i0, time_, r, l, c):
+def _rlc_poles(r, l, c):
+    """Classify the public decimal components before rounding any derived rates."""
+    resistance, inductance, capacitance = (Fraction(str(x)) for x in (r, l, c))
+    discriminant = resistance**2 * capacitance - 4 * inductance
+    if discriminant == 0:
+        return "critically_damped", 0.0
+    squared_rate = abs(discriminant) / (4 * inductance**2 * capacitance)
+    with localcontext() as context:
+        context.prec = 50
+        rate = (Decimal(squared_rate.numerator) / Decimal(squared_rate.denominator)).sqrt()
+    return ("overdamped" if discriminant > 0 else "underdamped"), float(rate)
+
+
+def _rlc_analytic_state(alpha, omega, impedance, vs, v0, i0, time_, r, l, c, regime, modal_rate):
     """Stable modal propagator; voltage and impedance-scaled current."""
-    if alpha == omega:
-        regime = "critically_damped"
-    elif alpha < omega:
-        regime = "underdamped"
-    else:
-        regime = "overdamped"
     if time_ == 0 or (v0 == vs and i0 == 0):
         return v0, i0, regime
     wt, at = omega * time_, alpha * time_
@@ -836,7 +843,7 @@ def _rlc_analytic_state(alpha, omega, impedance, vs, v0, i0, time_, r, l, c):
             endpoint = _rlc_overdamped_modes(r, l, c, vs, v0, i0, time_)
             if endpoint is not None:
                 return endpoint[0], endpoint[1], regime
-        beta = math.sqrt(alpha - omega) * math.sqrt(alpha + omega)
+        beta = modal_rate
         denominator = alpha + beta
         slow = -omega * (omega / denominator)
         fast = -denominator
@@ -859,8 +866,7 @@ def _rlc_analytic_state(alpha, omega, impedance, vs, v0, i0, time_, r, l, c):
             cosine = decay
             source_gain = -math.expm1(-alpha * time_) - alpha * k
         else:
-            frequency = math.sqrt(omega - alpha) * math.sqrt(omega + alpha)
-            phase = frequency * time_
+            phase = modal_rate * time_
             if not math.isfinite(phase):
                 raise ValueError("RLC oscillation phase exceeds the supported finite range")
             sinc = math.sin(phase) / phase if phase else 1.0
@@ -896,8 +902,9 @@ def _solve_rlc_transient(params):
         raise ValueError("RLC damping exceeds the supported finite range")
     if not math.isfinite(v0 - vs) or not math.isfinite(i0 * impedance):
         raise ValueError("RLC initial state exceeds the supported finite range")
+    regime, modal_rate = _rlc_poles(r, l, c)
     voltage, current, regime = _rlc_analytic_state(
-        alpha, omega, impedance, vs, v0, i0, time_, r, l, c)
+        alpha, omega, impedance, vs, v0, i0, time_, r, l, c, regime, modal_rate)
     if not math.isfinite(voltage) or not math.isfinite(current):
         raise ValueError("RLC solution exceeds the supported finite range")
     decayed = regime == "overdamped" and (abs(voltage) < abs(v0) or abs(current) < abs(i0))
@@ -928,9 +935,8 @@ def _solve_rlc_transient(params):
     residual = max(abs(voltage - reference_v) / voltage_scale,
                    abs(current - reference_i) / current_scale)
     zeta = alpha / omega
-    if alpha < omega:
-        frequency = math.sqrt(omega - alpha) * math.sqrt(omega + alpha)
-        overshoot = 100.0 * math.exp(-math.pi * alpha / frequency)
+    if regime == "underdamped" and modal_rate:
+        overshoot = 100.0 * math.exp(-math.pi * (alpha / modal_rate))
     else:
         overshoot = 0.0
     return {
