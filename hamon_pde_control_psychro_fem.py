@@ -2077,7 +2077,7 @@ def _explicit_coil_water(spec):
         f = float(phase == "ice")
     if phase == "ice" and not -60 <= t <= 0:
         raise ValueError("ice enthalpy requires -60 to 0 C")
-    if phase == "liquid" and (not 0 <= t <= 200 or _pws_ashrae_pa(t) > pressure):
+    if f < 1 and (not 0 <= t <= 200 or _pws_ashrae_pa(t) > pressure):
         raise ValueError("liquid product temperature must be between freezing and boiling")
     if phase != "liquid" and spec.get("load_split") == "ashrae_dew_point":
         raise ValueError("ashrae_dew_point requires a liquid drain")

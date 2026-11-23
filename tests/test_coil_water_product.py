@@ -66,6 +66,16 @@ class CoilProductTest(unittest.TestCase):
         del spec["m_da_kg_s"]
         self.assertTrue(route(spec)["presolve_verified"])
 
+    def test_any_liquid_share_obeys_local_boiling_condition(self):
+        spec = dict(mode="cooling_coil", p_atm_pa=550, m_da_kg_s=1,
+                    inlet={"t_db_c":-10,"rh":.65}, outlet={"t_db_c":-20,"rh":.95},
+                    t_condensate_c=0)
+        for fraction in (0,.5,1):
+            mixed = {**spec,"condensate_phase":"mixed","ice_mass_fraction":fraction}
+            self.assertEqual(solve(mixed)["passed"],fraction==1)
+            self.assertEqual(route(mixed)["presolve_verified"],fraction==1)
+        self.assertFalse(solve({**spec,"condensate_phase":"liquid"})["passed"])
+
     def test_dry_coil_and_flow_scaling(self):
         r = solve({**WET, "outlet":{"t_db_c":20.,"w_kg_per_kgda":.012},
                    "condensate_phase":"ice", "t_condensate_c":-8})
