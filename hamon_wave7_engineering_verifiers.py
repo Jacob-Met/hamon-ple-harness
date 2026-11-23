@@ -35,6 +35,139 @@ WAVE7_DOMAINS = (
 )
 
 
+def _rankine_cycle(params: Mapping[str, Any]) -> Dict[str, Any]:
+    """Energy balance and phase information for the first turbine outlet."""
+    result = {"domain": "thermo_cycles", "subkind": "rankine", "verified": False}
+
+    def number(name, default=None):
+        value = params.get(name, default)
+        if isinstance(value, bool) or value is None:
+            raise ValueError(f"invalid_or_missing_{name}")
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError(f"nonfinite_{name}")
+        return Fraction(str(parsed))
+
+    def bracketed(value, liquid, latent):
+        if value < liquid:
+            return "below_saturated_liquid", None
+        if value > liquid + latent:
+            return "above_saturated_vapor", None
+        fraction = (value - liquid) / latent
+        if fraction == 0:
+            return "saturated_liquid", fraction
+        if fraction == 1:
+            return "saturated_vapor", fraction
+        return "liquid_vapor_mixture", fraction
+
+    try:
+        p1, p2, v1 = number("P1"), number("P2"), number("v1")
+        h1, h3 = number("h1"), number("h3")
+        eta_p, eta_t = number("eta_p", 1), number("eta_t", 1)
+        if p2 <= p1 or v1 <= 0 or not (0 < eta_p <= 1 and 0 < eta_t <= 1):
+            raise ValueError("invalid_rankine_parameters")
+        declared_x = number("x4s") if "x4s" in params else None
+        if declared_x is not None and not 0 <= declared_x <= 1:
+            raise ValueError("invalid_declared_turbine_quality")
+
+        have_h = "h_f" in params or "h_fg" in params
+        if have_h:
+            hf, hfg = number("h_f"), number("h_fg")
+            if hfg <= 0:
+                raise ValueError("nonpositive_saturation_enthalpy_span")
+        entropy_state = None
+        if "s_f" in params or "s_fg" in params:
+            sf, sfg = number("s_f"), number("s_fg")
+            if sfg <= 0:
+                raise ValueError("nonpositive_saturation_entropy_span")
+            if "s3" in params:
+                entropy_state = bracketed(number("s3"), sf, sfg)
+        if "h4s" in params:
+            h4s = number("h4s")
+            source = "direct_enthalpy"
+        else:
+            if not have_h or entropy_state is None:
+                raise ValueError("saturation_enthalpy_and_entropy_brackets_required")
+            fraction = entropy_state[1]
+            if fraction is None:
+                raise ValueError("isentropic_entropy_outside_saturation_bracket")
+            h4s = hf + fraction * hfg
+            source = "saturation_entropy"
+
+        phase_s, xs = bracketed(h4s, hf, hfg) if have_h else (entropy_state or ("unknown", None))
+        if have_h and entropy_state is not None:
+            entropy_phase, entropy_x = entropy_state
+            if xs is None or entropy_x is None:
+                if entropy_phase != phase_s:
+                    raise ValueError("contradictory_isentropic_phase")
+            elif not math.isclose(float(xs), float(entropy_x), rel_tol=1e-8, abs_tol=1e-10):
+                raise ValueError("contradictory_isentropic_quality")
+        can_check_quality = have_h or entropy_state is not None
+        if declared_x is not None and can_check_quality:
+            if xs is None or not math.isclose(float(xs), float(declared_x), rel_tol=1e-8, abs_tol=1e-10):
+                raise ValueError("declared_quality_inconsistent_with_saturation_bracket")
+        if h4s > h3:
+            raise ValueError("negative_first_turbine_work")
+        wp = v1 * (p2 - p1) / eta_p
+        h2 = h1 + wp
+        heat_boiler = h3 - h2
+        if heat_boiler < 0:
+            raise ValueError("negative_boiler_heat_addition")
+        h4 = h3 - eta_t * (h3 - h4s)
+        phase, x = bracketed(h4, hf, hfg) if have_h else ("unknown", None)
+        if not have_h and eta_t == 1:
+            phase, x = phase_s, xs
+        wt = h3 - h4
+        heat_reheat = 0
+        exhaust = h4
+        if any(k in params for k in ("h5", "h6s", "eta_t2")):
+            if "h5" not in params or "h6s" not in params:
+                raise ValueError("incomplete_rankine_reheat_stage")
+            h5, h6s = number("h5"), number("h6s")
+            eta_t2 = number("eta_t2", float(eta_t))
+            if not 0 < eta_t2 <= 1:
+                raise ValueError("invalid_reheat_turbine_efficiency")
+            if h5 < h4 or h6s > h5:
+                raise ValueError("invalid_reheat_component_direction")
+            exhaust = h5 - eta_t2 * (h5 - h6s)
+            heat_reheat = h5 - h4
+            wt += h5 - exhaust
+        qin = heat_boiler + heat_reheat
+        qout = exhaust - h1
+        net = wt - wp
+        if net <= 0 or qin <= 0:
+            raise ValueError("non_positive_rankine_work")
+        if qout <= 0:
+            raise ValueError("nonpositive_rankine_heat_rejection")
+        thermal = net / qin
+        bounded = "T_cond" in params or "T_boiler_max" in params
+        carnot_ok = True
+        if bounded:
+            cold, hot = number("T_cond"), number("T_boiler_max")
+            if not 0 < cold < hot:
+                raise ValueError("invalid_rankine_reservoirs")
+            carnot_ok = float(thermal - (1-cold/hot)) <= 1e-11
+        qin_f, qout_f, work_f = map(float, (qin, qout, net))
+        if min(qin_f, qout_f, work_f) <= 0:
+            raise ValueError("unrepresentable_rankine_energy")
+        residual = abs((qin_f - qout_f) - work_f) / max(abs(qin_f), 1e-12)
+        result.update(
+            w_pump_J_kg=float(wp), w_turbine_J_kg=float(wt), w_net_J_kg=work_f,
+            q_in_J_kg=qin_f, q_out_J_kg=qout_f, eta_thermal=float(thermal),
+            isentropic_outlet_enthalpy_J_kg=float(h4s), first_turbine_outlet_enthalpy_J_kg=float(h4),
+            isentropic_outlet_source=source, isentropic_outlet_phase=phase_s,
+            x4s_quality=None if xs is None else float(xs),
+            first_turbine_outlet_phase=phase, x4_quality=None if x is None else float(x),
+            carnot_checked=bounded, residual=residual, verified=carnot_ok and residual < 1e-10,
+        )
+        if declared_x is not None:
+            result["declared_x4s_quality"] = float(declared_x)
+            result["declared_x4s_quality_checked"] = can_check_quality
+    except (TypeError, ValueError, OverflowError) as exc:
+        result["error"] = str(exc)
+    return result
+
+
 def solve_thermodynamic_cycle(params: Mapping[str, Any]) -> Dict[str, Any]:
     subkind = str(params.get("subkind") or params.get("cycle_type") or "brayton").strip().lower()
 
@@ -106,72 +239,7 @@ def solve_thermodynamic_cycle(params: Mapping[str, Any]) -> Dict[str, Any]:
         }
 
     if subkind == "rankine":
-        p1 = float(params["P1"])
-        p2 = float(params["P2"])
-        v1 = float(params["v1"])
-        h1 = float(params["h1"])
-        h3 = float(params["h3"])
-        eta_p = float(params.get("eta_p", 1.0))
-        eta_t = float(params.get("eta_t", 1.0))
-        if p2 <= p1 or v1 <= 0.0 or not (0.0 < eta_p <= 1.0 and 0.0 < eta_t <= 1.0):
-            return {"domain": "thermo_cycles", "subkind": subkind, "verified": False, "error": "invalid_rankine_parameters"}
-
-        w_p = v1 * (p2 - p1) / eta_p
-        h2 = h1 + w_p
-
-        if "h4s" in params:
-            h4s = float(params["h4s"])
-            x4s = float(params.get("x4s", 1.0))
-        else:
-            s3 = float(params["s3"])
-            s_f = float(params["s_f"])
-            s_fg = float(params["s_fg"])
-            h_f = float(params["h_f"])
-            h_fg = float(params["h_fg"])
-            x4s = (s3 - s_f) / s_fg
-            h4s = h_f + x4s * h_fg
-
-        h4 = h3 - eta_t * (h3 - h4s)
-        w_t = h3 - h4
-
-        q_reheat = 0.0
-        if "h5" in params and "h6s" in params:
-            h5 = float(params["h5"])
-            h6s = float(params["h6s"])
-            eta_t2 = float(params.get("eta_t2", eta_t))
-            h6 = h5 - eta_t2 * (h5 - h6s)
-            q_reheat = h5 - h4
-            w_t += (h5 - h6)
-            q_out = h6 - h1
-        else:
-            q_out = h4 - h1
-
-        q_in = (h3 - h2) + q_reheat
-        w_net = w_t - w_p
-        if w_net <= 0.0 or q_in <= 0.0:
-            return {"domain": "thermo_cycles", "subkind": subkind, "verified": False, "error": "non_positive_rankine_work"}
-        eta_th = w_net / q_in
-        residual = float(abs((q_in - q_out) - w_net) / max(abs(q_in), 1e-12))
-
-        carnot_ok = True
-        if "T_cond" in params and "T_boiler_max" in params:
-            t_cond = float(params["T_cond"])
-            t_bmax = float(params["T_boiler_max"])
-            carnot_ok = bool(t_cond > 0.0 and t_bmax > t_cond and eta_th <= (1.0 - t_cond / t_bmax) + 1e-11)
-
-        return {
-            "domain": "thermo_cycles",
-            "subkind": subkind,
-            "w_pump_J_kg": float(w_p),
-            "w_turbine_J_kg": float(w_t),
-            "w_net_J_kg": float(w_net),
-            "q_in_J_kg": float(q_in),
-            "q_out_J_kg": float(q_out),
-            "x4s_quality": float(x4s),
-            "eta_thermal": float(eta_th),
-            "residual": residual,
-            "verified": bool(carnot_ok and residual < 1e-10),
-        }
+        return _rankine_cycle(params)
 
     if subkind in ("otto", "diesel"):
         r = float(params["r"])
