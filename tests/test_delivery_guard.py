@@ -113,6 +113,7 @@ class DirectArchive(unittest.IsolatedAsyncioTestCase):
             complete = [("one.md", b"one"), ("two.md", b"two")]
             for entries, reason in [
                 (complete[::-1], None),
+                ([complete[0], ("two.md", b"   ")], "zip_invalid_member_format"),
                 (complete[:1], "zip_root_members_mismatch"),
                 (complete + [("extra.md", b"extra")], "zip_root_members_mismatch"),
                 (complete + complete[:1], "zip_root_members_mismatch"),

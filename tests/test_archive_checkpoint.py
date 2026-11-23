@@ -1,5 +1,6 @@
 import contextlib
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,19 @@ def public_task(name):
 
 
 class ArchiveInterruption(unittest.TestCase):
+    def test_bounded_office_validation_accounts_for_both_archives(self):
+        document = io.BytesIO()
+        with zipfile.ZipFile(document, "w", zipfile.ZIP_DEFLATED) as office:
+            office.writestr("[Content_Types].xml", b"types")
+            office.writestr("word/document.xml", b"document")
+        package = io.BytesIO()
+        with zipfile.ZipFile(package, "w") as output:
+            output.writestr("memo.docx", document.getvalue())
+        with zipfile.ZipFile(package) as archive:
+            needed = len(document.getvalue()) + len(b"typesdocument")
+            self.assertFalse(archive_checkpoint.verify_typed_members(archive, ["memo.docx"], needed - 1))
+            self.assertTrue(archive_checkpoint.verify_typed_members(archive, ["memo.docx"], needed))
+
     def test_raw_foundation_contract_and_ambiguity(self):
         text = public_task("foundation-strategy")
         names = archive_contract.member_names(text)
