@@ -268,22 +268,29 @@ def scan_dir(p):
         return {"state":"missing"}
     h = hashlib.sha256()
     count = 0
+
+    def raise_walk_error(error):
+        raise error
+
     try:
-        for root, dirs, files in os.walk(p, followlinks=False):
-            depth = len(Path(root).relative_to(p).parts)
-            dirs[:] = sorted(d for d in dirs if not (Path(root)/d).is_symlink()) if depth < 5 else []
+        for root, dirs, files in os.walk(p, followlinks=False, onerror=raise_walk_error):
+            folder = Path(root)
+            dirs[:] = sorted(d for d in dirs if not (folder / d).is_symlink())
             for name in sorted(files):
-                f = Path(root)/name
-                if not regular(f) or not f.is_file():
+                child = folder / name
+                if not regular(child) or not child.is_file():
                     continue
-                st = f.stat()
-                h.update(str(f.relative_to(p)).encode())
-                h.update(f"{st.st_size}:{st.st_mtime_ns}".encode())
+                member = scan_file(child, None)
+                if member["state"] == "empty":
+                    continue
+                if member["state"] != "ready":
+                    return member
+                # Frame each pathname and fixed-width content digest separately.
+                relative = os.fsencode(child.relative_to(p))
+                h.update(len(relative).to_bytes(8, "big"))
+                h.update(relative)
+                h.update(bytes.fromhex(member["fingerprint"]))
                 count += 1
-                if count >= 500:
-                    break
-            if count >= 500:
-                break
         return {"state":"ready" if count else "empty",
                 "fingerprint":h.hexdigest(),"files":count}
     except (OSError,ValueError):
