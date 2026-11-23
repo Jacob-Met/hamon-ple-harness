@@ -20,10 +20,24 @@ jobs:
         with:
           python-version: "3.12"
       - name: Independent spreadsheet engine and symbolic units
+        timeout-minutes: 9
         run: |
-          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=2 update -qq
-          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=2 install -y --no-install-recommends libreoffice-calc
-          pip install --disable-pip-version-check sympy==1.14.0
+          # A regional EC2 mirror stalled on the core package until the whole
+          # job expired. Keep Ubuntu signature verification and use its HTTPS archive.
+          sudo python3 - <<'PY'
+          import re
+          from pathlib import Path
+          for path in (Path('/etc/apt/sources.list.d/ubuntu.sources'), Path('/etc/apt/sources.list')):
+              if path.is_file():
+                  original = path.read_text()
+                  revised = re.sub(r'http://[^/\s]+\.ec2\.archive\.ubuntu\.com/ubuntu/?',
+                                   'https://archive.ubuntu.com/ubuntu', original)
+                  if revised != original:
+                      path.write_text(revised)
+          PY
+          sudo env DEBIAN_FRONTEND=noninteractive timeout 90s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive timeout 360s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 install -y --no-install-recommends libreoffice-calc
+          pip install --disable-pip-version-check --timeout 30 --retries 1 sympy==1.14.0
       - name: Recalculate saved workbook and compare exact unit scales
         run: python ship/verify_xlsx_unit_graph.py --out "$RUNNER_TEMP/xlsx-unit-graph" --min-memory-gib 4
       - uses: actions/upload-artifact@v4

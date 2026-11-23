@@ -482,6 +482,11 @@ class _FormulaNumber:
     conversion_depth: int = 0
     arithmetic_depth: int = 0
     evidence: Any = None
+    constraint: Any = None
+
+    @property
+    def required_unit(self):
+        return self.unit if self.constraint is None else self.constraint
 
 
 class _FormulaConflict(ValueError):
@@ -490,7 +495,15 @@ class _FormulaConflict(ValueError):
         self.key, self.status, self.evidence = key, status, evidence
 
 
-def _formula_unit(key, operation, left, right):
+def _formula_unit(key, operation, left, right, *, conditional=False):
+    if conditional and isinstance(operation, (ast.Add, ast.Sub)):
+        # A valid sum must share the known operand's frame even when another
+        # term has no declared unit. This is a necessary condition, not a unit
+        # annotation for that unlabelled term.
+        if isinstance(left, _FormulaUnit) and (right is None or right is _COEFFICIENT):
+            return left
+        if isinstance(right, _FormulaUnit) and (left is None or left is _COEFFICIENT):
+            return right
     if left is None or right is None:
         return None
     if left is _COEFFICIENT and right is _COEFFICIENT:
@@ -552,22 +565,40 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
                 tokens.append(token["unit"])
                 continue
             operand = f"v{len(symbols)+len(references)}"
-            if token["number"]:
-                number = float(token["number"])
-                if not math.isfinite(number) or 0 < abs(number) < sys.float_info.min:
-                    raise ValueError("unsupported_operand_range")
-                symbols[operand] = _FormulaNumber(number, _COEFFICIENT)
-            else:
-                name = token["ref_sheet"] or key[0]
-                if name.startswith("'"):
-                    name = name[1:-1].replace("''", "'")
-                sheets = [s for s in literals if s == name or (
-                    s.isascii() and name.isascii() and s.lower() == name.lower())]
-                if len(sheets) != 1:
-                    raise ValueError("unknown_or_ambiguous_worksheet")
-                references[operand] = (sheets[0], _address(*_grid_position(token["ref_start"])))
+            try:
+                if token["number"]:
+                    number = float(token["number"])
+                    if not math.isfinite(number) or 0 < abs(number) < sys.float_info.min:
+                        raise ValueError("unsupported_operand_range")
+                    symbols[operand] = _FormulaNumber(number, _COEFFICIENT)
+                else:
+                    name = token["ref_sheet"] or key[0]
+                    if name.startswith("'"):
+                        name = name[1:-1].replace("''", "'")
+                    sheets = [s for s in literals if s == name or (
+                        s.isascii() and name.isascii() and s.lower() == name.lower())]
+                    if len(sheets) != 1:
+                        raise ValueError("unknown_or_ambiguous_worksheet")
+                    references[operand] = (sheets[0], _address(*_grid_position(token["ref_start"])))
+            except (ValueError, ArithmeticError) as exc:
+                # Keep valid expression syntax available to the structural
+                # pass; numeric/reference availability is an evaluation error.
+                symbols[operand] = exc
             tokens.append(operand)
-        return ast.parse(" ".join(tokens), mode="eval").body, symbols, references
+        tree = ast.parse(" ".join(tokens), mode="eval").body
+        # An explicit dimensional contradiction does not depend on a cached
+        # number, a present input, or successful evaluation of a dependency.
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "_convert" and len(node.args) == 3 and not node.keywords
+                    and all(isinstance(arg, ast.Constant) and type(arg.value) is str
+                            for arg in node.args[1:])):
+                from_name, to_name = (arg.value for arg in node.args[1:])
+                source, target = _CONVERT_UNITS.get(from_name), _CONVERT_UNITS.get(to_name)
+                if source is not None and target is not None and source.dim != target.dim:
+                    raise _FormulaConflict(key, "dimension_mismatch", "incompatible_conversion_dimensions",
+                                           from_unit=from_name, to_unit=to_name, dimension_mismatch=True)
+        return tree, symbols, references
 
     for key, row in producers.items():
         try:
@@ -600,11 +631,15 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
 
         def scalar(node):
             if isinstance(node, ast.Name):
-                return reference(references[node.id]) if node.id in references else symbols[node.id]
+                result = reference(references[node.id]) if node.id in references else symbols[node.id]
+                if isinstance(result, Exception):
+                    raise result
+                return result
             if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
                 result = scalar(node.operand)
                 return _FormulaNumber(-result.value if isinstance(node.op, ast.USub) else result.value,
-                                      result.unit, result.roots, result.conversion_depth, result.arithmetic_depth)
+                                      result.unit, result.roots, result.conversion_depth, result.arithmetic_depth,
+                                      constraint=result.constraint)
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == "_convert" and len(node.args) == 3 and not node.keywords):
                 if any(not isinstance(arg, ast.Constant) or type(arg.value) is not str for arg in node.args[1:]):
@@ -623,11 +658,8 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
                     evidence.update(root_sheet=actual.roots[0][0], root_cell=actual.roots[0][1])
                 elif actual.roots:
                     evidence["root_cells"] = [list(ref) for ref in actual.roots]
-                if source.dim != target.dim:
-                    raise _FormulaConflict(key, "dimension_mismatch", "incompatible_conversion_dimensions",
-                                           **evidence, dimension_mismatch=True)
                 source_unit = _FormulaUnit(Fraction(source.val), source.dim)
-                if isinstance(actual.unit, _FormulaUnit) and actual.unit != source_unit:
+                if isinstance(actual.required_unit, _FormulaUnit) and actual.required_unit != source_unit:
                     raise ValueError("upstream_unit_disagrees")
                 numeric_source = D(1)/_CALC_LBM_PER_KG if legacy_lbm and from_name == "lbm" else source.val
                 numeric_target = D(1)/_CALC_LBM_PER_KG if legacy_lbm and to_name == "lbm" else target.val
@@ -641,6 +673,7 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
                 raise ValueError("unsupported_arithmetic_operator")
             left, right = scalar(node.left), scalar(node.right)
             unit = _formula_unit(key, node.op, left.unit, right.unit)
+            constraint = _formula_unit(key, node.op, left.required_unit, right.required_unit, conditional=True)
             number = operations[type(node.op)](left.value, right.value)
             if isinstance(node.op, (ast.Add, ast.Sub)) and 0 < max(abs(left.value), abs(right.value)):
                 if abs(number) <= 1e-14*max(abs(left.value), abs(right.value)):
@@ -649,7 +682,7 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
                 raise ValueError("unsupported_result_range")
             return _FormulaNumber(number, unit, tuple(sorted(set(left.roots+right.roots))),
                                   max(left.conversion_depth,right.conversion_depth),
-                                  max(left.arithmetic_depth,right.arithmetic_depth))
+                                  max(left.arithmetic_depth,right.arithmetic_depth), constraint=constraint)
 
         result = scalar(tree)
         # A plain CONVERT chain may contain all 256 indexed conversion cells.
@@ -657,7 +690,7 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
         has_arithmetic = (producers[key][3] == "arithmetic"
                           or any(isinstance(node,(ast.BinOp,ast.UnaryOp)) for node in ast.walk(tree)))
         result = _FormulaNumber(result.value, result.unit, result.roots, result.conversion_depth,
-                                result.arithmetic_depth+int(has_arithmetic), result.evidence)
+                                result.arithmetic_depth+int(has_arithmetic), result.evidence, result.constraint)
         if result.arithmetic_depth > 40:
             raise ValueError("cyclic_or_deep_dependency")
         return result
@@ -684,8 +717,7 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
         if isinstance(result, _FormulaConflict):
             if result.key == key:
                 record.update(reason=str(result), **result.evidence)
-                if kind != "conversion" or cached is not None:
-                    record["status"] = result.status
+                record["status"] = result.status
             else:
                 record.update(reason="upstream_"+result.status,
                               source_sheet=result.key[0], source_cell=result.key[1])
@@ -699,6 +731,9 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
             record["expected"] = result.value
             if isinstance(result.unit,_FormulaUnit):
                 record.update(si_dimension=list(result.unit.dimension), unit_scale_si=str(result.unit.scale))
+            elif isinstance(result.constraint, _FormulaUnit):
+                record.update(conditional_si_dimension=list(result.constraint.dimension),
+                              conditional_unit_scale_si=str(result.constraint.scale))
             if incompatible_type:
                 record.update(status="mismatch", cached_type=incompatible_type, reason="nonnumeric_cache")
             elif cached is None:
