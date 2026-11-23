@@ -57,11 +57,143 @@ DETERMINISTIC_FAST_PATH_DOMAINS: frozenset[str] = frozenset(
 )
 
 
-def _area_mach_ratio_sq(mach: float, gamma: float) -> float:
-    gp1 = gamma + 1.0
-    gm1 = gamma - 1.0
-    term = (2.0 / gp1) * (1.0 + 0.5 * gm1 * mach * mach)
-    return (term ** (gp1 / gm1)) / (mach * mach)
+def _isentropic_log_area(mach, gamma):
+    """Log(A/A*) on the supplied positive Mach coordinate."""
+    if mach == 1:
+        return Decimal(0)
+    half_delta = (gamma - 1) / 2
+    temperature = 1 + half_delta * mach**2
+    exponent = (gamma + 1) / (2 * (gamma - 1))
+    return exponent * (temperature / (1 + half_delta)).ln() - mach.ln()
+
+
+def _nozzle_area_mach(area, gamma, regime):
+    if area < 1:
+        raise ValueError("Isentropic A/A* must be at least one")
+    if regime not in ("sub", "subsonic", "sup", "supersonic"):
+        raise ValueError("Area inversion requires the subsonic or supersonic branch")
+    if area == 1:
+        return 1.0
+    subsonic = regime in ("sub", "subsonic")
+    lo, hi = (math.ulp(0.0), 1.) if subsonic else (1., math.nextafter(math.inf, 0.))
+    target = area.ln()
+
+    def error(value):
+        return _isentropic_log_area(Decimal.from_float(value), gamma) - target
+
+    if error(lo if subsonic else hi) < 0:
+        raise ValueError("Requested area has no representable Mach number on this branch")
+    # Bisect in log Mach over the entire finite positive range. Finish on
+    # adjacent representable Mach values so shallow sonic minima do not turn
+    # either branch into a manufactured equality.
+    while math.nextafter(lo, hi) < hi:
+        mid = math.sqrt(lo) * math.sqrt(hi)
+        if not lo < mid < hi:
+            mid = lo + (hi-lo)/2
+        residual = error(mid)
+        if residual == 0:
+            return mid
+        if (residual > 0) == subsonic:
+            lo = mid
+        else:
+            hi = mid
+    return min((lo, hi), key=lambda value: abs(error(value)))
+
+
+def _nozzle_brackets(mach, predicted, target, relation, increasing):
+    """Check the specified ratio on the reported Mach grid, including sonic sensitivity."""
+    if predicted == target:
+        return True
+    toward = math.inf if (target > predicted) == increasing else 0.
+    neighbor = math.nextafter(float(mach), toward)
+    if neighbor == 0 or not math.isfinite(neighbor):
+        return False
+    adjacent = relation(Decimal.from_float(neighbor))
+    return min(predicted, adjacent) <= target <= max(predicted, adjacent)
+
+
+def _isentropic_nozzle(params, gamma_value, gas_constant):
+    def positive(value, name):
+        value = float(value)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"Isentropic {name} must be finite and positive")
+        return Decimal.from_float(value)
+
+    def publish(value, name):
+        rounded = float(value)
+        if not math.isfinite(rounded) or rounded == 0:
+            raise ValueError(f"Isentropic {name} is outside the positive binary64 range")
+        return rounded
+
+    gamma = positive(gamma_value, "gamma")
+    if gamma <= 1:
+        raise ValueError("Isentropic gamma must exceed one")
+    gas = positive(gas_constant, "gas constant")
+    t0 = positive(params.get("T0", 300.), "stagnation temperature")
+    p0 = positive(params.get("P0", 101325.), "stagnation pressure")
+    throat = positive(params.get("A_throat", .001), "throat area")
+    with localcontext() as ctx:
+        # The forward relation subtracts log Mach at a quadratic minimum.
+        # Preserve its excess above unity, including when gamma is near one.
+        ctx.prec = 80 + max(0, gamma.adjusted())
+        gm1 = gamma - 1
+        area = pressure = None
+        if params.get("mach") is not None:
+            mach = positive(params["mach"], "Mach number")
+        elif params.get("area_ratio") is not None:
+            area = positive(params["area_ratio"], "area ratio")
+            regime = str(params.get("regime", "supersonic")).strip().lower()
+            mach = Decimal.from_float(_nozzle_area_mach(area, gamma, regime))
+        elif params.get("p0_over_p") is not None:
+            pressure = positive(params["p0_over_p"], "stagnation pressure ratio")
+            if pressure <= 1:
+                raise ValueError("A finite-area flowing nozzle requires P0/P greater than one")
+            m = (2 * ((pressure.ln()*gm1/gamma).exp() - 1) / gm1).sqrt()
+            mach = Decimal.from_float(publish(m, "Mach number"))
+        else:
+            raise ValueError("isentropic requires 'mach', 'area_ratio', or 'p0_over_p'")
+
+        t_ratio = 1 + gm1*mach**2/2
+        log_p_ratio = t_ratio.ln() * gamma/gm1
+        log_area = _isentropic_log_area(mach, gamma)
+        max_log = Decimal.from_float(math.nextafter(math.inf, 0.)).ln()
+        if max(log_p_ratio, log_area) > max_log:
+            raise ValueError("Isentropic stagnation pressure or area ratio exceeds the finite range")
+        p_ratio = log_p_ratio.exp()
+        density_ratio = (t_ratio.ln()/gm1).exp()
+        area_ratio = log_area.exp()
+        ts = t0 / t_ratio
+        ps = p0 / p_ratio
+        velocity = mach*(gamma*gas*ts).sqrt()
+        star_ratio = (gamma + 1)/2
+        star_t = t0 / star_ratio
+        star_p = p0 / (star_ratio.ln()*gamma/gm1).exp()
+        choked = throat * star_p / (gas*star_t) * (gamma*gas*star_t).sqrt()
+        result = {key: publish(value, key) for key, value in (
+            ("mach", mach), ("T0_over_T", t_ratio), ("P0_over_P", p_ratio),
+            ("rho0_over_rho", density_ratio), ("A_over_Astar", area_ratio),
+            ("T_static_K", ts), ("P_static_Pa", ps), ("velocity_m_s", velocity),
+            ("mdot_choked_kg_s", choked))}
+        # Replay the published static pressure, temperature and velocity, using
+        # the requested area itself when it determined the operating point.
+        ts, ps, speed, flow = (Decimal.from_float(result[k]) for k in
+                               ("T_static_K", "P_static_Pa", "velocity_m_s", "mdot_choked_kg_s"))
+        local_area = area if area is not None else Decimal.from_float(result["A_over_Astar"])
+        mass_error = abs(ps/(gas*ts) * speed * throat * local_area / flow - 1)
+        energy_error = abs((ts + speed**2 * gm1/(2*gamma*gas)) / t0 - 1)
+        pressure_error = abs(p0 / (ps*pressure) - 1) if pressure is not None else 0
+        input_resolved = True
+        if area is not None:
+            subsonic = regime in ("sub", "subsonic")
+            on_branch = mach == 1 if area == 1 else (mach < 1 if subsonic else mach > 1)
+            input_resolved = on_branch and _nozzle_brackets(
+                mach, log_area, area.ln(), lambda m: _isentropic_log_area(m, gamma), not subsonic)
+        elif pressure is not None:
+            input_resolved = _nozzle_brackets(
+                mach, log_p_ratio, pressure.ln(), lambda m: (1 + gm1*m*m/2).ln()*gamma/gm1, True)
+        residual = float(max(mass_error, energy_error, pressure_error))
+        return {"domain": "compressible_acoustics", "subkind": "isentropic", **result,
+                "residual": residual, "verified": input_resolved and residual < 1e-10}
 
 
 # Treat rounded critical inputs as the sonic section within this relative
@@ -168,67 +300,7 @@ def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any
     r_gas = float(params.get("R", 287.05))
 
     if subkind == "isentropic":
-        gm1 = gamma - 1.0
-        gp1 = gamma + 1.0
-        if "mach" in params and params["mach"] is not None:
-            mach = float(params["mach"])
-        elif "area_ratio" in params and params["area_ratio"] is not None:
-            ar = float(params["area_ratio"])
-            if ar < 1.0 - 1e-12:
-                raise ValueError(f"area_ratio A/A*={ar} must be >= 1.0")
-            if abs(ar - 1.0) <= 1e-12:
-                mach = 1.0
-            else:
-                regime = str(params.get("regime", "supersonic")).strip().lower()
-                fn = lambda m: math.sqrt(_area_mach_ratio_sq(m, gamma)) - ar
-                if regime.startswith("sub"):
-                    mach = float(optimize.brentq(fn, 1e-9, 1.0 - 1e-11, xtol=1e-14, rtol=1e-14))
-                else:
-                    mach = float(optimize.brentq(fn, 1.0 + 1e-11, 60.0, xtol=1e-14, rtol=1e-14))
-        elif "p0_over_p" in params and params["p0_over_p"] is not None:
-            pr = float(params["p0_over_p"])
-            mach = math.sqrt((2.0 / gm1) * ((pr ** (gm1 / gamma)) - 1.0))
-        else:
-            raise ValueError("isentropic requires 'mach', 'area_ratio', or 'p0_over_p'")
-
-        t0_over_t = 1.0 + 0.5 * gm1 * mach * mach
-        p0_over_p = t0_over_t ** (gamma / gm1)
-        rho0_over_rho = t0_over_t ** (1.0 / gm1)
-        a_over_astar = math.sqrt(_area_mach_ratio_sq(mach, gamma)) if mach > 0 else float("inf")
-
-        t0_k = float(params.get("T0", 300.0))
-        p0_pa = float(params.get("P0", 101325.0))
-        a_throat = float(params.get("A_throat", 1.0e-3))
-
-        t_static = t0_k / t0_over_t
-        p_static = p0_pa / p0_over_p
-        rho_static = p_static / (r_gas * t_static)
-        sound_speed = math.sqrt(gamma * r_gas * t_static)
-        velocity = mach * sound_speed
-        mdot_choked = (
-            a_throat
-            * p0_pa
-            / math.sqrt(t0_k)
-            * math.sqrt(gamma / r_gas)
-            * ((0.5 * gp1) ** (-0.5 * gp1 / gm1))
-        )
-        mdot_local = rho_static * velocity * (a_throat * a_over_astar)
-        residual = abs(mdot_local - mdot_choked) / max(abs(mdot_choked), 1e-15)
-        return {
-            "domain": "compressible_acoustics",
-            "subkind": subkind,
-            "mach": mach,
-            "T0_over_T": t0_over_t,
-            "P0_over_P": p0_over_p,
-            "rho0_over_rho": rho0_over_rho,
-            "A_over_Astar": a_over_astar,
-            "T_static_K": t_static,
-            "P_static_Pa": p_static,
-            "velocity_m_s": velocity,
-            "mdot_choked_kg_s": mdot_choked,
-            "residual": residual,
-            "verified": residual < 1e-10,
-        }
+        return _isentropic_nozzle(params, gamma, r_gas)
 
     if subkind == "normal_shock":
         m1 = float(params["M1"])
