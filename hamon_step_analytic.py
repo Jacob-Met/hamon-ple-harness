@@ -17,9 +17,9 @@ _MATERIAL = CURVED_PRIMITIVES | {
     "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION",
 }
 
-def select_curved_primitive(entities):
+def select_analytic_primitive(entities, supported=CURVED_PRIMITIVES):
     candidates = [eid for eid, (kind, _) in entities.items()
-                  if kind in CURVED_PRIMITIVES]
+                  if kind in supported]
     if not candidates:
         return None
     if len(candidates) != 1:
@@ -74,6 +74,49 @@ def _determinant(a):
     return (a[0][0]*(a[1][1]*a[2][2]-a[1][2]*a[2][1])
             - a[0][1]*(a[1][0]*a[2][2]-a[1][2]*a[2][0])
             + a[0][2]*(a[1][0]*a[2][1]-a[1][1]*a[2][0]))
+
+def _round_public(evaluator, tensor_scales=None):
+    def endpoint_float(endpoint):
+        # Convert exact dyadic endpoints with Python's ties-to-even rounding.
+        sign, mantissa, exponent, bits = endpoint._mpi_[0]
+        if bits < 0:
+            raise ValueError("STEP analytic result is not finite")
+        if not mantissa:
+            return 0.0
+        if exponent+bits > 1025:
+            raise ValueError("STEP analytic result exceeds binary64 range")
+        if exponent+bits < -1200:
+            return -0.0 if sign else 0.0
+        value = (Fraction(mantissa << exponent) if exponent >= 0 else
+                 Fraction(mantissa, 1 << -exponent))
+        return float(-value if sign else value)
+
+    for digits in (80, 160, 320, 640, 1280, 2560, 5120):
+        iv = MPIntervalContext()
+        iv.dps = digits
+        values = evaluator(iv)
+        scales = {} if tensor_scales is None else tensor_scales(iv, values)
+        rounded = []
+        for index, value in enumerate(values):
+            try:
+                low, high = endpoint_float(value.a), endpoint_float(value.b)
+            except (OverflowError, ValueError) as exc:
+                raise ValueError("STEP analytic result exceeds finite binary64 range") from exc
+            if not math.isfinite(low) or not math.isfinite(high):
+                raise ValueError("STEP analytic result exceeds finite binary64 range")
+            if low != high:
+                break
+            if low == 0 and index not in scales and (value.a > 0 or value.b < 0):
+                raise ValueError("STEP analytic nonzero result is lost in binary64")
+            if value != iv.mpf(0) and not (
+                    abs(iv.mpf(low)-value) <= scales.get(index, abs(value))*iv.mpf("1e-12")):
+                break
+            rounded.append(low)
+        if len(rounded) == len(values):
+            break
+    else:
+        raise ValueError("STEP analytic output cannot be qualified within binary64 tolerance")
+    return rounded
 
 def analytic_mass_properties(entities, selected, unit_scale, density):
     scale = _scalar(unit_scale, "unit scale", True)
@@ -130,21 +173,6 @@ def analytic_mass_properties(entities, selected, unit_scale, density):
             (rho > 0 and min(principal) <= 0)):
         raise ValueError("STEP analytic section moments failed their exact invariants")
 
-    def endpoint_float(endpoint):
-        # Convert exact dyadic endpoints with Python's ties-to-even rounding.
-        sign, mantissa, exponent, bits = endpoint._mpi_[0]
-        if bits < 0:
-            raise ValueError("STEP analytic result is not finite")
-        if not mantissa:
-            return 0.0
-        if exponent+bits > 1025:
-            raise ValueError("STEP analytic result exceeds binary64 range")
-        if exponent+bits < -1200:
-            return -0.0 if sign else 0.0
-        value = (Fraction(mantissa << exponent) if exponent >= 0 else
-                 Fraction(mantissa, 1 << -exponent))
-        return float(-value if sign else value)
-
     rational_norm = _rational_sqrt(norm)
     exact_extents = []
     for coordinate in axis:
@@ -156,9 +184,7 @@ def analytic_mass_properties(entities, selected, unit_scale, density):
         else:
             exact_extents.append(None)
 
-    for digits in (80, 160, 320, 640, 1280, 2560, 5120):
-        iv = MPIntervalContext()
-        iv.dps = digits
+    def evaluate(iv):
         def num(value):
             return iv.mpf(value.numerator)/value.denominator
         root = iv.sqrt(num(norm))
@@ -177,30 +203,11 @@ def analytic_mass_properties(entities, selected, unit_scale, density):
                    num(height*abs(axis[i]))/root
                    +2*num(radius)*iv.sqrt(num((norm-axis[i]**2)/norm))
                    for i in range(3)]
-        values = ([num(volume)*iv.pi, num(rho*volume)*iv.pi,
+        return ([num(volume)*iv.pi, num(rho*volume)*iv.pi,
                    num(surface)*iv.pi, num(rho)] + centers + extents
                   + [num(v)*iv.pi for row in tensor for v in row]
                   + [num(v)*iv.pi for v in principal])
-        rounded = []
-        for value in values:
-            try:
-                low, high = endpoint_float(value.a), endpoint_float(value.b)
-            except (OverflowError, ValueError) as exc:
-                raise ValueError("STEP analytic result exceeds finite binary64 range") from exc
-            if not math.isfinite(low) or not math.isfinite(high):
-                raise ValueError("STEP analytic result exceeds finite binary64 range")
-            if low != high:
-                break
-            if low == 0 and (value.a > 0 or value.b < 0):
-                raise ValueError("STEP analytic nonzero result is lost in binary64")
-            if value != iv.mpf(0) and not (
-                    abs(iv.mpf(low)-value) <= abs(value)*iv.mpf("1e-12")):
-                break
-            rounded.append(low)
-        if len(rounded) == len(values):
-            break
-    else:
-        raise ValueError("STEP analytic output cannot be qualified within binary64 tolerance")
+    rounded = _round_public(evaluate)
     if min(rounded[0], rounded[2], *rounded[7:10]) <= 0 or (
             rho > 0 and min(rounded[1], rounded[3], *rounded[19:22]) <= 0):
         raise ValueError("STEP analytic positive material property vanished on output")

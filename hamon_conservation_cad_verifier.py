@@ -218,13 +218,6 @@ def _num_list(tok: str) -> List[float]:
     return [float(x.strip()) for x in t.split(",") if x.strip()] if t else []
 
 
-def _box_mesh(origin: np.ndarray, x_ax: np.ndarray, y_ax: np.ndarray, z_ax: np.ndarray, dx: float, dy: float, dz: float) -> Tuple[np.ndarray, np.ndarray]:
-    corners = [origin + i * x_ax + j * y_ax + k * z_ax for k in (0.0, dz) for j in (0.0, dy) for i in (0.0, dx)]
-    v = np.array(corners, dtype=np.float64)
-    f = np.array([[0,2,1],[1,2,3],[4,5,6],[5,7,6],[0,1,5],[0,5,4],[2,6,7],[2,7,3],[0,4,6],[0,6,2],[1,3,7],[1,7,5]], dtype=np.int32)
-    return v, f
-
-
 def _position_ifc_profile(poly, entities, reference, scale):
     """Place profile vertices in the swept solid's XY plane."""
     if reference == "$":
@@ -901,7 +894,7 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
         unit_metadata = {"unit_scale_source": "explicit_override"}
 
     from hamon_step_csg import select_csg_root, csg_mass_properties
-    from hamon_step_analytic import CURVED_PRIMITIVES, select_curved_primitive, analytic_mass_properties
+    from hamon_step_analytic import CURVED_PRIMITIVES, select_analytic_primitive, analytic_mass_properties
     selected_csg = select_csg_root(entities, spec.get("solid_entity_id"))
     if selected_csg is not None:
         if spec.get("unit_scale_m") is None:
@@ -943,10 +936,15 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
         unit_scale, unit_metadata = resolve_step_length_scale(components, geometry_ids)
 
     if selected_solid is None and not has_ifc:
-        primitive = select_curved_primitive(entities)
+        primitive = select_analytic_primitive(entities, CURVED_PRIMITIVES | {"BLOCK"})
         if primitive is not None:
-            properties, analytic_volume = analytic_mass_properties(
-                entities, primitive, unit_scale, spec.get("density_kg_m3", 7850.0))
+            if entities[primitive][0] == "BLOCK":
+                from hamon_step_box import block_mass_properties
+                properties, analytic_volume = block_mass_properties(
+                    entities, primitive, unit_scale, spec.get("density_kg_m3", 7850.0))
+            else:
+                properties, analytic_volume = analytic_mass_properties(
+                    entities, primitive, unit_scale, spec.get("density_kg_m3", 7850.0))
             report = _cad_report(properties, analytic_volume, unit_scale, len(entities))
             report.update(unit_metadata)
             report["selected_solid_entity_id"] = primitive
@@ -1108,16 +1106,7 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
 
     analytic_entities = entities.items() if face_occurrences is None else ()
     for eid, (et, args) in analytic_entities:
-        if et == "BLOCK":
-            if len(args) != 5:
-                raise ValueError("STEP block requires exactly three positive dimensions")
-            origin, x_ax, y_ax, z_ax = _axis2_frame(entities, _ref_id(args[1]), unit_scale)
-            dx, dy, dz = float(args[2]) * unit_scale, float(args[3]) * unit_scale, float(args[4]) * unit_scale
-            if any(not math.isfinite(v) or v <= 0 for v in (dx, dy, dz)):
-                raise ValueError("STEP block dimensions must be finite and positive")
-            _append(*_box_mesh(origin, x_ax, y_ax, z_ax, dx, dy, dz))
-            analytic_vol = dx * dy * dz
-        elif et in ("EXTRUDED_AREA_SOLID", "IFCEXTRUDEDAREASOLID") and len(args) >= 4:
+        if et in ("EXTRUDED_AREA_SOLID", "IFCEXTRUDEDAREASOLID") and len(args) >= 4:
             swept = _rectangular_sweep(entities, et, args, unit_scale)
             if swept is not None:
                 vertices, faces, analytic_vol = swept
