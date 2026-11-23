@@ -1,0 +1,9 @@
+# Single-stub matching lengths
+
+The `rf_transmission_rlc` solver accepts `subkind="smith_stub"` for a lossless line with a positive real characteristic impedance and a passive load of positive resistance. The two lengths are measured in wavelengths from the load to the stub, and along the stub. The load and stub share a characteristic impedance. The solver returns both matching branches in order of distance from the load. A matched load has one canonical prescription.
+
+The default `length_representation="wavelengths"` verifies the returned binary64 values `d_over_lambda` and `l_stub_over_lambda`. Select `length_representation="endpoint_relative"` to verify `d_coordinate` and `l_stub_coordinate`. Each coordinate contains an integer `quarter_waves` and a signed decimal string `offset_wavelengths`. In wavelengths, the coordinate is `quarter_waves / 4 + offset_wavelengths`. Evaluate the offset at high precision and apply the quarter-wave rotation exactly. Combining the pair in binary64 can erase the correction. A half-wavelength shift gives the same electrical input.
+
+Each branch reports independent residuals and pass flags for both serializations. The residual is the magnitude of the normalized input impedance minus one, after including the shunt stub. A pass requires a finite residual below 1e-10. The top-level `verified` and `residual` refer to the selected branch and representation. The endpoint-relative result describes an ideal electrical prescription. Fabrication tolerance requires a separate analysis.
+
+For a 50 Ω line, a resistive load of 10⁻¹² Ω and a shorted stub, both returned ordinary length pairs have a normalized residual of approximately 0.00704. Both endpoint-relative pairs independently replay below 1e-10. At an exactly matched load, the canonical result is zero line distance and either zero open-stub length or a quarter-wave shorted stub.

@@ -1088,6 +1088,107 @@ def _transmission_port(params):
         return dict(result, error=str(exc))
 
 
+def _smith_coordinate(ctx, turns):
+    quarter = int(ctx.nint(4 * turns))
+    offset = turns - ctx.mpf(quarter) / 4
+    return {"quarter_waves": quarter, "offset_wavelengths": ctx.nstr(offset, ctx.dps - 12)}
+
+
+def _smith_rotation(ctx, quarter, offset):
+    # Rotate the small offset before applying its exact quarter-wave anchor.
+    c, s = ctx.cospi(2 * offset), ctx.sinpi(2 * offset)
+    return ((c, s), (-s, c), (-c, -s))[quarter]
+
+
+def _smith_residual(ctx, load, stub, line_rotation, stub_rotation):
+    # Independent normalized ABCD propagation. Combine the shunt admittance
+    # in homogeneous coordinates so an open or short never needs a tangent.
+    c, s = line_rotation
+    c_stub, s_stub = stub_rotation
+    voltage = load * c + ctx.j * s
+    current = c + ctx.j * load * s
+    if stub == "short":
+        num, den = -ctx.j * c_stub, s_stub
+    else:
+        num, den = ctx.j * s_stub, c_stub
+    total_current = current * den + voltage * num
+    if not total_current:
+        return None
+    error = float(abs((voltage * den - total_current) / total_current))
+    return error if math.isfinite(error) else None
+
+
+def _solve_smith_stub(params):
+    """Synthesize both lossless shunt matches and verify their serialized lengths."""
+    from mpmath import mp
+
+    z0 = float(params.get("Z0", 50.0))
+    resistance = float(params["R_L"])
+    reactance = float(params.get("X_L", 0.0))
+    if not all(map(math.isfinite, (z0, resistance, reactance))) or min(z0, resistance) <= 0:
+        raise ValueError("Smith stub matching requires finite R_L > 0, Z0 > 0 and finite X_L")
+    stub = str(params.get("stub_type", "short")).strip().lower()
+    if stub.startswith("short"):
+        stub = "short"
+    elif stub.startswith("open"):
+        stub = "open"
+    else:
+        raise ValueError("stub_type must select an open or short termination")
+    representation = params.get("length_representation", "wavelengths")
+    if representation not in ("wavelengths", "endpoint_relative"):
+        raise ValueError("length_representation must be wavelengths or endpoint_relative")
+    branch = params.get("branch", 0)
+    if isinstance(branch, bool) or branch not in (0, 1, "0", "1"):
+        raise ValueError("branch must select 0 or 1")
+
+    exponents = [math.frexp(abs(x))[1] for x in (z0, resistance, reactance) if x]
+    ctx = mp.clone()
+    # Resolve the weak wave and small angular offsets across the input contrast.
+    ctx.prec = 192 + 3 * (max(exponents) - min(exponents))
+    load = ctx.mpc(resistance, reactance) / ctx.mpf(z0)
+    magnitude = abs(load - 1) / ctx.sqrt(load.real)
+    gamma_load = (load - 1) / (load + 1)
+
+    def decode(coordinate):
+        return _smith_rotation(ctx, coordinate["quarter_waves"], ctx.mpf(coordinate["offset_wavelengths"]))
+
+    solutions = []
+    for susceptance in ((magnitude, -magnitude) if magnitude else (ctx.zero,)):
+        if susceptance:
+            # The two unit-conductance intersections have y = 1 +/- j|b|.
+            gamma_match = -ctx.j * susceptance / (2 + ctx.j * susceptance)
+            phase = ctx.arg(gamma_load * ctx.conj(gamma_match))
+            distance = (phase / (4 * ctx.pi)) % ctx.mpf("0.5")
+        else:
+            distance = ctx.zero
+        if stub == "short":
+            length = ctx.atan2(1, susceptance) / (2 * ctx.pi)
+        else:
+            length = (ctx.atan(-susceptance) / (2 * ctx.pi)) % ctx.mpf("0.5")
+
+        # Map a length rounded to a half wavelength to its equivalent zero.
+        d, l_stub = float(distance) % 0.5, float(length) % 0.5
+        d_coord, l_coord = _smith_coordinate(ctx, distance), _smith_coordinate(ctx, length)
+        plain = _smith_residual(ctx, load, stub, _smith_rotation(ctx, 0, ctx.mpf(d)),
+                                _smith_rotation(ctx, 0, ctx.mpf(l_stub)))
+        relative = _smith_residual(ctx, load, stub, decode(d_coord), decode(l_coord))
+        residual = relative if representation == "endpoint_relative" else plain
+        solutions.append((distance, {
+            "d_over_lambda": d, "l_stub_over_lambda": l_stub,
+            "d_coordinate": d_coord, "l_stub_coordinate": l_coord,
+            "absolute_length_residual": plain,
+            "absolute_lengths_verified": plain is not None and plain < 1e-10,
+            "endpoint_relative_residual": relative,
+            "endpoint_relative_verified": relative is not None and relative < 1e-10,
+            "residual": residual, "verified": residual is not None and residual < 1e-10,
+        }))
+
+    all_branches = [row for _, row in sorted(solutions, key=lambda item: item[0])]
+    chosen = all_branches[min(int(branch), len(all_branches) - 1)]
+    return {"domain": "rf_transmission_rlc", "subkind": "smith_stub", "stub_type": stub,
+            "length_representation": representation, **chosen, "all_branches": all_branches}
+
+
 def solve_transmission_line_rlc(params: Mapping[str, Any]) -> Dict[str, Any]:
     """Deterministic solver for lossless/lossy transmission lines, Smith-chart stubs, and RLC transients."""
     subkind = str(params.get("subkind", "transmission_line")).strip().lower()
@@ -1096,61 +1197,7 @@ def solve_transmission_line_rlc(params: Mapping[str, Any]) -> Dict[str, Any]:
         return _transmission_port(params)
 
     if subkind == "smith_stub":
-        z0 = float(params.get("Z0", 50.0))
-        rl = float(params["R_L"])
-        xl = float(params.get("X_L", 0.0))
-        stub_type = str(params.get("stub_type", "short")).strip().lower()
-        branch = int(params.get("branch", 0))
-        if not (math.isfinite(z0) and z0 > 0.0 and math.isfinite(rl) and rl > 0.0 and math.isfinite(xl)):
-            raise ValueError("Smith stub matching requires finite R_L > 0, Z0 > 0 and finite X_L")
-
-        # At either intersection with the unit-conductance circle, y = 1 + jb.
-        # Equating its reflection magnitude with the load gives b² = |z - 1|²/Re(z).
-        # Reflection phase is a full-circle coordinate even at a quarter wavelength.
-        z_load = complex(rl / z0, xl / z0)
-        delta = complex((rl - z0) / z0, xl / z0)
-        b_abs = abs(delta) / math.sqrt(z_load.real)
-        gamma_load = delta / (z_load + 1)
-        phase_load = math.atan2(gamma_load.imag, gamma_load.real)
-        sols = []
-        for b in ((b_abs, -b_abs) if b_abs else (0.0,)):
-            if b:
-                gamma_match = -1j * b / (2.0 + 1j * b)
-                phase_match = math.atan2(gamma_match.imag, gamma_match.real)
-                d_lam = ((phase_load - phase_match) / (4.0 * math.pi)) % 0.5
-                if d_lam == 0.5:
-                    d_lam = 0.0
-            else:
-                # Every line length works for an already matched load.
-                d_lam = 0.0
-
-            if stub_type.startswith("short"):
-                stub_angle = math.atan2(1.0, b)
-                y_stub = -1j * math.cos(stub_angle) / math.sin(stub_angle)
-            else:
-                stub_angle = math.atan(-b) % math.pi
-                if stub_angle == math.pi:
-                    stub_angle = 0.0
-                y_stub = 1j * math.sin(stub_angle) / math.cos(stub_angle)
-            l_lam = stub_angle / (2.0 * math.pi)
-            # Independently recover the terminal impedance using the line ABCD matrix.
-            angle = 2.0 * math.pi * d_lam
-            cs, sn = math.cos(angle), math.sin(angle)
-            y_line = (cs + 1j * z_load * sn) / (z_load * cs + 1j * sn)
-            residual = abs(1.0 / (y_line + y_stub) - 1.0)
-            sols.append((d_lam, l_lam, float(residual)))
-
-        sols.sort(key=lambda s: s[0])
-        chosen = sols[min(branch, len(sols) - 1)]
-        return {
-            "domain": "rf_transmission_rlc",
-            "subkind": subkind,
-            "d_over_lambda": chosen[0],
-            "l_stub_over_lambda": chosen[1],
-            "all_branches": [{"d_over_lambda": d, "l_stub_over_lambda": l, "residual": r} for d, l, r in sols],
-            "residual": chosen[2],
-            "verified": chosen[2] < 1e-10,
-        }
+        return _solve_smith_stub(params)
 
     if subkind == "rlc_transient":
         return _solve_rlc_transient(params)
