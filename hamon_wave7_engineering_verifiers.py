@@ -509,6 +509,93 @@ def _hx_inverse(arrangement, field, measurement, hot, cold, c_hot, c_cold, c_min
         return float(-remainder.ln() / factor)
 
 
+def _isothermal_radiation_components(factors, temperatures, adiabatic):
+    """Return each anchored component's common prescribed temperature, when unique."""
+    uniform = {}
+    unseen = set(range(len(temperatures)))
+    while unseen:
+        first = unseen.pop()
+        component, pending, fixed = {first}, [first], set()
+        while pending:
+            i = pending.pop()
+            if i not in adiabatic:
+                fixed.add(float(temperatures[i]))
+            for j in np.flatnonzero((factors[i] != 0) | (factors[:, i] != 0)):
+                if j in unseen:
+                    unseen.remove(j)
+                    component.add(j)
+                    pending.append(j)
+        if len(fixed) == 1:
+            uniform.update(dict.fromkeys(component, fixed.pop()))
+    return uniform
+
+
+def _resolved_radiation_balance(factors, areas, emissivities, temperatures, adiabatic):
+    """Resolve a weakly anchored diffuse-gray network before rounding its heat flux."""
+    from sympy import Matrix, Rational, SparseMatrix
+    from sympy.polys.matrices.exceptions import DMNonInvertibleMatrixError
+
+    n = len(areas)
+    matrix = SparseMatrix.zeros(n, n)
+    rhs = Matrix.zeros(n, 1)
+    exchange = []
+    emit = []
+    blackbody = []
+    for i in range(n):
+        # On a closed surface J-G = sum_j Fij (Ji-Jj). Self-view contributes
+        # exactly zero. This retains the small emissive term in its own right.
+        e = Rational(0) if i in adiabatic else Rational(float(emissivities[i]))
+        eb = Rational(0) if i in adiabatic else Rational(SIGMA_SB) * Rational(float(temperatures[i]))**4
+        links = [(j, Rational(float(factors[i, j]))) for j in np.flatnonzero(factors[i]) if j != i]
+        for j, weight in links:
+            matrix[i, int(j)] = -(1 - e) * weight
+        matrix[i, i] = e + (1 - e) * sum(w for _, w in links)
+        rhs[i] = e * eb
+        exchange.append(links)
+        emit.append(e)
+        blackbody.append(eb)
+
+    system = matrix.to_DM().to_field()
+    try:
+        numerator, divisor = system.solve_den(rhs.to_DM().convert_to(system.domain))
+    except DMNonInvertibleMatrixError:
+        return {"verified": False, "error": "singular_radiation_balance"}
+    radiosity = list(numerator.to_Matrix() / system.domain.to_sympy(divisor))
+    heat = []
+    surface_errors = []
+    for i, ji in enumerate(radiosity):
+        outward = sum(w * (ji - radiosity[j]) for j, w in exchange[i])
+        heat.append(Rational(float(areas[i])) * outward)
+        # Replay both the gray-surface law and the outward flux against the
+        # submitted view factors, including the independently supplied self-view.
+        irradiation = Rational(float(factors[i, i])) * ji + sum(w * radiosity[j] for j, w in exchange[i])
+        scale = max(abs(ji), abs(irradiation))
+        mismatch = ji - emit[i] * blackbody[i] - (1 - emit[i]) * irradiation
+        if scale:
+            surface_errors.extend([abs(mismatch) / scale, abs(ji - irradiation - outward) / scale])
+    balance = abs(sum(heat)) / max(sum(map(abs, heat)), 1)
+    published_j = [float(j) for j in radiosity]
+    published_q = [float(q) for q in heat]
+    if not all(math.isfinite(v) for v in published_j + published_q) or any(j < 0 for j in radiosity):
+        return {"verified": False, "error": "unrepresentable_radiation_balance"}
+    def rounding_error(published, exact):
+        return max((abs(Rational(v) - x) / abs(x) for v, x in zip(published, exact) if x), default=0)
+
+    q_rounding = rounding_error(published_q, heat)
+    j_rounding = rounding_error(published_j, radiosity)
+    residual = float(max([balance, q_rounding, j_rounding, *surface_errors]))
+    return {
+        "radiosity_W_m2": published_j,
+        "Q_net_W": published_q,
+        "T_surface_K": [(float((radiosity[i] / Rational(SIGMA_SB)) ** Rational(1, 4))
+                         if i in adiabatic else float(temperatures[i])) for i in range(n)],
+        "residual": residual,
+        "verified": residual < 1e-9,
+        **({"error": "unrepresentable_radiation_heat"} if q_rounding >= 1e-9 else {}),
+        **({"error": "unrepresentable_radiation_radiosity"} if j_rounding >= 1e-9 else {}),
+    }
+
+
 def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
     subkind = str(params.get("subkind") or ("radiation_network" if "F" in params else "heat_exchanger")).strip().lower()
 
@@ -714,7 +801,8 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
         n = f_mat.shape[0]
         if f_mat.shape != (n, n) or areas.shape != (n,) or eps_vec.shape != (n,) or len(t_raw) != n:
             return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "dimension_mismatch"}
-        if np.any(areas <= 0.0) or np.any(eps_vec <= 0.0) or np.any(eps_vec > 1.0) or np.any(f_mat < -1e-12):
+        if (not all(np.isfinite(v).all() for v in (areas, eps_vec, f_mat)) or np.any(areas <= 0.0)
+                or np.any(eps_vec <= 0.0) or np.any(eps_vec > 1.0) or np.any(f_mat < -1e-12)):
             return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "invalid_surface_properties"}
 
         row_sum_err = float(np.max(np.abs(np.sum(f_mat, axis=1) - 1.0)))
@@ -750,23 +838,53 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
                 "surfaces_without_temperature_path": np.flatnonzero(~anchored).tolist(),
             }
 
+        for i in range(n):
+            if i not in adiabatic and not 0 < float(t_raw[i]) < math.inf:
+                return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "non_positive_surface_temperature"}
+
+        def resolved():
+            return {
+                "domain": "exchangers_radiation", "subkind": subkind,
+                "row_sum_error": row_sum_err, "reciprocity_error": recip_err,
+                **_resolved_radiation_balance(f_mat, areas, eps_vec, t_raw, adiabatic),
+            }
+
+        uniform = _isothermal_radiation_components(f_mat, t_raw, adiabatic)
+        blackbody = {t: Fraction(SIGMA_SB) * Fraction(t)**4
+                     for t in {float(t_raw[i]) for i in range(n) if i not in adiabatic}}
         m_sys = np.zeros((n, n), dtype=float)
         b_rhs = np.zeros(n, dtype=float)
-        for i in range(n):
-            if i in adiabatic:
-                m_sys[i, :] = -f_mat[i, :]
-                m_sys[i, i] += 1.0
-                b_rhs[i] = 0.0
-            else:
-                ti = float(t_raw[i])
-                if ti <= 0.0:
-                    return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "non_positive_surface_temperature"}
-                eb_i = SIGMA_SB * (ti ** 4)
-                m_sys[i, :] = -(1.0 - eps_vec[i]) * f_mat[i, :]
-                m_sys[i, i] += 1.0
-                b_rhs[i] = eps_vec[i] * eb_i
+        try:
+            for i in range(n):
+                if i in uniform:
+                    # Every surface has the same exact radiosity and zero heat
+                    # transfer in an isothermal, closed, anchored component.
+                    m_sys[i, i] = 1.
+                    b_rhs[i] = float(blackbody[uniform[i]])
+                    continue
+                emission = 0. if i in adiabatic else eps_vec[i]
+                reflectivity = 1. - emission
+                m_sys[i] = -reflectivity * f_mat[i]
+                outward = math.fsum(f_mat[i, j] for j in range(n) if j != i)
+                m_sys[i, i] = emission + reflectivity * outward
+                if i not in adiabatic:
+                    b_rhs[i] = float(Fraction(float(emission)) * blackbody[float(t_raw[i])])
+        except OverflowError:
+            return resolved()
+
+        # An almost reflecting surface can lose its emissive term in 1-eps.
+        # Weak exchange with an adiabatic component can similarly lose its
+        # physical anchor in I-F. Replay when binary64 cannot resolve the
+        # surface balance at the verification tolerance.
+        resolution = np.finfo(float).eps / 1e-9
+        active_eps = [eps_vec[i] for i in range(n) if i not in adiabatic and i not in uniform]
+        if ((active_eps and min(active_eps) <= resolution)
+                or (adiabatic.difference(uniform) and np.linalg.cond(m_sys) * resolution >= 1.)):
+            return resolved()
 
         j_primary = np.linalg.solve(m_sys, b_rhs)
+        if not np.isfinite(j_primary).all() or np.any(j_primary < np.finfo(float).tiny):
+            return resolved()
         lu, piv = linalg.lu_factor(m_sys)
         j_dual = linalg.lu_solve((lu, piv), b_rhs)
 
@@ -774,15 +892,31 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
         surf_res_err = 0.0
         t_effective: List[float] = []
         for i in range(n):
-            q_encl = float(areas[i]) * float(np.sum(f_mat[i, :] * (j_primary[i] - j_primary)))
-            q_net[i] = q_encl
-            if i in adiabatic:
+            outward = float(np.sum(f_mat[i] * (j_primary[i] - j_primary)))
+            q_encl = float(areas[i]) * outward
+            if not math.isfinite(q_encl):
+                return resolved()
+            q_net[i] = 0. if i in adiabatic or i in uniform else q_encl
+            irradiation = float(f_mat[i] @ j_primary)
+            level = max(abs(j_primary[i]), abs(irradiation))
+            if level:
+                surf_res_err = max(surf_res_err, abs(j_primary[i] - irradiation - outward) / level)
+            if i in adiabatic and level:
+                surf_res_err = max(surf_res_err, abs(outward) / level)
+            if i not in adiabatic and i not in uniform:
+                exchange_level = math.fsum(abs(f_mat[i, j]) * (abs(j_primary[i]) + abs(j_primary[j]))
+                                           for j in range(n) if j != i)
+                if (exchange_level and abs(outward) <= resolution * exchange_level) or abs(q_encl) < np.finfo(float).tiny:
+                    return resolved()
+            if i in uniform:
+                t_effective.append(uniform[i])
+            elif i in adiabatic:
                 t_effective.append(float((max(float(j_primary[i]), 0.0) / SIGMA_SB) ** 0.25))
             else:
                 ti = float(t_raw[i])
                 t_effective.append(ti)
                 if eps_vec[i] < 1.0 - 1e-12:
-                    q_surf = float((areas[i] * eps_vec[i] / (1.0 - eps_vec[i])) * (SIGMA_SB * (ti ** 4) - j_primary[i]))
+                    q_surf = float((areas[i] * eps_vec[i] / (1.0 - eps_vec[i])) * (float(blackbody[ti]) - j_primary[i]))
                     surf_res_err = max(surf_res_err, abs(q_surf - q_encl) / max(abs(q_encl), 1.0))
 
         enclosure_balance_err = abs(float(np.sum(q_net))) / max(float(np.sum(np.abs(q_net))), 1.0)
