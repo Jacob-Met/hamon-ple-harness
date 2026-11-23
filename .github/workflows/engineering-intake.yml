@@ -25,6 +25,8 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - name: Registered thin polygon pressure and support-distance controls
         run: python ship/verify_polygon_contact_slacks.py --repo . --out "$RUNNER_TEMP/polygon-contact-slacks" --require-all
+      - name: Registered regional stiffness and common-displacement controls
+        run: python ship/verify_zoned_contact.py --repo . --out "$RUNNER_TEMP/zoned-contact"
       - name: Registered Arduino Due inter-net wire and routed-path controls
         timeout-minutes: 3
         run: |
