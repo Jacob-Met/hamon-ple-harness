@@ -148,13 +148,11 @@ def scan_file(p, root_members):
             return {"state":"empty"}
         h = hashlib.sha256()
         h.update(str(st.st_size).encode())
-        # Content fingerprint on both ends; metadata alone is not a proof
-        # against same-size rewrites.
+        # Equal-sized CAD edits can occur anywhere in a large deliverable.
+        # Stream the complete file under the task protocol's existing deadline.
         with p.open("rb") as f:
-            h.update(f.read(min(st.st_size, 1_048_576)))
-            if st.st_size > 1_048_576:
-                f.seek(max(0, st.st_size-1_048_576))
-                h.update(f.read(1_048_576))
+            while block := f.read(1_048_576):
+                h.update(block)
         ext = p.suffix.lower()
         if ext in (".zip",".docx",".xlsx",".xlsm"):
             try:
