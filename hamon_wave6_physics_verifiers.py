@@ -1361,16 +1361,73 @@ def _rounded_stress_root(compare):
     return sign*value(chosen)
 
 
+def _stress_number(value, *, legacy_text=False):
+    numeric = isinstance(value, (int, float, np.integer, np.floating))
+    if isinstance(value, (bool, np.bool_)) or not (numeric or (legacy_text and isinstance(value, str))):
+        raise ValueError("Stress and direction inputs must be finite real numbers")
+    if isinstance(value, (int, np.integer)):
+        return Fraction(int(value))
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError("Stress and direction inputs must be finite real numbers")
+    return Fraction(value)
+
+
+def _cauchy_tensor(params):
+    keys = (("sigma_x", "tau_xy", "tau_xz"),
+            ("tau_xy", "sigma_y", "tau_yz"),
+            ("tau_xz", "tau_yz", "sigma_z"))
+    if "stress_tensor" not in params:
+        return [[_stress_number(params.get(key, 0), legacy_text=True) for key in row] for row in keys]
+    matrix = np.asarray(params["stress_tensor"], dtype=object)
+    if matrix.shape != (3, 3):
+        raise ValueError("stress_tensor must be a symmetric 3 by 3 array")
+    tensor = [[_stress_number(value) for value in row] for row in matrix]
+    for i, row in enumerate(keys):
+        for j, key in enumerate(row):
+            if tensor[i][j] != tensor[j][i]:
+                raise ValueError("stress_tensor must be symmetric")
+            if key in params and _stress_number(params[key]) != tensor[i][j]:
+                raise ValueError(f"{key} conflicts with stress_tensor")
+    return tensor
+
+
+def _plane_traction(tensor, normal):
+    """Cauchy traction with an unnormalized normal and exact squared norm."""
+    normal = np.asarray(normal, dtype=object)
+    if normal.shape != (3,):
+        raise ValueError("plane_normal must have three components")
+    v = [_stress_number(x) for x in normal]
+    length_squared = sum(x*x for x in v)
+    if not length_squared:
+        raise ValueError("plane_normal must be nonzero")
+    force = [sum(a*b for a,b in zip(row,v)) for row in tensor]
+    normal_stress = sum(t*n for t,n in zip(force,v)) / length_squared
+    tangent = [t-normal_stress*n for t,n in zip(force,v)]
+    if sum(s*n for s,n in zip(tangent,v)) != 0:
+        raise ArithmeticError("Tangential traction is not in the supplied plane")
+
+    def root(square):
+        def compare(trial):
+            if trial < 0:
+                return 1
+            difference = square - trial*trial
+            return (difference>0) - (difference<0)
+        return _rounded_stress_root(compare)
+
+    def normalize(items):
+        return [(-1 if x<0 else 1)*root(x*x/length_squared) for x in items]
+
+    return {"unit_normal": normalize(v), "traction": normalize(force),
+            "normal_stress": _rounded_stress_root(lambda t: (normal_stress>t)-(normal_stress<t)),
+            "shear_traction": normalize(tangent),
+            "shear_magnitude": root(sum(s*s for s in tangent)/length_squared)}
+
+
 def _mohr_stress(params):
     """Recover pressure-independent shear and yield from both Cartesian and principal invariants."""
     def sign(v):
         return int(v > 0) - int(v < 0)
-
-    def number(key):
-        v = float(params.get(key, 0.0))
-        if not math.isfinite(v):
-            raise ValueError("Stress inputs must be finite")
-        return Fraction(v)
 
     def compare_root(index, quadratic, linear, constant):
         # The shifted monic cubic has three real roots. Sign variations
@@ -1384,9 +1441,11 @@ def _mohr_stress(params):
         return 1 if threshold < 0 else sign(square-threshold*threshold)
 
     try:
-        x, y, z = (number(k) for k in ("sigma_x", "sigma_y", "sigma_z"))
-        xy, xz, yz = (number(k) for k in ("tau_xy", "tau_xz", "tau_yz"))
-        strength = number("sigma_yield") if params.get("sigma_yield") is not None else None
+        stress = _cauchy_tensor(params)
+        x, y, z = (stress[i][i] for i in range(3))
+        xy, xz, yz = stress[0][1], stress[0][2], stress[1][2]
+        strength = _stress_number(params["sigma_yield"], legacy_text=True) if params.get("sigma_yield") is not None else None
+        plane = _plane_traction(stress,params["plane_normal"]) if "plane_normal" in params else None
         if strength is not None and strength < 0:
             raise ValueError("Yield strength must be nonnegative")
         mean = (x+y+z)/3
@@ -1430,9 +1489,20 @@ def _mohr_stress(params):
             unit = max(map(abs, (a,b,c,xy,xz,yz)))
             tensor = np.array([[float(v/unit) for v in row] for row in
                                ((a,xy,xz), (xy,b,yz), (xz,yz,c))])
-            spectrum = np.linalg.eigvalsh(tensor)
+            spectrum, principal_axes = np.linalg.eigh(tensor)
+            # Each body diagonal in the principal frame defines an octahedral plane.
+            # Remove hydrostatic stress first so a large common pressure cannot
+            # conceal errors in the Cartesian traction or its tangential part.
+            normals = principal_axes @ (np.array([[1., 1., 1., 1.],
+                                                   [1., 1., -1., -1.],
+                                                   [1., -1., 1., -1.]]) / math.sqrt(3.))
+            traction = tensor @ normals
+            normal_part = np.sum(normals * traction, axis=0)
+            shear = traction - normals * normal_part
+            oct_residual = max(np.max(np.abs(normal_part)),
+                               np.max(np.abs(np.sum(shear*shear,axis=0) - float(2*j2/(3*unit**2)))))
             ref_gap = _rounded_stress_root(lambda t: gap(unit*t))
-            residual = max(abs(float(spectrum.sum())),
+            residual = max(float(oct_residual), abs(float(spectrum.sum())),
                            abs(float(spectrum @ spectrum)/2 - float(j2/unit**2)),
                            abs(float(np.prod(spectrum)) - float(j3/unit**3)),
                            abs(float(spectrum[-1]-spectrum[0])-ref_gap))
@@ -1440,9 +1510,12 @@ def _mohr_stress(params):
                 "tau_max_inplane": _rounded_stress_root(lambda t: positive_sqrt(ux*ux/4+xy*xy, t)),
                 "tau_max_abs": _rounded_stress_root(lambda t: gap(2*t)),
                 "theta_p_deg": angle, "sigma_von_mises": _rounded_stress_root(vm),
+                "sigma_oct": _rounded_stress_root(lambda t: sign(mean-t)),
+                "tau_oct": _rounded_stress_root(lambda t: positive_sqrt(2*j2/3, t)),
+                **({"plane_traction": plane} if plane is not None else {}),
                 "safety_factor_vm": safety(vm), "safety_factor_tresca": safety(gap),
                 "residual": residual, "verified": residual < 1e-11}
-    except (ArithmeticError, ValueError) as exc:
+    except (ArithmeticError, TypeError, ValueError) as exc:
         return {"verified": False, "error": str(exc)}
 
 

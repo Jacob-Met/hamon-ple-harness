@@ -6,6 +6,7 @@ from fractions import Fraction
 
 import numpy as np
 from scipy.sparse import coo_matrix
+from scipy.sparse.linalg import spsolve
 
 
 def number(value):
@@ -119,14 +120,14 @@ def invert_loss(head_drop, law, scale):
     return np.sign(head_drop) * (lo + hi) / 2
 
 
-def newton(initial, evaluate, tolerance):
+def newton(initial, evaluate, tolerance, solve=np.linalg.solve):
     value = initial.copy()
     for _ in range(80):
         residual, jacobian = evaluate(value)
         norm = np.max(np.abs(residual), initial=0.0)
         if norm <= tolerance:
             return value
-        change = np.linalg.solve(jacobian, residual)
+        change = solve(jacobian, residual)
         for backtrack in range(25):
             candidate = value - change / 2**backtrack
             candidate_norm = np.max(np.abs(evaluate(candidate)[0]), initial=0.0)
@@ -178,6 +179,97 @@ def forest_walk(endpoints, edges, roots, node_count):
     if len(order) != node_count:
         raise ValueError("All nodes must belong to one connected network")
     return branches
+
+
+def single_reservoir_loops(endpoints, root, demands, datum, incidence, law, inverse, scale):
+    """Solve continuity in tree-drop coordinates and energy in cycle coordinates."""
+    edge_count = len(endpoints)
+    basis, _ = pressure_forest(len(demands), endpoints, [root], law(np.zeros(edge_count))[1])
+    branches = forest_walk(endpoints, basis, [root], len(demands))
+    chords = np.setdiff1d(np.arange(edge_count), basis)
+    # A chord needs only the signed drops between its endpoints and their
+    # common ancestor. Build these rows without a dense incidence inverse.
+    parent = np.zeros(len(demands), dtype=int)
+    depth = np.zeros(len(demands), dtype=int)
+    column = np.zeros(len(demands), dtype=int)
+    sign = np.zeros(len(demands), dtype=int)
+    columns = {edge: i for i, edge in enumerate(basis)}
+    for p, child, edge, direction in branches:
+        parent[child] = p
+        depth[child] = depth[p] + 1
+        column[child] = columns[edge]
+        sign[child] = direction
+    row, col, data = list(basis), list(range(len(basis))), [1] * len(basis)
+    for edge in chords:
+        left, right = endpoints[edge]
+        while left != right:
+            if depth[left] >= depth[right]:
+                row.append(edge)
+                col.append(column[left])
+                data.append(-sign[left])
+                left = parent[left]
+            else:
+                row.append(edge)
+                col.append(column[right])
+                data.append(sign[right])
+                right = parent[right]
+    paths = coo_matrix((data, (row, col)), shape=(edge_count, len(basis))).tocsr()
+    walks = paths[chords].tocoo()
+    cycles = coo_matrix(
+        (np.r_[-walks.data, np.ones(len(chords))],
+         (np.r_[np.asarray(basis)[walks.col], chords],
+          np.r_[walks.row, np.arange(len(chords))])),
+        shape=(edge_count, len(chords)),
+    ).tocsr()
+    junctions = np.arange(len(demands)) != root
+    A = incidence[junctions]
+    d = demands[junctions]
+
+    def nodal_equations(tree_drop):
+        flow = inverse(paths @ tree_drop, scale)
+        jacobian = A.multiply(1 / law(flow)[1]) @ paths
+        return A @ flow + d, jacobian
+
+    pressure = newton(np.zeros(len(basis)), nodal_equations, min(1e-12, 5e-13 * np.abs(d).sum()), spsolve)
+    qnode = inverse(paths @ pressure, scale)
+    # Accumulate rounded drops and demands exactly on the tree. The cut
+    # flow starts the independent cycle solve with continuity satisfied.
+    heads = [Fraction(float(datum))] * len(demands)
+    for p, child, edge, direction in branches:
+        heads[child] = heads[p] - direction * Fraction(float(pressure[columns[edge]]))
+    cut = [Fraction(float(v)) for v in demands]
+    feasible = np.zeros(edge_count)
+    for p, child, edge, direction in reversed(branches):
+        feasible[edge] = float(direction * cut[child])
+        cut[p] += cut[child]
+    loss_scale = float(np.max(np.abs(law(feasible)[0])))
+    tolerance = max(32 * np.finfo(float).eps * loss_scale, min(1e-13, 1e-13 * loss_scale))
+
+    use_nodal_projection = len(chords) > len(basis)
+
+    def loop_equations(amount):
+        drop, slope = law(feasible + cycles @ amount)
+        residual = cycles.T @ drop
+        if use_nodal_projection:
+            return residual, slope
+        return residual, cycles.T @ cycles.multiply(slope[:, None])
+
+    def projected_step(slope, residual):
+        # C is the cycle basis with C[chords] = I. A vector z supported on
+        # the chords with z[chords] = residual therefore has C.T @ z = residual.
+        # Project D^-1 z into the continuity nullspace with a sparse nodal
+        # solve. Its chord entries solve C.T D C delta = residual exactly
+        # in real arithmetic, without constructing that high-rank matrix.
+        trial = np.zeros(edge_count)
+        trial[chords] = residual / slope[chords]
+        conductance = A.multiply(1 / slope)
+        correction = spsolve(conductance @ A.T, A @ trial)
+        return trial[chords] - (A[:, chords].T @ correction) / slope[chords]
+
+    linear_step = projected_step if use_nodal_projection else spsolve
+    amount = newton(np.zeros(len(chords)), loop_equations, tolerance, linear_step)
+    qloop = feasible + cycles @ amount
+    return qloop, qnode, np.array(list(map(float, heads))), law(qloop)[0], basis
 
 
 def resolved_laminar_exchange(endpoints, basis, cycles, reservoirs, fixed_heads, demands,
@@ -430,8 +522,8 @@ def network(spec):
     if any(a == b for a, b in endpoints):
         raise ValueError("Pipe cannot connect a node to itself")
     radial = len(reservoirs) == 1 and len(pipes) == len(nodes) - 1
-    if radial:
-        # Connectedness is established by the traversal in radial_solution.
+    if len(reservoirs) == 1:
+        # Both single-reservoir formulations check connectivity by traversing the tree.
         row = np.asarray(endpoints).ravel()
         col = np.repeat(np.arange(len(pipes)), 2)
         signs = np.tile([1., -1.], len(pipes))
@@ -467,6 +559,9 @@ def network(spec):
     if radial:
         qloop, qnode, total_head, drop = radial_solution(
             endpoints, reservoirs[0], demands, datum, law, inverse, re_per_flow)
+    elif len(reservoirs) == 1:
+        qloop, qnode, total_head, drop, basis = single_reservoir_loops(
+            endpoints, reservoirs[0], demands, datum, incidence, law, inverse, scale)
     else:
         # Use pressure drops on a forest rooted at the reservoirs as continuous
         # coordinates. Prefer low-resistance pipes so a small pressure gradient
@@ -495,10 +590,7 @@ def network(spec):
             derivative = A / law(flow)[1]
             return residual, derivative @ paths
 
-        # The minimum flow used to bracket a pipe inverse is not the scale
-        # of the continuity equations for a very lightly loaded closed mesh.
-        mass_scale = float(np.abs(d).sum()) if len(reservoirs) == 1 else scale
-        tree_drop = newton(initial, nodal_equations, min(1e-12, 5e-13 * mass_scale))
+        tree_drop = newton(initial, nodal_equations, min(1e-12, 5e-13 * scale))
         qnode = inverse(pipe_drops(tree_drop), scale)
         head = np.linalg.solve(basis_incidence.T, tree_drop)
         # The second formulation begins with continuity satisfied, and may change
@@ -512,17 +604,12 @@ def network(spec):
         cycles[chords, np.arange(len(chords))] = 1.0
 
         initial_loss = np.abs(law(feasible)[0])
-        if len(reservoirs) > 1:
-            # Each exchange uses its own root-to-root head scale. The nodal
-            # estimate also accounts for a loop driven by other exchanges.
-            path_loss = np.maximum(initial_loss, np.abs(law(qnode)[0]))
-            path_scale = np.abs(cycles).T @ path_loss + np.abs(fixed_drop[chords])
-            path_scale = np.where(path_scale > 0, path_scale, 1.)
-            loop_tolerance = 1e-13
-        else:
-            path_scale = np.ones(len(chords))
-            loss_scale = np.max(initial_loss)
-            loop_tolerance = max(32 * np.finfo(float).eps * loss_scale, min(1e-13, 1e-13 * loss_scale))
+        # Each exchange uses its own root-to-root head scale. The nodal
+        # estimate also accounts for a loop driven by other exchanges.
+        path_loss = np.maximum(initial_loss, np.abs(law(qnode)[0]))
+        path_scale = np.abs(cycles).T @ path_loss + np.abs(fixed_drop[chords])
+        path_scale = np.where(path_scale > 0, path_scale, 1.)
+        loop_tolerance = 1e-13
 
         def loop_equations(amount):
             drop, slope = law(feasible + cycles @ amount)
@@ -535,45 +622,44 @@ def network(spec):
         drop, _ = law(qloop)
         total_head = root_head.copy()
         total_head[junctions] += head
-        if len(reservoirs) > 1:
-            # Nearly balanced reservoirs can cancel either a chord's driving
-            # head or a tree pipe's demand and exchange flows.
-            guard = math.sqrt(np.finfo(float).eps)
-            path_drop = np.abs(cycles).T @ np.abs(drop) + np.abs(fixed_drop[chords])
-            hidden_drop = np.abs(drop[chords]) < guard * path_drop
-            path_flow = np.abs(feasible) + np.abs(cycles) @ np.abs(amplitude)
-            hidden_flow = np.abs(qloop[basis]) < guard * path_flow[basis]
-            root_incidence = incidence[reservoirs]
-            root_flow = root_incidence @ qloop
-            hidden_supply = np.abs(root_flow) < guard * (np.abs(root_incidence) @ np.abs(qloop))
-            if np.any(hidden_drop) or np.any(hidden_flow) or np.any(hidden_supply):
-                # Exchanges are coupled only when their forest paths share a
-                # pipe. Independent nonlinear branches keep their own law.
-                support = cycles != 0
-                selected = hidden_drop | np.any(support[np.asarray(basis, dtype=int)[hidden_flow]], axis=0)
-                incident = np.any(root_incidence[hidden_supply] != 0, axis=0)
-                selected |= np.any(support[incident], axis=0)
-                while True:
-                    affected = np.any(support[:, selected], axis=1)
-                    neighboring = np.any(support[affected], axis=0)
-                    if np.array_equal(neighboring, selected):
-                        break
-                    selected = neighboring
-                reynolds = re_per_flow * np.maximum(np.abs(qnode), np.abs(qloop))
-                if np.any(reynolds[affected] >= 2000):
-                    raise ValueError("Near-balanced reservoir exchange is unresolved by transitional or turbulent losses")
-                if np.any(minor[affected]):
-                    qloop, total_head, resolved_supply = resolved_minor_exchange(
-                        endpoints, basis, cycles[:, selected], reservoirs, fixed_heads, demands,
-                        length, diameter, minor, viscosity, gravity, affected, qloop, drop,
-                        amplitude[selected], hidden_supply)
-                else:
-                    qloop, total_head, resolved_supply = resolved_laminar_exchange(
-                        endpoints, basis, cycles[:, selected], reservoirs, fixed_heads, demands,
-                        length, diameter, viscosity, gravity, affected, qloop, drop)
-                if np.any((re_per_flow * np.abs(qloop))[affected] >= 2000):
-                    raise ValueError("Resolved flow exceeds the laminar regime")
-                drop = law(qloop)[0]
+        # Nearly balanced reservoirs can cancel either a chord's driving
+        # head or a tree pipe's demand and exchange flows.
+        guard = math.sqrt(np.finfo(float).eps)
+        path_drop = np.abs(cycles).T @ np.abs(drop) + np.abs(fixed_drop[chords])
+        hidden_drop = np.abs(drop[chords]) < guard * path_drop
+        path_flow = np.abs(feasible) + np.abs(cycles) @ np.abs(amplitude)
+        hidden_flow = np.abs(qloop[basis]) < guard * path_flow[basis]
+        root_incidence = incidence[reservoirs]
+        root_flow = root_incidence @ qloop
+        hidden_supply = np.abs(root_flow) < guard * (np.abs(root_incidence) @ np.abs(qloop))
+        if np.any(hidden_drop) or np.any(hidden_flow) or np.any(hidden_supply):
+            # Exchanges are coupled only when their forest paths share a
+            # pipe. Independent nonlinear branches keep their own law.
+            support = cycles != 0
+            selected = hidden_drop | np.any(support[np.asarray(basis, dtype=int)[hidden_flow]], axis=0)
+            incident = np.any(root_incidence[hidden_supply] != 0, axis=0)
+            selected |= np.any(support[incident], axis=0)
+            while True:
+                affected = np.any(support[:, selected], axis=1)
+                neighboring = np.any(support[affected], axis=0)
+                if np.array_equal(neighboring, selected):
+                    break
+                selected = neighboring
+            reynolds = re_per_flow * np.maximum(np.abs(qnode), np.abs(qloop))
+            if np.any(reynolds[affected] >= 2000):
+                raise ValueError("Near-balanced reservoir exchange is unresolved by transitional or turbulent losses")
+            if np.any(minor[affected]):
+                qloop, total_head, resolved_supply = resolved_minor_exchange(
+                    endpoints, basis, cycles[:, selected], reservoirs, fixed_heads, demands,
+                    length, diameter, minor, viscosity, gravity, affected, qloop, drop,
+                    amplitude[selected], hidden_supply)
+            else:
+                qloop, total_head, resolved_supply = resolved_laminar_exchange(
+                    endpoints, basis, cycles[:, selected], reservoirs, fixed_heads, demands,
+                    length, diameter, viscosity, gravity, affected, qloop, drop)
+            if np.any((re_per_flow * np.abs(qloop))[affected] >= 2000):
+                raise ValueError("Resolved flow exceeds the laminar regime")
+            drop = law(qloop)[0]
     if radial:
         continuity, local_mass_ok, root_supply = radial_balance(endpoints, reservoirs[0], demands, qloop)
         supply = np.array([root_supply])
