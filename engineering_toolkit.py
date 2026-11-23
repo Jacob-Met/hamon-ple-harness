@@ -660,6 +660,105 @@ def _arithmetic_audit(producers, literals, converted):
         yield record
 
 
+def _equipment_catalog(filename, edition, sheet_name, title_sheet):
+    """Resolve both the selected equipment sheet and its issue through the workbook index."""
+    from collections import defaultdict
+    def rich_string(node):
+        # Phonetic guides and document annotations are not part of a cell's display text.
+        return "".join(t.text or "" for t in node.findall("{*}t") + node.findall("{*}r/{*}t"))
+    with zipfile.ZipFile(filename) as archive:
+        workbook, parts = _xlsx_parts(archive)
+        if not workbook or sheet_name == title_sheet:
+            raise ValueError("expected distinct named title and catalog worksheets")
+        def part(name):
+            found = [s for s in parts if s["name"] == name]
+            if len(found) != 1 or found[0]["kind"] != "worksheet" or found[0]["state"] != "visible":
+                raise ValueError(f"expected one visible worksheet named {name!r}")
+            return found[0]["part"]
+        root = pathlib.PurePosixPath(workbook)
+        rels = _xlsx_relationships(archive, str(root.parent / "_rels" / (root.name + ".rels")))
+        shared = []
+        tables = [r for r in rels.values() if r.get("Type") in {base + "/sharedStrings" for base in _DOCUMENT_RELS}]
+        if tables:
+            if len(tables) != 1 or tables[0].get("TargetMode", "Internal") != "Internal":
+                raise ValueError("ambiguous shared string table")
+            table = _xlsx_xml(archive, _xlsx_target(workbook, tables[0].get("Target", "")), 25000000)
+            shared = [rich_string(node) for node in table.findall("{*}si")]
+        def read(name):
+            rows = defaultdict(dict)
+            worksheet = _xlsx_xml(archive, part(name), 25000000)
+            if any(r.get("hidden") in ("1", "true") for r in worksheet.findall("{*}sheetData/{*}row")):
+                raise ValueError(f"hidden rows in source worksheet {name!r}")
+            for c in worksheet.findall("{*}sheetData/{*}row/{*}c"):
+                match = re.fullmatch(r"([A-Z]{1,3})([1-9][0-9]{0,6})", c.get("r",""))
+                if not match:
+                    raise ValueError("invalid worksheet cell reference")
+                col, number = match.groups()
+                if col in rows[int(number)]:
+                    raise ValueError("duplicate worksheet cell reference")
+                typ = c.get("t", "n")
+                value = c.findtext("{*}v", "")
+                if c.find("{*}f") is not None or typ == "e":
+                    value = None
+                elif typ == "s":
+                    if not value.isascii() or not value.isdigit() or int(value) >= len(shared):
+                        raise ValueError("unresolved shared string")
+                    value = shared[int(value)]
+                elif typ == "inlineStr":
+                    node = c.find("{*}is")
+                    value = rich_string(node) if node is not None else ""
+                elif typ not in ("str",):
+                    value = None if value else ""
+                rows[int(number)][col] = value
+            return rows
+        def norm(s):
+            return " ".join((s or "").split()).casefold()
+        title = read(title_sheet)
+        issues = [(n,row.get("B")) for n,row in title.items() if norm(row.get("A")) in {"doc no.","doc no","document number"}]
+        if len(issues)!=1 or issues[0][1]!=edition:
+            raise ValueError("requested edition does not match the unique title-block document number")
+        rows = read(sheet_name)
+        headers = [(n,[col for col,v in row.items() if norm(v)=="manufacturer"],
+                       [col for col,v in row.items() if norm(v)=="model"]) for n,row in rows.items()]
+        headers = [h for h in headers if h[1] and h[2]]
+        if len(headers)!=1 or len(headers[0][1])!=1 or len(headers[0][2])!=1:
+            raise ValueError("expected one manufacturer/model header row")
+        start, (maker,), (model,) = headers[0]
+        catalog = defaultdict(list)
+        for n, row in rows.items():
+            if n<=start or all(v=="" for v in row.values()): continue
+            if not norm(row.get(maker)) or not norm(row.get(model)):
+                raise ValueError(f"missing literal manufacturer or model at {sheet_name} row {n}")
+            key = " ".join((row[maker]+" "+row[model]).split())
+            catalog[key].append({"manufacturer":row[maker],"model":row[model],
+                                 "cells":[f"{sheet_name}!{maker}{n}",f"{sheet_name}!{model}{n}"]})
+        if not catalog:
+            raise ValueError("empty equipment catalog")
+        return catalog, f"{title_sheet}!B{issues[0][0]}"
+
+
+def witness_equipment(pdf, filename, edition, sheet, title_sheet, equipment_type):
+    import hashlib
+    import hamon_witness_package
+    documents = [pathlib.Path(pdf), pathlib.Path(filename)]
+    payloads = []
+    for path in documents:
+        with path.open("rb") as source:
+            data = source.read(32 * 1024 * 1024 + 1)
+        if len(data) > 32 * 1024 * 1024:
+            raise ValueError("equipment source exceeds 32 MiB")
+        payloads.append(data)
+    catalog, title_cell = _equipment_catalog(io.BytesIO(payloads[1]), edition, sheet, title_sheet)
+    converted = subprocess.run(["pdftotext","-layout","-","-"],input=payloads[0],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25)
+    if converted.returncode:
+        raise ValueError("unable to read PDF text")
+    result = hamon_witness_package.match_installation(converted.stdout.decode("utf-8"), catalog, equipment_type)
+    result.update(edition=edition, title_cell=title_cell, catalog_sheet=sheet,
+                  sources=[{"file":str(p),"sha256":hashlib.sha256(b).hexdigest()} for p,b in zip(documents,payloads)])
+    return result
+
+
 def xlsx_audit(filename: str):
     """Audit declared worksheet cells and formula caches without evaluating a workbook."""
     manifest = {"file": filename, "kind": "xlsx-formula-audit", "sheets": [], "other_sheets": []}
@@ -1141,6 +1240,10 @@ def audit_local_deliverable(path: str | pathlib.Path) -> dict[str, Any]:
 def run(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     sub=p.add_subparsers(dest="cmd",required=True)
+    we=sub.add_parser("witness-equipment", help="Join explicit as-installed PDF evidence to an exact model row in a named workbook edition")
+    we.add_argument("--equipment-type", choices=("inverter","pcs"), default="inverter")
+    we.add_argument("pdf"); we.add_argument("catalog"); we.add_argument("--edition", required=True)
+    we.add_argument("--sheet", required=True); we.add_argument("--title-sheet", required=True)
     wp=sub.add_parser("witness-package", help="Reconcile dated scope, release evidence and standing case items before writing a Word package")
     wp.add_argument("file", nargs="?")
     wp.add_argument("--example", action="store_true", help="print a constructed input template")
@@ -1219,7 +1322,9 @@ def run(argv=None):
     fmg.add_argument("file")
     args=p.parse_args(argv)
     try:
-        if args.cmd=="witness-package":
+        if args.cmd=="witness-equipment":
+            out=witness_equipment(args.pdf,args.catalog,args.edition,args.sheet,args.title_sheet,args.equipment_type)
+        elif args.cmd=="witness-package":
             import hamon_witness_package
             if args.example and args.file is None and args.output is None:
                 print(json.dumps(hamon_witness_package.example(), indent=2))
