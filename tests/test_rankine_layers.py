@@ -89,6 +89,52 @@ class TestRankineLayers(unittest.TestCase):
                 self.assertFalse(run("active", [row], water_table_depth_m=table,
                                      gamma_water_N_m3=10000)["conservation_verified"])
 
+    def test_two_water_faces_cross_material_and_water_boundaries(self):
+        rows = [{"thickness_m": 2, "phi_deg": 30, "gamma_above_water_N_m3": 18000,
+                 "gamma_saturated_N_m3": 20000},
+                {"thickness_m": 4, "phi_deg": 30, "gamma_above_water_N_m3": 18000,
+                 "gamma_saturated_N_m3": 20000}]
+        for state, k in (("active", 1/3), ("passive", 3)):
+            for rear in (0, 1, 2, 4, 6, 8):
+                for front in (0, 1, 2, 4, 6, 8):
+                    with self.subTest(state=state, rear=rear, front=front):
+                        h, gw = 6, 10000
+                        # Superpose a dry soil triangle, submerged slope correction,
+                        # and the opposed hydrostatic triangles about the wall base.
+                        wet, flooded = max(0, h-rear), max(0, h-front)
+                        effective_f = k * (18000*h*h - 8000*wet**2) / 2
+                        effective_m = k * (18000*h**3 - 8000*wet**3) / 6
+                        net_f = gw * (wet**2 - flooded**2) / 2
+                        net_m = gw * (wet**3 - flooded**3) / 6
+                        r = run(state, rows, water_table_depth_m=rear,
+                                front_water_table_depth_m=front, gamma_water_N_m3=gw)
+                        self.assertTrue(r["conservation_verified"], r)
+                        self.assertAlmostEqual(r["thrust_N_m"], effective_f + net_f)
+                        self.assertAlmostEqual(r["moment_Nm_m"], effective_m + net_m)
+                        self.assertAlmostEqual(r["hydrostatic_thrust_N_m"], net_f)
+                        self.assertAlmostEqual(r["hydrostatic_moment_Nm_m"], net_m)
+                        self.assertEqual(r["profile"][-1]["net_water_bottom_Pa"], gw*(wet-flooded))
+
+    def test_opposed_water_can_reverse_the_resultant_or_leave_a_pure_couple(self):
+        soil = [{"thickness_m": 4, "phi_deg": 0, "gamma_above_water_N_m3": 2500}]
+        def solve(front, **extra):
+            return run("active", soil, front_water_table_depth_m=front,
+                       gamma_water_N_m3=10000, **extra)
+        reversed_load = solve(0)
+        self.assertTrue(reversed_load["conservation_verified"])
+        self.assertEqual(reversed_load["thrust_N_m"], -60000)
+        self.assertAlmostEqual(reversed_load["moment_Nm_m"], -80000)
+        self.assertAlmostEqual(reversed_load["resultant_above_base_m"], 4/3)
+        self.assertFalse(solve(0, proposed_thrust_N_m=60000)["conservation_verified"])
+        couple = solve(2)
+        self.assertTrue(couple["conservation_verified"])
+        self.assertEqual(couple["thrust_N_m"], 0)
+        self.assertAlmostEqual(couple["moment_Nm_m"], 40000/3)
+        self.assertIsNone(couple["resultant_above_base_m"])
+        self.assertFalse(solve(-1)["conservation_verified"])
+        self.assertFalse(solve(0, wall_acceleration_horizontal_g=0.15)["conservation_verified"])
+        self.assertFalse(run("active", [dict(soil[0], pore_pressure_coefficient=0.5)])["conservation_verified"])
+
     def test_out_of_scope_or_false_claims(self):
         for kw in [{"backfill_slope_deg":2},{"wall_friction_deg":1},{"surcharge_Pa":-10},
                    {"water_table_depth_m":0},{"proposed_thrust_N_m":0}]:
