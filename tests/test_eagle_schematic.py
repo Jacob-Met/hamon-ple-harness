@@ -75,6 +75,56 @@ class EagleSchematicTests(unittest.TestCase):
         labels[1]["baseline_origin"] = (45, 40)
         self.assertEqual(_graph(wires, [], labels)[0], [0, 1])
 
+    def test_ink_at_a_proposed_free_end(self):
+        wires = '<g stroke="rgb(0%, 50%, 0%)" fill="none"><path d="M 0 10 L 30 10"/><path d="M 50 40 L 80 40"/></g>'
+        labels = [
+            {"text": "CLK", "baseline_direction": (1, 0), "baseline_origin": (1, 10),
+             "page_bbox_pt": (1, 3, 13, 11)},
+            {"text": "CLK", "baseline_direction": (1, 0), "baseline_origin": (45, 40),
+             "page_bbox_pt": (45, 33, 58, 41)},
+        ]
+        for name, shape, joined in (
+            ("clear", "", True),
+            ("crossing cubic", '<path d="M 45 30 C 57 35 43 45 55 50"/>', False),
+            ("crossing polyline", '<path d="M 48 30 L 50 40 L 55 50"/>', False),
+            ("clear L shape", '<path d="M 30 20 L 30 60 L 70 60"/>', True),
+            ("disconnected strokes", '<path d="M 30 40 L 35 40 M 65 40 L 70 40"/>', True),
+            ("clear cubic", '<path d="M 55 30 C 65 35 55 45 65 50"/>', True),
+            ("red circle bounds", '<circle cx="50" cy="40" r="1"/>', False),
+            ("unknown bounds", '<path d="M 0 0 A 1 1 0 0 0 2 0"/>', False),
+        ):
+            svg = f'<svg>{wires}<g stroke="rgb(90%, 0%, 0%)" fill="none">{shape}</g></svg>'
+            with self.subTest(name=name):
+                obstacles = ([], [])
+                green, red, _, _ = _ink(svg.encode(), symbol_obstacles=obstacles)
+                groups, _, _ = _graph(green, red, labels, symbol_obstacles=obstacles)
+                self.assertEqual(groups[0] == groups[1], joined)
+
+    def test_one_occurrence_cannot_name_an_ordinary_arrow_and_a_second_wire(self):
+        for separate in (False, True):
+            dx = 40 if separate else 0
+            wires = [[(2.5+dx, 29), (2.5+dx, 19)], [(2.8, 11), (2.8, 1)]]
+            foot, tip = (2.5+dx, 19), (2.5+dx, 9)
+            red = [[foot, tip], [tip, (-2.5+dx, 16.5)], [tip, (7.5+dx, 16.5)]]
+            words = [{"text": "+5V", "page_bbox_pt": (x+2, -1, x+3, 9), "baseline_origin": (x+2.8, 9),
+                      "baseline_direction": (0, -1)} for x in ([0, dx] if separate else [0])]
+            evidence = []
+            groups, _, _ = _graph(wires, red, words, wire_end_witnesses=evidence)
+            self.assertEqual(groups[0] == groups[1], separate)
+            self.assertEqual(len(evidence), int(separate))
+
+    def test_one_occurrence_cannot_name_a_parallel_wire_and_a_second_loose_end(self):
+        for separate in (False, True):
+            dx = 40 if separate else 0
+            wires = [[(dx, 40.7), (dx+30, 40.7)], [(5, 40), (30, 40)]]
+            words = [{"text": "CLK", "page_bbox_pt": (x, 33, x+13, 41),
+                      "baseline_origin": (x, 40), "baseline_direction": (1, 0)}
+                     for x in ([0, dx] if separate else [0])]
+            evidence = []
+            groups, _, _ = _graph(wires, [], words, wire_end_witnesses=evidence)
+            self.assertEqual(groups[0] == groups[1], separate)
+            self.assertEqual(len(evidence), int(separate))
+
     def test_curve_and_unknown_transform_remain_unresolved(self):
         raw = b'<svg xmlns="http://www.w3.org/2000/svg"><g stroke="rgb(0%, 50%, 0%)" fill="none"><path d="M 1 2 C 1 3 4 6 7 8"/><path transform="wibble(8)" d="M 0 0 L 10 0"/></g></svg>'
         wires, red, marks, unknown = _ink(raw)

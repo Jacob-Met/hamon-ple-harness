@@ -67,6 +67,8 @@ EAGLE can print a net name across the open end of a wire. The page reader uses t
 
 A label qualified this way can extend a separately established same-page net. A supply name requires a matching physical supply symbol. Conflicting names on either component prevent the join, subject to the existing repeated-ground-bar rule for a uniquely identified incidental annotation. The decision uses the groups present before any free-end joins. Each accepted entry in `wire_end_label_witnesses` gives the name, wire index, physical endpoint and glyph baseline origin in page points.
 
+A printed occurrence can supply evidence for only one wire island across ordinary wire labels, supply symbols and free-end proposals. Separate occurrences of the same name can connect the islands. For unfilled straight symbol paths, the clearance check follows the segments that actually draw ink, including closure edges and disjoint subpaths. For curves and filled shapes it conservatively withholds a free-end join inside the transformed bounds expanded by 0.13 page points. Unlocalized red geometry withholds free-end joins on that page.
+
 | Manufacturer drawing | Wire sections | Complete native nets, before → after | False joins | Missed native wire pairs, before → after |
 | --- | ---: | ---: | ---: | ---: |
 | Arduino Mega 2560 Rev3e, both sheets in flat-document mode | 483 | 107 → 109 of 111 | 0 | 87 → 17 |

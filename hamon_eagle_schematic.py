@@ -60,7 +60,17 @@ def _color(value):
     return ""
 
 
-def _ink(svg, glyph_origins=None):
+def _red_shape_bounds(tag, element, matrix):
+    """Conservative page-space bounds for symbol paths outside the straight-stroke list."""
+    if tag == "path":
+        return drawing._svg_curve_bbox(element.get("d", ""), matrix)
+    if tag in ("circle", "ellipse"):
+        return drawing._svg_ellipse_bbox(tag, element.attrib, matrix)
+    points = drawing._shape_points(tag, element.attrib)
+    return drawing._bounds(points, matrix) if points else None
+
+
+def _ink(svg, glyph_origins=None, symbol_obstacles=None):
     wires, symbol_lines = [], []
     unsupported = Counter()
     fills = 0
@@ -84,14 +94,29 @@ def _ink(svg, glyph_origins=None):
                 point = drawing.transform_point(matrix, (float(element.get("x", 0)),
                                                         float(element.get("y", 0))))
                 glyph_origins.append((point, ref.rsplit("-", 1)[0]))
+        if tag not in ("path", "line", "rect", "circle", "ellipse", "polygon", "polyline"):
+            continue
         color = _color(stroke)
-        if not color or tag not in ("path", "line", "circle", "ellipse", "polygon", "polyline"):
+        red_ink = color == "red" or _color(fill) == "red"
+        if not color and not (red_ink and symbol_obstacles is not None):
+            continue
+        points = drawing._path_points(element.get("d", "")) if tag == "path" and fill == "none" else None
+        if symbol_obstacles is not None and red_ink and len(points or ()) != 2:
+            extra_lines, bounds = symbol_obstacles
+            vertices = (points if tag == "path" else drawing._shape_points(tag, element.attrib))
+            pairs = (drawing._straight_segment_vertex_pairs(tag, element.attrib, vertices)
+                     if fill == "none" and matrix is not None else None)
+            if pairs is not None:
+                page_points = [drawing.transform_point(matrix, v) for v in vertices]
+                extra_lines.extend((page_points[i], page_points[j]) for i, j in pairs)
+            else:
+                bounds.append(_red_shape_bounds(tag, element, matrix))
+        if not color or tag == "rect":
             continue
         if not visible or matrix is None:
             unsupported[color + "_appearance_or_transform"] += 1
             continue
         if tag == "path" and fill == "none":
-            points = drawing._path_points(element.get("d", ""))
             if points and len(points) == 2:
                 ends = [tuple(round(x, 4) for x in drawing.transform_point(matrix, p)) for p in points]
                 if color == "red":
@@ -144,7 +169,7 @@ def _label_frame(point, direction):
     return (dx * x + dy * y, dx * y - dy * x)
 
 
-def _label_anchors(wires, roots, words, *, word_indices=None):
+def _label_anchors(wires, roots, words, *, word_indices=None, word_roots=None):
     anchors = defaultdict(set)
     parallel = defaultdict(list)
     for direction in {w["baseline_direction"] for w in words if "baseline_direction" in w}:
@@ -166,6 +191,8 @@ def _label_anchors(wires, roots, words, *, word_indices=None):
                 if -.22 * height < y - bottom < .07 * height
                 and start - .35 * height <= left <= end - .35 * height
                 and min(right, end) - max(left, start) > .55 * min(right - left, end - start)}
+        if word_roots is not None:
+            word_roots[word_index].update(hits)
         if len(hits) == 1:
             anchors[word["text"]].update(hits)
             if word_indices is not None:
@@ -187,14 +214,20 @@ def _touches_segment(point, segment, tolerance):
     return math.dist(point, (a[0] + t * dx, a[1] + t * dy)) <= tolerance
 
 
-def _wire_end_labels(wires, roots, endpoints, lines, words):
+def _wire_end_labels(wires, roots, endpoints, lines, words, symbol_bounds=()):
     """Find collinear native text at an electrically free end of a single green wire."""
     # Only scan ink for endpoints actually overlapped by a qualifying text run.
     # A symbol stroke or a different wire can meet an endpoint at its interior.
+    if any(bound is None for bound in symbol_bounds):
+        return []
     free = {}
+
     def is_free(index, point):
         if point not in free:
+            x, y = point
             free[point] = (len(set(endpoints.near(point))) == 1
+                           and not any(x0 - .13 <= x <= x1 + .13 and y0 - .13 <= y <= y1 + .13
+                                       for x0, y0, x1, y1 in symbol_bounds)
                            and not any(_touches_segment(point, line, .13) for line in lines)
                            and not any(i != index and _touches_segment(point, wire, .12)
                                        for i, wire in enumerate(wires)))
@@ -349,7 +382,7 @@ def _side_supply_labels(glyphs, words):
     return candidates
 
 
-def _graph(wires, lines, words, *, wire_end_witnesses=None):
+def _graph(wires, lines, words, *, wire_end_witnesses=None, symbol_obstacles=((), ())):
     groups, endpoints = Groups(len(wires)), Points(.12)
     for i, (a, b) in enumerate(wires):
         for p in (a, b):
@@ -358,7 +391,8 @@ def _graph(wires, lines, words, *, wire_end_witnesses=None):
             endpoints.add(p, i)
     roots = [groups.root(i) for i in range(len(wires))]
     label_words, all_glyphs = set(), []
-    labels = _label_anchors(wires, roots, words, word_indices=label_words)
+    word_roots = defaultdict(set)
+    labels = _label_anchors(wires, roots, words, word_indices=label_words, word_roots=word_roots)
     supplies, marks = _supply_anchors(wires, roots, lines, words, all_glyphs=all_glyphs)
     # A printed supply word alone can land on a different wire. The full
     # glyph and its stem take precedence everywhere the symbol is observed.
@@ -370,9 +404,15 @@ def _graph(wires, lines, words, *, wire_end_witnesses=None):
             groups.join(first, other)
     # A loose-end label only extends an independently observed same-page anchor.
     # Snapshot existing groups before adding joins so inference cannot bootstrap.
-    candidates = (_wire_end_labels(wires, roots, endpoints, lines, words)
+    extra_lines, symbol_bounds = symbol_obstacles
+    clearance_lines = [*lines, *extra_lines] if extra_lines else lines
+    candidates = (_wire_end_labels(wires, roots, endpoints, clearance_lines, words, symbol_bounds)
                   + _side_supply_labels(all_glyphs, words))
-    word_roots = defaultdict(set)
+    # An ordinary glyph and a proposed wire end can overlap the same printed
+    # occurrence. Track its actual island for every role before admitting joins.
+    for glyph in all_glyphs:
+        for index in glyph["ordinary_word_indices"]:
+            word_roots[index].add(glyph["wire_index"])
     for root, witness in candidates:
         word_roots[witness["_word_index"]].add(root)
     label_roots = defaultdict(lambda: defaultdict(set))
@@ -434,8 +474,8 @@ def page_connectivity(filename, page=1):
     source = Path(filename)
     stock = drawing.scan_pdf(source, page, page, limit_paths=1, limit_words=5000)["pages"][0]
     with tempfile.TemporaryDirectory(prefix="hamon-eagle-") as directory:
-        glyphs = []
-        wires, red, fills, unsupported = _ink(drawing._page_svg(source, page, directory), glyphs)
+        glyphs, symbol_obstacles = [], ([], [])
+        wires, red, fills, unsupported = _ink(drawing._page_svg(source, page, directory), glyphs, symbol_obstacles)
     if len(wires) > 2000 or len(red) > 5000 or len(stock["words"]) >= 5000:
         raise ValueError("EAGLE schematic exceeds the registered page processing bounds")
     result = {"kind": "eagle-schematic-page-connectivity", "page": page,
@@ -451,7 +491,8 @@ def page_connectivity(filename, page=1):
         return {**result, "status": "unresolved_profile", "wire_groups": None}
     _word_directions(stock["words"], glyphs)
     wire_end_witnesses = []
-    membership, marks, anchors = _graph(wires, red, stock["words"], wire_end_witnesses=wire_end_witnesses)
+    membership, marks, anchors = _graph(wires, red, stock["words"],
+                                        wire_end_witnesses=wire_end_witnesses, symbol_obstacles=symbol_obstacles)
     return {**result, "status": "candidate_evidence", "wire_groups": membership,
             "group_count": len(set(membership)), "supply_glyphs": marks,
             "wire_end_label_witnesses": wire_end_witnesses,
