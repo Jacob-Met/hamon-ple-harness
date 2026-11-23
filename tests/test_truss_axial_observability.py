@@ -54,3 +54,44 @@ class AxialObservableTests(unittest.TestCase):
         self.assertEqual(result["N_a_N"], result["N_b_N"])
         self.assertEqual(result["displayed_free_joint_residual_upper_N"], 1.)
         self.assertEqual(result["equilibrium_basis"], "represented_member_factors_before_force_rounding")
+
+    def test_restrained_settlement_and_thermal_strain(self):
+        members = [bar("a", "A", "B", 200000)]
+        for motion, change, expected in ((0,0,0), (.001,0,100), (-.001,0,-100),
+                                         (0,50,-100), (0,-50,100), (.001,50,0)):
+            nodes = {"A": {"x": 0, "y": 0, "fix_x": True, "fix_y": True},
+                     "B": {"x": 2, "y": 0, "fix_x": True, "fix_y": True, "ux_m": motion}}
+            members[0].update(alpha_per_K=1e-5, dT_K=change)
+            with self.subTest(motion=motion, change=change):
+                result = solve(nodes, members)
+                self.assertTrue(result["displacement_unique"] and result["dual_verified"])
+                self.assertAlmostEqual(result["N_a_N"], expected, places=11)
+
+    def test_free_expansion_and_motion_on_an_unrestrained_component(self):
+        nodes = {"A": {"x": 0, "y": 0, "fix_x": True, "fix_y": True},
+                 "B": {"x": 1, "y": 0}}
+        hot = {**bar("a", "A", "B", 64), "alpha_per_K": 1/16, "dT_K": 2}
+        result = solve(nodes, [hot])
+        self.assertEqual((result["N_a_N"], result["free_mechanism_count"]), (0,1))
+        nodes["B"]["ux_m"] = 1/8
+        with self.assertRaisesRegex(ValueError, "restrained"):
+            solve(nodes, [hot])
+
+    def test_affine_preload_equivalence_with_a_free_mechanism(self):
+        nodes = {"A": {"x": 0, "y": 0, "fix_x": True, "fix_y": True, "ux_m": 1/16},
+                 "B": {"x": 1, "y": 0, "Fx": 4},
+                 "C": {"x": 2, "y": 0, "fix_x": True, "fix_y": True, "ux_m": -1/16}}
+        members = [{**bar("a", "A", "B", 64), "alpha_per_K": 1/16, "dT_K": 2},
+                   {**bar("b", "B", "C", 128), "alpha_per_K": 1/32, "dT_K": -1}]
+        result = solve(nodes, members)
+        self.assertEqual((result["N_a_N"], result["N_b_N"]), (-8, -12))
+        self.assertEqual(result["free_mechanism_count"], 1)
+        # With B temporarily fixed at zero the constrained bars carry -12 N
+        # and -4 N. Releasing B adds 8 N to its external load in a homogeneous solve.
+        homogeneous = {name: dict(row, ux_m=0) for name,row in nodes.items()}
+        homogeneous["B"]["Fx"] += 8
+        equivalent = solve(homogeneous, [dict(m, dT_K=0) for m in members])
+        self.assertEqual((equivalent["N_a_N"]-12, equivalent["N_b_N"]-4), (-8, -12))
+        nodes["B"]["Fy"] = 1/1024
+        with self.assertRaisesRegex(ValueError, "virtual work"):
+            solve(nodes, members)
