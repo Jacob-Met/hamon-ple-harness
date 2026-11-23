@@ -1,6 +1,7 @@
 """Deterministic engineering CLI: exact dimensions and file invariants."""
 import asyncio
 import json
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -81,6 +82,18 @@ class ToolkitContracts(unittest.TestCase):
         self.assertIn("/tmp/hamon_drawing.py",fake.files)
         self.assertIn("pdf-dimension-links",instructions)
         self.assertIn("pdf-auto-measure",instructions)
+        prefix = "python3 /tmp/hamon-engineering-toolkit.py"
+        self.assertEqual(instructions.count(prefix), 1)
+        examples = [line.strip() for line in instructions.splitlines() if line.startswith("  ")]
+        quantity = next(line for line in examples if line.startswith("quantity "))
+        argv = shlex.split(prefix + " " + quantity)
+        self.assertEqual(argv[:2], ["python3", fake.path])
+        with tempfile.TemporaryDirectory() as scratch:
+            for name, data in fake.files.items():
+                (Path(scratch) / Path(name).name).write_bytes(data)
+            output = subprocess.check_output([sys.executable, str(Path(scratch) / Path(fake.path).name), *argv[2:]])
+        self.assertEqual(t.D(json.loads(output)["value"]), t.D("1.5"))
+
 
 
 if __name__=="__main__":

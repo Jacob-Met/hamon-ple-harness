@@ -1,5 +1,9 @@
 PYTHON ?= python3
 
+.PHONY: verify-multispan-contact
+verify-multispan-contact:
+	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m unittest discover -s tests -p 'test_multispan_contact.py' -v
+
 .PHONY: verify-provider-wire
 verify-provider-wire:
 	$(PYTHON) ship/replay_engineering_provider_wire.py --reference
@@ -22,7 +26,3 @@ verify-pipe-meshes:
 .PHONY: verify-drainage-front
 verify-drainage-front:
 	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m pytest -q tests/test_consolidation_front.py tests/test_layered_consolidation_transient.py
-
-.PHONY: verify-multispan-contact
-verify-multispan-contact:
-	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m unittest discover -s tests -p 'test_multispan_contact.py' -v
