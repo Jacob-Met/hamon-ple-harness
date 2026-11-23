@@ -110,6 +110,11 @@ def bearing_factors(method, degrees):
 
 
 def geometry_factors(method, degrees, ratio, embedment, shape, nc, nq):
+    shape_f, depth_f, _ = _geometry_factors_with_increments(method, degrees, ratio, embedment, shape, nc, nq)
+    return shape_f, depth_f
+
+
+def _geometry_factors_with_increments(method, degrees, ratio, embedment, shape, nc, nq):
     # Shape and embedment in USACE EM 1110-1-1905, Tables 4-2, 4-3 and 4-6.
     if method == "terzaghi":
         if embedment > 1:
@@ -121,7 +126,7 @@ def geometry_factors(method, degrees, ratio, embedment, shape, nc, nq):
         sc, sg = {"strip": (1.0, 1.0), "square": (1.3, 0.8), "circular": (1.3, 0.6)}[
             shape
         ]
-        return (sc, 1.0, sg), (1.0, 1.0, 1.0)
+        return (sc, 1.0, sg), (1.0, 1.0, 1.0), (0.0, 0.0)
     if shape == "circular":
         raise ValueError(
             "Use the declared strip or rectangular geometry for this method"
@@ -135,22 +140,21 @@ def geometry_factors(method, degrees, ratio, embedment, shape, nc, nq):
         # Only the wedge and surcharge columns interpolate from zero to 10°.
         reference_kp_root = math.tan(math.pi / 4 + math.radians(max(10, degrees)) / 2)
         mix = min(1.0, degrees / 10)
-        sq = 1 + 0.1 * ratio * reference_kp_root**2 * mix
-        dq = 1 + 0.1 * embedment * reference_kp_root * mix
-        return (sc, sq, sq), (dc, dq, dq)
+        sq_increment = 0.1 * ratio * reference_kp_root**2 * mix
+        dq_increment = 0.1 * embedment * reference_kp_root * mix
+        sq, dq = 1 + sq_increment, 1 + dq_increment
+        return (sc, sq, sq), (dc, dq, dq), (sq_increment, dq_increment)
     # Historical unnamed routes use the original Vesic factor set with depth
     # represented by surcharge alone. Preserve their rectangular correction.
     sc = 1 + ratio * (nq / nc if degrees or method == "legacy_vesic" else 0.2)
-    sq = 1 + ratio * math.tan(phi)
+    sq_increment = ratio * math.tan(phi)
+    sq = 1 + sq_increment
     sg = 1 - 0.4 * ratio if degrees or method == "legacy_vesic" else 1.0
     if method == "legacy_vesic":
-        return (sc, sq, sg), (1.0, 1.0, 1.0)
+        return (sc, sq, sg), (1.0, 1.0, 1.0), (sq_increment, 0.0)
     k = embedment if embedment <= 1 else math.atan(embedment)
-    return (sc, sq, sg), (
-        1 + 0.4 * k,
-        1 + 2 * math.tan(phi) * (1 - math.sin(phi)) ** 2 * k,
-        1.0,
-    )
+    dq_increment = 2 * math.tan(phi) * (1 - math.sin(phi)) ** 2 * k
+    return (sc, sq, sg), (1 + 0.4 * k, 1 + dq_increment, 1.0), (sq_increment, dq_increment)
 
 
 def calculate(spec, legacy_rectangle=False):
@@ -228,9 +232,14 @@ def calculate(spec, legacy_rectangle=False):
         b, length = sorted((b, length))
     ratio = 0 if shape == "strip" else b / (length or b)
     nc, nq, ng = bearing_factors(method, phi)
+    # Nc = (Nq - 1)/tan(phi); recover the expm1-based excess before the
+    # historical rectangle route substitutes its zero-angle cohesion factor.
+    nq_increment = nc * math.tan(math.radians(phi))
     if method == "legacy_vesic" and legacy_rectangle and phi <= 1e-6:
         nc = 5.14
-    shape_f, depth_f = geometry_factors(method, phi, ratio, depth / b, shape, nc, nq)
+    shape_f, depth_f, (sq_increment, dq_increment) = _geometry_factors_with_increments(
+        method, phi, ratio, depth / b, shape, nc, nq
+    )
     wt = (
         max(0.0, get("water_table_depth_m"))
         if "water_table_depth_m" in spec
@@ -256,6 +265,12 @@ def calculate(spec, legacy_rectangle=False):
     qcoeff = nq * shape_f[1] * depth_f[1]
     gcoeff = 0.5 * b * ng * shape_f[2] * depth_f[2]
     total = math.fsum((cterm, qcoeff * surcharge, gcoeff * weight))
+    # Subtract the overburden in its own term. Rounding gross capacity first
+    # can discard the entire net resistance of a weak soil.
+    # Nq*sq*dq - 1 = (Nq-1)*sq*dq + (sq-1)*dq + (dq-1).
+    net_qcoeff = math.fsum((nq_increment * shape_f[1] * depth_f[1],
+                            sq_increment * depth_f[1], dq_increment))
+    net = math.fsum((cterm, net_qcoeff * surcharge, gcoeff * weight))
     other = math.fsum((cterm, qcoeff * second_top, gcoeff * second_weight))
     error = abs(total - other)
     out = {
@@ -274,8 +289,8 @@ def calculate(spec, legacy_rectangle=False):
         "soil_weight_term_Pa": gcoeff * weight,
         "q_ult_Pa": total,
         "q_allow_Pa": total / fs,
-        "q_net_ult_Pa": total - surcharge,
-        "q_net_allow_Pa": (total - surcharge) / fs,
+        "q_net_ult_Pa": net,
+        "q_net_allow_Pa": net / fs,
         "allowable_basis": "gross ultimate / FS; net ultimate / FS",
         "stress_integration_residual_Pa": error,
     }
