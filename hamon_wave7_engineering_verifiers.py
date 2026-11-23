@@ -971,57 +971,125 @@ def solve_lagrangian_orbital(params: Mapping[str, Any]) -> Dict[str, Any]:
     return {"domain": "lagrangian_orbital", "subkind": subkind, "verified": False, "error": f"unsupported_lagrangian_orbital:{subkind}"}
 
 
+def _electrochemistry(params: Mapping[str, Any]) -> Dict[str, Any]:
+    """One written reaction and one identified product, at constant current."""
+    result = {"domain": "electrochem_separations", "subkind": "electrochemistry"}
+
+    def value(key, default=None):
+        raw = params.get(key, default)
+        if raw is None or isinstance(raw, bool):
+            raise ValueError(f"invalid_{key}")
+        number = float(raw)
+        if not math.isfinite(number):
+            raise ValueError(f"invalid_{key}")
+        return number
+
+    def rational(number):
+        return Fraction(str(number))
+
+    def represent(quantity):
+        number = float(quantity)
+        if not math.isfinite(number) or (quantity and number == 0.0):
+            raise ArithmeticError("electrochem_result_outside_numeric_range")
+        return number
+
+    try:
+        potential = value("E0_V")
+        electrons = value("n_electrons")
+        temperature = value("T_K", 298.15)
+        quotient = value("Q_reaction", 1.0)
+        current = value("current_A", 0.0)
+        resistance = value("R_internal_ohm", 0.0)
+        activation = value("eta_activation_V", 0.0)
+        duration = value("time_s", 0.0)
+        efficiency = value("faradaic_efficiency", 1.0)
+        coefficient = value("product_stoich", 1.0)
+        molar_mass = value("molar_mass_g_mol") if "molar_mass_g_mol" in params else None
+        target = value("target_mass_g") if "target_mass_g" in params else None
+        mode = str(params.get("mode", "galvanic")).strip().lower()
+        if (min(electrons, temperature, quotient, coefficient) <= 0
+                or min(current, resistance, activation, duration) < 0
+                or not 0 <= efficiency <= 1
+                or (molar_mass is not None and molar_mass <= 0)
+                or (target is not None and target < 0)
+                or mode not in ("galvanic", "electrolytic")):
+            raise ValueError("invalid_electrochem_parameters")
+
+        # Charge and yield refer to the complete written reaction. Scaling its equation
+        # changes extent inversely, leaving the amount of the selected species invariant.
+        faraday = rational(FARADAY_C_MOL)
+        n, nu = rational(electrons), rational(coefficient)
+        total_charge = rational(current) * rational(duration)
+        reaction_charge = rational(efficiency) * total_charge
+        extent = reaction_charge / (n * faraday)
+        product = nu * extent
+        mass = product * rational(molar_mass) if molar_mass is not None else None
+        result.update({
+            "n_electrons": electrons,
+            "product_stoich": coefficient,
+            "charge_passed_C": represent(total_charge),
+            "reaction_charge_C": represent(reaction_charge),
+            "reaction_extent_mol": represent(extent),
+            "moles_reacted": represent(extent),
+            "product_moles": represent(product),
+            "mass_deposited_g": represent(mass) if mass is not None else (0.0 if product == 0 else None),
+        })
+
+        rt = R_GAS_UNIV * temperature
+        nf = electrons * FARADAY_C_MOL
+        log_q = math.log(quotient)
+        equilibrium = potential - (rt / nf) * log_q
+        standard_gibbs = -nf * potential
+        gibbs = -nf * equilibrium
+        loss = activation + current * resistance
+        terminal = equilibrium + loss if mode == "electrolytic" else equilibrium - loss
+        ln_k = -standard_gibbs / rt
+        thermo = [equilibrium, terminal, standard_gibbs, gibbs, ln_k]
+        if not all(map(math.isfinite, thermo)):
+            raise ArithmeticError("electrochem_result_outside_numeric_range")
+
+        # Check both reported molar quantities against the selected reaction charge.
+        def balance(charge):
+            return float(abs(charge - reaction_charge) / max(abs(reaction_charge), Fraction(1)))
+
+        residual = max(
+            abs(gibbs - (standard_gibbs + rt * log_q)) / max(abs(gibbs), abs(standard_gibbs), rt, 1),
+            balance(rational(result["reaction_extent_mol"]) * n * faraday),
+            balance(rational(result["product_moles"]) * n * faraday / nu),
+        )
+        if not math.isfinite(residual):
+            raise ArithmeticError("electrochem_result_outside_numeric_range")
+        result.update({"E_nernst_V": equilibrium, "V_cell_V": terminal,
+                       "delta_G0_J_mol": standard_gibbs, "delta_G_J_mol": gibbs,
+                       "ln_K_eq": ln_k, "residual": residual, "verified": residual < 1e-11})
+
+        if target is not None:
+            result["target_time_s"] = None
+            rate = rational(current) * rational(efficiency) * nu / (n * faraday)
+            if target == 0:
+                result["target_mass_status"] = "all_nonnegative_times" if rate == 0 else "unique"
+                if rate:
+                    result["target_time_s"] = 0.0
+            elif rate == 0 or molar_mass is None:
+                status = "unreachable_at_zero_rate" if rate == 0 else "molar_mass_required"
+                result.update({"target_mass_status": status, "verified": False,
+                               "error": f"target_mass_{status}"})
+            else:
+                time = rational(target) / (rate * rational(molar_mass))
+                result.update({"target_mass_status": "unique", "target_time_s": represent(time)})
+        return result
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        return {"domain": "electrochem_separations", "subkind": "electrochemistry",
+                "verified": False, "error": str(exc)}
+
+
 def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]:
     subkind = str(
         params.get("subkind") or ("distillation" if "alpha" in params else "electrochemistry")
     ).strip().lower()
 
     if subkind == "electrochemistry":
-        e0 = float(params["E0_V"])
-        n_el = float(params["n_electrons"])
-        t_k = float(params.get("T_K", 298.15))
-        q_rxn = float(params.get("Q_reaction", 1.0))
-        cur_a = float(params.get("current_A", 0.0))
-        r_int = float(params.get("R_internal_ohm", 0.0))
-        eta_act = float(params.get("eta_activation_V", 0.0))
-        time_s = float(params.get("time_s", 0.0))
-        mw_g = float(params.get("molar_mass_g_mol", 0.0))
-        eta_f = float(params.get("faradaic_efficiency", 1.0))
-        mode = str(params.get("mode", "galvanic")).strip().lower()
-
-        if n_el <= 0.0 or t_k <= 0.0 or q_rxn <= 0.0 or cur_a < 0.0 or r_int < 0.0 or eta_act < 0.0 or not (0.0 < eta_f <= 1.0):
-            return {"domain": "electrochem_separations", "subkind": subkind, "verified": False, "error": "invalid_electrochem_parameters"}
-
-        e_nernst = e0 - (R_GAS_UNIV * t_k / (n_el * FARADAY_C_MOL)) * math.log(q_rxn)
-        dg0 = -n_el * FARADAY_C_MOL * e0
-        dg = -n_el * FARADAY_C_MOL * e_nernst
-        ln_keq = (n_el * FARADAY_C_MOL * e0) / (R_GAS_UNIV * t_k)
-
-        if mode == "electrolytic":
-            v_cell = e_nernst + eta_act + cur_a * r_int
-        else:
-            v_cell = e_nernst - eta_act - cur_a * r_int
-
-        charge_c = cur_a * time_s
-        moles_prod = (eta_f * charge_c) / (n_el * FARADAY_C_MOL)
-        mass_g = moles_prod * mw_g
-
-        gibbs_res = abs(dg - (dg0 + R_GAS_UNIV * t_k * math.log(q_rxn))) / max(abs(dg0), R_GAS_UNIV * t_k, 1.0)
-        faraday_res = abs(moles_prod * n_el * FARADAY_C_MOL - eta_f * charge_c) / max(charge_c, 1.0)
-        residual = float(max(gibbs_res, faraday_res))
-        return {
-            "domain": "electrochem_separations",
-            "subkind": subkind,
-            "E_nernst_V": float(e_nernst),
-            "V_cell_V": float(v_cell),
-            "delta_G0_J_mol": float(dg0),
-            "delta_G_J_mol": float(dg),
-            "ln_K_eq": float(ln_keq),
-            "moles_reacted": float(moles_prod),
-            "mass_deposited_g": float(mass_g),
-            "residual": residual,
-            "verified": bool(residual < 1e-11),
-        }
+        return _electrochemistry(params)
 
     if subkind == "distillation":
         z_f = float(params["z_F"])
