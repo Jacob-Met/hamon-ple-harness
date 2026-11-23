@@ -10,6 +10,9 @@ from pathlib import Path
 import shutil
 import tempfile
 import zipfile
+from xml.etree.ElementTree import ParseError
+
+from office_package import check_main_part
 
 
 def verify_typed_members(z, names, max_unpacked_bytes=None):
@@ -23,14 +26,17 @@ def verify_typed_members(z, names, max_unpacked_bytes=None):
         if suffix == ".json":
             with z.open(name) as f:
                 json.load(f)
-        elif suffix in {".xlsx", ".docx"}:
-            key = "xl/workbook.xml" if suffix == ".xlsx" else "word/document.xml"
+        elif suffix in {".xlsx", ".xlsm", ".docx"}:
             with z.open(name) as f, zipfile.ZipFile(f) as doc:
                 if max_unpacked_bytes is not None:
                     max_unpacked_bytes -= sum(info.file_size for info in doc.infolist())
                     if max_unpacked_bytes < 0:
                         return False
-                if not {"[Content_Types].xml", key}.issubset(doc.namelist()) or doc.testzip():
+                try:
+                    check_main_part(doc, suffix)
+                except ParseError as exc:
+                    raise ValueError(f"invalid Office XML in {name}") from exc
+                if doc.testzip():
                     raise ValueError(f"invalid Office document {name}")
         elif suffix == ".csv":
             with z.open(name) as f, io.TextIOWrapper(f, encoding="utf-8-sig") as text:

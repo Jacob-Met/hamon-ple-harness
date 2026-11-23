@@ -17,6 +17,7 @@ import shlex
 from typing import Any
 
 import archive_contract
+import office_package
 from archive_checkpoint import verify_typed_members
 
 FILE = re.compile(
@@ -119,7 +120,9 @@ import sys
 import zipfile
 import zlib
 
-''' + inspect.getsource(verify_typed_members) + r'''
+from xml.etree.ElementTree import ParseError
+
+''' + inspect.getsource(office_package) + '\n' + inspect.getsource(verify_typed_members) + r'''
 
 targets = json.loads(sys.argv[1])
 result = {}
@@ -167,10 +170,13 @@ def scan_file(p, root_members):
                                 return {"state":"unknown"}
                         except (ValueError, EOFError, csv.Error, zipfile.BadZipFile, RuntimeError, zlib.error):
                             return {"state":"invalid","reason":"zip_invalid_member_format"}
-                    if ext == ".docx" and "word/document.xml" not in names:
-                        return {"state":"invalid","reason":"docx_missing_document"}
-                    if ext in (".xlsx",".xlsm") and "xl/workbook.xml" not in names:
-                        return {"state":"invalid","reason":"xlsx_missing_workbook"}
+                    if ext in (".docx", ".xlsx", ".xlsm"):
+                        if st.st_size > 32_000_000 or sum(m.file_size for m in z.infolist()) > 32_000_000:
+                            return {"state":"unknown"}
+                        try:
+                            check_main_part(z, ext)
+                        except (ValueError, ParseError):
+                            return {"state":"invalid","reason":"office_invalid_main_part"}
                     if st.st_size <= 32_000_000 and z.testzip() is not None:
                         return {"state":"invalid","reason":"zip_crc"}
             except (OSError,ValueError,zipfile.BadZipFile,RuntimeError):
