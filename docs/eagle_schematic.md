@@ -146,7 +146,7 @@ python ship/verify_eagle_finite_copper.py --raw RAW --repo . \
   --frozen ship/eagle_finite_course_v1.json --out finite-copper-result.json
 ```
 
-The provisioner transfers `hamon_eagle_material.py` with the ordinary toolkit modules. `ship/verify_eagle_provisioned.py` exercises that provisioner and the actual copied CLI through a local WebSocket receiver with Shapely available and with Python site packages disabled. Copying modules does not install third-party packages into the task container: if its interpreter lacks the finite-width backend, intact centerline witnesses remain available and an otherwise unsupported material route reports `finite_width_geometry_dependency_unavailable`. These local checks do not establish the official task image's installed packages or replace the organizer's Docker, cancellation and evaluation gates.
+The provisioner transfers `hamon_eagle_material.py` with the ordinary toolkit modules. `ship/verify_eagle_provisioned.py` exercises that provisioner and the actual copied CLI through a local WebSocket receiver with Shapely available and with Python site packages disabled. Copying modules does not install third-party packages into the task container. If its interpreter lacks the finite-width backend, a query with a declared board outline or milling cutout remains unresolved and reports `finite_width_geometry_dependency_unavailable`. A declared outline never silently becomes unbounded artwork. The older centerline proof remains available only when neither an outline nor a cutout is declared. These local checks do not establish the official task image's installed packages or replace the organizer's Docker, cancellation and evaluation gates.
 
 ### Checking a curved route between two pads
 
@@ -168,12 +168,104 @@ Run `python ship/verify_eagle_via_rules.py --repo . --raw RAW --out OUT` on the 
 
 ### Contact between two named board signals
 
-Run `python engineering_toolkit.py eagle-netlist FILE.sch --board FILE.brd --contact-nets 'D+' 'D-'`. The independent `inter_net_contact` result records the board digest, signal names, per-signal XML wire ordinals (zero-based), layer, and a strictly interior witness disk in nanometres. The area in mm² is the intersection of two conservatively inset wire regions after removing known circular drill voids and supported milling cutouts. The query covers explicit continuous wires on layers 1 and 16. It can be combined with `--routed-net` to inspect within-signal terminal paths independently.
+Run `python engineering_toolkit.py eagle-netlist FILE.sch --board FILE.brd --contact-nets 'D+' 'D-'`. The independent `inter_net_contact` result records the board digest, signal names, per-signal XML wire ordinals (zero-based), layer, and a strictly interior witness disk in nanometres. The area in mm² is the intersection of two conservatively inset wire regions after clipping to the qualified nominal board interior and removing known circular drill voids and supported milling cutouts. The query covers explicit continuous wires on layers 1 and 16. It can be combined with `--routed-net` to inspect within-signal terminal paths independently.
 
-The finite-material checks remove closed layer 46 contours drawn with straight continuous zero-width wires on the board or in supported placed packages. Both outer layers lose copper inside the contour. Open, branched and unsupported milling geometry leaves the query unresolved. Nested cutout interiors are removed conservatively. Plated slots and finished cutter dimensions are outside this model.
+The finite-material checks remove closed layer 46 contours drawn with straight continuous zero-width wires on the board or in supported placed packages. They also recognize a narrow curved family: an axis-aligned capsule made of four signed circular quarters and two straight sides. Each such component must match the complete analytic six-edge capsule; endpoint closure alone is insufficient. The checker removes an outward-rounded bounding box around each capsule. This may discard sound copper outside the actual slot, but cannot create a positive witness through the nominal slot. All cutout interiors and capsule boxes are subtracted, including nested or overlapping ones. Open, branched and other unsupported milling geometry leaves the query unresolved. Plated slots and finished cutter dimensions are outside this model.
 
-A missing witness leaves clearance unresolved. Pads, via copper, pours, internal layers, board outlines, manufactured tolerances, and electrical tests fall outside this wire-artwork check. The physical PCB and short-circuit impact are unverified.
+A missing witness leaves clearance unresolved. Pads, via copper, pours, internal layers, unsupported board contours, manufactured tolerances, and electrical tests fall outside this wire-artwork contact check. The physical PCB and short-circuit impact are unverified.
 
 Replay the original Arduino Due board, the registered 0.1 mm bridge on D−, and the same bridge translated 10 mm in both coordinates with `python ship/verify_eagle_inter_net.py --raw RAW --repo . --out OUT`. Supply the manufacturer files named above. The receiver also checks four terminal paths for each signal on each board.
 
 The receiver also verifies that a closed internal milling contour removes all four bridge contacts, a partial cut leaves two, a translated contour and documentation-layer drawing retain four, and an open outline leaves the contact unresolved.
+
+
+### Nominal board interior
+
+Both physical queries use layer 20 (Dimension) before constructing contacts,
+in-plane paths, terminal islands or plated collars. Autodesk distinguishes the
+[Dimension outline from Milling cutouts](https://forums.autodesk.com/t5/eagle-forum-read-only/milling-layer-changes-colors-of-board-background-eagle-v-8-3-bug/m-p/7296495).
+This checker interprets the nominal wire centerline as the board boundary; its
+drawing pen width does not add substrate.
+
+A supported outline is one closed, non-self-intersecting endpoint cycle made
+from straight wires and isolated convex quarter-circle corners. The parser
+uses exact source coordinates to join wires independently of their XML order,
+reverses the signed sweep when reversing an edge, and requires each quarter
+to join its straight tangents. Its axis-aligned corner box must fit inside the
+simple sharp-corner polygon, overlap no other corner interior, and contain no
+unrelated boundary segment. Each accepted quarter is replaced by inscribed
+chords with at most 1 nm sagitta. A further 2 nm inward guard produces the
+conservative board interior.
+
+The output's `board_domain` distinguishes three states:
+
+- `bounded`: a qualified domain, including source wire identities, edge and
+  quarter counts, the maximum chord error and the construction guard.
+- `unbounded_artwork`: no layer-20 outline was supplied. A positive result is
+  explicitly about nominal artwork without an established physical board.
+- `unresolved`: an outline was declared but could not be qualified. This
+  includes open or branched boundaries, multiple or nested contours, circles,
+  unsupported curves or placements, degenerate geometry and a missing backend.
+
+Layer-20 drawings in actually placed packages participate in the domain.
+Their source identity includes element, library, package and original wire
+ordinal; an unused library package does not change the board. Supported
+placement and mirroring follow the existing artwork transform restrictions.
+
+Nested Dimension loops can describe internal holes in EAGLE. This
+implementation leaves them unresolved rather than treating the largest loop
+alone as the board. Concave straight outlines are supported when simple;
+concave circular corners and general curved outlines remain outside the
+qualified family.
+
+Clipping occurs before planar components and overlap disks are measured.
+A trace crossing a notch needs an actual in-board detour. A surviving planar
+cap on each face of a drilled via does not prove a plated crossing: this
+model requires a full surviving circular collar around the intended bore.
+Every reported collar is therefore constrained by the board and milling
+geometry as well as foreign drills. The bore's own void is treated separately
+from the conducting collar and barrel wall.
+
+The 2 nm guard belongs to the construction, while the reported 1 nm path
+clearance is relative to the supported **nominal** geometry. A path may enter
+the conservative guard band without entering the nominal cutout. Neither
+number is a fabrication tolerance or an electrical clearance guarantee.
+
+The registered crossing uses two 0.20 mm wires. With a board rectangle
+containing the crossing, the overlap lower bound remains
+0.039998400016 mm² and its interior disk has radius 49,999 nm. Moving only
+the outline 10 mm away removes the witness. Placing the board's left edge
+at x = 0.05 mm recomputes the overlap as 0.009999000016 mm² and places the
+whole smaller disk inside the remaining board. Tangency yields no witness.
+
+The independent receiver below checks every complete planar path segment,
+contact disk, overlap disk and plated or terminal collar against analytic
+straight and circular board boundaries. Its arithmetic uses Python's standard
+library rather than the production geometry backend. It also checks the serialized
+barrel path: its ports and wall coordinates, radial landings, layer transition,
+and agreement with adjacent planar steps. Translating only that path outside
+the board is a rejected receiver control. The original Arduino
+Due and Feather source hashes, the frozen 19-case finite-copper course and
+the existing bridge/milling course are checked separately. The Feather's four
+placed USB-C milling capsules have an independent source and exclusion-box
+check. Earlier finite-course source witnesses are checked again against their
+reconstructed source edits and recorded hashes. Cross-net disk counts count
+inspected reports; the same physical bridge contacts appear in both routed-net
+queries. A failed sufficient witness remains unresolved.
+
+```sh
+python ship/verify_eagle_finite_copper.py --raw RAW --repo . \
+  --frozen ship/eagle_finite_course_v1.json --out finite.json
+python ship/verify_eagle_inter_net.py --raw RAW --repo . --out bridge
+python ship/verify_eagle_board_domain.py --raw RAW --repo . \
+  --finite finite.json --milling bridge/milling.json --out domain
+```
+
+The domain receiver also runs the normal CLI on the inside, outside,
+straddling, tangent and unsupported-outline controls; a concave notch with
+and without a copper detour; via-cap and complete-collar controls; and all
+24 original/bridge/translated Due pad-to-pad paths. Translating only the
+authentic Due outline by 120 mm preserves 605 matching contact declarations
+and 163 matching net declarations while removing all routed and planted
+cross-net witnesses. These are local source-geometry checks. They establish
+no manufactured-board result or hosted PLE score.
