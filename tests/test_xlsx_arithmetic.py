@@ -1,5 +1,8 @@
 """Reconcile arithmetic formula results with independently reconstructed input values."""
+import json
 from pathlib import Path
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 from zipfile import ZipFile
@@ -36,6 +39,20 @@ class ArithmeticWorkbookTests(TestCase):
                 self.assertEqual(audit["examples"][-1]["expected"], 20)
                 self.assertEqual(audit_local_deliverable(path)["ok"], wrong == 0)
 
+    def test_ordinary_cli_distinguishes_stale_correct_and_unsupported(self):
+        cli = Path(__file__).resolve().parents[1] / "engineering_toolkit.py"
+        for formula, cached, status in (("2*10", 20, 0), ("2*10", 33, 3), ("SUM(2,3)", 5, 0)):
+            with self.subTest(formula=formula, cached=cached):
+                path = self.workbook([[("A", formula, cached)]])
+                proc = subprocess.run([sys.executable, str(cli), "format-guard", str(path)],
+                                      capture_output=True, text=True, timeout=15)
+                self.assertEqual(proc.returncode, status, proc.stdout + proc.stderr)
+                result = json.loads(proc.stdout)
+                if formula.startswith("SUM"):
+                    self.assertEqual(result["unverified_arithmetic_formulas"], 1)
+                elif status:
+                    self.assertIn("arithmetic_mismatches=1", result["reason"])
+
     def test_numeric_precedence_scientific_notation_and_shared_dependency(self):
         path = self.workbook([[("A", ".5E+1", 5), ("B", "-(A1-1)/2+A1*3", 13),
                                ("C", "B1+A1+B1", 31)]])
@@ -49,6 +66,12 @@ class ArithmeticWorkbookTests(TestCase):
         audit = xlsx_audit(str(path))["arithmetic_audit"]
         self.assertEqual(audit["counts"], {"matched": 0, "mismatch": 0, "unverified": 6})
         self.assertEqual(audit_local_deliverable(path)["unverified_arithmetic_formulas"], 6)
+
+    def test_precision_sensitive_cancellation_does_not_reject_a_saved_zero(self):
+        path = self.workbook([[("A", "0.5-0.4-0.1", 0), ("B", "A1*1e12", 0)]])
+        counts = xlsx_audit(str(path))["arithmetic_audit"]["counts"]
+        self.assertEqual(counts, {"matched": 0, "mismatch": 0, "unverified": 2})
+        self.assertTrue(audit_local_deliverable(path)["ok"])
 
     def test_precision_as_displayed_is_outside_reconstruction(self):
         path = self.workbook([[("A", "1/3", .33)]], options='<calcPr fullPrecision="0"/>')
