@@ -93,11 +93,12 @@ def _inner_copper(primitive):
 
 
 def nominal_board_domain(records):
-    """Conservative interior of one closed straight/convex-quarter outline.
+    """Conservative interior of one simple outline with isolated tangent quarters.
 
     A validated quarter replaces an isolated sharp rectangular corner of a
-    simple polygon. Inscribed chords remove extra material at that corner;
-    they never fill a concave circular cutout or guess an outline topology.
+    simple polygon. Convex quarters use inscribed chords. At a reflex corner,
+    the intersection of neighboring tangents bounds the excluded circle from
+    outside, so the additional board material stays on the retained side.
     """
     if not records:
         return None, {"status": "unbounded_artwork", "reason": "no_layer_20_outline"}
@@ -153,7 +154,7 @@ def nominal_board_domain(records):
         a, b, sweep = row["a"], row["b"], row["curve"]
         if sweep:
             if abs(sweep) != 90:
-                raise ValueError("only convex axis-tangent quarter outlines are supported")
+                raise ValueError("only axis-tangent quarter outlines are supported")
             sign = 1 if sweep > 0 else -1
             dx, dy = sub(b, a)
             center = ((a[0]+b[0]-sign*dy)/2, (a[1]+b[1]+sign*dx)/2)
@@ -183,11 +184,17 @@ def nominal_board_domain(records):
             or sharp.minimum_clearance <= 4*_GUARD):
         raise ValueError("self-crossing or numerically unresolved layer 20 outline")
     checked = []
+    reflex = {}
     for index, (_, _, _, _, square) in corners.items():
         row = ordered[index]
-        if (row["curve"]*winding <= 0 or not sharp.covers(square)
-                or any(square.intersection(other).area > 0 for other in checked)):
-            raise ValueError("concave or overlapping layer 20 quarter corners")
+        if row["curve"]*winding < 0:
+            if sharp.intersection(square).area > 0:
+                raise ValueError("reflex layer 20 corner box intersects the board interior")
+            reflex[index] = square
+        elif not sharp.covers(square):
+            raise ValueError("convex layer 20 corner box leaves the board")
+        if any(square.intersection(other).area > 0 for other in checked):
+            raise ValueError("overlapping layer 20 quarter corners")
         for j, other in enumerate(ordered):
             if j == index:
                 continue
@@ -211,30 +218,45 @@ def nominal_board_domain(records):
             radius = float(radius)
             # R*theta^2/(8*n^2) bounds the circular sagitta without cancellation.
             count = max(1, ceil((pi/2)*sqrt(radius/8)))
-            if count > 4096 or len(points)+count > 32768:
-                raise ValueError("layer 20 arc exceeds the bounded approximation")
-            error = radius*(pi/2)**2/(8*count*count)
-            if error > 1:
+            while True:
+                if count > 4096 or len(points)+count+1 > 32768:
+                    raise ValueError("layer 20 arc exceeds the bounded approximation")
+                half_step = pi/(4*count)
+                error = radius*half_step**2/2
+                if index in reflex:
+                    error /= cos(half_step)
+                if error <= 1:
+                    break
                 count += 1
-                error = radius*(pi/2)**2/(8*count*count)
             largest_error = max(largest_error, error)
             sign = 1 if row["curve"] > 0 else -1
             cx, cy = map(float, center)
             ux, uy = map(float, radial)
-            for step in range(1, count):
-                angle = sign*(pi/2)*step/count
-                points.append((cx+ux*cos(angle)-uy*sin(angle),
-                               cy+ux*sin(angle)+uy*cos(angle)))
+            if index in reflex:
+                # The adjacent tangent intersection lies on the angular bisector
+                # at radius R / cos(half_step). Each polygon edge is tangent.
+                scale = 1/cos(half_step)
+                for step in range(count):
+                    angle = sign*(pi/2)*(step+0.5)/count
+                    points.append((cx+scale*(ux*cos(angle)-uy*sin(angle)),
+                                   cy+scale*(ux*sin(angle)+uy*cos(angle))))
+            else:
+                for step in range(1, count):
+                    angle = sign*(pi/2)*step/count
+                    points.append((cx+ux*cos(angle)-uy*sin(angle),
+                                   cy+ux*sin(angle)+uy*cos(angle)))
         points.append(tuple(map(float, row["b"])))
     polygon = Polygon(points)
-    if not polygon.is_valid or not sharp.covers(polygon):
-        raise ValueError("unresolved inscribed layer 20 polygon")
+    envelope = sharp.union(unary_union(list(reflex.values()))) if reflex else sharp
+    if not polygon.is_valid or not envelope.covers(polygon):
+        raise ValueError("unresolved inner layer 20 polygon")
     domain = polygon.buffer(-_GUARD, join_style="mitre")
     if domain.is_empty or not domain.is_valid:
         raise ValueError("layer 20 interior is unresolved at the numeric guard")
     return domain, {
         "status": "bounded", "layer": 20,
-        "model": "single_straight_outline_with_validated_convex_quarters",
+        "model": ("single_straight_outline_with_validated_tangent_quarters" if reflex else
+                  "single_straight_outline_with_validated_convex_quarters"),
         "sources": [list(row["source"]) for row in ordered],
         "wire_count": len(ordered), "quarter_count": len(corners),
         "arc_sagitta_upper_bound_nm": largest_error,

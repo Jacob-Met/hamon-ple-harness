@@ -188,19 +188,21 @@ This checker interprets the nominal wire centerline as the board boundary; its
 drawing pen width does not add substrate.
 
 A supported outline is one closed, non-self-intersecting endpoint cycle made
-from straight wires and isolated convex quarter-circle corners. The parser
+from straight wires and isolated convex or reflex quarter-circle corners. The parser
 uses exact source coordinates to join wires independently of their XML order,
 reverses the signed sweep when reversing an edge, and requires each quarter
-to join its straight tangents. Its axis-aligned corner box must fit inside the
-simple sharp-corner polygon, overlap no other corner interior, and contain no
-unrelated boundary segment. Each accepted quarter is replaced by inscribed
-chords with at most 1 nm sagitta. A further 2 nm inward guard produces the
-conservative board interior.
+to join its straight tangents. The sharp-corner polygon contains each convex
+corner box. Its interior excludes each reflex corner box. Corner interiors
+must be disjoint and each box must be free of unrelated boundary segments.
+Convex arcs use inscribed chords. Reflex arcs use the intersections of
+successive tangents, which keep the complete circular recess outside the
+board. Both approximations deviate by at most 1 nm before the 2 nm inward
+construction guard.
 
 The output's `board_domain` distinguishes three states:
 
 - `bounded`: a qualified domain, including source wire identities, edge and
-  quarter counts, the maximum chord error and the construction guard.
+  quarter counts, the maximum radial approximation error and the construction guard.
 - `unbounded_artwork`: no layer-20 outline was supplied. A positive result is
   explicitly about nominal artwork without an established physical board.
 - `unresolved`: an outline was declared but could not be qualified. This
@@ -214,9 +216,8 @@ placement and mirroring follow the existing artwork transform restrictions.
 
 Nested Dimension loops can describe internal holes in EAGLE. This
 implementation leaves them unresolved rather than treating the largest loop
-alone as the board. Concave straight outlines are supported when simple;
-concave circular corners and general curved outlines remain outside the
-qualified family.
+alone as the board. General curved outlines beyond the isolated tangent
+quarters remain outside the qualified family.
 
 Clipping occurs before planar components and overlap disks are measured.
 A trace crossing a notch needs an actual in-board detour. A surviving planar

@@ -48,6 +48,27 @@ def board(rows):
     return root,b
 
 class BoardDomainTests(unittest.TestCase):
+    def test_isolated_reflex_quarter_excludes_the_entire_circular_recess(self):
+        corners = [(0, 0), (8, 0), (8, 8), (5, 8), (5, 5), (4, 4), (0, 4)]
+        for mirror in (1, -1):
+            rows = outline([(mirror*x, y) for x, y in corners])
+            rows[4].set("curve", str(-90*mirror))
+            for edges in (rows, reverse_rows(rows), rows[::2]+rows[1::2]):
+                _, document = board(edges)
+                domain, evidence = nominal_board_domain(dimension_records(document))
+                center = (mirror*4_000_000, 5_000_000)
+                self.assertFalse(domain.covers(Point(center)))
+                self.assertLessEqual(evidence["arc_sagitta_upper_bound_nm"], 1)
+                self.assertTrue(domain.covers(Point(mirror*4_850_000, 4_150_000).buffer(5_000)))
+                self.assertFalse(domain.intersects(Point(mirror*4_600_000, 4_400_000).buffer(5_000)))
+                # The closest point on every complete returned edge must clear
+                # the unit-radius recess, including the middle of each tangent.
+                points = [(F(x)-center[0], F(y)-center[1]) for x,y in domain.exterior.coords]
+                for (x,y),(u,v) in zip(points,points[1:]):
+                    dx,dy = u-x,v-y
+                    t = max(0, min(1, -(x*dx+y*dy)/(dx*dx+dy*dy)))
+                    self.assertGreaterEqual((x+t*dx)**2+(y+t*dy)**2, 1_000_000**2)
+
     def query(self, rows):
         root,_=board(rows)
         with tempfile.TemporaryDirectory() as d:
