@@ -36,3 +36,41 @@ class ChannelSpecificEnergy(unittest.TestCase):
                 if count == 1:
                     self.assertEqual(r["depth_solutions"][0]["depth_m"], 1.)
                     self.assertEqual(r["depth_solutions"][0]["regime"], "critical")
+
+    def test_trapezoid_two_known_branches_and_reversed_discharge(self):
+        for q in (-3., 3.):
+            r = alternate(2.125, q=q, width=1., slope=1., gravity=1., mode="auto")
+            self.assertTrue(r["conservation_verified"], r)
+            for p,y in zip(r["depth_solutions"], (1.,2.)):
+                self.assertEqual(p["depth_m"],y)
+                self.assertEqual(p["area_m2"],(1+y)*y)
+                self.assertEqual(p["velocity_m_s"],q/p["area_m2"])
+                self.assertEqual(p["velocity_head_m"],2.125-y)
+                fr2 = q*q*(1+2*y)/p["area_m2"]**3
+                self.assertAlmostEqual(p["froude"],math.sqrt(fr2))
+                self.assertAlmostEqual(p["froude_squared_minus_one"],fr2-1)
+
+    def test_triangular_and_trapezoidal_critical_contacts(self):
+        for width, slope, q, g, e in ((0.,1.,1.,2.,1.25),(2.,1.,4.5,3.,1.375)):
+            for value,state in ((math.nextafter(e,0.),"below_minimum"),(e,"critical"),
+                                (math.nextafter(e,math.inf),"two_depths")):
+                r = alternate(value,q,width,slope,g)
+                self.assertTrue(r["ok"], r)
+                self.assertEqual(r["state"],state)
+                if state == "critical":
+                    p, = r["depth_solutions"]
+                    self.assertEqual(p["depth_m"],1.)
+                    self.assertEqual(p["froude_squared_minus_one"],0.)
+
+    def test_complementary_kinetic_head_and_zero_discharge(self):
+        tiny = 2.**-70
+        r = alternate(2.,q=tiny,gravity=1.)
+        self.assertTrue(r["conservation_verified"], r)
+        deep = r["depth_solutions"][1]
+        self.assertEqual(deep["depth_m"],2.)
+        self.assertEqual(deep["velocity_head_m"],tiny**2/8)
+        stagnant = alternate(2.,q=0.)
+        self.assertEqual(stagnant["state"],"stagnant")
+        self.assertEqual(stagnant["depth_solutions"][0]["velocity_m_s"],0.)
+        for spec in ((2.,1.,0.,0.,4.),(-2.,1.,1.,0.,4.),(2.,1.,1.,-1.,4.)):
+            self.assertFalse(alternate(*spec)["ok"])
