@@ -16,6 +16,7 @@ from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 import hamon_drawing_reader
 import taskbridge
+from test_ifc_rectilinear_boolean import ifc_intersection
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -47,6 +48,7 @@ async def exercise(tool_module="./task-tools.ts"):
             p.mkdir()
         data = {
             "model.ifc": fixtures.SAMPLE_IFC.encode(),
+            "thin-material.ifc": ifc_intersection(2.**-40).encode(),
             "drawing ü.pdf": hamon_drawing_reader.build_minimal_vector_pdf(
                 [
                     {
@@ -91,6 +93,8 @@ async def exercise(tool_module="./task-tools.ts"):
         (task / "owner's result.json").write_text('{"a":1}')
         pre = "check_deliverable_preflight"
         cases = [
+            {"id": "thin-ifc", "tool": "hamon_ifc_spatial_clash",
+             "params": {"path": "thin-material.ifc"}},
             {
                 "id": "ifc",
                 "tool": "hamon_ifc_spatial_clash",
@@ -293,7 +297,7 @@ class RegisteredFileProtocolTests(unittest.TestCase):
         cls.results = cls.record["results"]
 
     def test_registered_files_reach_actual_task_bytes(self):
-        for name in ("ifc", "pdf", "circuit", "good"):
+        for name in ("ifc", "thin-ifc", "pdf", "circuit", "good"):
             with self.subTest(tool=name):
                 r = self.results[name]
                 self.assertTrue(r["completed"], r)
@@ -305,7 +309,8 @@ class RegisteredFileProtocolTests(unittest.TestCase):
         self.assertEqual(self.results["pdf"]["details"]["page_count"], 1)
         self.assertEqual(self.results["good"]["details"]["size_bytes"], 13)
         self.assertEqual(self.results["good"]["details"]["path"], "good.json")
-        for name in ("model.ifc", "drawing ü.pdf", "circuit.sp"):
+        self.assertEqual(self.results["thin-ifc"]["details"]["total_solid_volume_m3"], 2.**-40)
+        for name in ("model.ifc", "thin-material.ifc", "drawing ü.pdf", "circuit.sp"):
             self.assertIn(name, self.record["reads"])
 
     def test_local_shadow_does_not_approve_bad_task_file(self):
@@ -355,3 +360,4 @@ class RegisteredFileProtocolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
