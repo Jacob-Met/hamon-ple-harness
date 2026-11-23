@@ -147,7 +147,7 @@ _WAVE8_INPUTS = {
     ),
     "rankine_layers": (
         "civil_geotech",
-        "pressure_state layers water_table_depth_m front_water_table_depth_m gamma_water_N_m3 surcharge_Pa",
+        "pressure_state layers front_layers front_surface_depth_m water_table_depth_m front_water_table_depth_m gamma_water_N_m3 surcharge_Pa front_surcharge_Pa",
         "dual_solver_rel_residual",
     ),
     "bearing_capacity": (
@@ -156,12 +156,14 @@ _WAVE8_INPUTS = {
         "stress_integration_residual_Pa",
     ),
 }
+_RANKINE_LAYER_KEYS = "thickness_m phi_deg gamma_above_water_N_m3 gamma_submerged_N_m3 gamma_saturated_N_m3"
 _WAVE8_ROW_KEYS = {
     "nodes": "id demand_m3_s fixed_head_m",
     "pipes": "id from to length_m diameter_m roughness_m minor_loss_K",
     "buses": "id type p_injection_pu q_injection_pu vm_pu va_deg q_min_injection_pu q_max_injection_pu shunt_g_pu shunt_b_pu",
     "lines": "id from to r_pu x_pu tap_ratio phase_shift_deg line_charging_b_pu",
-    "layers": "thickness_m phi_deg gamma_above_water_N_m3 gamma_submerged_N_m3 gamma_saturated_N_m3",
+    "layers": _RANKINE_LAYER_KEYS,
+    "front_layers": _RANKINE_LAYER_KEYS,
 }
 _STATION_KEYS = "radius_m meridional_velocity_m_s absolute_tangential_velocity_m_s absolute_flow_angle_deg relative_flow_angle_deg blade_metal_angle_deg"
 _WAVE8_RECORD_KEYS = {
