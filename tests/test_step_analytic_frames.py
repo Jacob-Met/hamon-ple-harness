@@ -75,6 +75,21 @@ class StepAnalyticFrameTests(unittest.TestCase):
         self.assert_frame(block_text((1.,0.,100.),None),
                           np.array([[100.,0.,1.],[0.,norm,0.],[-1.,0.,100.]])/norm)
 
+    def test_decimal_text_keeps_parallelism_and_small_nonzero_angles(self):
+        with self.subTest(case='exact decimal parallel'),self.assertRaises(ValueError):
+            self.verify(block_text((1.,2.,3.),(.1,.2,.3)))
+        with self.subTest(case='decimal angle below binary64 resolution'):
+            tiny = '1.'+'0'*59+'1'
+            text = block_text((1.,1.,1.),(1.,1.,1.)).replace(
+                "#3=DIRECTION('',(1.0,1.0,1.0));",f"#3=DIRECTION('',(1.,{tiny},1.));")
+            matrix = np.column_stack((np.array([-1.,2.,-1.])/math.sqrt(6),
+                                      np.array([-1.,0.,1.])/math.sqrt(2),np.ones(3)/math.sqrt(3)))
+            self.assert_frame(text,matrix)
+        with self.subTest(case='small component chooses default projection'):
+            text = block_text((1.,1.,0.),None).replace(
+                "#2=DIRECTION('',(1.0,1.0,0.0));","#2=DIRECTION('',(1.,1.E-400,0.));")
+            self.assert_frame(text,[[0.,0.,1.],[-1.,0.,0.],[0.,-1.,0.]])
+
     def test_missing_malformed_or_parallel_declared_placement_is_not_a_default(self):
         valid = block_text()
         cases = [valid.replace("BLOCK('',#4,", "BLOCK('',#999,"),
