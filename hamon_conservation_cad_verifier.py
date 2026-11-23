@@ -410,6 +410,101 @@ def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, densi
     }
 
 
+def _rectangular_sweep(entities, et, args, unit_scale, frame=None):
+    prof_id = _ref_id(args[0] if et == "IFCEXTRUDEDAREASOLID" else args[1])
+    pos_id = _ref_id(args[1] if et == "IFCEXTRUDEDAREASOLID" else args[2])
+    depth = float(args[3]) * unit_scale
+    if frame is None:
+        frame = _axis2_frame(entities, pos_id, unit_scale)
+    origin, x_ax, y_ax, z_ax = frame
+    if prof_id in entities:
+        pet, pargs = entities[prof_id]
+        if pet in ("RECTANGLE_PROFILE_DEF", "IFCRECTANGLEPROFILEDEF") and len(pargs) >= 5:
+            lx, ly = float(pargs[3]) * unit_scale, float(pargs[4]) * unit_scale
+            poly = np.array([[-0.5*lx,-0.5*ly],[0.5*lx,-0.5*ly],[0.5*lx,0.5*ly],[-0.5*lx,0.5*ly]])
+            direction, normal = z_ax, 1.0
+            if et == "IFCEXTRUDEDAREASOLID":
+                if min(lx, ly, depth) <= 0 or not all(map(math.isfinite, (lx, ly, depth))):
+                    raise ValueError("Rectangular IFC extrusion dimensions must be finite and positive")
+                poly = _position_ifc_profile(poly, entities, pargs[2], unit_scale)
+                local = _ifc_extrusion_direction(entities, args[2])
+                direction = local[0] * x_ax + local[1] * y_ax + local[2] * z_ax
+                normal = local[2]
+            vertices, faces = _extrude_polygon_2d(poly, origin, x_ax, y_ax, direction, depth)
+            return vertices, faces if normal > 0 else faces[:, ::-1], lx * ly * depth * abs(normal)
+
+
+def _ifc_product_properties(typed, raw, unit_scale, density):
+    from hamon_ifc_spatial_clash import (
+        MASS_PRODUCT_TYPES, _placed_product_frame, _product_shapes, _require_single_swept_body,
+        _rigid_ifc_frame,
+    )
+
+    owners = list(_product_shapes(typed, strict=True))
+    if not owners:
+        if any(kind == "IFCPRODUCTDEFINITIONSHAPE" for kind, _ in typed.values()):
+            raise ValueError("IFC product definition shape has no resolved owner")
+        return None
+    if not math.isfinite(density) or density <= 0:
+        raise ValueError("IFC product mass requires a positive finite density")
+    if any(kind == "IFCRELVOIDSELEMENT" for kind, _ in typed.values()):
+        raise ValueError("IFC products with opening subtraction are unsupported")
+
+    parts = []
+    reference = None
+    for eid, kind, args, _ in owners:
+        if kind not in MASS_PRODUCT_TYPES:
+            raise ValueError(f"Unsupported IFC mass occurrence type {kind} on #{eid}")
+        item = _require_single_swept_body(typed, eid, mass_takeoff=True)
+        if item not in raw or len(typed[item][1]) != 4:
+            raise ValueError(f"Unresolved IFC rectangular swept Body on #{eid}")
+        world = _placed_product_frame(typed, args[5], unit_scale)
+        position = typed[item][1][1]
+        if position is not None:
+            world = world @ _rigid_ifc_frame(typed, position, unit_scale)
+        rotation, origin = world[:3, :3], world[:3, 3]
+        # Integrate in world-axis directions about the body's origin. This keeps
+        # survey-scale translation out of the local mesh and its central moments.
+        swept = _rectangular_sweep(raw, *raw[item], unit_scale, (np.zeros(3), *rotation.T))
+        if swept is None:
+            raise ValueError(f"Expected a rectangular swept IFC Body on #{eid}")
+        vertices, faces, analytic = swept
+        props = _compute_mesh_mass_properties(vertices, faces, density)
+        if "reason" in props:
+            return props, None
+        if reference is None:
+            reference = origin
+        offset = origin - reference
+        parts.append((props, analytic, offset + props["centroid_m"],
+                      offset + vertices.min(axis=0), offset + vertices.max(axis=0)))
+
+    volume = math.fsum(p["volume_m3"] for p, *_ in parts)
+    mass = math.fsum(p["mass_kg"] for p, *_ in parts)
+    center = np.array([math.fsum(p["mass_kg"] * c[i] for p, _, c, _, _ in parts) / mass
+                       for i in range(3)])
+    inertia = np.zeros((3, 3))
+    for props, _, centroid, _, _ in parts:
+        dx, dy, dz = centroid - center
+        shift = np.array([[dy*dy + dz*dz, -dx*dy, -dx*dz],
+                          [-dx*dy, dx*dx + dz*dz, -dy*dz],
+                          [-dx*dz, -dy*dz, dx*dx + dy*dy]])
+        inertia += np.asarray(props["inertia_tensor_centroid_kg_m2"]) + props["mass_kg"] * shift
+    extents = np.max([p[4] for p in parts], axis=0) - np.min([p[3] for p in parts], axis=0)
+    return {
+        "geometry_basis": "additive_ifc_product_occurrences", "ifc_product_count": len(parts),
+        "volume_m3": volume, "mass_kg": mass, "density_kg_m3": density,
+        "centroid_m": (reference + center).tolist(), "aabb_extents_m": extents.tolist(),
+        "inertia_tensor_centroid_kg_m2": inertia.tolist(),
+        "principal_moments_kg_m2": np.linalg.eigvalsh(inertia).tolist(),
+        "surface_area_m2": math.fsum(p["surface_area_m2"] for p, *_ in parts),
+        "max_product_volume_rel_error": max(abs(p["volume_m3"] - a) / a for p, a, *_ in parts),
+        "watertight_manifold": True,
+        "triangle_count": sum(p["triangle_count"] for p, *_ in parts),
+        "net_oriented_area_residual_m2": math.fsum(p["net_oriented_area_residual_m2"] for p, *_ in parts),
+        "net_oriented_area_tolerance_m2": math.fsum(p["net_oriented_area_tolerance_m2"] for p, *_ in parts),
+    }, math.fsum(analytic for _, analytic, *_ in parts)
+
+
 def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
     step_text = spec.get("step_text") or ""
     if not step_text and spec.get("file_b64"):
@@ -420,6 +515,15 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
     entities, unit_scale = _parse_step_entities_map(step_text)
     if spec.get("unit_scale_m") is not None:
         unit_scale = float(spec["unit_scale_m"])
+
+    if any(kind.startswith("IFC") for kind, _ in entities.values()):
+        from hamon_ifc_spatial_clash import _detect_length_unit_scale, parse_ifc_entities
+        typed = parse_ifc_entities(step_text)
+        if spec.get("unit_scale_m") is None:
+            unit_scale = _detect_length_unit_scale(typed)
+        occurrences = _ifc_product_properties(typed, entities, unit_scale, density)
+        if occurrences is not None:
+            return _cad_report(*occurrences, unit_scale, len(entities))
 
     pts: Dict[int, np.ndarray] = {}
     verts_map: Dict[int, np.ndarray] = {}
@@ -501,33 +605,21 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
             _append(*_cylinder_mesh(origin, x_ax, y_ax, z_ax, r, h))
             analytic_vol = math.pi * r * r * h
         elif et in ("EXTRUDED_AREA_SOLID", "IFCEXTRUDEDAREASOLID") and len(args) >= 4:
-            prof_id = _ref_id(args[0] if et == "IFCEXTRUDEDAREASOLID" else args[1])
-            pos_id = _ref_id(args[1] if et == "IFCEXTRUDEDAREASOLID" else args[2])
-            depth = float(args[3]) * unit_scale
-            origin, x_ax, y_ax, z_ax = _axis2_frame(entities, pos_id, unit_scale)
-            if prof_id in entities:
-                pet, pargs = entities[prof_id]
-                if pet in ("RECTANGLE_PROFILE_DEF", "IFCRECTANGLEPROFILEDEF") and len(pargs) >= 5:
-                    lx, ly = float(pargs[3]) * unit_scale, float(pargs[4]) * unit_scale
-                    poly = np.array([[-0.5*lx,-0.5*ly],[0.5*lx,-0.5*ly],[0.5*lx,0.5*ly],[-0.5*lx,0.5*ly]])
-                    direction, normal = z_ax, 1.0
-                    if et == "IFCEXTRUDEDAREASOLID":
-                        if min(lx, ly, depth) <= 0 or not all(map(math.isfinite, (lx, ly, depth))):
-                            raise ValueError("Rectangular IFC extrusion dimensions must be finite and positive")
-                        poly = _position_ifc_profile(poly, entities, pargs[2], unit_scale)
-                        local = _ifc_extrusion_direction(entities, args[2])
-                        direction = local[0] * x_ax + local[1] * y_ax + local[2] * z_ax
-                        normal = local[2]
-                    vertices, faces = _extrude_polygon_2d(poly, origin, x_ax, y_ax, direction, depth)
-                    _append(vertices, faces if normal > 0 else faces[:, ::-1])
-                    analytic_vol = lx * ly * depth * abs(normal)
+            swept = _rectangular_sweep(entities, et, args, unit_scale)
+            if swept is not None:
+                vertices, faces, analytic_vol = swept
+                _append(vertices, faces)
 
     if not all_verts:
         raise ValueError("No supported 3D solid entities found in STEP input")
     props = _compute_mesh_mass_properties(np.vstack(all_verts), np.vstack(all_faces), density)
+    return _cad_report(props, analytic_vol, unit_scale, len(entities))
+
+
+def _cad_report(props, analytic_vol, unit_scale, entity_count):
     if "reason" in props:
         return {"ok": True, "tool": "hamon_conservation_cad_verifier", "mode": "step_cad",
-                "unit_scale_m": unit_scale, "entity_count": len(entities),
+                "unit_scale_m": unit_scale, "entity_count": entity_count,
                 "conservation_verified": False, **props}
     dual_rel_err = abs(props["volume_m3"] - analytic_vol) / analytic_vol if (analytic_vol and analytic_vol > 0) else 0.0
     return {
@@ -535,9 +627,9 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
         "tool": "hamon_conservation_cad_verifier",
         "mode": "step_cad",
         "unit_scale_m": unit_scale,
-        "entity_count": len(entities),
+        "entity_count": entity_count,
         "dual_volume_rel_error": dual_rel_err,
-        "conservation_verified": bool(dual_rel_err <= 5e-3),
+        "conservation_verified": bool(max(dual_rel_err, props.get("max_product_volume_rel_error", 0.)) <= 5e-3),
         **props,
     }
 

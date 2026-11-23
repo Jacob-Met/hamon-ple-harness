@@ -6,6 +6,7 @@ from fractions import Fraction
 from functools import partial
 import re
 
+from hamon_eagle_walk import rooted_tree
 from hamon_eagle_netlist import _named, _physical_pads, _read
 
 
@@ -173,7 +174,24 @@ def board_bores(board, elements, libraries, signal, terminals):
     return bores
 
 
-def connect_landings(interior, edges):
+def escape_on_pad(center, exterior, diameter, bore):
+    """Does this wire reach outside the drill within the pad's inscribed disk?"""
+    dx, dy = exterior[2] - center[2], exterior[3] - center[3]
+    length2 = dx * dx + dy * dy
+    if 4 * length2 <= diameter**2:
+        return True
+    # Test the point one pad radius along the wire. Its squared clearance has
+    # the sign of constant * sqrt(length2) + linear, without taking a root.
+    x, y, drill, _ = bore
+    ux, uy = center[2] - x, center[3] - y
+    constant = 4 * (ux * ux + uy * uy) + diameter**2 - drill**2
+    linear = 4 * diameter * (ux * dx + uy * dy)
+    if linear > 0:
+        return constant >= 0 or linear**2 > constant**2 * length2
+    return constant > 0 and constant**2 * length2 > linear**2
+
+
+def connect_landings(interior, edges, surface):
     """A plated center is reachable only by a wire chain that exits its bore.
 
     Keep the original XML wire steps in each approach. No drilled-away interior
@@ -182,6 +200,18 @@ def connect_landings(interior, edges):
     for (bore, layer), local in interior.items():
         x, y, _, _ = bore
         center = ("copper", layer, x, y)
+        # A clipped SMD can still feed a wire through surviving pad copper.
+        # Keep this approach local to the terminal: its center is not a wire
+        # junction inside the bore.
+        for pad_center in local.keys() & surface.keys():
+            for term, ref, diameter in surface[pad_center]:
+                for end, wire in local[pad_center]:
+                    if inside(end, bore) or not escape_on_pad(pad_center, end, diameter, bore):
+                        continue
+                    edges[term].append((end, [(term, pad_center, ref, None),
+                                              (pad_center, end, wire, None)]))
+                    edges[end].append((term, [(end, pad_center, wire, None),
+                                              (pad_center, term, ref, None)]))
         parents = {center: None}
         queue = deque([center])
         while queue:
@@ -191,7 +221,8 @@ def connect_landings(interior, edges):
                     continue
                 parents[b] = a, ref
                 if inside(b, bore):
-                    queue.append(b)
+                    if b not in surface:
+                        queue.append(b)
                     continue
                 reverse = []
                 point = b
@@ -232,6 +263,7 @@ def routed_continuity(prediction, board_path, signal_name):
     points = set()
     traces = []
     landings = []
+    surface = defaultdict(list)
 
     def join(a, b, ref):
         edges[a].append((b, [(a, b, ref, None)]))
@@ -262,6 +294,9 @@ def routed_continuity(prediction, board_path, signal_name):
             for node in pad_nodes(e, pad):
                 points.add(node)
                 landings.append((term, node, ref))
+                if pad.tag == "smd":
+                    diameter = min(nm(pad.get("dx")), nm(pad.get("dy")))
+                    surface[node].append((term, ref, diameter))
         except (KeyError, ValueError, InvalidOperation) as exc:
             unsupported(ref, exc)
     ordinal = defaultdict(int)
@@ -321,16 +356,9 @@ def routed_continuity(prediction, board_path, signal_name):
                     local = interior[bore, a[1]]
                     local[a].append((b, ref))
                     local[b].append((a, ref))
-    connect_landings(interior, edges)
+    connect_landings(interior, edges, surface)
     root = terminals[0]
-    previous = {root: None}
-    queue = deque([root])
-    while queue:
-        a = queue.popleft()
-        for b, walk in edges[a]:
-            if b not in previous:
-                previous[b] = (a, walk)
-                queue.append(b)
+    previous = rooted_tree(edges, root)
     missing = [list(t) for t in terminals if t not in previous]
     if missing:
         reason = "trace_does_not_demonstrably_reach_plating" if blocked_terminal else "no_supported_copper_path"

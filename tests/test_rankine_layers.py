@@ -1,4 +1,5 @@
 """Public FHWA NHI-06-089 Appendix A.5 pressure diagrams, in coherent SI units."""
+import math
 from pathlib import Path
 import sys
 import unittest
@@ -141,6 +142,93 @@ class TestRankineLayers(unittest.TestCase):
             self.assertFalse(run("active",[layer(1,120,30)],**kw)["conservation_verified"])
         for invalid in (layer(1,120,90),layer(-1,120,30),dict(layer(1,120,30),cohesion_Pa=900)):
             self.assertFalse(run("passive",[invalid])["conservation_verified"])
+
+
+    def test_opposing_dry_earth_force_and_moment_about_common_toe(self):
+        def dry(h, phi=30):
+            return {"thickness_m": h, "phi_deg": phi, "gamma_above_water_N_m3": 18000}
+        for h in (1.9, 2., 2.1, 2.0000001):
+            with self.subTest(h=h):
+                # Independent centroids of rear active and front passive triangles.
+                front_force = 27000*h**2
+                force = 108000 - front_force
+                moment = 216000 - front_force*h/3
+                r = run("active", [dry(6)], front_layers=[dry(h)], front_surface_depth_m=6-h)
+                self.assertTrue(r["conservation_verified"], r)
+                self.assertEqual(r["front_pressure_state"], "passive")
+                self.assertAlmostEqual(r["rear_effective_thrust_N_m"], 108000)
+                self.assertAlmostEqual(r["front_effective_thrust_N_m"], front_force)
+                self.assertAlmostEqual(r["thrust_N_m"], force)
+                self.assertAlmostEqual(r["moment_Nm_m"], moment)
+                if h == 2:
+                    self.assertEqual(r["resultant_kind"], "pure_couple")
+                    self.assertIsNone(r["resultant_above_base_m"])
+                    self.assertFalse(run("active", [dry(6)], front_layers=[dry(h)],
+                                         proposed_thrust_N_m=0, proposed_moment_Nm_m=0)["conservation_verified"])
+                else:
+                    self.assertEqual(r["resultant_kind"], "force")
+                    self.assertAlmostEqual(r["resultant_above_base_m"]/(moment/force), 1., places=8)
+                    self.assertTrue(r["resultant_above_base_m"] > 6 if h < 2 else r["resultant_above_base_m"] < 0)
+        adjacent = run("active", [dry(6)], front_layers=[dry(math.nextafter(2., 3.))])
+        self.assertTrue(adjacent["conservation_verified"])
+        self.assertLess(adjacent["thrust_N_m"], 0.)
+        self.assertEqual(adjacent["resultant_kind"], "force_unresolved_at_roundoff")
+        self.assertIsNone(adjacent["resultant_above_base_m"])
+        matched = run("passive", [dry(2, 0)], front_layers=[dry(2, 0)])
+        self.assertTrue(matched["conservation_verified"])
+        self.assertEqual((matched["thrust_N_m"], matched["moment_Nm_m"]), (0., 0.))
+        self.assertEqual(matched["resultant_kind"], "balanced")
+        self.assertIsNone(matched["resultant_above_base_m"])
+        reversed_state = run("passive", [dry(6)], front_layers=[dry(2)])
+        self.assertTrue(reversed_state["conservation_verified"])
+        self.assertEqual(reversed_state["front_pressure_state"], "active")
+        self.assertAlmostEqual(reversed_state["thrust_N_m"], 27000*36 - 3000*4)
+
+    def test_layered_faces_referenced_to_distinct_grades_and_common_water_datum(self):
+        def material(h, phi, submerged):
+            return {"thickness_m": h, "phi_deg": phi, "gamma_above_water_N_m3": 18000,
+                    "gamma_submerged_N_m3": submerged}
+        def diagram(rows):
+            # Rectangle plus triangle and their geometric centroids above the toe.
+            f = m = 0.
+            for top, bottom, p, q in rows:
+                rectangle = (bottom-top)*p
+                triangle = (bottom-top)*(q-p)/2
+                f += rectangle + triangle
+                m += rectangle*(6-(top+bottom)/2) + triangle*(6-(top+2*bottom)/3)
+            return f, m
+
+        back = [material(2, 0, 10000), material(4, 30, 10000)]
+        front = [material(1, 30, 8000), material(2, 0, 8000)]
+        rear_force, rear_moment = diagram([(0, 1, 2000, 20000), (1, 2, 20000, 30000),
+                                          (2, 6, 10000, 70000/3)])
+        for front_table, front_diagram in (
+            (2, [(3, 4, 3000, 27000), (4, 6, 9000, 25000)]),
+            (4.5, [(3, 4, 3000, 57000), (4, 4.5, 19000, 28000),
+                   (4.5, 6, 28000, 40000)]),
+        ):
+            with self.subTest(front_table=front_table):
+                exposed_force, exposed_moment = diagram(front_diagram)
+                water_f = 5000*(5**2-(6-front_table)**2)
+                water_m = 10000*(5**3-(6-front_table)**3)/6
+                r = run("active", back, front_layers=front, front_surface_depth_m=3,
+                        water_table_depth_m=1, front_water_table_depth_m=front_table,
+                        surcharge_Pa=2000, front_surcharge_Pa=1000, gamma_water_N_m3=10000)
+                self.assertTrue(r["conservation_verified"], r)
+                self.assertEqual(r["front_profile"][0]["top_m"], 3.)
+                self.assertEqual(r["front_profile"][0]["water_top_Pa"], max(0,3-front_table)*10000)
+                self.assertAlmostEqual(r["thrust_N_m"], rear_force - exposed_force + water_f)
+                self.assertAlmostEqual(r["moment_Nm_m"], rear_moment - exposed_moment + water_m)
+                self.assertAlmostEqual(r["front_effective_moment_Nm_m"], exposed_moment)
+
+    def test_front_grade_and_material_validation(self):
+        row = {"thickness_m": 6, "phi_deg": 30, "gamma_above_water_N_m3": 18000}
+        for extra in ({"front_surcharge_Pa": 5}, {"front_layers": []}, {"front_layers": [None]},
+                      {"front_layers": [dict(row, thickness_m=7)]},
+                      {"front_layers": [row], "front_surface_depth_m": 1},
+                      {"front_layers": [dict(row, cohesion_Pa=10)]}):
+            with self.subTest(extra=extra):
+                self.assertFalse(run("active", [row], **extra)["conservation_verified"])
 
 
 if __name__ == "__main__":
