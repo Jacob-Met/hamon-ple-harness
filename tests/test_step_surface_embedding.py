@@ -1,5 +1,6 @@
 """Closed STEP shells must also be embedded, without crossing surface sheets."""
 import math
+from fractions import Fraction as F
 import unittest
 import numpy as np
 from hamon_conservation_cad_verifier import verify_step_cad_geometry
@@ -114,6 +115,53 @@ class StepSurfaceEmbeddingTests(unittest.TestCase):
         perimeter = 2*count*radius*math.sin(math.pi/count)
         self.assertAlmostEqual(got["volume_m3"], area*height, places=11)
         self.assertAlmostEqual(got["surface_area_m2"], 2*area+perimeter*height, places=11)
+
+    def test_newly_resolved_thin_solids_have_exact_centered_moments(self):
+        # Integrate horizontal square cross-sections analytically, subtracting
+        # the smaller pyramid in rational arithmetic. A dyadic shear checks
+        # products of inertia as well as the diagonal terms.
+        for height in (math.nextafter(2., 0.), 2.-2.**-25):
+            h = F(height)
+            volume = 4*(2-h)/3
+            center = (2+h)/4
+            variance = [F(1, 5), F(1, 5), (4+2*h+h*h)/10-center*center]
+            for shear in (False, True):
+                matrix = [[F(1), F(0), F(1, 2) if shear else F(0)],
+                          [F(0), F(1), -F(1, 4) if shear else F(0)],
+                          [F(0), F(0), F(1)]]
+                covariance = [[sum(matrix[i][k]*variance[k]*matrix[j][k] for k in range(3))
+                               for j in range(3)] for i in range(3)]
+                trace = sum(covariance[k][k] for k in range(3))
+                for scale in (2.**-100, 1., 2.**100):
+                    with self.subTest(height=height, shear=shear, scale=scale):
+                        points, faces = fans(0., height)
+                        points = (points @ np.array(matrix, dtype=float).T)*scale
+                        got = verify_step_cad_geometry({"step_text": surface_step(points, faces),
+                                                        "density_kg_m3": 7.5})
+                        self.assertTrue(got["conservation_verified"], got)
+                        self.assertEqual(got["volume_m3"], float(volume*F(scale)**3))
+                        self.assertEqual(got["centroid_m"], [float(row[2]*center*F(scale)) for row in matrix])
+                        expected = [[float(F(7.5)*volume*F(scale)**5*((trace if i == j else 0)-covariance[i][j]))
+                                     for j in range(3)] for i in range(3)]
+                        self.assertEqual(got["inertia_tensor_centroid_kg_m2"], expected)
+                        if not shear:
+                            self.assertEqual(got["principal_moments_kg_m2"], sorted(expected[k][k] for k in range(3)))
+                        else:
+                            normalized = np.asarray(expected)/max(abs(x) for row in expected for x in row)
+                            principal = np.linalg.eigvalsh(normalized)
+                            actual = np.asarray(got["principal_moments_kg_m2"])/max(abs(x) for row in expected for x in row)
+                            np.testing.assert_allclose(actual, principal, rtol=2e-15, atol=0)
+
+    def test_nonfinite_or_unrepresentable_mass_withholds_all_mass_properties(self):
+        for height, density in ((1., -1.), (1., math.inf),
+                                (math.nextafter(2., 0.), math.ulp(0.)), (-1., 1e308)):
+            with self.subTest(height=height, density=density):
+                points, faces = fans(0., height)
+                got = verify_step_cad_geometry({"step_text": surface_step(points, faces),
+                                                "density_kg_m3": density})
+                self.assertFalse(got["conservation_verified"], got)
+                for key in ("volume_m3", "mass_kg", "centroid_m", "inertia_tensor_centroid_kg_m2"):
+                    self.assertNotIn(key, got)
 
 
 if __name__ == "__main__":
