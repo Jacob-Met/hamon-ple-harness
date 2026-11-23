@@ -63,6 +63,8 @@ jobs:
           PY
           python ship/verify_eagle_inter_net.py --repo . --raw "$raw" --out "$raw/report"
           cat "$raw/report/inter-net.json"
+      - name: Transient consolidation reporting and model-routing controls
+        run: make verify-wave8-history
       - name: Registered TypeScript/Python tools and physics regression gates
         run: python -m pytest -q tests/test_ac_power_flow.py tests/test_registered_engineering_verifiers.py tests/test_wired_router_e2e.py tests/test_wave6_physics_verifiers.py tests/test_wave7_engineering_verifiers.py tests/test_step_translated_properties.py
       - run: python -m compileall -q engineering_intake.py engineering_toolkit.py hamon_drawing.py hamon_preflight.py hamon_dxf.py hamon_scale.py hamon_affine_metric.py hamon_callout.py hamon_dual_verifier.py hamon_cad_takeoff.py hamon_pareto.py harness.py taskbridge.py delivery_guard.py delivery_materialize.py archive_checkpoint.py archive_contract.py ship/check_artifact_provenance.py ship/audit_ple_delivery.py

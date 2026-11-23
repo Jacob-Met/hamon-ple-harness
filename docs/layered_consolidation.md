@@ -81,3 +81,9 @@ These checks are not a new score on the 29 public PLE tasks. A mock SSE
 provider checks protocol behavior. Genuine dev artifacts must come from the
 organizer's `eval/run.py`; this change does not edit historical `artifacts/`
 or submit a portal entry.
+
+## Drained interfaces and reporting precision
+
+For two to eight clay layers separated by freely draining material, the inline router accepts `drained_layer_consolidation_history`. Set `interface_condition` to `fully_drained`, choose `drained` or `sealed` for each of `top_boundary` and `bottom_boundary`, and supply `drained_layers` in vertical order. Each layer has `H_clay_m`, `cv_m2_s` and `mv_per_Pa`. All layers share the supplied `time_s` and uniform `load_history`. The router sums the settlements and weights the excess pore pressure by layer thickness. Each homogeneous solution must pass its independent finite-volume check. For layers in hydraulic contact, use the `layered_consolidation_1d` calculation above.
+
+On `consolidation_history_1d` and `drained_layer_consolidation_history`, a claimed `proposed_settlement_m` may specify `settlement_reporting_increment_m`. A claimed `proposed_mean_excess_pore_pressure_Pa` may specify `pressure_reporting_increment_Pa`. Both solutions must round to the proposed value on the stated increment, with ties rounded to the even multiple. Without an increment, both solutions must agree with the claim within a relative error below one part per million. A claim of zero without an increment requires both computed values to be zero.

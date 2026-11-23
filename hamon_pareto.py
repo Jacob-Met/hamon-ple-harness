@@ -160,9 +160,14 @@ _WAVE8_INPUTS = {
         "consolidation_layers time_s drainage load_history proposed_settlement_m proposed_mean_excess_pore_pressure_Pa",
         "dual_solver_rel_residual component_rel_residual inversion_rel_residual load_balance_rel_residual",
     ),
+    "drained_layer_consolidation_history": (
+        "civil_geotech",
+        "drained_layers interface_condition top_boundary bottom_boundary time_s load_history proposed_settlement_m proposed_mean_excess_pore_pressure_Pa settlement_reporting_increment_m pressure_reporting_increment_Pa",
+        "dual_solver_rel_residual",
+    ),
     "consolidation_history_1d": (
         "civil_geotech",
-        "H_clay_m cv_m2_s mv_per_Pa time_s drainage load_history proposed_settlement_m proposed_mean_excess_pore_pressure_Pa",
+        "H_clay_m cv_m2_s mv_per_Pa time_s drainage load_history proposed_settlement_m proposed_mean_excess_pore_pressure_Pa settlement_reporting_increment_m pressure_reporting_increment_Pa",
         "dual_solver_rel_residual",
     ),
     "rankine_layers": (
@@ -183,6 +188,7 @@ _WAVE8_ROW_KEYS = {
     "settlement_layers": "top_depth_m bottom_depth_m e0 Cc Cr sigma_v0_eff_Pa sigma_preconsolidation_Pa",
     "consolidation_layers": "thickness_m cv_m2_s mv_per_Pa",
     "load_history": "time_s surcharge_Pa",
+    "drained_layers": "H_clay_m cv_m2_s mv_per_Pa",
     "nodes": "id demand_m3_s fixed_head_m",
     "pipes": "id from to length_m diameter_m roughness_m minor_loss_K",
     "buses": "id type p_injection_pu q_injection_pu vm_pu va_deg q_min_injection_pu q_max_injection_pu shunt_g_pu shunt_b_pu",
@@ -288,7 +294,13 @@ def _wave8_result(req):
         return None
     if not all(_bounded_wave8_field(k, v) for k, v in spec.items()):
         return None
-    result = dispatch_ple_tool("hamon_conservation_cad_verifier", req)
+    if calculation in ("consolidation_history_1d", "drained_layer_consolidation_history"):
+        from hamon_consolidation_certificate import history_certificate
+        result = history_certificate(spec, dispatch_ple_tool)
+    else:
+        result = dispatch_ple_tool("hamon_conservation_cad_verifier", req)
+    if result is None:
+        return None
     if (
         result.get("calculation") != calculation
         or result.get("ok") is not True

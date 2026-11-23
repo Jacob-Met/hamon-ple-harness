@@ -20,6 +20,6 @@ The result replays volume from the returned coordinates and checks rounding of t
 
 ## Checks and scope
 
-Run `make verify-pfr` with the repository dependencies. New checks use an independent Lambert-W solution for heated gas, a forward DOP853 initial-value solution for Arrhenius cases, finite fractional-order depletion, invalid continuations and the registered JSON CLI. Existing power-law and broader wave-6 tests cover the unchanged routes.
+Run `python -m unittest discover -s tests -p 'test_pfr*.py' -v` with the repository dependencies. New checks use an independent Lambert-W solution for heated gas, a forward DOP853 initial-value solution for Arrhenius cases, finite fractional-order depletion, invalid continuations and the registered JSON CLI. Existing power-law and broader wave-6 tests cover the unchanged routes.
 
 These are mathematical engineering controls, not experimental observations or PLE benchmark scores. No organizer dev-set run or portal submission was performed. Existing dev-set artifacts were not edited.
