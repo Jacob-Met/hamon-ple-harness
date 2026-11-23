@@ -1783,7 +1783,7 @@ class _CstrRoot(NamedTuple):
         return float(midpoint), float(1 - midpoint)
 
 
-def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon, order, gas, inlet_x, refine):
+def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon, order, gas, inlet_x, refine, *, exact_inputs=False):
     """Enumerate the single-CSTR power-law/Arrhenius steady-state equation.
 
     Exact stationary-polynomial isolation partitions the physical interval.
@@ -1798,7 +1798,7 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
         raise ValueError("CSTR inputs must be finite")
     if volume < 0 or min(c0, feed, t0) <= 0 or epsilon <= -1:
         raise ValueError("CSTR requires nonnegative volume, positive feed/concentration/temperature and epsilon_A > -1")
-    slope = delta if abs(delta) > 1e-15 else 0.0
+    slope = delta if exact_inputs or abs(delta) > 1e-15 else 0.0
     inlet = t0 if slope else top
     if min(inlet, inlet + slope) <= 0:
         raise ValueError("CSTR temperature must stay positive on 0 <= conversion <= 1")
@@ -1807,20 +1807,23 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
     if inlet_x == 1:
         return [_CstrRoot(Fraction(1), Fraction(1), 1, 1, 0)] if order > 0 else []
 
-    # Use precisely the same precedence as the maintained rate law.
+    # Legacy callers preserve their maintained float rate law. The coupled
+    # thermal caller must retain every supplied bit: rounding a large integer
+    # rate, or flattening a small nonzero slope, can change branch topology.
+    rate_input = Fraction if exact_inputs else float
     if "A_preexp" in params and "E_a" in params:
         rate_kind = "preexponential"
-        rate = float(params["A_preexp"])
-        activation = float(params["E_a"])
+        rate = rate_input(params["A_preexp"])
+        activation = rate_input(params["E_a"])
         reference = 1.0
     elif "k_ref" in params and "T_ref" in params and "E_a" in params:
         rate_kind = "reference"
-        rate = float(params["k_ref"])
-        activation = float(params["E_a"])
-        reference = float(params["T_ref"])
+        rate = rate_input(params["k_ref"])
+        activation = rate_input(params["E_a"])
+        reference = rate_input(params["T_ref"])
     else:
         rate_kind = "constant"
-        rate = float(params["k"])
+        rate = rate_input(params["k"])
         activation = 0.0
         reference = 1.0
     if not all(math.isfinite(x) for x in (rate, activation, reference)) or min(rate, reference) <= 0:
@@ -1925,7 +1928,7 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
         tref = D(reference)
         target = D(volume).ln()
         log_rate, log_concentration = dr.ln(), dc.ln()
-        exact_power = activation == 0.0 and order.is_integer() and abs(order) <= 32
+        exact_power = activation == 0.0 and rational_order.denominator == 1 and abs(order) <= 32
         fixed = df.ln()-log_rate-dn*log_concentration-target
 
         def balance(z):
@@ -2186,6 +2189,10 @@ def _constant_rate_pfr(params, concentration, feed, flow, order, rate, inlet_t, 
 def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
     """Deterministic solver for CSTR, PFR, N-CSTRs, Arrhenius, and adiabatic reactor design."""
     reactor_type = str(params.get("reactor_type", "pfr")).strip().lower()
+    if "heat_transfer" in params:
+        from hamon_cstr_thermal import solve_jacketed_cstr
+        return solve_jacketed_cstr({**params, "reactor_type": reactor_type},
+                                   root_solver=_cstr_conversion_branches)
     if reactor_type == "cstr_series" and params.get("conversion") is not None:
         from hamon_cstr_series_design import solve_equal_volume_cstr_design
         return solve_equal_volume_cstr_design(params)
@@ -2497,3 +2504,4 @@ def prune_deterministic_fast_path(
         "cost_saved_usd": 0.0,
         "fast_path_pruned": False,
     }
+
