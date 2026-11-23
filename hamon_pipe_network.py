@@ -247,7 +247,7 @@ def resolved_laminar_exchange(endpoints, basis, cycles, reservoirs, fixed_heads,
 
 def resolved_minor_exchange(endpoints, basis, cycles, reservoirs, fixed_heads, demands,
                             length, diameter, minor, viscosity, gravity, affected,
-                            flow, drop, amplitude):
+                            flow, drop, amplitude, hidden_supply):
     """Refine coupled laminar exchanges with signed quadratic minor losses."""
     from mpmath import mp
 
@@ -314,9 +314,10 @@ def resolved_minor_exchange(endpoints, basis, cycles, reservoirs, fixed_heads, d
     previous = None
     for digits in (50, 100, 200, 400):
         result = refine(digits)
-        # A published zero in the selected circulation can mask cancellation
-        # below the precision used. Leave that case unresolved.
-        if result == previous and all(result[0]):
+        # A zero in a selected circulation or a cancelling boundary supply
+        # can mask a contribution below the precision used. Leave it unresolved.
+        supplies_resolved = all(v for v, hidden in zip(result[2], hidden_supply) if hidden)
+        if result == previous and all(result[0]) and supplies_resolved:
             flow = flow.copy()
             flow[edges] = result[0]
             return flow, np.array(result[1]), np.array(result[2])
@@ -564,7 +565,8 @@ def network(spec):
                 if np.any(minor[affected]):
                     qloop, total_head, resolved_supply = resolved_minor_exchange(
                         endpoints, basis, cycles[:, selected], reservoirs, fixed_heads, demands,
-                        length, diameter, minor, viscosity, gravity, affected, qloop, drop, amplitude[selected])
+                        length, diameter, minor, viscosity, gravity, affected, qloop, drop,
+                        amplitude[selected], hidden_supply)
                 else:
                     qloop, total_head, resolved_supply = resolved_laminar_exchange(
                         endpoints, basis, cycles[:, selected], reservoirs, fixed_heads, demands,
