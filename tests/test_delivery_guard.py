@@ -5,6 +5,7 @@ No hidden task files, model calls, or grading slots are used.
 """
 import contextlib
 import io
+import os
 from pathlib import Path
 import shlex
 import sys
@@ -161,6 +162,45 @@ class LargeDeliverable(unittest.IsolatedAsyncioTestCase):
             graded.write_bytes(data)
             self.assertEqual(guard.compare(before, await guard.snapshot(self, targets)),
                              [{"path": task_path, "reason": "unchanged"}])
+
+
+class DirectoryDeliverable(unittest.IsolatedAsyncioTestCase):
+    async def test_tree_uses_complete_contents_from_the_live_task_probe(self):
+        task_path = "/filesystem/graded"
+        targets = [{"path": task_path, "kind": "dir"}]
+        self.instruction = "Save the files under graded/."
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp).resolve() / "graded"
+            folder.mkdir()
+
+            async def task_exec(command, timeout_sec):
+                _, _, program, argument = shlex.split(command)
+                output = io.StringIO()
+                with (mock.patch("pathlib.Path", side_effect=lambda value: folder if value == task_path else Path(value)),
+                      mock.patch.object(sys, "argv", ["-c", argument]),
+                      contextlib.redirect_stdout(output)):
+                    exec(program, {})
+                return {"exit_code": 0, "output": output.getvalue()}
+
+            self.exec = task_exec
+            (folder / "placeholder").touch()
+            self.assertEqual((await guard.snapshot(self, targets))[task_path]["state"], "empty")
+            deep = folder.joinpath("a", "b", "c", "d", "e", "f")
+            deep.mkdir(parents=True)
+            payload = deep / "result.csv"
+            payload.write_bytes(b"old,1")
+            before = await guard.snapshot(self, targets)
+            self.assertEqual(before[task_path]["files"], 1)
+            old_times = (payload.stat().st_atime_ns, payload.stat().st_mtime_ns)
+            os.utime(payload, ns=(old_times[0], old_times[1] + 1_000_000_000))
+            self.assertEqual(guard.compare(before, await guard.snapshot(self, targets)),
+                             [{"path": task_path, "reason": "unchanged"}])
+            payload.write_bytes(b"new,1")
+            os.utime(payload, ns=old_times)
+            self.assertEqual(guard.compare(before, await guard.snapshot(self, targets)), [])
+            (folder / "bad.pdf").write_bytes(b"not a PDF")
+            self.assertEqual(guard.compare(before, await guard.snapshot(self, targets)),
+                             [{"path": task_path, "reason": "pdf_header"}])
 
 
 class CompareSnapshots(unittest.TestCase):
