@@ -892,9 +892,8 @@ def _solve_rlc_transient(params):
     if r < 0 or l <= 0 or c <= 0 or time_ < 0:
         raise ValueError("Passive RLC requires R >= 0, L > 0, C > 0 and t >= 0")
     alpha = (0.5 * r) / l
-    lc = l * c
-    omega = (1.0 / math.sqrt(lc) if math.isfinite(lc) and lc > 0
-             else (1.0 / math.sqrt(l)) / math.sqrt(c))
+    # Multiplying L and C first can round a subnormal product by several ppm.
+    omega = (1.0 / math.sqrt(l)) / math.sqrt(c)
     impedance = math.sqrt(l) / math.sqrt(c)
     if not all(math.isfinite(value) and value > 0 for value in (omega, impedance)):
         raise ValueError("RLC natural scales exceed the supported finite range")

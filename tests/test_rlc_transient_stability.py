@@ -109,7 +109,7 @@ class RlcTransientStabilityTests(unittest.TestCase):
                 self.assertEqual(actual["regime"], expected)
 
     def test_exact_component_discriminant_across_adjacent_floats_and_scales(self):
-        for exponent in (-250, -100, 0, 100, 250):
+        for exponent in (-300, -250, -160, -100, 0, 100, 250, 300):
             component = float(f"1e{exponent}")
             for capacitance, expected in (
                 (math.nextafter(component, 0.), "underdamped"),
