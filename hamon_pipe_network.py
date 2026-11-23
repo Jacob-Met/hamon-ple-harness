@@ -181,7 +181,7 @@ def forest_walk(endpoints, edges, roots, node_count):
 
 
 def resolved_laminar_exchange(endpoints, basis, cycles, reservoirs, fixed_heads, demands,
-                              length, diameter, viscosity, gravity):
+                              length, diameter, viscosity, gravity, affected, flow, drop):
     """Solve the laminar forest equations as exact demand and boundary contributions."""
     from sympy import Matrix, Rational, SparseMatrix, pi
     from sympy.core.evalf import PrecisionExhausted
@@ -218,11 +218,14 @@ def resolved_laminar_exchange(endpoints, basis, cycles, reservoirs, fixed_heads,
         except PrecisionExhausted as exc:
             raise ValueError("Could not resolve a near-balanced reservoir exchange") from exc
 
-    flow = np.array([rounded(a + b*pi) for a, b in zip(demand_flow, boundary_flow)])
+    flow = flow.copy()
+    for edge in np.flatnonzero(affected):
+        flow[edge] = rounded(demand_flow[edge] + boundary_flow[edge]*pi)
     heads = dict(root_heads)
     for parent, child, edge, direction in forest:
-        heads[child] = (heads[parent] - direction * resistance[edge]
-                        * (boundary_flow[edge] + demand_flow[edge]/pi))
+        loss = (resistance[edge] * (boundary_flow[edge] + demand_flow[edge]/pi)
+                if affected[edge] else Rational(float(drop[edge])))
+        heads[child] = heads[parent] - direction * loss
     return flow, np.array([rounded(heads[i]) for i in range(len(demands))])
 
 
@@ -429,12 +432,23 @@ def network(spec):
             path_flow = np.abs(feasible) + np.abs(cycles) @ np.abs(amplitude)
             hidden_flow = np.abs(qloop[basis]) < guard * path_flow[basis]
             if np.any(hidden_drop) or np.any(hidden_flow):
-                if np.any(minor) or np.any(re_per_flow * np.maximum(np.abs(qnode), np.abs(qloop)) >= 2000):
+                # Exchanges are coupled only when their forest paths share a
+                # pipe. Independent nonlinear branches keep their own law.
+                support = cycles != 0
+                selected = hidden_drop | np.any(support[np.asarray(basis, dtype=int)[hidden_flow]], axis=0)
+                while True:
+                    affected = np.any(support[:, selected], axis=1)
+                    neighboring = np.any(support[affected], axis=0)
+                    if np.array_equal(neighboring, selected):
+                        break
+                    selected = neighboring
+                reynolds = re_per_flow * np.maximum(np.abs(qnode), np.abs(qloop))
+                if np.any(minor[affected]) or np.any(reynolds[affected] >= 2000):
                     raise ValueError("Near-balanced reservoir exchange is unresolved by nonlinear pipe losses")
                 qloop, total_head = resolved_laminar_exchange(
-                    endpoints, basis, cycles, reservoirs, fixed_heads, demands,
-                    length, diameter, viscosity, gravity)
-                if np.any(re_per_flow * np.abs(qloop) >= 2000):
+                    endpoints, basis, cycles[:, selected], reservoirs, fixed_heads, demands,
+                    length, diameter, viscosity, gravity, affected, qloop, drop)
+                if np.any((re_per_flow * np.abs(qloop))[affected] >= 2000):
                     raise ValueError("Resolved flow exceeds the laminar regime")
                 drop = law(qloop)[0]
     if radial:

@@ -72,3 +72,19 @@ class FixedHeadExchange(unittest.TestCase):
             self.assertTrue(out["conservation_verified"], out)
             self.assertTrue(math.isclose(out["flows_m3_s"]["BC"], flows["BC"], rel_tol=1e-12))
             self.assertEqual(out["reservoir_supply_m3_s"], 0.)
+
+    def test_independent_turbulent_exchange_keeps_the_laminar_balance_resolved(self):
+        spec, flows, heads, _ = two_sources(-1.06360259114687e-9, .5, 1, False, False)
+        spec["nodes"].append({"id": "C", "fixed_head_m": 1.})
+        side = {"id": "side", "from": "C", "to": "A", "length_m": 10,
+                "diameter_m": .025, "minor_loss_K": 2}
+        spec["pipes"].append(side)
+        # The side line connects two fixed heads and shares no pipe with the
+        # A-J-B exchange. It cannot change the two-source closed-form result.
+        out = verify_pipe_network(spec)
+        self.assertTrue(out["conservation_verified"], out)
+        self.assertGreater(out["reynolds"]["side"], 4000)
+        self.assertEqual(out["flows_m3_s"]["B"], flows["B"])
+        self.assertEqual(out["heads_m"]["J"], heads["J"])
+        wrong = {**out["flows_m3_s"], "B": 0}
+        self.assertFalse(verify_pipe_network({**spec, "proposed_flows_m3_s": wrong})["conservation_verified"])
