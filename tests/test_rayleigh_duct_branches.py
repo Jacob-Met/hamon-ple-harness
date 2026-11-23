@@ -103,3 +103,23 @@ class RayleighBranchTests(unittest.TestCase):
             self.assertAlmostEqual(1+density1*speed1**2, pressure2+density2*speed2**2, places=11)
             dimensional_heat = cp*(temp2-temp1)+(speed2**2-speed1**2)/2
             self.assertAlmostEqual(dimensional_heat,25.,places=7)
+
+    def test_redundant_caloric_inputs_describe_one_gas_at_large_mach(self):
+        gamma = math.nextafter(1., math.inf)
+        cp, gas, q = 1.e16, 1.5, 2.274641089584658e33
+        result = solve(1.e8, q, gamma=gamma, cp=cp, R=gas)
+        self.assertTrue(result["verified"],result)
+        self.assertEqual(result["R_effective_J_kgK"],gas)
+        self.assertEqual(result["gamma_effective"],gamma)
+        with localcontext() as ctx:
+            ctx.prec = 125
+            c, r = D(cp), D(gas)
+            g = c/(c-r)
+            inlet_m = D(10)**8
+            outlet_m, pressure = D(result["M2"]), D(result["P2_over_P1"])
+            inlet_t = D(300)/(1+g*r*inlet_m**2/(2*c))
+            inlet_u = inlet_m*(g*r*inlet_t).sqrt()
+            outlet_u = inlet_u*pressure*(outlet_m/inlet_m)**2
+            outlet_t = inlet_t*pressure*(outlet_u/inlet_u)
+            heat = c*(outlet_t-inlet_t)+(outlet_u**2-inlet_u**2)/2
+            self.assertLess(abs(heat/D(q)-1),D("2e-15"))

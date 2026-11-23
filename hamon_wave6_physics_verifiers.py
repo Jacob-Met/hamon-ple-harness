@@ -240,14 +240,16 @@ def _rayleigh_duct(params, gamma, r_gas):
             raise ValueError("Rayleigh flow requires positive finite specific heat")
         c = Fraction(cp)
         if "R" in params:
-            # cp/R = gamma/(gamma-1). Allow correctly rounded presentations
-            # of one consistent calorically perfect gas, including rounded gamma.
-            clo, chi = rounding_cell(cp)
-            rlo, rhi = rounding_cell(r_gas)
-            glo, ghi = rounding_cell(gamma)
-            if chi < rlo*ghi/(ghi-1) or clo > rhi*glo/(glo-1):
+            # Use one physical gas. Preserve the supplied cp and R
+            # together when the implied ratio rounds to the declared gamma.
+            if c <= gas:
                 raise ValueError("Rayleigh cp, R and gamma describe inconsistent gas properties")
-        gas = c*(g-1)/g
+            implied_gamma = c/(c-gas)
+            if "gamma" in params and float(implied_gamma) != gamma:
+                raise ValueError("Rayleigh cp, R and gamma describe inconsistent gas properties")
+            g = implied_gamma
+        else:
+            gas = c*(g-1)/g
     else:
         c = g*gas/(g-1)
     branch = params.get("branch")
@@ -275,7 +277,7 @@ def _rayleigh_duct(params, gamma, r_gas):
         if float(gas) == 0 or (budget and float(budget) == 0):
             raise OverflowError
         base.update(T0_star_K=float(star), q_choke_J_kg=float(budget),
-                    cp_J_kgK=float(c), R_effective_J_kgK=float(gas))
+                    gamma_effective=float(g), cp_J_kgK=float(c), R_effective_J_kgK=float(gas))
         # Retain the documented relative sonic tolerance for rounded critical inputs.
         at_limit = abs(q-budget) <= Fraction(_DUCT_SONIC_REL_TOL) * max(abs(q), budget)
         if q > budget and not at_limit:
