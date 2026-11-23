@@ -2217,10 +2217,13 @@ def _truss_response(spec):
         prescribed = {}
         for support in spec.get("supports", []):
             i = _truss_node_index(support["node"], len(nodes))
-            if support.get("fix_x", False):
-                prescribed[2*i] = Fraction(float(support.get("ux_m", 0.0)))
-            if support.get("fix_y", False):
-                prescribed[2*i+1] = Fraction(float(support.get("uy_m", 0.0)))
+            for axis, (flag, field) in enumerate((("fix_x", "ux_m"), ("fix_y", "uy_m"))):
+                if support.get(flag, False):
+                    dof = 2*i + axis
+                    value = Fraction(float(support.get(field, 0.0)))
+                    if dof in prescribed and prescribed[dof] != value:
+                        raise ValueError(f"Conflicting prescribed {field} at truss node {i}")
+                    prescribed[dof] = value
     except (IndexError, KeyError, TypeError, ValueError, OverflowError) as exc:
         return {**identity, "passed": False, "reason": f"Invalid truss input: {exc}"}
 

@@ -44,6 +44,25 @@ class CopperWitnessTests(unittest.TestCase):
         )
         self.assertEqual(steps[1]["end"], ["copper", 1, 2000000, 0])
 
+    def test_witness_requires_continuous_trace_artwork(self):
+        direct = wire(0, 0, 40, 0)
+        detour = wire(0, 0, 0, 2) + wire(0, 2, 40, 2) + wire(40, 2, 40, 0)
+        for style in ("longdash", "shortdash", "dashdot"):
+            with self.subTest(style=style):
+                marked = direct.replace("/>", f' style="{style}"/>')
+                result = self.routed(marked, end=(40, 0))
+                self.assertEqual(result["status"], "unresolved")
+                self.assertEqual(result["unsupported"][0]["source"], ("wire", 0))
+                self.assertFalse(result["witnesses"])
+
+                result = self.routed(marked + detour, end=(40, 0))
+                self.assertEqual(result["status"], "witnessed")
+                sources = [step["source"] for step in result["witnesses"][0]["steps"]]
+                self.assertEqual([s for s in sources if s[0] == "wire"],
+                                 [["wire", 1], ["wire", 2], ["wire", 3]])
+        for continuous in (direct, direct.replace("/>", ' style="continuous"/>')):
+            self.assertEqual(self.routed(continuous, end=(40, 0))["status"], "witnessed")
+
     def test_layer_crossings_require_plating(self):
         traces = wire(0, 0, 2, 0) + wire(2, 0, 2, 1, 16)
         via = '<via x="2" y="0" drill=".25" extent="1-16"/>'
@@ -166,7 +185,6 @@ class CopperWitnessTests(unittest.TestCase):
             wire(0, 0, 2, 1, 19),
             '<polygon layer="1" width=".1"/>',
             wire(0, 0, 2, 1).replace("/>", ' curve="90"/>'),
-            wire(0, 0, 2, 1).replace("/>", ' style="longdash"/>'),
         ):
             with self.subTest(item=item):
                 result = self.routed(item)
