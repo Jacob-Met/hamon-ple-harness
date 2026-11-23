@@ -147,7 +147,7 @@ class RemoteProtocol(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(argv[:2], ["python3", "-c"])
         options = json.loads(argv[3])
         self.assertEqual(options["target"], item["target"])
-        self.assertIn("subprocess.run(", argv[2])
+        self.assertIn("subprocess.Popen(", argv[2])
         self.assertIn("shell=False", argv[2])
 
     async def test_protocol_task_error_fails_open(self):
