@@ -1155,7 +1155,7 @@ def solve_nodal_kcl(spec: dict[str, Any], *, omega: float | None = None) -> dict
             raise ValueError(f"conflicting fixed voltages at node {node!r}")
         fixed_v[nd] = voltage
 
-    branches: list[tuple[str, int, str, str, complex]] = []
+    branches: list[tuple[str, int, str, str, complex | None]] = []
     for index, r in enumerate(spec.get("resistors", [])):
         n1 = _norm_node(r.get("n1", r.get("from", 0)))
         n2 = _norm_node(r.get("n2", r.get("to", 0)))
@@ -1172,15 +1172,31 @@ def solve_nodal_kcl(spec: dict[str, Any], *, omega: float | None = None) -> dict
             raise ValueError("zero branch impedance")
         branches.append(("impedances", index, n1, n2, 1.0 / z_c))
 
-    if omega is not None:
-        for index, ind in enumerate(spec.get("inductors", [])):
-            z = complex(float(ind.get("R_series_ohm", 0.0)), omega * float(ind["L_H"]))
-            if z == 0:
-                raise ValueError("zero branch impedance")
-            branches.append(("inductors", index, _norm_node(ind["n1"]), _norm_node(ind["n2"]), 1.0 / z))
-        for index, cap in enumerate(spec.get("capacitors", [])):
-            z = complex(0.0, -1.0 / (omega * float(cap["C_F"])))
-            branches.append(("capacitors", index, _norm_node(cap["n1"]), _norm_node(cap["n2"]), 1.0 / z))
+    frequency = 0.0 if omega is None else omega
+    if not math.isfinite(frequency):
+        raise ValueError("Require a finite angular frequency")
+    for index, ind in enumerate(spec.get("inductors", [])):
+        resistance = float(ind.get("R_series_ohm", 0.0))
+        inductance = float(ind["L_H"])
+        if not math.isfinite(inductance) or inductance <= 0 or not math.isfinite(resistance) or resistance < 0:
+            raise ValueError("Require a positive finite winding inductance and nonnegative finite resistance")
+        impedance = complex(resistance, frequency * inductance)
+        if not frequency and not resistance:
+            admittance = None  # Ideal winding at steady DC constrains its terminal voltages to be equal.
+        else:
+            if not math.isfinite(impedance.imag) or (frequency and not impedance.imag):
+                raise ValueError("Inductive reactance is outside the finite reporting range")
+            admittance = 1.0 / impedance
+        branches.append(("inductors", index, _norm_node(ind["n1"]), _norm_node(ind["n2"]), admittance))
+    for index, cap in enumerate(spec.get("capacitors", [])):
+        capacitance = float(cap["C_F"])
+        if not math.isfinite(capacitance) or capacitance <= 0:
+            raise ValueError("Require a positive finite capacitance")
+        susceptance = frequency * capacitance
+        if not math.isfinite(susceptance) or (frequency and not susceptance):
+            raise ValueError("Capacitive susceptance is outside the finite reporting range")
+        branches.append(("capacitors", index, _norm_node(cap["n1"]), _norm_node(cap["n2"]),
+                         complex(0.0, susceptance)))
 
     for index, y_item in enumerate(spec.get("admittances", [])):
         n1 = _norm_node(y_item.get("n1", y_item.get("from", 0)))
@@ -1197,36 +1213,76 @@ def solve_nodal_kcl(spec: dict[str, Any], *, omega: float | None = None) -> dict
         all_nodes.add(_norm_node(cs["node"]))
     all_nodes.discard("__GND__")
 
-    free_nodes = sorted(nd for nd in all_nodes if nd not in fixed_v)
+    # Contract ideal windings before solving the finite-admittance network.
+    # A tree has unique directed currents once the other incident currents are known.
+    links = {}
+    for collection, index, n1, n2, y_val in branches:
+        if y_val is None:
+            links.setdefault(n1, []).append((n2, index))
+            links.setdefault(n2, []).append((n1, index))
+    representative = {}
+    winding_tree = []
+    for root in [*fixed_v, *links]:
+        if root in representative or root not in links:
+            continue
+        representative[root] = root
+        pending = [(root, None)]
+        while pending:
+            node, parent_edge = pending.pop()
+            for neighbor, edge in links[node]:
+                if edge == parent_edge:
+                    continue
+                if neighbor in representative:
+                    raise ValueError("Ideal winding cycle leaves a circulating DC current undetermined")
+                if neighbor in fixed_v:
+                    if fixed_v[neighbor] != fixed_v[root]:
+                        raise ValueError("Ideal winding connects inconsistent prescribed voltages")
+                    raise ValueError("Separate prescribed nodes on an ideal winding have undetermined supply currents")
+                representative[neighbor] = root
+                winding_tree.append((neighbor, node, edge))
+                pending.append((neighbor, edge))
+
+    def node_group(node):
+        return representative.get(node, node)
+
+    free_nodes = sorted({node_group(n) for n in all_nodes} - set(fixed_v))
     idx = {nd: i for i, nd in enumerate(free_nodes)}
     m = len(free_nodes)
     Y = [[0j] * m for _ in range(m)]
     I_rhs = [0j] * m
 
-    fixed_supply = dict.fromkeys(fixed_v, 0j)
+    def sum_currents(values):
+        return complex(math.fsum(v.real for v in values), math.fsum(v.imag for v in values))
+
+    injections = {}
+    group_injections = {}
     for cs in spec.get("current_sources", []) + spec.get("current_injections", []):
-        nd = _norm_node(cs["node"])
-        i_c = _to_c(cs.get("I_A", cs.get("I", 0.0)))
-        if nd in idx:
-            I_rhs[idx[nd]] += i_c
-        else:
-            fixed_supply[nd] -= i_c
+        node = _norm_node(cs["node"])
+        value = _to_c(cs.get("I_A", cs.get("I", 0.0)))
+        injections.setdefault(node, []).append(value)
+        group_injections.setdefault(node_group(node), []).append(value)
+    for group, values in group_injections.items():
+        if group in idx:
+            I_rhs[idx[group]] = sum_currents(values)
 
     for _, _, n1, n2, y_val in branches:
+        n1, n2 = node_group(n1), node_group(n2)
+        if y_val is None or n1 == n2:
+            continue
         if n1 in idx:
             i1 = idx[n1]
             Y[i1][i1] += y_val
             if n2 in idx:
                 Y[i1][idx[n2]] -= y_val
             else:
-                I_rhs[i1] += y_val * fixed_v.get(n2, 0j)
+                I_rhs[i1] += y_val * fixed_v[n2]
         if n2 in idx:
             i2 = idx[n2]
             Y[i2][i2] += y_val
             if n1 in idx:
                 Y[i2][idx[n1]] -= y_val
             else:
-                I_rhs[i2] += y_val * fixed_v.get(n1, 0j)
+                I_rhs[i2] += y_val * fixed_v[n1]
 
     complex_system = any(v.imag != 0 for row in Y for v in row) or any(v.imag != 0 for v in I_rhs)
     is_ac = (complex_system or bool(spec.get("impedances") or spec.get("admittances"))
@@ -1246,6 +1302,9 @@ def solve_nodal_kcl(spec: dict[str, Any], *, omega: float | None = None) -> dict
         disc = 0.0
         kcl_res = 0.0
 
+    for node, group in representative.items():
+        V_all[node] = V_all[group]
+
     out: dict[str, Any] = {
         "dual_rel_discrepancy": disc,
         "kcl_max_residual_A": kcl_res,
@@ -1257,24 +1316,58 @@ def solve_nodal_kcl(spec: dict[str, Any], *, omega: float | None = None) -> dict
     def current_value(value: complex):
         return [value.real, value.imag] if is_ac or value.imag else float(value.real)
 
-    currents = []
+    # The signed surplus after ordinary branches is the current flowing
+    # out of each child subtree through its parent winding. Start at leaves.
+    surplus = {node: list(values) for node, values in injections.items()}
+    branch_values = {}
+    winding_start = {}
     for collection, index, n1, n2, y_val in branches:
-        i_br = (V_all[n1] - V_all[n2]) * y_val
+        if y_val is None:
+            winding_start[index] = n1
+            continue
+        value = (V_all[n1]-V_all[n2])*y_val
+        branch_values[collection, index] = value
+        surplus.setdefault(n1, []).append(-value)
+        surplus.setdefault(n2, []).append(value)
+    # Keep each cut sum on the original represented injections and ordinary
+    # branch currents. Rounding a child winding before propagation can erase
+    # a surviving parent current when opposing loads nearly cancel.
+    cut = {}
+    for node in representative:
+        terms = surplus.get(node, ())
+        cut[node] = [sum(Fraction(v.real) for v in terms), sum(Fraction(v.imag) for v in terms)]
+    for child, parent, index in reversed(winding_tree):
+        real_flow, imag_flow = cut[child]
+        flow = complex(real_flow, imag_flow)
+        branch_values["inductors", index] = flow if child == winding_start[index] else -flow
+        cut[parent][0] += real_flow
+        cut[parent][1] += imag_flow
+        surplus.setdefault(parent, []).append(flow)
+        surplus.setdefault(child, []).append(-flow)
+    if winding_tree:
+        # Replay KCL separately at the original terminals after expanding the shorted nodes.
+        for node, terms in surplus.items():
+            if node in fixed_v:
+                continue
+            imbalance = abs(sum_currents(terms))
+            out["kcl_max_residual_A"] = max(out["kcl_max_residual_A"], imbalance)
+            if imbalance > 1e-8 * math.fsum(map(abs, terms)):
+                raise ValueError("Published winding currents do not satisfy terminal KCL")
+    currents = []
+    for collection, index, n1, n2, _ in branches:
+        i_br = branch_values[collection, index]
         value = current_value(i_br)
         currents.append({"collection": collection, "index": index, "n1": n1, "n2": n2,
                          "current_A": value})
         # Legacy endpoints-only names expose the first matching branch.
         out.setdefault(f"I_branch_{n1}{n2}_A", value)
-        if n1 in fixed_supply:
-            fixed_supply[n1] += i_br
-        if n2 in fixed_supply:
-            fixed_supply[n2] -= i_br
     out["branch_currents"] = currents
     # Each node reports the net supplied by its prescribed voltage, after
     # subtracting independent injections. Parallel ideal supplies at one node
     # do not individually have a determined current.
     out["prescribed_node_supply_A"] = {
-        node: current_value(value) for node, value in fixed_supply.items() if node != "__GND__"
+        node: current_value(-complex(*cut[node]) if node in cut else -sum_currents(surplus.get(node, ())))
+        for node in fixed_v if node != "__GND__"
     }
     return out
 
