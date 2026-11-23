@@ -461,6 +461,12 @@ _ARITHMETIC_TOKEN = re.compile(
 
 _COEFFICIENT = object()
 
+# LibreOffice 24.2 retains this historical pound conversion constant. Keep it
+# separate from the exact SI pound in _CONVERT_UNITS. A cache matching only
+# this engine convention is unverified, rather than a proven stale value.
+# https://github.com/LibreOffice/core/blob/libreoffice-24.2.7.2/scaddins/source/analysis/analysishelper.cxx
+_CALC_LBM_PER_KG = D("2.20462291469134")
+
 
 @dataclass(frozen=True)
 class _FormulaUnit:
@@ -512,7 +518,7 @@ def _formula_unit(key, operation, left, right):
     return unit
 
 
-def _scalar_formula_audit(arithmetic, conversions, literals):
+def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
     """Evaluate one dependency graph for ordinary arithmetic and CONVERT calls.
 
     Topological evaluation preserves the 256-cell conversion-chain contract
@@ -623,7 +629,9 @@ def _scalar_formula_audit(arithmetic, conversions, literals):
                 source_unit = _FormulaUnit(Fraction(source.val), source.dim)
                 if isinstance(actual.unit, _FormulaUnit) and actual.unit != source_unit:
                     raise ValueError("upstream_unit_disagrees")
-                expected = float(D(actual.value)*source.val/target.val)
+                numeric_source = D(1)/_CALC_LBM_PER_KG if legacy_lbm and from_name == "lbm" else source.val
+                numeric_target = D(1)/_CALC_LBM_PER_KG if legacy_lbm and to_name == "lbm" else target.val
+                expected = float(D(actual.value)*numeric_source/numeric_target)
                 if (not math.isfinite(expected) or (expected == 0 and actual.value != 0)
                         or 0 < abs(expected) < sys.float_info.min):
                     raise ValueError("numeric_range")
@@ -698,6 +706,16 @@ def _scalar_formula_audit(arithmetic, conversions, literals):
             else:
                 record["status"] = "matched" if math.isclose(cached,result.value,rel_tol=1e-12) else "mismatch"
         reports[kind].append(record)
+    if not legacy_lbm and any('"lbm"' in row[0] for row in producers.values()):
+        # Reconstruct the whole graph under one alternate numeric convention;
+        # never use a saved intermediate to explain a downstream result.
+        alternate = _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=True)
+        for kind, records in reports.items():
+            for record, other in zip(records, alternate[kind]):
+                if record["status"] == "mismatch" and other["status"] == "matched":
+                    record.update(status="unverified", reason="engine_specific_lbm_scale",
+                                  expected_si=record.pop("expected"),
+                                  expected_legacy_lbm=other["expected"])
     return reports
 
 

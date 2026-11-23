@@ -71,15 +71,24 @@ def cases():
         ('CONVERT(Inputs!A1,"m","cm")+CONVERT(Inputs!A2,"cm","cm")', sp.Rational(7627,50)),
         ('CONVERT(A13,"cm","m")', sp.Rational(7627,5000)),
     ]
+    # Independent reproduction of the pinned Calc 24.2 conversion table,
+    # separate from SymPy's exact SI definition and the production evaluator.
+    # https://github.com/LibreOffice/core/blob/libreoffice-24.2.7.2/scaddins/source/analysis/analysishelper.cxx
+    legacy_lbm_per_kg = sp.Rational("2.20462291469134")
+    legacy_expected = {"A5": sp.Rational(45,2)*legacy_lbm_per_kg}
     for group in (("m","mm","cm","km","in","ft","yd"), ("g","kg","lbm"), ("sec","hr")):
         for source in group:
             for target in group:
                 rows.append((f'CONVERT(5/2,"{source}","{target}")',
                              sp.Rational(5,2)*ratio(source,target)))
+                if "lbm" in (source,target) and source != target:
+                    factors = {"g":sp.Rational(1,1000), "kg":sp.Rational(1),
+                               "lbm":1/legacy_lbm_per_kg}
+                    legacy_expected[f"A{len(rows)}"] = sp.Rational(5,2)*factors[source]/factors[target]
     # Independent quantities establish the composite unit frames as well as numbers.
     assert sp.simplify(convert_to(u.centimeter*u.meter/u.centimeter, u.meter)/u.meter) == 1
     assert sp.simplify(convert_to(u.inch*u.centimeter/u.inch, u.meter)/u.meter) == sp.Rational(1,100)
-    return rows, sp.__version__
+    return rows, sp.__version__, legacy_expected
 
 
 def sheet(rows, formulas):
@@ -129,7 +138,7 @@ def main():
     executable = shutil.which("soffice") or shutil.which("libreoffice")
     if executable is None:
         raise SystemExit("LibreOffice Calc is required; this gate does not skip a missing engine")
-    rows, sympy_version = cases()
+    rows, sympy_version, legacy_expected = cases()
     args.out.mkdir(parents=True, exist_ok=True)
     source, output = args.out/"source.xlsx", args.out/"recalculated"
     output.mkdir()
@@ -143,23 +152,31 @@ def main():
     recalculated = output/source.name
     audit = xlsx_audit(recalculated)
     guard = audit_local_deliverable(recalculated)
+    (args.out/"audit-fresh.json").write_text(json.dumps(audit,indent=2,default=str)+"\n")
     assert guard["ok"], guard
     checks = next(s["part"] for s in audit["sheets"] if s["name"] == "Checks")
     with ZipFile(recalculated) as book:
         parts = {name:book.read(name) for name in book.namelist()}
     root = ET.fromstring(parts[checks])
     cells = {cell.get("r"):cell for cell in root.iter(f"{{{MAIN}}}c")}
-    comparisons = []
+    comparisons, engine_variants = [], []
     for index, (formula, expected) in enumerate(rows, 1):
         cell = cells[f"A{index}"]
         assert cell.get("t", "n") == "n", ET.tostring(cell).decode()
         actual = float(cell.find(f"{{{MAIN}}}v").text)
         expected_float = float(expected)
-        assert math.isclose(actual, expected_float, rel_tol=1e-12, abs_tol=0), (formula,actual,expected)
+        exact_match = math.isclose(actual, expected_float, rel_tol=1e-12, abs_tol=0)
+        alternate = legacy_expected.get(f"A{index}")
+        legacy_match = alternate is not None and math.isclose(actual,float(alternate),rel_tol=1e-12,abs_tol=0)
+        assert exact_match or legacy_match, (formula,actual,expected,alternate)
+        if not exact_match:
+            engine_variants.append({"cell":f"A{index}", "sympy_exact":str(expected),
+                                    "calc_legacy_exact":str(alternate), "calc_value":actual})
         comparisons.append({"cell":f"A{index}", "source_formula":formula,
                             "sympy_exact":str(expected), "calc_value":actual})
     matched = sum(audit[kind]["counts"]["matched"] for kind in ("arithmetic_audit","conversion_audit"))
-    assert matched == len(rows), audit
+    unverified = sum(audit[kind]["counts"]["unverified"] for kind in ("arithmetic_audit","conversion_audit"))
+    assert matched+len(engine_variants) == len(rows) and unverified == len(engine_variants), audit
     # Alter only a separate control copy; preserve the engine-produced package unchanged.
     stale_cells = ("A1","A5","A6","A9")
     for address in stale_cells:
@@ -180,7 +197,8 @@ def main():
         "qualified":True, "effective_memory_gib":memory/1024**3,
         "libreoffice":subprocess.check_output([executable,"--version"],text=True).strip(),
         "sympy":sympy_version, "independent_pair_conversions":62,
-        "fresh_formulas_matched":matched, "fresh_guard":guard["ok"],
+        "fresh_formulas_compared":len(rows), "fresh_formulas_matched":matched,
+        "engine_specific_lbm_variants":engine_variants, "fresh_guard":guard["ok"],
         "stale_guard":stale_guard["ok"], "stale_mismatch_cells":mismatches,
         "comparisons":comparisons,
     }

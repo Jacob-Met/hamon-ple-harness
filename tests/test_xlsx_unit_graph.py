@@ -137,6 +137,39 @@ class UnitGraphTests(unittest.TestCase):
         self.assertTrue(guard["ok"], guard)
         self.assertEqual(audit["arithmetic_audit"]["counts"]["matched"], 46)
 
+    def test_known_calc_pound_scale_is_unverified_and_never_taken_from_a_cache(self):
+        legacy = 2.20462291469134
+        exact = float(Fraction(100000000,45359237))
+        audit, guard = self.evaluate([
+            ("A", 'CONVERT(1,"kg","lbm")', legacy),
+            ("B", "A1*10", legacy*10),
+            ("C", 'CONVERT(A1,"lbm","kg")', 1),
+            ("D", 'CONVERT(1,"kg","lbm")', 999),
+            ("E", 'CONVERT(1,"kg","lbm")', exact)])
+        conversions = self.records(audit, "conversion")
+        arithmetic = self.records(audit, "arithmetic")
+        for row in (conversions["Results","A1"], arithmetic["Results","B1"]):
+            self.assertEqual(row["status"], "unverified")
+            self.assertEqual(row["reason"], "engine_specific_lbm_scale")
+            self.assertNotIn("expected", row)
+            self.assertIn("expected_si", row)
+        self.assertEqual(conversions["Results","A1"]["expected_legacy_lbm"], legacy)
+        self.assertEqual(conversions["Results","C1"]["status"], "matched")
+        self.assertEqual(conversions["Results","D1"]["status"], "mismatch")
+        self.assertEqual(conversions["Results","E1"]["status"], "matched")
+        self.assertFalse(guard["ok"])
+
+    def test_wrong_pound_cache_cannot_explain_a_legacy_downstream_number(self):
+        audit, guard = self.evaluate([
+            ("A", 'CONVERT(1,"kg","lbm")', 999),
+            ("B", "A1*10", 9990),
+            ("C", "A1*10", 22.0462291469134)])
+        arithmetic = self.records(audit, "arithmetic")
+        self.assertEqual(arithmetic["Results","B1"]["status"], "mismatch")
+        self.assertEqual(arithmetic["Results","C1"]["status"], "unverified")
+        self.assertEqual(arithmetic["Results","C1"]["reason"], "engine_specific_lbm_scale")
+        self.assertFalse(guard["ok"])
+
     def test_unsupported_and_inconsistent_unit_dependencies_remain_unverified(self):
         audit, guard = self.evaluate([
             ("A", 'CONVERT(\'Ratings 2026\'!B1,"m","cm")', 300),
