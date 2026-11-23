@@ -262,7 +262,8 @@ def test_coupled_regulators_can_release_a_temporary_reactive_limit(setpoint_a, s
 
 
 @pytest.mark.parametrize("vb, angle, slack_x, upper", [(0.98, 5, 3, True), (1.04, 2, 5, False)])
-def test_alternative_reactive_pivot_after_inconsistent_intermediate(vb, angle, slack_x, upper):
+@pytest.mark.parametrize("copies", [1, 3, 6])
+def test_alternative_reactive_pivot_after_inconsistent_intermediate(vb, angle, slack_x, upper, copies):
     magnitudes = [1.0, 0.94, vb]
     angles = [0, angle, -angle]
     voltages = [cmath.rect(vm, math.radians(va)) for vm, va in zip(magnitudes, angles)]
@@ -291,9 +292,59 @@ def test_alternative_reactive_pivot_after_inconsistent_intermediate(vb, angle, s
         "proposed_voltages": {name: {"vm_pu": vm, "va_deg": va}
                               for name, vm, va in zip(ids, magnitudes, angles)},
     }
+    # A-bus ties join each pair of regulators to the next; equal phasors
+    # carry zero tie current, so the terminal-power solution above still holds.
+    buses, lines, claims = [spec["buses"][0]], [], {"S": spec["proposed_voltages"]["S"]}
+    for i in range(copies):
+        labels = {"S": "S", "A": f"A{i}", "B": f"B{i}"}
+        for bus in spec["buses"][1:]:
+            name = labels[bus["id"]]
+            buses.append({**bus, "id": name})
+            claims[name] = spec["proposed_voltages"][bus["id"]].copy()
+        for line in spec["lines"]:
+            lines.append({**line, "id": f'{line["id"]}{i}', "from": labels[line["from"]],
+                          "to": labels[line["to"]]})
+        if i:
+            lines.append({"id": f"tie{i}", "from": f"A{i-1}", "to": f"A{i}",
+                          "r_pu": 0.01, "x_pu": 0.4})
+    network = {"buses": buses, "lines": lines}
+    if copies == 6:
+        buses[0]["va_deg"] = 17.0
+        for phasor in claims.values():
+            phasor["va_deg"] += 17.0
+        buses.reverse()
+        lines.reverse()
+    result = verify_ac_power_flow(network)
+    assert result["conservation_verified"], result
+    assert result["clamped_pv_q_pu"] == {f"A{i}": qa for i in range(copies)}
+    for name, claim in claims.items():
+        assert result["voltages"][name]["vm_pu"] == pytest.approx(claim["vm_pu"], abs=1e-9)
+        assert result["voltages"][name]["va_deg"] == pytest.approx(claim["va_deg"], abs=1e-8)
+    assert verify_ac_power_flow({**network, "proposed_voltages": claims})["conservation_verified"]
+    claims["A0"]["vm_pu"] += 5e-7
+    assert not verify_ac_power_flow({**network, "proposed_voltages": claims})["conservation_verified"]
+
+
+def test_small_network_preserves_independently_verified_equilibrium():
+    # Both generators at their upper bounds admit a second physical root. The
+    # flat-start rectangular check instead agrees with the single-bound root.
+    spec = {
+        "buses": [
+            {"id": "S", "type": "slack", "vm_pu": 1},
+            {"id": "A", "type": "PV", "vm_pu": 1.24, "p_injection_pu": 1.91,
+             "q_min_injection_pu": 0.20, "q_max_injection_pu": 1.45},
+            {"id": "B", "type": "PV", "vm_pu": 1.09, "p_injection_pu": -1.84,
+             "q_min_injection_pu": -0.83, "q_max_injection_pu": -0.78},
+        ],
+        "lines": [
+            {"id": "SA", "from": "S", "to": "A", "r_pu": 0, "x_pu": 2.62},
+            {"id": "AB", "from": "A", "to": "B", "r_pu": 0, "x_pu": 0.15},
+            {"id": "BS", "from": "B", "to": "S", "r_pu": 0, "x_pu": 5.45},
+        ],
+    }
     result = verify_ac_power_flow(spec)
     assert result["conservation_verified"], result
-    assert result["clamped_pv_q_pu"] == {"A": qa}
+    assert result["clamped_pv_q_pu"] == {"A": 1.45}
 
 
 @pytest.mark.parametrize("injections", [(1.2,), (-1.2,), (1.2, -1.4), (1.2,) * 5])
