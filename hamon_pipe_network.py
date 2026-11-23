@@ -245,6 +245,85 @@ def resolved_laminar_exchange(endpoints, basis, cycles, reservoirs, fixed_heads,
             np.array([rounded(supply[node]) for node in reservoirs]))
 
 
+def resolved_minor_exchange(endpoints, basis, cycles, reservoirs, fixed_heads, demands,
+                            length, diameter, minor, viscosity, gravity, affected,
+                            flow, drop, amplitude):
+    """Refine coupled laminar exchanges with signed quadratic minor losses."""
+    from mpmath import mp
+
+    forest = forest_walk(endpoints, basis, reservoirs, len(demands))
+    roots = {node: node for node in reservoirs}
+    for parent, child, _, _ in forest:
+        roots[child] = roots[parent]
+    edges = np.flatnonzero(affected)
+    ctx = mp.clone()
+
+    def refine(digits):
+        ctx.dps = digits
+
+        def exact(value):
+            return ctx.mpf(float(value))
+
+        head = {node: exact(h) for node, h in zip(reservoirs, fixed_heads)}
+        cut = list(map(exact, demands))
+        feasible = [ctx.zero] * len(flow)
+        for parent, child, edge, direction in reversed(forest):
+            feasible[edge] = direction * cut[child]
+            cut[parent] += cut[child]
+
+        chord = ctx.matrix(cycles[edges].astype(int).tolist())
+        base = ctx.matrix([feasible[e] for e in edges])
+        boundary = ctx.matrix([head[roots[endpoints[e][0]]] - head[roots[endpoints[e][1]]]
+                               for e in edges])
+        linear = [128 * exact(viscosity) * exact(length[e]) /
+                  (ctx.pi * exact(gravity) * exact(diameter[e])**4) for e in edges]
+        quadratic = [8 * exact(minor[e]) /
+                     (ctx.pi**2 * exact(gravity) * exact(diameter[e])**4) for e in edges]
+
+        # Each selected chord has an identity row, and every laminar slope
+        # is positive, so the coupled circulation Jacobian is positive definite.
+        x = ctx.matrix(list(map(exact, amplitude)))
+        for _ in range(40):
+            q = base + chord * x
+            loss = ctx.matrix([v * (r + k*abs(v)) for v, r, k in zip(q, linear, quadratic)])
+            slopes = [r + 2*k*abs(v) for v, r, k in zip(q, linear, quadratic)]
+            residual = chord.T * (loss - boundary)
+            step = ctx.lu_solve(chord.T * ctx.diag(slopes) * chord, residual)
+            x -= step
+            if ctx.norm(step, 'inf') <= ctx.eps * max(ctx.norm(x, 'inf'), ctx.norm(base, 'inf')):
+                break
+        else:
+            raise ValueError("Could not refine a coupled minor-loss exchange")
+
+        q = base + chord * x
+        refined = dict(zip(edges, q))
+        losses = {e: v*(r + k*abs(v)) for e, v, r, k in zip(edges, q, linear, quadratic)}
+        for parent, child, edge, direction in forest:
+            head[child] = head[parent] - direction * losses.get(edge, exact(drop[edge]))
+
+        supply = {node: cut[node] for node in reservoirs}
+        for edge, (a, b) in enumerate(endpoints):
+            left, right = roots[a], roots[b]
+            if left != right:
+                v = refined.get(edge, exact(flow[edge]))
+                supply[left] += v
+                supply[right] -= v
+        return (tuple(map(float, q)), tuple(float(head[i]) for i in range(len(demands))),
+                tuple(float(supply[node]) for node in reservoirs))
+
+    previous = None
+    for digits in (50, 100, 200, 400):
+        result = refine(digits)
+        # A published zero in the selected circulation can mask cancellation
+        # below the precision used. Leave that case unresolved.
+        if result == previous and all(result[0]):
+            flow = flow.copy()
+            flow[edges] = result[0]
+            return flow, np.array(result[1]), np.array(result[2])
+        previous = result
+    raise ValueError("Could not resolve rounding on a coupled minor-loss exchange")
+
+
 def radial_solution(endpoints, root, demands, datum, law, inverse, re_per_flow):
     """A tree edge supplies exactly the sum of demands in the cut below it."""
     branches = forest_walk(endpoints, range(len(endpoints)), [root], len(demands))
@@ -480,11 +559,16 @@ def network(spec):
                         break
                     selected = neighboring
                 reynolds = re_per_flow * np.maximum(np.abs(qnode), np.abs(qloop))
-                if np.any(minor[affected]) or np.any(reynolds[affected] >= 2000):
-                    raise ValueError("Near-balanced reservoir exchange is unresolved by nonlinear pipe losses")
-                qloop, total_head, resolved_supply = resolved_laminar_exchange(
-                    endpoints, basis, cycles[:, selected], reservoirs, fixed_heads, demands,
-                    length, diameter, viscosity, gravity, affected, qloop, drop)
+                if np.any(reynolds[affected] >= 2000):
+                    raise ValueError("Near-balanced reservoir exchange is unresolved by transitional or turbulent losses")
+                if np.any(minor[affected]):
+                    qloop, total_head, resolved_supply = resolved_minor_exchange(
+                        endpoints, basis, cycles[:, selected], reservoirs, fixed_heads, demands,
+                        length, diameter, minor, viscosity, gravity, affected, qloop, drop, amplitude[selected])
+                else:
+                    qloop, total_head, resolved_supply = resolved_laminar_exchange(
+                        endpoints, basis, cycles[:, selected], reservoirs, fixed_heads, demands,
+                        length, diameter, viscosity, gravity, affected, qloop, drop)
                 if np.any((re_per_flow * np.abs(qloop))[affected] >= 2000):
                     raise ValueError("Resolved flow exceeds the laminar regime")
                 drop = law(qloop)[0]
