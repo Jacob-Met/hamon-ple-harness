@@ -1,4 +1,4 @@
-"""Centered vertical bearing on homogeneous soil beneath a horizontal shallow footing."""
+"""Vertical bearing on homogeneous soil beneath a horizontal shallow footing."""
 
 import bisect
 import math
@@ -177,7 +177,6 @@ def calculate(spec, legacy_rectangle=False):
     if length is not None:
         if length <= 0:
             raise ValueError("Plan dimensions must be positive")
-        b, length = sorted((b, length))
     shape = spec.get(
         "footing_shape",
         "strip" if length is None else ("square" if length == b else "rectangular"),
@@ -200,13 +199,33 @@ def calculate(spec, legacy_rectangle=False):
             "horizontal_load_N",
             "base_tilt_deg",
             "ground_slope_deg",
-            "eccentricity_B_m",
-            "eccentricity_L_m",
         )
     ):
         raise ValueError(
-            "Only centered vertical loading, horizontal base and level ground are represented"
+            "Only vertical loading, horizontal base and level ground are represented"
         )
+    offset_b = get("eccentricity_B_m", 0)
+    offset_l = get("eccentricity_L_m", 0)
+    eccentric_method = spec.get("eccentricity_method")
+    effective = {}
+    if eccentric_method is not None or offset_b or offset_l:
+        if eccentric_method != "meyerhof_effective_area" or method != "meyerhof":
+            raise ValueError("Specify Meyerhof bearing and meyerhof_effective_area for eccentric loading")
+        if shape not in ("rectangular", "square") or length is None:
+            raise ValueError("Effective-area bearing requires a finite rectangular or square plan")
+        if get("column_load_N") <= 0:
+            raise ValueError("Effective-area bearing requires a positive vertical load")
+        # FHWA GEC 6, eqs. 6-6 through 6-8. Reduce the axes named by the
+        # caller before ordering the effective dimensions for the factors.
+        b -= 2 * abs(offset_b)
+        length -= 2 * abs(offset_l)
+        area = b * length
+        if min(b, length, area) <= 0 or not math.isfinite(area):
+            raise ValueError("The resultant must be inside the plan with a finite positive effective area")
+        effective = {"eccentricity_method": eccentric_method, "effective_B_m": b,
+                     "effective_L_m": length, "effective_area_m2": area}
+    if length is not None:
+        b, length = sorted((b, length))
     ratio = 0 if shape == "strip" else b / (length or b)
     nc, nq, ng = bearing_factors(method, phi)
     if method == "legacy_vesic" and legacy_rectangle and phi <= 1e-6:
@@ -243,6 +262,7 @@ def calculate(spec, legacy_rectangle=False):
         "ok": True,
         "calculation": "bearing_capacity",
         "bearing_method": method,
+        **effective,
         "footing_shape": shape,
         "Nq": nq,
         "Nc": nc,
