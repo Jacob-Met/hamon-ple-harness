@@ -247,3 +247,74 @@ def integrate_closed_surface(vertices, triangles, density):
         return result
     except ValueError:
         return {"reason": "STEP mass properties cannot be represented as finite binary64 quantities"}
+
+
+def _point_inside_closed_surface(point, triangles):
+    """Exact ray parity for a point disjoint from an embedded closed surface.
+
+    Integer moment-curve directions avoid edge/vertex hits without geometric
+    tolerances. Each plane/edge degeneracy excludes finitely many seeds, so
+    the finite retry bound covers every triangle's possible bad directions.
+    """
+    prepared = []
+    for a, b, c in triangles:
+        normal = _cross(_sub(b, a), _sub(c, a))
+        drop = max(range(3), key=lambda k: abs(normal[k]))
+        axes = tuple(k for k in range(3) if k != drop)
+        projected = [tuple(p[k] for k in axes) for p in (a,b,c)]
+        prepared.append((a, normal, axes, projected))
+    for seed in range(1, 8*len(triangles)+2):
+        direction = (1, seed, seed*seed)
+        crossings, ambiguous = 0, False
+        for anchor, normal, axes, projected in prepared:
+            denominator = _dot(normal, direction)
+            if denominator == 0:
+                ambiguous = True
+                break
+            distance = _dot(normal, _sub(anchor, point)) / denominator
+            if distance <= 0:
+                continue
+            hit = tuple(point[k] + distance*direction[k] for k in axes)
+            sides = [_orient(projected[i], projected[(i+1) % 3], hit) for i in range(3)]
+            if all(s >= 0 for s in sides) or all(s <= 0 for s in sides):
+                if any(s == 0 for s in sides):
+                    ambiguous = True
+                    break
+                crossings += 1
+        if not ambiguous:
+            return bool(crossings % 2)
+    raise ValueError("Could not construct a transverse STEP containment ray")
+
+
+def verify_void_shells(vertices, triangles, shell_ids):
+    """Check the orientation and containment of pairwise disjoint shell surfaces.
+
+    Embedding and one connected component per declared shell are prerequisites.
+    Consequently a single boundary point locates each entire shell relative to
+    every other shell. Cavities must be inside the outer boundary and may not
+    contain one another.
+    """
+    raw = [tuple(Fraction(float(x)) for x in point) for point in vertices]
+    groups = {}
+    for tri, shell in zip(triangles, shell_ids):
+        groups.setdefault(int(shell), []).append(tuple(raw[int(v)] for v in tri))
+    result = {"void_shell_count": len(groups)-1, "void_containment_verified": False}
+    if 0 not in groups or len(groups) < 2:
+        return {**result, "reason": "STEP void topology lacks an outer or inner shell"}
+    anchor = groups[0][0][0]
+    signed = {}
+    for shell, faces in groups.items():
+        signed[shell] = sum(_dot(_sub(a, anchor), _cross(_sub(b, anchor), _sub(c, anchor)))
+                            for a,b,c in faces)
+    if any(signed[0]*signed[shell] >= 0 for shell in groups if shell != 0):
+        return {**result, "reason": "STEP void shell winding must oppose its outer shell"}
+    for shell, faces in groups.items():
+        if shell != 0 and not _point_inside_closed_surface(faces[0][0], groups[0]):
+            return {**result, "reason": "STEP void shell is outside the declared outer solid"}
+    for first, faces in groups.items():
+        if first == 0:
+            continue
+        for second, other in groups.items():
+            if second != 0 and second != first and _point_inside_closed_surface(faces[0][0], other):
+                return {**result, "reason": "STEP void shells may not be nested"}
+    return {**result, "void_containment_verified": True}

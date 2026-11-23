@@ -347,7 +347,8 @@ def _axis2_frame(entities: Dict[int, Tuple[str, List[str]]], aid: Optional[int],
 
 def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, density_kg_m3: float,
                                   *, require_connected: bool = False,
-                                  surface_face_ids: Optional[List[int]] = None) -> Dict[str, Any]:
+                                  surface_face_ids: Optional[List[int]] = None,
+                                  surface_shell_ids: Optional[List[int]] = None) -> Dict[str, Any]:
     # Form edge differences and signed tetrahedra in the body's coordinate scale.
     low, high = vertices.min(axis=0), vertices.max(axis=0)
     reference = low + 0.5 * (high - low)
@@ -407,12 +408,23 @@ def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, densi
     if require_connected:
         components = len({root(index) for index in range(len(qfaces))})
         diagnostics["connected_component_count"] = components
-        if components != 1:
+        shell_ids = [0]*len(qfaces) if surface_shell_ids is None else surface_shell_ids
+        if len(shell_ids) != len(qfaces):
+            raise ValueError("STEP triangle shell labels are incomplete")
+        group_roots = {}
+        for index, shell_id in enumerate(shell_ids):
+            group_roots.setdefault(shell_id, set()).add(root(index))
+        diagnostics["void_shell_count"] = len(group_roots)-1
+        if components != len(group_roots) or any(len(roots) != 1 for roots in group_roots.values()):
             return {**diagnostics, "reason": "Declared STEP shell has disconnected surface components"}
-        from hamon_step_surface import integrate_closed_surface, verify_surface_embedding
+        from hamon_step_surface import integrate_closed_surface, verify_surface_embedding, verify_void_shells
         diagnostics.update(verify_surface_embedding(unique, qfaces, surface_face_ids))
         if "reason" in diagnostics:
             return diagnostics
+        if len(group_roots) > 1:
+            diagnostics.update(verify_void_shells(unique, qfaces, shell_ids))
+            if "reason" in diagnostics:
+                return diagnostics
         if not math.isfinite(surface_area) or surface_area <= 0:
             return {**diagnostics, "reason": "STEP surface area is outside finite binary64 range"}
         moments = integrate_closed_surface(unique, qfaces, density_kg_m3)
@@ -821,10 +833,9 @@ def _step_solid_faces(entities, selector):
             raise ValueError("STEP assembly placement is unsupported; select a solid definition explicitly")
         selected = roots[0]
     kind, args = entities[selected]
-    if kind == "BREP_WITH_VOIDS":
-        raise ValueError("STEP enclosed void shells require containment qualification and are unsupported")
-    if len(args) != 2:
-        raise ValueError("STEP solid requires one complete outer shell reference")
+    expected_args = 3 if kind == "BREP_WITH_VOIDS" else 2
+    if len(args) != expected_args:
+        raise ValueError("STEP solid requires complete outer and declared void shell references")
 
     seen = set()
 
@@ -858,7 +869,15 @@ def _step_solid_faces(entities, selector):
             raise ValueError("STEP solid requires a declared closed shell")
         return [entry for fid in _step_topology_refs(values[1], "shell faces") for entry in face(fid, forward, set())]
 
-    return selected, shell(_ref_id(args[1]), True, set())
+    groups = [shell(_ref_id(args[1]), True, set())]
+    if kind == "BREP_WITH_VOIDS":
+        for void in _step_topology_refs(args[2], "void shells"):
+            void_kind, values = entities.get(void, (None, []))
+            if (void_kind != "ORIENTED_CLOSED_SHELL" or len(values) != 4
+                    or values[1] != "*" or values[3] != ".F."):
+                raise ValueError("STEP void shells require a reversed oriented closed shell")
+            groups.append(shell(void, True, set()))
+    return selected, [(index, eid, forward) for index, group in enumerate(groups) for eid, forward in group]
 
 
 def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
@@ -897,6 +916,7 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
     all_verts: List[np.ndarray] = []
     all_faces: List[np.ndarray] = []
     surface_face_ids: List[int] = []
+    surface_shell_ids: List[int] = []
     analytic_vol: Optional[float] = None
 
     def _append(v: np.ndarray, f: np.ndarray) -> None:
@@ -944,7 +964,7 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
         return exact
 
     selected_solid, face_occurrences = _step_solid_faces(entities, spec.get("solid_entity_id"))
-    for eid, forward in face_occurrences or ():
+    for shell_id, eid, forward in face_occurrences or ():
         et, args = entities[eid]
         if et in ("FACE", "ADVANCED_FACE", "FACE_SURFACE") and len(args) >= 2:
             boundaries = []
@@ -1033,6 +1053,7 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
                 face_triangles = face_triangles[:, [0, 2, 1]]
             _append(face_vertices, face_triangles)
             surface_face_ids.extend([eid] * len(face_triangles))
+            surface_shell_ids.extend([shell_id] * len(face_triangles))
 
     analytic_entities = entities.items() if face_occurrences is None else ()
     for eid, (et, args) in analytic_entities:
@@ -1056,7 +1077,8 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("No supported 3D solid entities found in STEP input")
     props = _compute_mesh_mass_properties(np.vstack(all_verts), np.vstack(all_faces), density,
                                           require_connected=face_occurrences is not None,
-                                          surface_face_ids=surface_face_ids)
+                                          surface_face_ids=surface_face_ids,
+                                          surface_shell_ids=surface_shell_ids)
     report = _cad_report(props, analytic_vol, unit_scale, len(entities))
     if selected_solid is not None:
         report["selected_solid_entity_id"] = selected_solid
