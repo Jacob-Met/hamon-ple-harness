@@ -689,10 +689,10 @@ def _step_face_region(boundaries):
     normal = normals[outer] / normal_length
     # Coordinates may already be rounded after a large translation. Account for
     # those ulps without imposing a world-origin absolute tolerance.
-    rounding = 8 * float(np.max(np.spacing(np.abs(vertices)))) / extent
-    tolerance = rounding + 64 * np.finfo(float).eps
-    if any(np.max(np.abs(p @ normal)) > tolerance for p in local):
-        raise ValueError("STEP face boundaries are non-planar")
+    for points, p in zip(rings, local):
+        rounding = 8 * ((np.spacing(np.abs(points)) + np.spacing(np.abs(origin))) @ np.abs(normal)) / extent
+        if np.any(np.abs(p @ normal) > rounding + 64 * np.finfo(float).eps):
+            raise ValueError("STEP face boundaries are non-planar")
     axes = [j for j in range(3) if j != int(np.argmax(np.abs(normal)))]
     projected = [p[:, axes] for p in local]
 
@@ -782,18 +782,37 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
         ratios = np.asarray(_num_list(values[1]), dtype=float)
         if ratios.shape != (3,) or not np.isfinite(ratios).all() or not np.any(ratios):
             raise ValueError("STEP analytic geometry requires a finite nonzero direction")
-        ratios /= np.max(np.abs(ratios))
-        return ratios / np.linalg.norm(ratios)
+        return tuple(Fraction(float(value)) for value in ratios)
 
-    def _relative_geometry(points, anchor):
+    def _cross(a, b):
+        return (a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0])
+
+    def _geometry_points(points, anchor, axis, line=False):
+        # A supporting line/plane can be anchored arbitrarily far along itself.
+        # Exact raw-coordinate predicates avoid cancellation at that anchor;
+        # tolerances derive from the finite boundary, not its parameterization.
         points = np.asarray(points)
-        delta = points - anchor
-        scale = float(np.max(np.abs(delta)))
+        scale = float(np.max(np.abs(points - points[0])))
         if not math.isfinite(scale) or scale <= 0:
             raise ValueError("STEP analytic geometry is degenerate")
-        magnitude = max(float(np.max(np.abs(points))), float(np.max(np.abs(anchor))))
-        tolerance = 8 * np.spacing(magnitude) / scale + 64 * np.finfo(float).eps
-        return delta / scale, tolerance
+        normalized = np.array([float(value / max(map(abs, axis))) for value in axis])
+        normalized /= np.linalg.norm(normalized)
+        ulps = np.spacing(np.abs(points))
+        rounding = np.linalg.norm(ulps, axis=1) if line else ulps @ np.abs(normalized)
+        tolerances = 8 * rounding + 64 * np.finfo(float).eps * scale
+        exact = [tuple(Fraction(float(value)) for value in point) for point in points]
+        anchor = tuple(Fraction(float(value)) for value in anchor)
+        norm_sq = sum(value*value for value in axis)
+        for point, tolerance in zip(exact, tolerances):
+            delta = tuple(value - origin for value, origin in zip(point, anchor))
+            if line:
+                residual_sq = sum(value*value for value in _cross(delta, axis))
+            else:
+                residual_sq = sum(value*direction for value, direction in zip(delta, axis))**2
+            if residual_sq > Fraction(float(tolerance))**2 * norm_sq:
+                kind = "line" if line else "plane"
+                raise ValueError(f"STEP boundary vertices disagree with the declared {kind}")
+        return exact
 
     for eid, (et, args) in entities.items():
         if et in ("ADVANCED_FACE", "FACE_SURFACE") and len(args) >= 2:
@@ -841,11 +860,9 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
                         if not math.isfinite(magnitude) or magnitude <= 0:
                             raise ValueError("STEP line requires a positive finite vector magnitude")
                         axis = _direction(vector[1])
-                        delta, tolerance = _relative_geometry([verts_map[start], verts_map[end]], anchor)
-                        if np.max(np.linalg.norm(np.cross(delta, axis), axis=1)) > tolerance:
-                            raise ValueError("STEP edge vertices disagree with the declared line")
-                        positive = np.dot(delta[1] - delta[0], axis) > 0
-                        if positive != (ec_args[4] == ".T."):
+                        ends = _geometry_points([verts_map[start], verts_map[end]], anchor, axis, line=True)
+                        orientation = sum((b-a)*direction for a, b, direction in zip(ends[0], ends[1], axis))
+                        if orientation == 0 or (orientation > 0) != (ec_args[4] == ".T."):
                             raise ValueError("STEP edge direction disagrees with the declared curve sense")
                         if oargs[4] == ".F.":
                             start, end = end, start
@@ -872,13 +889,12 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
                 anchor = pts.get(_ref_id(placement[1]))
                 if anchor is None:
                     raise ValueError("STEP plane references a missing location")
-                axis = np.array([0., 0., 1.]) if placement[2] == "$" else _direction(placement[2])
-                delta, tolerance = _relative_geometry(face_vertices, anchor)
-                if np.max(np.abs(delta @ axis)) > tolerance:
-                    raise ValueError("STEP face vertices disagree with the declared plane")
-                a, b, c = delta[face_triangles[0]]
-                positive = np.dot(np.cross(b - a, c - a), axis) > 0
-                if positive != (args[3] == ".T."):
+                axis = (Fraction(0), Fraction(0), Fraction(1)) if placement[2] == "$" else _direction(placement[2])
+                exact = _geometry_points(face_vertices, anchor, axis)
+                a, b, c = (exact[index] for index in face_triangles[0])
+                cross = _cross(tuple(y-x for x, y in zip(a, b)), tuple(y-x for x, y in zip(a, c)))
+                orientation = sum(value*direction for value, direction in zip(cross, axis))
+                if orientation == 0 or (orientation > 0) != (args[3] == ".T."):
                     raise ValueError("STEP face winding disagrees with the declared surface sense")
             _append(face_vertices, face_triangles)
 

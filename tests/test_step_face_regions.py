@@ -219,5 +219,35 @@ class StepFaceRegionTests(unittest.TestCase):
                 verify_step_cad_geometry({"step_text": text})
 
 
+    def test_distant_support_anchors_do_not_hide_offsets_or_change_winding(self):
+        outer = [(0., 0.), (5., 0.), (5., 5.), (0., 5.)]
+        hole = [(1., 1.), (2., 1.), (2., 2.), (1., 2.)]
+        for line in (False, True):
+            original = prism_step(outer, [hole], edge_loops=line)
+            if line:
+                match = re.search(r"(#\d+=LINE\(''),#(\d+),#(\d+)\)", original)
+                pid, vector = int(match[2]), int(match[3])
+                base = [float(value) for value in re.search(
+                    rf"#{pid}=CARTESIAN_POINT\('',\(([^()]*)", original)[1].split(',')]
+                changed = original.replace(match[0], f"{match[1]},#990001,#{vector})")
+            else:
+                placement = re.search(r"PLANE\('',#(\d+)\)", original)[1]
+                changed = re.sub(rf"(#{placement}=AXIS2_PLACEMENT_3D\('',)#\d+",
+                                 r"\g<1>#990001", original)
+                base = [0., 0., 0.]
+            for shift, normal_offset in ((1e12, 0.), (1e12, .001), (1e15, 1.), (1e16, 0.)):
+                anchor = f"#990001=CARTESIAN_POINT('',({shift},{base[1]},{normal_offset}));\n"
+                text = changed.replace("ENDSEC;\nEND-ISO", anchor + "ENDSEC;\nEND-ISO")
+                with self.subTest(line=line, shift=shift, offset=normal_offset):
+                    if normal_offset:
+                        with self.assertRaisesRegex(ValueError, "declared line|declared plane"):
+                            verify_step_cad_geometry({"step_text": text})
+                    else:
+                        got = verify_step_cad_geometry({"step_text": text})
+                        self.assertTrue(got["conservation_verified"], got)
+                        self.assertEqual(got["volume_m3"], 144.)
+                        self.assertEqual(got["surface_area_m2"], 192.)
+
+
 if __name__ == "__main__":
     unittest.main()
