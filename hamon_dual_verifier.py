@@ -839,6 +839,8 @@ def solve_static_equilibrium_2d(spec: dict[str, Any]) -> dict[str, Any]:
     q = Fraction(float(spec.get("udl_N_per_m", 0.0)))
     points = [(Fraction(float(p["x"])), Fraction(float(p.get("Fx", 0.0))),
                Fraction(float(p.get("Fy", 0.0)))) for p in spec.get("point_loads", [])]
+    if "total_length_m" in spec and any(not left <= x <= right for x, _, _ in points):
+        raise ValueError("Point loads must lie within the specified beam length")
     uniform_down = q * (right - left)
     total_down = uniform_down - sum(fy for _, _, fy in points)
     total_fx = sum(fx for _, fx, _ in points)

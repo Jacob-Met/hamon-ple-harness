@@ -52,6 +52,17 @@ class RollerSection(unittest.TestCase):
                 r = solve(10, 0, [(0, 0, -1e16), (10, 0, -1)], total_length_m=10)
                 self.assertEqual((r["R_Ay_N"], r["R_By_N"], r["M_support_B_Nm"]), (1, 1e16, 0))
 
+    def test_loads_respect_explicit_extent_and_implicit_overhangs(self):
+        for outside in (-2, 12):
+            with self.subTest(outside=outside), self.assertRaises(ValueError):
+                solve(0, 10, [(outside, 0, -100)], total_length_m=10)
+        r = solve(0, 10, [(0, 0, -10), (10, 0, -25)], total_length_m=10)
+        self.assertEqual((r["R_Ay_N"], r["R_By_N"], r["M_support_B_Nm"]), (10, 25, 0))
+        for pin, roller, overhang in ((0, 10, 12), (10, 0, -2)):
+            with self.subTest(pin=pin):
+                r = solve(pin, roller, [(overhang, 0, -100)])
+                self.assertEqual((r["R_Ay_N"], r["R_By_N"], r["M_support_B_Nm"]), (-20, 120, 200))
+
     def test_unresisted_or_inconsistent_support_layout_is_refused(self):
         for pin, roller in ((2, 2), (-1, 4), (1, 7)):
             with self.subTest(pin=pin, roller=roller), self.assertRaises(ValueError):
