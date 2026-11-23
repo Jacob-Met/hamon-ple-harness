@@ -39,7 +39,7 @@ import os
 import pathlib
 import subprocess
 import tempfile
-from time import monotonic
+from time import monotonic, time
 from typing import Any
 
 import taskbridge
@@ -318,6 +318,28 @@ class Run:
       await self.on_event(event)
 
 
+def delivery_step_cap(session):
+  value = getattr(session, "limits", {}).get("max_steps")
+  return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def delivery_budget_exhausted(session, steps):
+  cap = delivery_step_cap(session)
+  return cap is not None and steps >= cap
+
+
+def delivery_process_env(env, session, steps, reserve, *, delivery=False):
+  """Configure the cooperative Pi boundary using this pass's actual budget."""
+  remaining = session.time_left()
+  work = taskbridge.time_share(remaining, reserve)
+  now = time()
+  config = {"phase": "delivery" if delivery else "work",
+            "completed_steps": steps, "max_steps": delivery_step_cap(session),
+            "phase_deadline_ms": None if work is None else (now + work) * 1000,
+            "task_deadline_ms": None if remaining is None else (now + remaining) * 1000}
+  return {**env, "PLE_DELIVERY_BUDGET": json.dumps(config, separators=(",", ":"))}
+
+
 async def solve(session: taskbridge.Session) -> str:
   """Runs Pi on a single task and returns the final response.
 
@@ -449,6 +471,8 @@ async def solve(session: taskbridge.Session) -> str:
           "--append-system-prompt",
           NOTE.format(workdir=session.workdir) + engineering_inventory + engineering_cli_note + delivery_note,
       ]
+      if checked_delivery:
+        argv.extend(["-e", str(HERE / "delivery-budget.ts")])
       run = Run(session, model)
       if archive_plan:
         run.archive_watch = archive_contract.FirstPublication(
@@ -458,7 +482,8 @@ async def solve(session: taskbridge.Session) -> str:
       done = await taskbridge.run_process(
           argv,
           session,
-          env=env,
+          env=(delivery_process_env(env, session, run.replies, reserve_window)
+               if checked_delivery else env),
           cwd=str(work),
           on_line=run.on_line,
           stdin=first_request.encode(),
@@ -471,7 +496,7 @@ async def solve(session: taskbridge.Session) -> str:
       if run.tool_turn is not None and not run.invalid_tail:
         tool_session = acknowledged_tool_session(
             session_dir, run.tool_turn, run.observed_results, run.expected_calls, run.history)
-      can_continue = run.tool_turn is None or tool_session is not None
+      can_continue = (run.tool_turn is None or tool_session is not None) and not delivery_budget_exhausted(session, run.replies)
       participant_followup = False
       if delivery_targets and before_delivery is not None:
         after_delivery = await delivery_guard.snapshot(session, delivery_targets)
@@ -509,7 +534,8 @@ async def solve(session: taskbridge.Session) -> str:
           terminal.invalidate()
           try:
             await taskbridge.run_process(
-                [*argv, "--continue"] if resume else argv, session, env=env, cwd=str(work),
+                [*argv, "--continue"] if resume else argv, session,
+                env=delivery_process_env(env, session, run.replies, STOP_BEFORE_SEC, delivery=True), cwd=str(work),
                 on_line=run.on_line, stdin=refine.encode(), stop_before_sec=STOP_BEFORE_SEC,
                 log_prefix="pi-archive-refine: ")
           except taskbridge.Cancelled:
@@ -552,7 +578,7 @@ async def solve(session: taskbridge.Session) -> str:
               issues = delivery_guard.compare(before_delivery, after_delivery)
               await session.log("delivery_gate: post_materialize=" + str(len(issues)))
           delivery_time = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC)
-          if (issues or (working_copy and terminal.filing)) and can_continue and (delivery_time is None or delivery_time >= MIN_DELIVERY_RUN_SEC):
+          if (issues or (working_copy and terminal.filing)) and can_continue and not delivery_budget_exhausted(session, run.replies) and (delivery_time is None or delivery_time >= MIN_DELIVERY_RUN_SEC):
             # Each task has its own temporary session directory. Continue the
             # actual calculation history if Pi persisted it before the cutoff.
             resume = any(session_dir.glob("*.jsonl"))
@@ -569,7 +595,7 @@ async def solve(session: taskbridge.Session) -> str:
             await taskbridge.run_process(
                 [*argv, "--continue"] if resume else argv,
                 session,
-                env=env,
+                env=delivery_process_env(env, session, run.replies, STOP_BEFORE_SEC, delivery=True),
                 cwd=str(work),
                 on_line=run.on_line,
                 stdin=instruction.encode(),
@@ -592,13 +618,14 @@ async def solve(session: taskbridge.Session) -> str:
             )
       # A complete deliverable still needs a final reply after an acknowledged
       # tool turn. Its history proof cannot be reused after another model run.
-      if tool_session is not None and not participant_followup:
+      if tool_session is not None and not participant_followup and not delivery_budget_exhausted(session, run.replies):
         remaining = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC)
         if remaining is None or remaining >= MIN_DELIVERY_RUN_SEC:
           terminal.invalidate()
           await session.log("delivery_gate: continuing acknowledged tool results")
           await taskbridge.run_process(
-              [*argv, "--session", str(tool_session)], session, env=env, cwd=str(work),
+              [*argv, "--session", str(tool_session)], session,
+              env=delivery_process_env(env, session, run.replies, STOP_BEFORE_SEC, delivery=True), cwd=str(work),
               on_line=run.on_line, stop_before_sec=STOP_BEFORE_SEC, log_prefix="pi-finalize: ",
               stdin=(b"Continue from the recorded tool results. Check what was actually delivered, "
                      b"finish the requested work within the remaining time, and report its status."))
