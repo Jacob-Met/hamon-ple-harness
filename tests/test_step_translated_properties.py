@@ -58,13 +58,14 @@ def test_closed_prism_translation_and_full_tensor(scale,rot,offset):
 
 @pytest.mark.parametrize('issue',['missing','flipped','hairline'])
 def test_open_inconsistent_or_area_unbalanced_prism_withholds_mass_properties(issue):
+    if issue=='hairline':
+        # The warped cap is now rejected before triangulation and vertex welding.
+        with pytest.raises(ValueError, match='non-planar'):
+            verify_step_cad_geometry(prism((0,0,0),1.,np.eye(3),issue))
+        return
     got=verify_step_cad_geometry(prism((0,0,0),1.,np.eye(3),issue))
     assert got['conservation_verified'] is False
-    if issue=='hairline':
-        # Vertices match under the existing nanometre weld but oriented area exposes the gap.
-        assert got['watertight_manifold']
-        assert got['net_oriented_area_residual_m2']>got['net_oriented_area_tolerance_m2']
-    else:assert not got['watertight_manifold']
+    assert not got['watertight_manifold']
     for prop in ['volume_m3','mass_kg','centroid_m','inertia_tensor_centroid_kg_m2','principal_moments_kg_m2']:
         assert prop not in got
 

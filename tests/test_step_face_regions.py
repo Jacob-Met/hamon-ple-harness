@@ -1,5 +1,6 @@
 """Planar STEP faces are regions; their inner loops are void boundaries."""
 import math
+import re
 import unittest
 
 import numpy as np
@@ -175,6 +176,47 @@ class StepFaceRegionTests(unittest.TestCase):
                     self.check_prism(outer, holes, height=2., edge_loops=True,
                                      reverse_bounds=reverse, opposite_surface=opposite,
                                      rotation=rotation, translation=(10000., -20000., 30000.))
+
+
+    def test_invalid_face_regions_are_refused(self):
+        outer = [(0., 0.), (5., 0.), (5., 5.), (0., 5.)]
+        inner = [(1., 1.), (3., 1.), (3., 3.), (1., 3.)]
+        cases = [
+            (outer, [[(6., 1.), (7., 1.), (7., 2.), (6., 2.)]]),
+            (outer, [[(0., 1.), (2., 1.), (2., 2.), (0., 2.)]]),
+            (outer, [inner, [(2., 2.), (4., 2.), (4., 4.), (2., 4.)]]),
+            (outer, [inner, [(1.5, 1.5), (2., 1.5), (2., 2.), (1.5, 2.)]]),
+            (outer, [inner[::-1]]),
+            ([(0., 0.), (5., 4.), (0., 5.), (4., 0.)], []),
+        ]
+        for index, (outline, holes) in enumerate(cases):
+            with self.subTest(case=index), self.assertRaisesRegex(ValueError, "STEP"):
+                verify_step_cad_geometry({"step_text": prism_step(outline, holes)})
+
+
+    def test_incomplete_or_inconsistent_declared_geometry_is_refused(self):
+        outer = [(0., 0.), (5., 0.), (5., 5.), (0., 5.)]
+        holes = [[(1., 1.), (2., 1.), (2., 2.), (1., 2.)]]
+        poly = prism_step(outer, holes)
+        edge = prism_step(outer, holes, edge_loops=True)
+        cases = {
+            "duplicate_outer": poly.replace("FACE_BOUND(", "FACE_OUTER_BOUND(", 1),
+            "missing_point": re.sub(r"#\d+=CARTESIAN_POINT[^\n]*\n", "", poly, count=1),
+            "missing_loop": poly.replace("POLY_LOOP(", "UNSUPPORTED_LOOP(", 1),
+            "nonplanar": poly.replace("CARTESIAN_POINT('',(0.0,0.0,0.0))",
+                                       "CARTESIAN_POINT('',(0.0,0.0,0.025))", 1),
+            "curved_surface": poly.replace("PLANE(", "CYLINDRICAL_SURFACE(", 1),
+            "curved_edge": edge.replace("LINE(", "CIRCLE(", 1),
+            "plane_normal": re.sub(r"DIRECTION\([^;]+", "DIRECTION('',(1.,1.,1.))", poly, count=1),
+            "line_direction": re.sub(r"DIRECTION\([^;]+", "DIRECTION('',(1.,1.,1.))", edge, count=1),
+            "surface_sense": re.sub(r"(FACE_SURFACE\([^;]+),\.T\.\)", r"\1,.F.)", poly, count=1),
+            "curve_sense": re.sub(r"(EDGE_CURVE\([^;]+),\.T\.\)", r"\1,.F.)", edge, count=1),
+            "disconnected_edge": re.sub(r"(ORIENTED_EDGE\([^;]+),\.([TF])\.\)",
+                                         lambda m: m[1]+(",.F.)" if m[2] == "T" else ",.T.)"), edge, count=1),
+        }
+        for name, text in cases.items():
+            with self.subTest(case=name), self.assertRaisesRegex(ValueError, "STEP"):
+                verify_step_cad_geometry({"step_text": text})
 
 
 if __name__ == "__main__":
