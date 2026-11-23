@@ -392,6 +392,7 @@ async def solve(session: taskbridge.Session) -> str:
           session, delivery_materialize.snapshot_targets(materialize_candidates),
           deadline=observation_deadline,
       ) if checked_delivery else None
+      attempted_generators = set()
       delivery_note = (
           "\n\nOUTPUT DELIVERY CONTRACT (literal destinations from the instruction):\n"
           + "\n".join("  " + item["path"] for item in delivery_targets)
@@ -537,10 +538,17 @@ async def solve(session: taskbridge.Session) -> str:
             selected = delivery_materialize.plan(
                 materialize_candidates, issues,
                 before_generators, after_generators,
+                attempted=attempted_generators,
             )
             if selected:
               terminal.invalidate()
               observed = await delivery_materialize.materialize(session, selected)
+              # Unknown execution may already have changed task files. Never
+              # automatically repeat that script version after a model repair.
+              for item in selected[:len(observed)]:
+                attempted_generators.add((
+                    item["script"], after_generators[item["script"]].get("fingerprint"),
+                ))
               await session.log(
                   "delivery_gate: materializers="
                   + json.dumps(observed, separators=(",",":"))[:800]
@@ -602,6 +610,46 @@ async def solve(session: taskbridge.Session) -> str:
               on_line=run.on_line, stop_before_sec=STOP_BEFORE_SEC, log_prefix="pi-finalize: ",
               stdin=(b"Continue from the recorded tool results. Check what was actually delivered, "
                      b"finish the requested work within the remaining time, and report its status."))
+      # The repair/finalization turn may have written a generator without running
+      # it. Recover only fresh versions for known incomplete explicit outputs,
+      # then independently inspect the actual artifacts before returning done.
+      if materialize_candidates and before_generators is not None:
+        left = session.time_left()
+        budget = 90 if left is None else min(90, max(0, left - 1))
+        final_deadline = monotonic() + budget
+        if budget >= 24:
+          if not terminal.observed:
+            terminal.observe(await delivery_guard.snapshot(
+                session, delivery_targets, deadline=final_deadline - 10))
+          final_issues = delivery_guard.compare(before_delivery, terminal.after)
+          if final_issues:
+            after_generators = await delivery_guard.snapshot(
+                session, delivery_materialize.snapshot_targets(materialize_candidates),
+                deadline=final_deadline - 10,
+            )
+            selected = delivery_materialize.plan(
+                materialize_candidates, final_issues, before_generators, after_generators,
+                attempted=attempted_generators,
+            )
+            if selected:
+              terminal.invalidate()
+              observed = await delivery_materialize.materialize(
+                  session, selected, reserve_sec=10, deadline=final_deadline,
+              )
+              terminal.observe(await delivery_guard.snapshot(
+                  session, delivery_targets, deadline=final_deadline,
+              ))
+              # Telemetry cannot prevent the independent terminal observation
+              # or consume the remaining delivery deadline.
+              log_budget = min(1, final_deadline - monotonic())
+              if log_budget > 0:
+                try:
+                  await asyncio.wait_for(session.log("delivery_gate: final_materializers="
+                      + json.dumps(observed, separators=(",", ":"))[:800]), log_budget)
+                except taskbridge.Cancelled:
+                  raise
+                except Exception:
+                  pass
       if delivery_targets and not terminal.observed:
         left = session.time_left()
         budget = 25 if left is None else min(25, max(0, left - 1))
@@ -622,3 +670,4 @@ async def solve(session: taskbridge.Session) -> str:
 def resolve_wired_domain_tools(prompt: str = "", file_paths=()) -> list[str]:
     from hamon_pareto import select_domain_tools
     return list(select_domain_tools(prompt=prompt, file_paths=file_paths))
+
