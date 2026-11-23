@@ -97,3 +97,64 @@ def test_normal_conservation_and_domain_routes_reject_a_missing_phase_current():
             spec["proposed_phase_currents_pu"] = {k: z(0,0) for k in "ABC"}
         assert run_router_conservation_cad_verifier({"spec":spec})["conservation_verified"] is expected
         assert run_dual_verify_spec({"mode":"domain","kind":"symmetrical_fault","spec":spec})["dual_verified"] is expected
+
+
+@pytest.mark.parametrize("zero_scale", [1e12, 1e19])
+@pytest.mark.parametrize("fault_z", [0j, 0.01 + 0.02j])
+@pytest.mark.parametrize("fault,phases", [
+    ("3PH", "ABC"), ("SLG", "A"), ("SLG", "B"), ("SLG", "C"),
+    ("LL", "AB"), ("LL", "BC"), ("LL", "CA"),
+    ("DLG", "AB"), ("DLG", "BC"), ("DLG", "CA"),
+])
+def test_weak_ground_against_shared_neutral_circuit(fault, phases, fault_z, zero_scale):
+    # Equal positive/negative series impedances are three independent
+    # impedances plus a shared neutral. Solve that physical star directly.
+    series = 0.05 + 0.125j
+    neutral = (0.25 + 0.5j) * zero_scale
+    zero = series + 3 * neutral
+    source_a = 0.94 + 0.17j
+    rotate = complex(-0.5, -math.sqrt(3) / 2)
+    emf = dict(zip("ABC", (source_a, source_a * rotate, source_a * rotate.conjugate())))
+    spec = source(fault)
+    spec.update(faulted_phases=list(phases),
+                prefault_positive_voltage_pu=z(source_a.real, source_a.imag),
+                fault_impedance_pu=z(fault_z.real, fault_z.imag))
+    spec["sequence_impedances_pu"] = {
+        key: z(value.real, value.imag)
+        for key, value in (("positive", series), ("negative", series), ("zero", zero))
+    }
+    currents = dict.fromkeys("ABC", 0j)
+    ground = 0j
+    if fault == "SLG":
+        ground = emf[phases] / (series + neutral + fault_z)
+        currents[phases] = ground
+    elif fault == "3PH":
+        currents = {name: e / (series + fault_z) for name, e in emf.items()}
+    else:
+        b, c = phases
+        if fault == "LL":
+            currents[b] = (emf[b] - emf[c]) / (2 * series + fault_z)
+            currents[c] = -currents[b]
+        else:
+            ground = (emf[b] + emf[c]) / (series + 2 * (neutral + fault_z))
+            difference = (emf[b] - emf[c]) / series
+            currents[b], currents[c] = (ground + difference) / 2, (ground - difference) / 2
+
+    got = verify_symmetrical_fault(spec)
+    assert got["conservation_verified"], got
+    assert as_complex(got["ground_return_current_pu"]) == pytest.approx(ground, rel=1e-12, abs=0)
+    for name, i in currents.items():
+        actual_i = as_complex(got["phase_currents_pu"][name])
+        actual_v = as_complex(got["phase_voltages_pu"][name])
+        assert actual_i == pytest.approx(i, rel=1e-12, abs=1e-30)
+        assert actual_v == pytest.approx(emf[name] - series * i - neutral * ground, abs=1e-13)
+        if fault in ("DLG", "SLG") and name in phases:
+            assert actual_v == pytest.approx(fault_z * ground, rel=1e-12, abs=1e-38)
+
+
+@pytest.mark.parametrize("mode", ["zero", "positive", "negative"])
+def test_three_phase_fault_rejects_a_singular_terminal_mode(mode):
+    spec = source("3PH")
+    spec["fault_impedance_pu"] = z(0, 0.25)
+    spec["sequence_impedances_pu"][mode] = z(0, -0.25)
+    assert not verify_symmetrical_fault(spec)["conservation_verified"]

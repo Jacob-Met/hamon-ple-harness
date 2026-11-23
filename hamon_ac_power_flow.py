@@ -1,6 +1,5 @@
 """Balanced AC load flow and terminal faults of three-sequence Thevenin equivalents."""
 
-import cmath
 import math
 
 import numpy as np
@@ -670,11 +669,28 @@ def symmetrical_fault(spec):
             else next(p for p in labels if p not in faulted)
         )
     )
-    order = np.roll(np.arange(3), -offset)
-    alpha = cmath.exp(2j * math.pi / 3)
+    from mpmath import mp
+
+    # Keep the common-mode voltage drop when a weak ground path coexists
+    # with much larger circulating phase currents. Zabc can lose its two
+    # differential modes if its entries are formed at binary64 precision.
+    ctx = mp.clone()
+    exponents = [0] + [
+        math.frexp(abs(x))[1]
+        for z in (z0, z1, z2, zf, emf) for x in (z.real, z.imag) if x
+    ]
+    ctx.prec = 112 + 2 * (max(exponents) - min(exponents))
+    z0, z1, z2, zf, emf = map(ctx.mpc, (z0, z1, z2, zf, emf))
+    order = [(offset + n) % 3 for n in range(3)]
+    alpha = ctx.mpc(-1, ctx.sqrt(3)) / 2
     rotation = emf * alpha ** (-offset)
-    transform = np.array([[1, 1, 1], [1, alpha**2, alpha], [1, alpha, alpha**2]])
+    transform = ctx.matrix([[1, 1, 1], [1, alpha.conjugate(), alpha],
+                            [1, alpha, alpha.conjugate()]])
     if fault == "3PH":
+        # With a zero series-plus-fault impedance in an unexcited mode,
+        # the terminal constraints admit arbitrary current in that mode.
+        if any(impedance + zf == 0 for impedance in (z0, z1, z2)):
+            raise ValueError("Three-phase terminal currents are not uniquely determined")
         seq = (0, rotation / (z1 + zf), 0)
     elif fault == "SLG":
         i = rotation / (z0 + z1 + z2 + 3 * zf)
@@ -692,19 +708,23 @@ def symmetrical_fault(spec):
             rotation * (zg + z2) / determinant,
             -rotation * zg / determinant,
         )
-    canonical = transform @ np.asarray(seq)
-    iabc = np.empty(3, dtype=complex)
-    iabc[order] = canonical
-    # Independent phase-domain system: v = e - Zabc i, with three linear
-    # terminal boundary conditions. No sequence-fault formulas enter this solve.
-    zabc = (transform * np.array([z0, z1, z2])) @ np.conjugate(transform.T) / 3
+    # Restore the fixed ABC coordinates of the positive and negative
+    # sequences. Keep I0 directly: summing the published phase currents
+    # can lose a genuine small ground return through cancellation.
+    seq_current = ctx.matrix([seq[0], seq[1] * alpha**offset,
+                              seq[2] * alpha**(-offset)])
+    seq_voltage = ctx.matrix([-z0 * seq_current[0], emf - z1 * seq_current[1],
+                              -z2 * seq_current[2]])
+    iabc = transform * seq_current
+    voltage = transform * seq_voltage
+
+    # Independent phase-domain system with three terminal boundary conditions.
+    zabc = transform * ctx.diag([z0, z1, z2]) * transform.H / 3
     source = emf * transform[:, 1]
-    voltage = source - zabc @ iabc
-    zero_v = np.zeros((3, 3), dtype=complex)
-    zero_i = np.zeros_like(zero_v)
+    zero_v, zero_i = ctx.zeros(3), ctx.zeros(3)
     a, b, c = order
     if fault == "3PH":
-        zero_v = np.eye(3, dtype=complex)
+        zero_v = ctx.eye(3)
         zero_i = -zf * zero_v
     elif fault == "SLG":
         zero_v[0, a] = 1
@@ -723,23 +743,31 @@ def symmetrical_fault(spec):
         zero_v[1, c] = -1
         zero_v[2, b] = 1
         zero_i[2, b] = zero_i[2, c] = -zf
-    iphase = np.linalg.solve(zero_v @ zabc - zero_i, zero_v @ source)
-    residual = zero_v @ voltage + zero_i @ iabc
-    scale = max(abs(iabc))
+    iphase = ctx.lu_solve(zero_v * zabc - zero_i, zero_v * source)
+    residual = zero_v * voltage + zero_i * iabc
+    scale = max(map(abs, iabc))
     precision = 32 * np.finfo(float).eps * scale
-    tol = np.minimum(1e-6, 1e-7 * np.abs(iabc) + precision)
-    verified = bool(
-        np.all(np.abs(iphase - iabc) <= tol) and np.max(np.abs(residual)) < 1e-6
+    tolerances = [min(1e-6, 1e-7 * abs(i) + precision) for i in iabc]
+    difference = [abs(independent - actual) for independent, actual in zip(iphase, iabc)]
+    boundary_error = max(map(abs, residual))
+    verified = (
+        all(d <= tol for d, tol in zip(difference, tolerances))
+        and boundary_error < 1e-6
     )
     if "proposed_phase_currents_pu" in spec:
         proposed = spec["proposed_phase_currents_pu"]
         if not isinstance(proposed, dict) or set(proposed) != set(labels):
             raise ValueError("Proposed currents must contain A, B and C")
-        claimed = np.array([phasor(proposed[k]) for k in labels])
-        verified = verified and bool(np.all(np.abs(claimed - iabc) <= tol))
+        claimed = [ctx.mpc(phasor(proposed[k])) for k in labels]
+        verified = verified and all(
+            abs(claim - actual) <= tol for claim, actual, tol in zip(claimed, iabc, tolerances)
+        )
 
     def pack(z):
-        return {"real": float(z.real), "imag": float(z.imag)}
+        real, imag = float(z.real), float(z.imag)
+        if not (math.isfinite(real) and math.isfinite(imag)):
+            raise ValueError("Computed phasor exceeds the finite output range")
+        return {"real": real, "imag": imag}
 
     def vector(names, vec):
         return dict(zip(names, map(pack, vec)))
@@ -752,13 +780,11 @@ def symmetrical_fault(spec):
         "fault_type": fault,
         "phase_currents_pu": vector(labels, iabc),
         "phase_voltages_pu": vector(labels, voltage),
-        "sequence_currents_pu": vector(seq_names, np.conjugate(transform.T) @ iabc / 3),
-        "sequence_voltages_pu": vector(
-            seq_names, np.conjugate(transform.T) @ voltage / 3
-        ),
-        "ground_return_current_pu": pack(np.sum(iabc)),
-        "max_phase_sequence_difference_pu": float(np.max(np.abs(iphase - iabc))),
-        "max_terminal_boundary_residual_pu": float(np.max(np.abs(residual))),
+        "sequence_currents_pu": vector(seq_names, seq_current),
+        "sequence_voltages_pu": vector(seq_names, seq_voltage),
+        "ground_return_current_pu": pack(3 * seq_current[0]),
+        "max_phase_sequence_difference_pu": float(max(difference)),
+        "max_terminal_boundary_residual_pu": float(boundary_error),
     }
 
 
