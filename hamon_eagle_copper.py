@@ -162,6 +162,14 @@ def board_bores(board, elements, libraries, signal, terminals):
                 except ValueError:
                     pass
             add(x, y, row, owner)
+    # The virtual center joins all approaches through one continuous plated rim.
+    # A neighboring drill can break that rim without touching an approaching wire.
+    for i, (x, y, diameter, owner) in enumerate(bores):
+        if owner is None:
+            continue
+        if any(i != j and 4 * ((x - u)**2 + (y - v)**2) <= (diameter + d)**2
+               for j, (u, v, d, _) in enumerate(bores)):
+            bores[i] = (x, y, diameter, None)
     return bores
 
 

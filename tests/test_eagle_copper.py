@@ -99,6 +99,18 @@ class CopperWitnessTests(unittest.TestCase):
         self.assertEqual([step["source"][1] for step in out["witnesses"][0]["steps"]
                           if step["source"][0] == "wire"], list(range(3, 9)))
 
+    def test_drills_sever_plated_rim_without_crossing_trace_centerline(self):
+        direct = (wire(0, 0, 1, 0) + wire(1, 0, 2, 0)
+                  + '<via x="1" y="0" drill="1" diameter="1.2" extent="1-16"/>')
+        splits = '<hole x="1" y=".55" drill=".30"/><hole x="1" y="-.55" drill=".30"/>'
+        self.assertEqual(self.routed(direct, end=(2, 0))["status"], "witnessed")
+        self.assertEqual(self.routed(direct, end=(2, 0), plain=splits)["status"], "unresolved")
+        detour = wire(0, 0, 0, 1) + wire(0, 1, 2, 1) + wire(2, 1, 2, 0)
+        out = self.routed(direct + detour, end=(2, 0), plain=splits)
+        self.assertEqual(out["status"], "witnessed")
+        self.assertEqual([s["source"][1] for s in out["witnesses"][0]["steps"]
+                          if s["source"][0] == "wire"], [2, 3, 4])
+
     def test_unsupported_artwork_does_not_prove_continuity(self):
         for item in (
             wire(0, 0, 2, 1, 19),
