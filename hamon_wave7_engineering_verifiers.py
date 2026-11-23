@@ -1122,13 +1122,15 @@ def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]
         a_q = 1.0 - q
         b_q = -((1.0 - q) * (alpha + 1.0) - (alpha - 1.0) * z_f - 1.0)
         c_q = -alpha * q
-        if abs(a_q) < 1e-12:
+        if a_q == 0.0:
             theta_alg = -c_q / b_q
         else:
             disc = math.sqrt(max(0.0, b_q * b_q - 4.0 * a_q * c_q))
-            r_plus = (-b_q + disc) / (2.0 * a_q)
-            r_minus = (-b_q - disc) / (2.0 * a_q)
-            theta_alg = r_plus if (1.0 < r_plus < alpha) else r_minus
+            # Use the non-cancelling numerator for one root and Vieta's
+            # product for the other, especially as q approaches unity.
+            half_numerator = -0.5 * (b_q + math.copysign(disc, b_q))
+            root = half_numerator / a_q
+            theta_alg = root if 1.0 < root < alpha else c_q / half_numerator
 
         pinch_reflux = (alpha * x_d) / (alpha - theta_brent) + (1.0 - x_d) / (1.0 - theta_brent) - 1.0
         # L = R D >= 0 and V' = (R+1)D - (1-q)F >= 0. Then L' = V' + B > 0.
