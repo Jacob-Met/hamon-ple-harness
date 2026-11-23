@@ -127,9 +127,11 @@ def plan(items: list[dict[str, Any]], issues: list[dict[str, str]],
 # target/script values are passed as JSON. The script itself runs without a
 # shell, in the project's task container, with output redacted.
 REMOTE_MATERIALIZE = r'''
+import contextlib
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -150,6 +152,30 @@ def allowed(path):
         and ".." not in path.parts and "." not in path.parts \
         and path.is_absolute() and regular(path)
 
+def observe_exit(process, seconds):
+    # Keep the exited leader unreaped until its group has been signalled, so
+    # that its numeric ID cannot be reused for an unrelated process group.
+    deadline = time.monotonic() + seconds
+    while True:
+        status = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if status is not None:
+            return status.si_status if status.si_code == os.CLD_EXITED else -status.si_status
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(process.args, seconds)
+        time.sleep(min(.02, remaining))
+
+def stop_generator(process):
+    # The generator owns its session. Stop its group before observing outputs.
+    # A one-second grace fits within the outer eight-second exec allowance.
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGTERM)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        observe_exit(process, 1)
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    process.wait()
+
 result = {"state":"skipped"}
 if (allowed(script) and allowed(target) and script.is_file()
         and script.suffix == ".py" and script.parent == target.parent
@@ -162,23 +188,27 @@ if (allowed(script) and allowed(target) and script.is_file()
     env["PYTHONNOUSERSITE"] = "1"
     started = time.monotonic()
     try:
-        run = subprocess.run(
+        process = subprocess.Popen(
             [sys.executable, str(script), str(target)],
             cwd=str(script.parent),
             env=env,
-            capture_output=True,
-            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
             shell=False,
-            check=False,
         )
-        result = {
-            "state": "executed" if run.returncode == 0 else "nonzero",
-            "exit_code": run.returncode,
-            "wall_ms": round(1000*(time.monotonic()-started)),
-            "target_created": target.is_file() and target.stat().st_size > 0,
-        }
-    except subprocess.TimeoutExpired:
-        result = {"state": "timeout", "wall_ms": round(1000*(time.monotonic()-started))}
+        try:
+            code = observe_exit(process, timeout)
+            state = "executed" if code == 0 else "nonzero"
+        except subprocess.TimeoutExpired:
+            code, state = None, "timeout"
+        finally:
+            stop_generator(process)
+        result = {"state": state, "wall_ms": round(1000*(time.monotonic()-started))}
+        if code is not None:
+            result.update(exit_code=code,
+                          target_created=target.is_file() and target.stat().st_size > 0)
     except OSError:
         result = {"state": "exec_error"}
 print(json.dumps(result, separators=(",",":")))
