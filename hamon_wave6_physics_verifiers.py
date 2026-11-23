@@ -1993,6 +1993,9 @@ def _constant_rate_pfr(params, concentration, feed, flow, order, rate, inlet_t, 
 def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
     """Deterministic solver for CSTR, PFR, N-CSTRs, Arrhenius, and adiabatic reactor design."""
     reactor_type = str(params.get("reactor_type", "pfr")).strip().lower()
+    if reactor_type == "cstr_series" and params.get("conversion") is not None:
+        from hamon_cstr_series_design import solve_equal_volume_cstr_design
+        return solve_equal_volume_cstr_design(params)
     order_n = float(params.get("order", 1.0))
     c_a0 = float(params.get("C_A0", 1.0))
     v0 = float(params.get("v0", 1.0))
@@ -2060,22 +2063,6 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
         ca_x = c_a0 * max(1.0 - x_conv, 0.0) / vol_factor
         return k_val * (ca_x ** order_n)
 
-    def _cstr_series_exit_x(tau_stage: float, n_stages: int) -> float:
-        if tau_stage <= 0.0:
-            return 0.0
-        x_prev = 0.0
-        for _ in range(n_stages):
-            fn = lambda x_cur, xp=x_prev: (f_a0 * (x_cur - xp) / max(rate_minus_ra(x_cur), 1e-30)) - (tau_stage * v0)
-            gap = 0.5 * (1.0 - x_prev)
-            x_hi = 1.0 - gap
-            for _ in range(60):
-                if fn(x_hi) > 0.0:
-                    break
-                gap *= 0.5
-                x_hi = 1.0 - gap
-            x_prev = float(optimize.brentq(fn, x_prev, x_hi, xtol=1e-13, rtol=1e-13))
-        return x_prev
-
     def volume_for_conversion(x_conv: float) -> float:
         if x_conv <= 0.0:
             return 0.0
@@ -2084,16 +2071,6 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
         if reactor_type == "pfr":
             val, _ = integrate.quad(lambda xi: f_a0 / rate_minus_ra(xi), 0.0, x_conv, epsabs=1e-12, epsrel=1e-12, limit=200)
             return float(val)
-        if reactor_type == "cstr_series":
-            n_stages = int(params.get("n_stages", 2))
-            fn_tau = lambda tau_stage: _cstr_series_exit_x(tau_stage, n_stages) - x_conv
-            tau_hi = max(1e-6, (c_a0 * x_conv / max(rate_minus_ra(0.5 * x_conv), 1e-12)))
-            for _ in range(40):
-                if fn_tau(tau_hi) > 0.0:
-                    break
-                tau_hi *= 2.0
-            tau_s = float(optimize.brentq(fn_tau, 0.0, tau_hi, xtol=1e-13, rtol=1e-13))
-            return n_stages * tau_s * v0
         raise ValueError(f"Unsupported reactor_type: {reactor_type}")
 
     cstr_branches = None
