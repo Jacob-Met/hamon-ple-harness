@@ -438,9 +438,11 @@ async def solve(session: taskbridge.Session) -> str:
       if left is not None:
         observation_budget = min(observation_budget, max(0, left - STARTUP_TASK_RESERVE_SECONDS))
       observation_deadline = observation_start + observation_budget
+      startup_targets = delivery_targets
+      if archive_contract.declared_members(session.instruction, delivery_targets):
+        startup_targets = [{**delivery_targets[0], "observe_loose_baseline": True}]
       before_delivery = await delivery_guard.snapshot(
-          session, [{**item, "observe_loose_baseline": True} for item in delivery_targets],
-          deadline=observation_deadline
+          session, startup_targets, deadline=observation_deadline
       )
       terminal.before = before_delivery
       checked_delivery = bool(delivery_targets) and before_delivery is not None
