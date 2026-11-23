@@ -64,15 +64,11 @@ def configure_junctions(branches, lines, parse_number):
     if not math.isfinite(kelvin) or kelvin <= 0:
         raise ValueError("Junction temperature must be finite and above absolute zero")
     names = set()
-    canonical = {}
     for br in branches:
         name = br["name"].casefold()
         if name in names:
             raise ValueError("Ambiguous device name in diode circuit")
         names.add(name)
-        for key in ("n_pos", "n_neg"):
-            node = br[key].casefold()
-            br[key] = "0" if node in {"0", "gnd"} else canonical.setdefault(node, br[key])
         if br["type"] != "D":
             continue
         model = models.get(br["model"].casefold())
