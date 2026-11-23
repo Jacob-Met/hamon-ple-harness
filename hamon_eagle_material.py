@@ -137,8 +137,33 @@ def _outline_cycles(records):
     return cycles
 
 
-def _contour_domain(ordered, *, removed=False):
+def _straight_runs(rows):
+    """Coalesce collinear forward segments of a closed, already connected wire cycle."""
+    def continues(first, second):
+        if first["curve"] or second["curve"]:
+            return False
+        ax, ay = first["a"]
+        bx, by = first["b"]
+        cx, cy = second["b"]
+        dx, dy = bx - ax, by - ay
+        ex, ey = cx - bx, cy - by
+        return dx * ey == dy * ex and dx * ex + dy * ey > 0
+
+    runs = []
+    for row in rows:
+        if runs and continues(runs[-1], row):
+            runs[-1] = dict(runs[-1], b=row["b"])
+        else:
+            runs.append(row)
+    if len(runs) > 1 and continues(runs[-1], runs[0]):
+        runs[0] = dict(runs[0], a=runs[-1]["a"])
+        runs.pop()
+    return runs
+
+
+def _contour_domain(source_rows, *, removed=False):
     """Enclose removed material, or inset retained material, at validated quarters."""
+    ordered = _straight_runs(source_rows)
     curved = [row for row in ordered if row["curve"]]
     if removed and len(curved) > 1:
         # The supported multi-arc opening has four equal convex quarters and
@@ -294,8 +319,8 @@ def _contour_domain(ordered, *, removed=False):
         "status": "bounded", "layer": 20,
         "model": ("single_straight_outline_with_validated_tangent_quarters" if reflex else
                   "single_straight_outline_with_validated_convex_quarters"),
-        "sources": [list(row["source"]) for row in ordered],
-        "wire_count": len(ordered), "quarter_count": len(corners),
+        "sources": [list(row["source"]) for row in source_rows],
+        "wire_count": len(source_rows), "quarter_count": len(corners),
         "arc_sagitta_upper_bound_nm": largest_error,
         "boundary_guard_nm": _GUARD,
         ("removed_area_upper_bound_mm2" if removed else "interior_area_lower_bound_mm2"): domain.area/1e12,
@@ -379,6 +404,7 @@ def _inside_chord_loop(point, rows):
 
 def _certified_hole_separation(left, right):
     """Prove the strict post-guard clearance using authored coordinates."""
+    left, right = _straight_runs(left), _straight_runs(right)
     guard = Fraction(_GUARD)
     required = 2 * guard
     # Convex mitred offsets remain inside every outward-shifted source half-plane.
