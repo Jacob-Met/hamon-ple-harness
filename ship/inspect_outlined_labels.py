@@ -29,7 +29,19 @@ def main():
                 paths[e.get("stroke")].append((e, d.parse_transform(e.get("transform"))))
         pitch = max(pg["junction_grid"]["pitch_pt"])
         _, segments = o.letter_strokes(paths, pg["junction_grid"]["stroke"], pitch)
-        print(json.dumps({"page": pg["page"], "words": [(i,n,r) for i,n,_,r in o.wire_words(pg["wires"],segments,pitch)]}), flush=True)
+        details = []
+        for i,n,occ,r in o.wire_words(pg["wires"],segments,pitch):
+            if r:
+                continue
+            vertical, edges = occ
+            def project(point):
+                return (-point[1],point[0]) if vertical else point
+            wire = list(map(project, pg["wires"][i]))
+            lo,hi = sorted(p[0] for p in wire)
+            start,end = min(p[0] for e in edges for p in e),max(p[0] for e in edges for p in e)
+            details.append({"wire":i,"name":n,"line":wire,"ink_x":[start,end],"pitch":pitch,
+                            "left_offset":(start-lo)/pitch,"right_offset":(hi-end)/pitch})
+        print(json.dumps({"page":pg["page"],"unregistered":details}),flush=True)
     with ZipFile(args.archive) as archive:
         cad = archive.read("A000056-cad-files/DUE_V02g.sch")
     sheets = ET.fromstring(cad).findall(".//sheets/sheet")
@@ -39,6 +51,8 @@ def main():
         for i,(name,g) in enumerate(zip(names,predicted["document_wire_groups"][page-1])):
             rows.append((name,g)); groups[name][g].append((page,i))
     print(json.dumps({"metric":counts(rows),"incomplete":{n:list(g.values()) for n,g in groups.items() if len(g)>1}}),flush=True)
+    for i,sheet in enumerate(sheets,1):
+        print(json.dumps({"native_page":i,"incomplete_labels":{net.get("name"):[dict(label.attrib) for label in net.findall("segment/label")] for net in sheet.findall("nets/net") if len(groups[net.get("name")])>1}}),flush=True)
 
 if __name__ == "__main__":
     main()
