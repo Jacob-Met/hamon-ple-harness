@@ -67,23 +67,38 @@ _WORD_MAIN_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingm
 _RELATIONSHIPS_TYPE = "application/vnd.openxmlformats-package.relationships+xml"
 
 
-def _opc_content_type(types, name):
-    """Resolve an OPC part's declared MIME type, giving an override precedence."""
-    part = "/" + name.lower()
-    extension = name.rsplit("/", 1)[-1].rsplit(".", 1)[-1].lower()
-    for element, attr, match in (("Override", "PartName", part),
-                                 ("Default", "Extension", extension)):
-        entries = [entry for entry in types.findall(_CONTENT_TYPES_NS + element)
-                   if entry.get(attr, "").lower() == match]
-        if len(entries) > 1:
-            raise ValueError("ambiguous_content_type")
-        if entries:
-            return entries[0].get("ContentType", "").lower()
-    return ""
+def _content_type_index(types):
+    defaults, overrides = {}, {}
+    for tag, attribute, table in (("Default", "Extension", defaults),
+                                  ("Override", "PartName", overrides)):
+        for entry in types.findall(_CONTENT_TYPES_NS + tag):
+            key = entry.get(attribute, "").lower()
+            if key in table:
+                raise ValueError("ambiguous_content_type")
+            table[key] = entry.get("ContentType", "").lower()
+    return defaults, overrides
 
 
-def check_main_part(archive, suffix):
-    """Validate the package relationship, declared main type and complete main XML."""
+def _opc_content_type(defaults, overrides, name):
+    key = name.lower()
+    _, dot, extension = key.rsplit("/", 1)[-1].rpartition(".")
+    return overrides.get("/" + key, defaults.get(extension, "") if dot else "")
+
+
+class _RootTag:
+    """Keep only the root tag while Expat checks the complete XML stream."""
+    tag = None
+
+    def start(self, tag, attrs):
+        if self.tag is None:
+            self.tag = tag
+
+    def close(self):
+        return self.tag
+
+
+def check_office_package(archive, suffix):
+    """Validate the main relationship and all parts declared as XML."""
     members = {}
     for item in archive.infolist():
         if item.is_dir():
@@ -97,7 +112,8 @@ def check_main_part(archive, suffix):
     types = _xlsx_xml(archive, members["[content_types].xml"], None)
     if types.tag != _CONTENT_TYPES_NS + "Types":
         raise ValueError("invalid_content_types_root")
-    if _opc_content_type(types, "_rels/.rels") != _RELATIONSHIPS_TYPE:
+    defaults, overrides = _content_type_index(types)
+    if _opc_content_type(defaults, overrides, "_rels/.rels") != _RELATIONSHIPS_TYPE:
         raise ValueError("incorrect_relationships_content_type")
     office = {ns + "/officeDocument" for ns in _DOCUMENT_RELS}
     relationships = _xlsx_relationships(archive, members["_rels/.rels"], limit=None)
@@ -117,21 +133,17 @@ def check_main_part(archive, suffix):
         roots = {"{" + ns + "}workbook" for ns in _SPREADSHEET_NS}
     else:
         raise ValueError(f"unsupported Office suffix: {suffix}")
-    if _opc_content_type(types, main) != expected_type:
+    if _opc_content_type(defaults, overrides, main) != expected_type:
         raise ValueError("incorrect_word_main_content_type" if suffix == ".docx" else "incorrect_workbook_content_type")
 
-    # Read through EOF to catch malformed trailing XML without materializing the tree.
-    class RootTag:
-        tag = None
-
-        def start(self, tag, attrs):
-            if self.tag is None:
-                self.tag = tag
-
-        def close(self):
-            return self.tag
-
-    with archive.open(main) as stream:
-        root_tag = ET.parse(stream, parser=ET.XMLParser(target=RootTag())).getroot()
-    if root_tag not in roots:
-        raise ValueError("incorrect_word_document_root" if suffix == ".docx" else "incorrect_workbook_root")
+    # The two metadata parts were already parsed through EOF above.
+    for key, name in members.items():
+        if key in ("[content_types].xml", "_rels/.rels"):
+            continue
+        mime = _opc_content_type(defaults, overrides, name).partition(";")[0].strip()
+        if mime not in ("application/xml", "text/xml") and not mime.endswith("+xml"):
+            continue
+        with archive.open(name) as stream:
+            root_tag = ET.parse(stream, parser=ET.XMLParser(target=_RootTag())).getroot()
+        if name == main and root_tag not in roots:
+            raise ValueError("incorrect_word_document_root" if suffix == ".docx" else "incorrect_workbook_root")

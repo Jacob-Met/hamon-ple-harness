@@ -174,9 +174,9 @@ def scan_file(p, root_members):
                         if st.st_size > 32_000_000 or sum(m.file_size for m in z.infolist()) > 32_000_000:
                             return {"state":"unknown"}
                         try:
-                            check_main_part(z, ext)
-                        except (ValueError, ParseError):
-                            return {"state":"invalid","reason":"office_invalid_main_part"}
+                            check_office_package(z, ext)
+                        except (ValueError, ParseError, LookupError):
+                            return {"state":"invalid","reason":"office_invalid_package"}
                     if st.st_size <= 32_000_000 and z.testzip() is not None:
                         return {"state":"invalid","reason":"zip_crc"}
             except (OSError,ValueError,zipfile.BadZipFile,RuntimeError):

@@ -26,7 +26,7 @@ from typing import Any
 
 from office_package import (
     _DOCUMENT_RELS, _SPREADSHEET_NS, _xlsx_relationships, _xlsx_target, _xlsx_xml,
-    check_main_part,
+    check_office_package,
 )
 
 getcontext().prec = 28
@@ -766,7 +766,7 @@ def audit_local_deliverable(path: str | pathlib.Path) -> dict[str, Any]:
                     return {"ok": False, "path": str(p), "reason": "corrupt_or_empty_zip"}
                 if ext == ".docx":
                     try:
-                        check_main_part(zf, ext)
+                        check_office_package(zf, ext)
                     except (ValueError, ET.ParseError) as exc:
                         return {"ok": False, "path": str(p), "reason": f"invalid_docx:{exc}"}
         except Exception:

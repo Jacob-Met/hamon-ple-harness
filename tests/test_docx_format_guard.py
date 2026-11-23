@@ -102,10 +102,42 @@ class DeliveryPackageChecks(unittest.TestCase):
             archive_checkpoint.verify(submitted, names)
             targets = [{"path": "/filesystem/" + name, "kind": "file"} for name in names]
             targets.append({"path": "/filesystem/submission.zip", "kind": "file", "root_members": names})
-            observed = io.StringIO()
-            with (mock.patch("pathlib.Path", side_effect=lambda path: root / Path(path).name),
-                  mock.patch.object(sys, "argv", ["-c", json.dumps(targets)]),
-                  contextlib.redirect_stdout(observed)):
-                exec(delivery_guard.REMOTE_PROBE, {})
-            self.assertEqual({k: v["state"] for k, v in json.loads(observed.getvalue()).items()},
-                             {item["path"]: "ready" for item in targets})
+            self.assertEqual(self.probe(root, targets), {item["path"]: "ready" for item in targets})
+
+    @staticmethod
+    def probe(root, targets):
+        observed = io.StringIO()
+        with (mock.patch("pathlib.Path", side_effect=lambda path: root / Path(path).name),
+              mock.patch.object(sys, "argv", ["-c", json.dumps(targets)]),
+              contextlib.redirect_stdout(observed)):
+            exec(delivery_guard.REMOTE_PROBE, {})
+        return {k: v["state"] for k, v in json.loads(observed.getvalue()).items()}
+
+    def test_secondary_parts_follow_declared_xml_types_through_eof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book = root / "register.xlsx"
+            submitted = root / "submission.zip"
+            part = "xl/register.xml"
+            sheet_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
+            types = (f'<Override PartName="/{part}" ContentType="application/'
+                     'vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                     f'<Default Extension="data" ContentType="{sheet_type}"/>'
+                     '<Override PartName="/xl/preview.xml" ContentType="application/octet-stream"/>')
+            main = '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>'
+            targets = [{"path": "/filesystem/register.xlsx", "kind": "file"},
+                       {"path": "/filesystem/submission.zip", "kind": "file", "root_members": [book.name]}]
+            for sheet, expected in (("<worksheet/>", "ready"), ("<worksheet>", "invalid")):
+                with self.subTest(expected=expected):
+                    package(book, target=part, part=part, declaration=types, main_xml=main)
+                    with zipfile.ZipFile(book, "a") as inner:
+                        inner.writestr("xl/worksheets/pump.data", sheet)
+                        inner.writestr("xl/preview.xml", b"binary preview")
+                    with zipfile.ZipFile(submitted, "w") as outer:
+                        outer.write(book, book.name)
+                    self.assertEqual(self.probe(root, targets), {x["path"]: expected for x in targets})
+                    if expected == "ready":
+                        archive_checkpoint.verify(submitted, [book.name])
+                    else:
+                        with self.assertRaises(ValueError):
+                            archive_checkpoint.verify(submitted, [book.name])

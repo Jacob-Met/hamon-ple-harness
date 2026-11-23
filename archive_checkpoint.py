@@ -12,7 +12,7 @@ import tempfile
 import zipfile
 from xml.etree.ElementTree import ParseError
 
-from office_package import check_main_part
+from office_package import check_office_package
 
 
 def verify_typed_members(z, names, max_unpacked_bytes=None):
@@ -33,8 +33,8 @@ def verify_typed_members(z, names, max_unpacked_bytes=None):
                     if max_unpacked_bytes < 0:
                         return False
                 try:
-                    check_main_part(doc, suffix)
-                except ParseError as exc:
+                    check_office_package(doc, suffix)
+                except (ParseError, LookupError) as exc:
                     raise ValueError(f"invalid Office XML in {name}") from exc
                 if doc.testzip():
                     raise ValueError(f"invalid Office document {name}")
