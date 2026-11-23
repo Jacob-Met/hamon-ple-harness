@@ -78,3 +78,16 @@ class RcPrechargeEndpoint(unittest.TestCase):
                         dict(target_fraction=1.1),dict(V_bus_V=float("inf"))]:
             with self.subTest(changes=changes),self.assertRaises(ValueError):
                 precharge(**changes)
+
+    def test_full_storage_resolution_even_before_charge_flows(self):
+        voltage = 2.**-537
+        exact = precharge(0.,V_bus_V=voltage,C_uF=2_000_000.,R_precharge_ohm=1.)
+        self.assertTrue(exact["dual_verified"],exact)
+        self.assertEqual(exact["stored_energy_J"],math.ulp(0.))
+        # The full-bus scalar would lose 1/3 relative accuracy while the
+        # zero-time target energy terms all remain exactly zero.
+        try:
+            unresolved = precharge(0.,V_bus_V=voltage,C_uF=3_000_000.,R_precharge_ohm=1.)
+        except ValueError:
+            return
+        self.assertFalse(unresolved["dual_verified"],unresolved)
