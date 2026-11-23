@@ -340,7 +340,8 @@ def _axis2_frame(entities: Dict[int, Tuple[str, List[str]]], aid: Optional[int],
     return origin, x_ax, y_ax, z_ax
 
 
-def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, density_kg_m3: float) -> Dict[str, Any]:
+def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, density_kg_m3: float,
+                                  *, require_connected: bool = False) -> Dict[str, Any]:
     # Form edge differences and signed tetrahedra in the body's coordinate scale.
     low, high = vertices.min(axis=0), vertices.max(axis=0)
     reference = low + 0.5 * (high - low)
@@ -352,7 +353,16 @@ def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, densi
     edge_counts: Dict[Tuple[int, int], int] = {}
     directed = set()
     manifold = True
-    for tri in qfaces:
+    parents = list(range(len(qfaces)))
+    edge_faces = {}
+
+    def root(index):
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    for index, tri in enumerate(qfaces):
         a, b, c = int(tri[0]), int(tri[1]), int(tri[2])
         if a == b or b == c or c == a:
             manifold = False
@@ -362,6 +372,11 @@ def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, densi
             directed.add((u, w))
             k = (u, w) if u < w else (w, u)
             edge_counts[k] = edge_counts.get(k, 0) + 1
+            if require_connected:
+                if k in edge_faces:
+                    parents[root(index)] = root(edge_faces[k])
+                else:
+                    edge_faces[k] = index
     watertight = manifold and bool(edge_counts) and all(cnt == 2 for cnt in edge_counts.values())
     edge1, edge2 = v1 - v0, v2 - v0
     area_vectors = 0.5 * np.cross(edge1, edge2)
@@ -378,6 +393,12 @@ def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, densi
     }
     if not watertight or not area_residual <= area_tolerance:
         return {**diagnostics, "reason": "Mesh lacks consistently paired edges or balanced oriented surface area"}
+
+    if require_connected:
+        components = len({root(index) for index in range(len(qfaces))})
+        diagnostics["connected_component_count"] = components
+        if components != 1:
+            return {**diagnostics, "reason": "Declared STEP shell has disconnected surface components"}
 
     dets = np.einsum("ij,ij->i", np.cross(v0, v1), v2)
     signed_vol = float(np.sum(dets) / 6.0)
@@ -733,6 +754,93 @@ def _step_face_region(boundaries):
     return vertices, np.asarray(faces, dtype=np.int32)
 
 
+def _step_topology_refs(token, context):
+    """Read every selected member; unsupported tokens cannot disappear."""
+    if not (token.startswith("(") and token.endswith(")")):
+        raise ValueError(f"STEP {context} requires a reference aggregate")
+    result = [_ref_id(value) for value in _split_step_top_args(token[1:-1])]
+    if not result or any(value is None for value in result) or len(set(result)) != len(result):
+        raise ValueError(f"STEP {context} has missing, malformed or repeated references")
+    return result
+
+
+def _step_solid_faces(entities, selector):
+    """Resolve one solid definition and its complete oriented shell topology."""
+    solid_kinds = {"MANIFOLD_SOLID_BREP", "FACETED_BREP", "BREP_WITH_VOIDS"}
+    roots = [eid for eid, (kind, _) in entities.items() if kind in solid_kinds]
+    if selector is None:
+        construction = {"CSG_SOLID", "BOOLEAN_RESULT", "BOOLEAN_CLIPPING_RESULT", "SOLID_REPLICA"}
+        if any(kind in construction for kind, _ in entities.values()):
+            raise ValueError("STEP CSG/Boolean construction is unsupported; select a BRep definition explicitly")
+        if roots:
+            if any(kind.endswith("_SOLID") for kind, _ in entities.values()):
+                raise ValueError("STEP has additional solid definitions; select a BRep explicitly")
+            for kind, values in entities.values():
+                if kind == "SHAPE_REPRESENTATION" or kind.endswith("_SHAPE_REPRESENTATION"):
+                    if len(values) != 3:
+                        raise ValueError("STEP shape representation is unsupported or incomplete")
+                    for item in _step_topology_refs(values[1], "represented items"):
+                        item_kind = entities.get(item, (None, []))[0]
+                        if item not in roots and item_kind != "AXIS2_PLACEMENT_3D":
+                            raise ValueError("STEP representation contains unsupported material; select a BRep explicitly")
+    if selector is not None:
+        if isinstance(selector, bool) or not isinstance(selector, int) or selector not in roots:
+            raise ValueError("STEP solid_entity_id must identify a declared solid definition")
+        selected = selector
+    elif not roots:
+        if any(kind in {"FACE", "FACE_SURFACE", "ADVANCED_FACE", "CLOSED_SHELL", "OPEN_SHELL",
+                        "ORIENTED_FACE", "ORIENTED_CLOSED_SHELL"} for kind, _ in entities.values()):
+            raise ValueError("STEP face topology has no supported declared solid")
+        return None, None
+    else:
+        if len(roots) != 1:
+            raise ValueError("STEP has multiple solid definitions; specify solid_entity_id")
+        assembly = {"MAPPED_ITEM", "SOLID_REPLICA", "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION",
+                    "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION"}
+        if any(kind in assembly for kind, _ in entities.values()):
+            raise ValueError("STEP assembly placement is unsupported; select a solid definition explicitly")
+        selected = roots[0]
+    kind, args = entities[selected]
+    if kind == "BREP_WITH_VOIDS":
+        raise ValueError("STEP enclosed void shells require containment qualification and are unsupported")
+    if len(args) != 2:
+        raise ValueError("STEP solid requires one complete outer shell reference")
+
+    seen = set()
+
+    def face(eid, forward, path):
+        if eid is None or eid not in entities or eid in path:
+            raise ValueError("STEP shell references a missing or cyclic face")
+        kind, values = entities[eid]
+        if kind == "ORIENTED_FACE":
+            if len(values) != 4 or values[1] != "*" or values[3] not in (".T.", ".F."):
+                raise ValueError("STEP oriented face requires an element and sense")
+            return face(_ref_id(values[2]), forward == (values[3] == ".T."), path | {eid})
+        expected = 2 if kind == "FACE" else 4
+        if kind not in {"FACE", "FACE_SURFACE", "ADVANCED_FACE"} or len(values) != expected:
+            raise ValueError("STEP shell includes an unsupported or incomplete face")
+        if kind != "FACE" and values[3] not in (".T.", ".F."):
+            raise ValueError("STEP face has an invalid surface sense")
+        if eid in seen:
+            raise ValueError("STEP shell references the same underlying face more than once")
+        seen.add(eid)
+        return [(eid, forward)]
+
+    def shell(eid, forward, path):
+        if eid is None or eid not in entities or eid in path:
+            raise ValueError("STEP solid references a missing or cyclic shell")
+        kind, values = entities[eid]
+        if kind == "ORIENTED_CLOSED_SHELL":
+            if len(values) != 4 or values[1] != "*" or values[3] not in (".T.", ".F."):
+                raise ValueError("STEP oriented shell requires an element and sense")
+            return shell(_ref_id(values[2]), forward == (values[3] == ".T."), path | {eid})
+        if kind != "CLOSED_SHELL" or len(values) != 2:
+            raise ValueError("STEP solid requires a declared closed shell")
+        return [entry for fid in _step_topology_refs(values[1], "shell faces") for entry in face(fid, forward, set())]
+
+    return selected, shell(_ref_id(args[1]), True, set())
+
+
 def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
     step_text = spec.get("step_text") or ""
     if not step_text and spec.get("file_b64"):
@@ -814,13 +922,15 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
                 raise ValueError(f"STEP boundary vertices disagree with the declared {kind}")
         return exact
 
-    for eid, (et, args) in entities.items():
-        if et in ("ADVANCED_FACE", "FACE_SURFACE") and len(args) >= 2:
+    selected_solid, face_occurrences = _step_solid_faces(entities, spec.get("solid_entity_id"))
+    for eid, forward in face_occurrences or ():
+        et, args = entities[eid]
+        if et in ("FACE", "ADVANCED_FACE", "FACE_SURFACE") and len(args) >= 2:
             boundaries = []
             if len(args) >= 3 and args[2] != "$":
                 if entities.get(_ref_id(args[2]), (None, []))[0] != "PLANE":
                     raise ValueError("STEP face requires a planar surface; curved faces cannot use boundary chords")
-            for bid in _ref_list(args[1]):
+            for bid in _step_topology_refs(args[1], "face bounds"):
                 if bid not in entities:
                     raise ValueError("STEP face references a missing boundary")
                 bet, bargs = entities[bid]
@@ -832,14 +942,16 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
                     raise ValueError("STEP face references a missing loop")
                 let, largs = entities[lid]
                 lpts: List[np.ndarray] = []
-                if let == "POLY_LOOP" and len(largs) >= 2:
-                    pids = _ref_list(largs[1])
+                if let == "POLY_LOOP" and len(largs) == 2:
+                    pids = _step_topology_refs(largs[1], "polygon loop")
                     if any(pid not in pts for pid in pids):
                         raise ValueError("STEP polygon loop references a missing point")
                     lpts = [pts[pid] for pid in pids]
-                elif let == "EDGE_LOOP" and len(largs) >= 2:
+                elif let == "EDGE_LOOP" and len(largs) == 2:
+                    if et == "FACE" or len(args) < 3 or args[2] == "$":
+                        raise ValueError("STEP edge-loop face requires a declared supporting plane")
                     endpoints = []
-                    for oe_id in _ref_list(largs[1]):
+                    for oe_id in _step_topology_refs(largs[1], "edge loop"):
                         oe_kind, oargs = entities.get(oe_id, (None, []))
                         if oe_kind != "ORIENTED_EDGE" or len(oargs) != 5 or oargs[4] not in (".T.", ".F."):
                             raise ValueError("STEP edge loop requires complete oriented edges")
@@ -896,9 +1008,12 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
                 orientation = sum(value*direction for value, direction in zip(cross, axis))
                 if orientation == 0 or (orientation > 0) != (args[3] == ".T."):
                     raise ValueError("STEP face winding disagrees with the declared surface sense")
+            if not forward:
+                face_triangles = face_triangles[:, [0, 2, 1]]
             _append(face_vertices, face_triangles)
 
-    for eid, (et, args) in entities.items():
+    analytic_entities = entities.items() if face_occurrences is None else ()
+    for eid, (et, args) in analytic_entities:
         if et == "BLOCK" and len(args) >= 5:
             origin, x_ax, y_ax, z_ax = _axis2_frame(entities, _ref_id(args[1]), unit_scale)
             dx, dy, dz = float(args[2]) * unit_scale, float(args[3]) * unit_scale, float(args[4]) * unit_scale
@@ -917,8 +1032,12 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
 
     if not all_verts:
         raise ValueError("No supported 3D solid entities found in STEP input")
-    props = _compute_mesh_mass_properties(np.vstack(all_verts), np.vstack(all_faces), density)
-    return _cad_report(props, analytic_vol, unit_scale, len(entities))
+    props = _compute_mesh_mass_properties(np.vstack(all_verts), np.vstack(all_faces), density,
+                                          require_connected=face_occurrences is not None)
+    report = _cad_report(props, analytic_vol, unit_scale, len(entities))
+    if selected_solid is not None:
+        report["selected_solid_entity_id"] = selected_solid
+    return report
 
 
 def _cad_report(props, analytic_vol, unit_scale, entity_count):
