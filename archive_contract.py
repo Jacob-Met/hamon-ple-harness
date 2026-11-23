@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import secrets
 import shlex
+from time import monotonic
 import zipfile
 
 from taskbridge import Cancelled
@@ -148,9 +149,11 @@ def declared_members(instruction, targets):
     return member_names(instruction)
 
 
-async def provision(session, targets):
+async def provision(session, targets, *, deadline: float | None = None):
     names = declared_members(getattr(session, "instruction", ""), targets)
     if not names:
+        return None
+    if deadline is not None and deadline <= monotonic():
         return None
     tag = secrets.token_hex(8)
     helper, stage = f"/tmp/ple-archive-{tag}.pyz", f"/tmp/ple-members-{tag}"
@@ -160,7 +163,10 @@ async def provision(session, targets):
         bundle.write(Path(__file__).with_name("office_package.py"), "office_package.py")
     body = buffer.getvalue()
     try:
-        if await asyncio.wait_for(session.write_file(helper, body), 12) != len(body):
+        timeout = 12.0 if deadline is None else min(12.0, deadline - monotonic())
+        if timeout <= 0:
+            return None
+        if await asyncio.wait_for(session.write_file(helper, body), timeout) != len(body):
             return None
     except Cancelled:
         raise

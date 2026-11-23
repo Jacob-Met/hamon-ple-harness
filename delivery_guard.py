@@ -14,6 +14,7 @@ import json
 import posixpath
 import re
 import shlex
+from time import monotonic
 from typing import Any
 
 import archive_contract
@@ -237,7 +238,8 @@ print(json.dumps(result,separators=(",",":")))
 '''
 
 
-async def snapshot(session: Any, targets: list[dict[str, str]]) -> dict | None:
+async def snapshot(session: Any, targets: list[dict[str, str]], *,
+                   deadline: float | None = None) -> dict | None:
     """One bounded, read-only remote observation; None means unavailable."""
     if not targets:
         return {}
@@ -246,7 +248,17 @@ async def snapshot(session: Any, targets: list[dict[str, str]]) -> dict | None:
     argv = shlex.quote(json.dumps(probe_targets, separators=(",",":")))
     cmd = "python3 -c " + shlex.quote(REMOTE_PROBE) + " " + argv
     try:
-        reply = await asyncio.wait_for(session.exec(cmd, timeout_sec=25), timeout=29)
+        execution_seconds, wait_seconds = 25, 29.0
+        if deadline is not None:
+            remaining = deadline - monotonic()
+            # Taskbridge clamps remote exec limits to at least one second.
+            if remaining < 1:
+                return None
+            execution_seconds = min(execution_seconds, int(remaining))
+            wait_seconds = min(wait_seconds, remaining)
+        reply = await asyncio.wait_for(
+            session.exec(cmd, timeout_sec=execution_seconds), timeout=wait_seconds
+        )
         if reply.get("timed_out") or reply.get("truncated") or reply.get("exit_code") != 0:
             return None
         data = json.loads(reply.get("output") or "")

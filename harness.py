@@ -39,6 +39,7 @@ import os
 import pathlib
 import subprocess
 import tempfile
+from time import monotonic
 from typing import Any
 
 import taskbridge
@@ -59,6 +60,8 @@ STOP_BEFORE_SEC = 90
 # time_share caps this reserve at one quarter of the remaining task time.
 DELIVERY_RESERVE_SEC = 30 * 60
 MIN_DELIVERY_RUN_SEC = 60
+STARTUP_OBSERVATION_SECONDS = 29
+STARTUP_TASK_RESERVE_SECONDS = 12
 CATALOG_TIMEOUT_SEC = 30
 # Request features the Google Cloud route for Claude refuses. pi leaves them
 # out, and the Anthropic API works without them too.
@@ -359,17 +362,30 @@ async def solve(session: taskbridge.Session) -> str:
       delivery_targets = delivery_guard.extract_targets(
           session.instruction, session.workdir
       )
-      before_delivery = await delivery_guard.snapshot(session, delivery_targets)
+      # Share one observation allowance before the participant starts. Later
+      # delivery verification retains its own existing per-operation limits.
+      observation_start = monotonic()
+      observation_budget = STARTUP_OBSERVATION_SECONDS
+      left = session.time_left()
+      if left is not None:
+        observation_budget = min(observation_budget, max(0, left - STARTUP_TASK_RESERVE_SECONDS))
+      observation_deadline = observation_start + observation_budget
+      before_delivery = await delivery_guard.snapshot(
+          session, delivery_targets, deadline=observation_deadline
+      )
       checked_delivery = bool(delivery_targets) and before_delivery is not None
-      archive_plan = await archive_contract.provision(session, delivery_targets) if checked_delivery else None
+      archive_plan = await archive_contract.provision(
+          session, delivery_targets, deadline=observation_deadline
+      ) if checked_delivery else None
       session_dir = pathlib.Path(scratch) / "delivery-session"
       session_args = ["--session-dir", str(session_dir)]
       # A generator written during this task can deterministically finish an
       # exact requested artifact; inherited unchanged scripts are never run.
       materialize_candidates = delivery_materialize.candidates(delivery_targets)
       before_generators = await delivery_guard.snapshot(
-          session, delivery_materialize.snapshot_targets(materialize_candidates)
-      )
+          session, delivery_materialize.snapshot_targets(materialize_candidates),
+          deadline=observation_deadline,
+      ) if checked_delivery else None
       delivery_note = (
           "\n\nOUTPUT DELIVERY CONTRACT (literal destinations from the instruction):\n"
           + "\n".join("  " + item["path"] for item in delivery_targets)
