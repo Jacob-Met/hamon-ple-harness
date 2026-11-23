@@ -139,8 +139,21 @@ def _outline_cycles(records):
 
 def _contour_domain(ordered, *, removed=False):
     """Enclose removed material, or inset retained material, at validated quarters."""
-    if removed and sum(bool(row["curve"]) for row in ordered) > 1:
-        raise ValueError("inner layer 20 loops support at most one isolated tangent quarter")
+    curved = [row for row in ordered if row["curve"]]
+    if removed and len(curved) > 1:
+        # The supported multi-arc opening has four equal convex quarters and
+        # four straight tangent bridges. The contour checks below establish
+        # the joins, winding, and isolation of their local corner squares.
+        squared_chords = {(r["b"][0]-r["a"][0])**2 + (r["b"][1]-r["a"][1])**2
+                        for r in curved}
+        if (len(ordered) != 8 or len(curved) != 4 or len(squared_chords) != 1
+                or len({r["curve"] for r in curved}) != 1):
+            raise ValueError("multi-quarter inner contour must be a simple rounded rectangle")
+        guard2 = (4 * Fraction(_GUARD))**2
+        for row in ordered:
+            dx, dy = row["b"][0]-row["a"][0], row["b"][1]-row["a"][1]
+            if not row["curve"] and dx*dx + dy*dy <= guard2:
+                raise ValueError("rounded opening has unresolved corner separation")
     start = ordered[0]["a"]
 
     def sub(a, b):
@@ -195,6 +208,8 @@ def _contour_domain(ordered, *, removed=False):
     for index, (_, _, _, _, square) in corners.items():
         row = ordered[index]
         if row["curve"]*winding < 0:
+            if removed and len(curved) > 1:
+                raise ValueError("rounded opening has a reflex corner")
             if sharp.intersection(square).area > 0:
                 raise ValueError("reflex layer 20 corner box intersects the board interior")
             reflex[index] = square
@@ -422,8 +437,11 @@ def nominal_board_domain(records):
             if removed.distance(other) <= 2 * _GUARD or not _certified_hole_separation(inner_rows[0], rows):
                 raise ValueError("layer 20 holes intersect, nest, touch, or have unresolved separation")
         if cut_info["quarter_count"]:
-            curve = next(row for row in rows if row["curve"])
-            cut_info["quarter_source"] = list(curve["source"])
+            sources = [list(row["source"]) for row in rows if row["curve"]]
+            if len(sources) == 1:
+                cut_info["quarter_source"] = sources[0]
+            else:
+                cut_info["quarter_sources"] = sources
         cutouts.append((removed, cut_info))
 
     removed = cutouts[0][0] if len(cutouts) == 1 else unary_union([geometry for geometry, _ in cutouts])
@@ -438,8 +456,12 @@ def nominal_board_domain(records):
         hole_model = "outer_outline_with_one_straight_dimension_hole"
         if hole_info["quarter_count"]:
             hole_model = "outer_outline_with_one_tangent_quarter_dimension_hole"
+            if hole_info["quarter_count"] == 1:
+                info = dict(info, hole_quarter_source=hole_info["quarter_source"])
+            else:
+                hole_model = "outer_outline_with_rounded_rectangle_dimension_hole"
+                info = dict(info, hole_quarter_sources=hole_info["quarter_sources"])
             info = dict(info, hole_quarter_count=hole_info["quarter_count"],
-                        hole_quarter_source=hole_info["quarter_source"],
                         hole_arc_error_upper_bound_nm=hole_info["arc_sagitta_upper_bound_nm"],
                         removed_area_upper_bound_mm2=hole_info["removed_area_upper_bound_mm2"])
     else:
