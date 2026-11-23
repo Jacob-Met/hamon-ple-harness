@@ -76,3 +76,24 @@ class OpposedRankineLoads(unittest.TestCase):
         self.assertTrue(out["conservation_verified"], out)
         self.assertTrue(math.isclose(out["thrust_N_m"], float(force), rel_tol=1e-14))
         self.assertTrue(math.isclose(out["moment_Nm_m"], float(moment), rel_tol=1e-14))
+
+    def test_water_boundary_uses_the_admitted_dry_profile(self):
+        # The exact binary64 values for .1 and .4 add to slightly more than
+        # .5, but the public toe and water table coincide at the same depth.
+        for table in (.5, 1.):
+            layers = [{"thickness_m": h, "gamma_above_water_N_m3": 18000, "phi_deg": 0}
+                      for h in (.1, .4)]
+            out = verify_rankine_layers({"pressure_state": "active", "layers": layers,
+                                        "front_layers": layers, "water_table_depth_m": table,
+                                        "front_water_table_depth_m": table})
+            self.assertTrue(out["conservation_verified"], out)
+            self.assertEqual(out["resultant_kind"], "balanced")
+
+    def test_unrepresentable_nonzero_load_has_no_balanced_certificate(self):
+        rows = column([.25], 18000, 9000)
+        for rear, front in ((math.ulp(0.), 0.), (0., math.ulp(0.))):
+            out = verify_rankine_layers({"pressure_state": "active", "layers": rows,
+                                        "front_layers": rows, "surcharge_Pa": rear,
+                                        "front_surcharge_Pa": front})
+            self.assertFalse(out["conservation_verified"], out)
+            self.assertIn("below the representable range", out["reason"])

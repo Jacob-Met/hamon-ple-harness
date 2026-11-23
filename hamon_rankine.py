@@ -235,7 +235,7 @@ def _integrate_face(spec, grade=0.):
     return result
 
 
-def _resolve_opposed_loads(spec):
+def _resolve_opposed_loads(spec, rear_profile, front_profile):
     """Integrate opposed force and moment contributions before rounding each face."""
     from sympy import Rational, S, pi, tan
     from sympy.core.evalf import PrecisionExhausted
@@ -243,10 +243,9 @@ def _resolve_opposed_loads(spec):
     def exact(value):
         return Rational(float(value))
 
-    def thickness(layers):
-        return sum(exact(row["thickness_m"]) for row in layers)
-
-    height = thickness(spec["layers"])
+    # Use the validated public interface coordinates on both faces. A water
+    # table coincident with a published layer boundary has no wet sliver.
+    height = exact(rear_profile[-1]["bottom_m"])
     gamma_water = exact(spec.get("gamma_water_N_m3", 9810))
     rear_water = exact(spec["water_table_depth_m"]) if "water_table_depth_m" in spec else height
     front_water = exact(spec["front_water_table_depth_m"]) if "front_water_table_depth_m" in spec else height
@@ -254,36 +253,37 @@ def _resolve_opposed_loads(spec):
     # subtracting opposed loads. A fictitious subdivision cannot introduce
     # a jump in stress or create a force or couple in a balanced diagram.
     force, moment = {}, {}
-    faces = [(spec["layers"], S.Zero, spec.get("surcharge_Pa", 0),
+    faces = [(spec["layers"], rear_profile, spec.get("surcharge_Pa", 0),
               rear_water, spec["pressure_state"] == "passive", 1)]
-    if "front_layers" in spec:
-        front = spec["front_layers"]
-        faces.append((front, height - thickness(front), spec.get("front_surcharge_Pa", 0),
+    if front_profile:
+        faces.append((spec["front_layers"], front_profile, spec.get("front_surcharge_Pa", 0),
                       front_water, spec["pressure_state"] == "active", -1))
-    for layers, top, surcharge, water, passive, sign in faces:
+    for layers, profile, surcharge, water, passive, sign in faces:
         stress = exact(surcharge)
-        for row in layers:
+        for section in profile:
+            row = layers[section["layer"]]
+            top, bottom = exact(section["top_m"]), exact(section["bottom_m"])
             coefficient = (exact(row["phi_deg"]), passive)
-            end = top + exact(row["thickness_m"])
-            for bottom in ([water, end] if top < water < end else [end]):
-                if top < water:
-                    gamma = exact(row["gamma_above_water_N_m3"])
-                elif "gamma_submerged_N_m3" in row:
-                    gamma = exact(row["gamma_submerged_N_m3"])
-                else:
-                    gamma = exact(row["gamma_saturated_N_m3"]) - gamma_water
-                dz = bottom - top
-                change = gamma * dz
-                area = dz * (stress + change / 2)
-                toe_moment = area * (height-bottom) + dz**2 * (stress/2 + change/6)
-                force[coefficient] = force.get(coefficient, 0) + sign * area
-                moment[coefficient] = moment.get(coefficient, 0) + sign * toe_moment
-                stress += change
-                top = bottom
+            if top < water:
+                gamma = exact(row["gamma_above_water_N_m3"])
+            elif "gamma_submerged_N_m3" in row:
+                gamma = exact(row["gamma_submerged_N_m3"])
+            else:
+                gamma = exact(row["gamma_saturated_N_m3"]) - gamma_water
+            dz = bottom - top
+            change = gamma * dz
+            area = dz * (stress + change / 2)
+            toe_moment = area * (height-bottom) + dz**2 * (stress/2 + change/6)
+            force[coefficient] = force.get(coefficient, 0) + sign * area
+            moment[coefficient] = moment.get(coefficient, 0) + sign * toe_moment
+            stress += change
 
-    def rounded(value):
+    def rounded(value, resultant):
         try:
-            return float(value.evalf(25, maxn=768, strict=True))
+            number = float(value.evalf(25, maxn=768, strict=True))
+            if resultant and number == 0 and value.is_zero is not True:
+                raise ValueError("Nonzero Rankine resultant is below the representable range")
+            return number
         except PrecisionExhausted as exc:
             raise ValueError("Could not resolve opposed Rankine loads") from exc
 
@@ -296,7 +296,7 @@ def _resolve_opposed_loads(spec):
     front_depth = max(S.Zero, height - front_water)
     water_force = gamma_water * (rear_depth**2 - front_depth**2) / 2
     water_moment = gamma_water * (rear_depth**3 - front_depth**3) / 6
-    return {key: rounded(value) for key, value in (
+    return {key: rounded(value, key in ("thrust_N_m", "moment_Nm_m")) for key, value in (
         ("effective_thrust_N_m", soil_force), ("hydrostatic_thrust_N_m", water_force),
         ("thrust_N_m", soil_force + water_force), ("effective_moment_Nm_m", soil_moment),
         ("hydrostatic_moment_Nm_m", water_moment), ("moment_Nm_m", soil_moment + water_moment))}
@@ -380,8 +380,8 @@ def verify_rankine_layers(spec):
                            abs(rear.get("front_effective_moment_Nm_m", 0.)), abs(rear["hydrostatic_moment_Nm_m"]))
         force_scale = max(map(abs, components))
         guard = math.sqrt(math.ulp(1.))
-        if abs(force) < guard * force_scale or abs(moment) < guard * moment_scale:
-            rear.update(_resolve_opposed_loads(spec))
+        if abs(force) <= guard * force_scale or abs(moment) <= guard * moment_scale:
+            rear.update(_resolve_opposed_loads(spec, rear["profile"], rear.get("front_profile")))
             force, moment = rear["thrust_N_m"], rear["moment_Nm_m"]
         residual = max(rear["dual_solver_rel_residual"],
                        abs(force-quadrature[0])/max(1., *map(abs, components)),
