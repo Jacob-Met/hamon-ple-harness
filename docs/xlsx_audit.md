@@ -12,7 +12,7 @@ column of a literal table. It records the source sheet, source cell, expected
 number and cached number. Only direct cell-reference keys and A1 ranges in
 this workbook qualify. A missing or nonnumeric cache, an ambiguous key before
 the match, or a formula-derived dependency yields `unverified`. Lookup
-counts cover top-level VLOOKUP and HLOOKUP calls. The verifier checks up to
+counts cover top-level VLOOKUP, HLOOKUP and INDEX calls. The verifier checks up to
 256 formulas and 2,048 key cells per formula. Above 100,000 workbook cells it
 keeps the inventory and reports all lookups as unverified.
 
@@ -23,3 +23,13 @@ Shared lookup formulas use their worksheet-local master and declared result rang
 For a top-level numeric `CONVERT(A1,"mm","in")`, `conversion_audit` follows same-sheet and named-sheet references to a numeric literal. It reconstructs each intermediate conversion, including cells with a missing or incorrect saved value. Each dependent formula must declare the unit produced by its predecessor. The result identifies the original worksheet, cell and number of conversions. For example, 1 m converts to 100 cm and back to 1 m even when the workbook has saved 999 and 9.99.
 
 The supported case-sensitive Excel units are `m`, `mm`, `cm`, `km`, `in`, `ft`, `yd`, `g`, `kg`, `lbm`, `sec` and `hr`. The numeric comparison uses relative tolerance 1e-12 and zero absolute tolerance. A wrong numeric cache or a conversion between incompatible dimensions with a numeric cache makes `format-guard` fail. A missing numeric cache leaves that cell's comparison unverified. Cycles, unsupported expressions, unknown units, inconsistent source units, external references and shared or array-derived results also remain unverified. The audit checks up to 256 normal conversion formulas and indexes up to 100,000 workbook cells.
+
+For vertical `INDEX(return_range,MATCH(key_cell,key_range,0))`, the two
+single-column ranges may start at different rows or reside on different
+local sheets. Both must contain the same number of rows. The numeric key,
+all keys through the first exact match, and the selected return cell must
+come from workbook literals. The first duplicate wins. The report identifies
+the selected return cell and compares its numeric value to the cache.
+Approximate or omitted match modes, external references, unknown keys and
+unsupported INDEX forms remain unverified. The ordinary `format-guard`
+rejects a proven cache mismatch.
