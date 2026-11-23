@@ -177,3 +177,84 @@ class EagleSchematicTests(unittest.TestCase):
             words = [{"text": "CLK", "page_bbox_pt": (0, 0, 12, 7)}]
             _word_directions(words, glyphs)
             self.assertNotIn("baseline_direction", words[0])
+
+
+    @staticmethod
+    def _side_supply_course(kind):
+        # Synthetic drawing geometry; no manufacturer fixture coordinates.
+        def arrow(x, y):
+            foot, tip = (x, y + 8), (x, y)
+            return [foot, (x, y + 24)], [[foot, tip], [(x + 4, y + 6), tip],
+                                                 [tip, (x - 4, y + 6)]]
+
+        side = {"text": "+5V", "page_bbox_pt": (3, -2, 13, 13)}
+        side_glyphs = [((10, y), "font") for y in (13, 8, 3)]
+        a, lines_a = arrow(0, 0)
+        b, lines_b = arrow(8, 10.5) if kind == "shared_tip" else arrow(80, 0)
+        words, glyphs = [side], side_glyphs
+        if kind != "shared_tip":
+            words.append({"text": "+5V", "page_bbox_pt": (76, -8, 84, -2)})
+            glyphs += [((x, -2), "font") for x in (76, 79, 82)]
+        wires, lines = [b, a], lines_b + lines_a
+        if kind == "shared_end":
+            wires.append([(10, 15), (10, 1)])
+        elif kind == "two_tip_names":
+            words += [{"text": name, "page_bbox_pt": box}
+                      for name, box in (("VIN", (-4, -8, 4, -2)), ("VCC", (-4, -9, 4, -3)))]
+        elif kind in ("negative_rail", "unoriented_rail"):
+            words.append({"text": "-5V" if kind == "negative_rail" else "VIN",
+                          "page_bbox_pt": (-13, -2, -3, 13)})
+            glyphs += [((-10, y), "different" if kind == "unoriented_rail" and i == 1 else "font")
+                       for i, y in enumerate((13, 8, 3))]
+        elif kind == "missing_seed":
+            lines = lines_a
+            words, glyphs = words[:1], glyphs[:3]
+        elif kind == "incomplete_arrow":
+            lines.pop()
+        return wires, lines, words, glyphs
+
+    def test_supply_side_labels_keep_distinct_printed_occurrences(self):
+        for kind, expected in (("separate", 1), ("shared_tip", 2), ("shared_end", 3)):
+            for turn in range(4):
+                def rotate(point):
+                    x, y = point
+                    for _ in range(turn):
+                        x, y = -y, x
+                    return (x, y)
+
+                wires, lines, words, glyphs = self._side_supply_course(kind)
+                for w in words:
+                    x, y, u, v = w["page_bbox_pt"]
+                    corners = [rotate(p) for p in ((x, y), (u, y), (u, v), (x, v))]
+                    xs, ys = zip(*corners)
+                    w["page_bbox_pt"] = (min(xs), min(ys), max(xs), max(ys))
+                _word_directions(words, [(rotate(p), font) for p, font in glyphs])
+                witnesses = []
+                groups, marks, _ = _graph([[rotate(p) for p in wire] for wire in wires],
+                                          [[rotate(p) for p in line] for line in lines],
+                                          words, wire_end_witnesses=witnesses)
+                with self.subTest(kind=kind, turn=turn):
+                    self.assertEqual(len(set(groups)), expected)
+                    self.assertEqual(sum(m.get("label_placement") == "side" for m in marks),
+                                     int(kind == "separate"))
+                    self.assertFalse(witnesses)
+                    self.assertFalse(any(k.startswith("_") for m in marks for k in m))
+
+    def test_supply_side_labels_reject_missing_or_competing_evidence(self):
+        for kind in ("two_tip_names", "negative_rail", "unoriented_rail",
+                     "missing_seed", "incomplete_arrow"):
+            wires, lines, words, glyphs = self._side_supply_course(kind)
+            _word_directions(words, glyphs)
+            with self.subTest(kind=kind):
+                groups, marks, _ = _graph(wires, lines, words)
+                self.assertEqual(groups, [0, 1])
+                self.assertFalse(any(m.get("label_placement") == "side" for m in marks))
+
+    def test_power_only_baselines_do_not_broaden_legacy_wire_names(self):
+        for name in ("-5V", "+3.3V", "vcc"):
+            words = [{"text": name, "page_bbox_pt": (20, 0, 28, 22)}]
+            _word_directions(words, [((26, 20 - 4 * i), "font") for i in range(len(name))])
+            with self.subTest(name=name):
+                self.assertNotIn("baseline_direction", words[0])
+                self.assertEqual(words[0]["power_baseline_direction"], (0, -1))
+                self.assertEqual(words[0]["power_baseline_origin"], (26, 20))
