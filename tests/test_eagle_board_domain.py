@@ -143,6 +143,56 @@ class BoardDomainTests(unittest.TestCase):
         wrong=rounded_rectangle(1);wrong[-1].set("curve","-90")
         self.assertEqual(self.query(wrong)["contacts"],[])
 
+    def test_rotated_quarters_use_the_local_corner_square(self):
+        def rotate(rows):
+            result = copy.deepcopy(rows)
+            for row in result:
+                for end in ("1", "2"):
+                    x = F(row.get("x" + end))
+                    y = F(row.get("y" + end))
+                    row.set("x" + end, str(float((3*x - 4*y)/5)))
+                    row.set("y" + end, str(float((4*x + 3*y)/5)))
+            return result
+
+        _, drawing = board(rotate(rounded_rectangle(1)))
+        domain, info = nominal_board_domain(dimension_records(drawing))
+        self.assertEqual(info["quarter_count"], 4)
+        self.assertLessEqual(info["arc_sagitta_upper_bound_nm"], 1)
+        # A rounded 4 mm square is the Minkowski sum of [1,3]^2 and
+        # a unit disk. The set is convex, so checking the vertices also
+        # certifies each complete returned edge after the inverse rotation.
+        for u, v in domain.exterior.coords:
+            x = (3*F(u) + 4*F(v))/5
+            y = (-4*F(u) + 3*F(v))/5
+            dx = max(1_000_000-x, 0, x-3_000_000)
+            dy = max(1_000_000-y, 0, y-3_000_000)
+            self.assertLessEqual(dx*dx+dy*dy, 1_000_000**2)
+        inner = Point(52_000, 536_000)
+        self.assertTrue(domain.covers(inner.buffer(90_000)))
+        self.assertFalse(domain.covers(inner.buffer(110_000)))
+
+        corner = [(0,0), (8,0), (8,8), (5,8), (5,5), (4,4), (0,4)]
+        for tip, reason in (("4.5", "intersects the board interior"),
+                            ("5", "unrelated boundary")):
+            # A nonadjacent peninsular boundary enters or just touches
+            # the actual reflex corner square. An edge of the peninsula
+            # also intersects the world-aligned box outside this square.
+            rows = outline(corner + [(0,6), ("4.5",6), ("4.5",tip),
+                                     ("4.75",tip), ("4.75","6.25"),
+                                     ("-0.5","6.25"), (-1,2)])
+            rows[4].set("curve","-90")
+            for variant in (rows, rotate(rows), reverse_rows(rotate(rows))):
+                _, drawing = board(variant)
+                with self.assertRaisesRegex(ValueError, reason):
+                    nominal_board_domain(dimension_records(drawing))
+        rows = outline(corner + [(-1,2)])
+        rows[4].set("curve","-90")
+        rows[3].set("x1","5.001")
+        rows[2].set("x2","5.001")
+        _, drawing = board(rotate(rows))
+        with self.assertRaisesRegex(ValueError, "does not join its straight tangents"):
+            nominal_board_domain(dimension_records(drawing))
+
     def test_same_net_notch_requires_the_real_in_board_detour(self):
         corners=[(-1,-1),(1,-1),(1,1),(.15,1),(.15,-.2),(-.15,-.2),(-.15,1),(-1,1)]
         root,b=board(outline(corners))

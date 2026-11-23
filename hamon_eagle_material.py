@@ -154,14 +154,13 @@ def nominal_board_domain(records):
         a, b, sweep = row["a"], row["b"], row["curve"]
         if sweep:
             if abs(sweep) != 90:
-                raise ValueError("only axis-tangent quarter outlines are supported")
+                raise ValueError("only tangent quarter outlines are supported")
             sign = 1 if sweep > 0 else -1
             dx, dy = sub(b, a)
             center = ((a[0]+b[0]-sign*dy)/2, (a[1]+b[1]+sign*dx)/2)
             u, v = sub(a, center), sub(b, center)
-            if (u[0]*u[1] or v[0]*v[1] or dot(u, v)
-                    or dot(u, u) != dot(v, v) or dot(u, u) == 0):
-                raise ValueError("layer 20 quarter is not axis-tangent")
+            if dot(u, v) or dot(u, u) != dot(v, v) or not dot(u, u):
+                raise ValueError("layer 20 arc is not a circular quarter")
             previous, following = ordered[index-1], ordered[(index+1) % len(ordered)]
             incoming, outgoing = sub(a, previous["a"]), sub(following["b"], b)
             ta, tb = tangent(u, sign), tangent(v, sign)
@@ -170,9 +169,10 @@ def nominal_board_domain(records):
                     or cross(outgoing, tb) or dot(outgoing, tb) <= 0):
                 raise ValueError("layer 20 arc does not join its straight tangents")
             vertex = (a[0]+b[0]-center[0], a[1]+b[1]-center[1])
-            square = box(float(min(center[0], vertex[0])), float(min(center[1], vertex[1])),
-                         float(max(center[0], vertex[0])), float(max(center[1], vertex[1])))
-            corners[index] = (center, u, abs(u[0]+u[1]), vertex, square)
+            # The two radii define the corner's local square at any orientation.
+            # Its world-axis bounding box can include unrelated board edges.
+            square = Polygon([tuple(map(float, p)) for p in (center, a, vertex, b)])
+            corners[index] = (center, u, hypot(*u), vertex, square)
             sharp_points.append(vertex)
         sharp_points.append(b)
     area2 = sum(a[0]*b[1]-a[1]*b[0] for a, b in zip(sharp_points, sharp_points[1:]))
