@@ -391,7 +391,7 @@ async def provision_engineering_cli(session: Any) -> str:
         "\n  python3 /tmp/hamon-engineering-toolkit.py dual-verify spec.json"
         "\n  python3 /tmp/hamon-engineering-toolkit.py dxf-takeoff SOURCE.dxf"
         "\n  python3 /tmp/hamon-engineering-toolkit.py dxf-takeoff SITE.dxf --existing-layer EXISTING --proposed-layer PROPOSED"
-        "\nTERRAIN: paired layers of triangular model-space 3DFACEs with declared INSUNITS."
+        "\nTERRAIN: paired layers of model-space 3DFACE triangles or strictly convex planar quads with declared INSUNITS."
         " Reports cut and fill from the two piecewise-linear surfaces, common plan area"
         " and uncovered areas. Incomplete coverage, same-surface overlaps or unsupported"
         " selected geometry withhold whole-site volumes; an unqualified result exits 3."
