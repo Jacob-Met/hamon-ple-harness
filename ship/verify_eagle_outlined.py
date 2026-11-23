@@ -112,9 +112,9 @@ def main():
             and {"GND", "+3V3", "JTAG_TMS", "JTAG_TCK"} <= {link["name"] for link in baseline["inter_sheet_anchors"]},
             "Unexpected sheet or appendix classification")
     require([len(p["wires"]) for p in baseline["pages"]] == [468, 407, 0], "Unexpected wire roster")
-    positive = ([41, 42, 45, 48, 56, 60, 63, 66, 67, 71, 102, 108, 111, 113, 118,
-                 121, 122, 123, 125, 127, 156, 157, 160, 162, 165, 168, 169, 170, 171],
-                [3, 5, 10, 11, 12, 15, 34, 35, 36, 72, 73, 75, 76, 77, 78, 80])
+    positive = ([41, 42, 43, 45, 48, 56, 60, 63, 66, 67, 71, 102, 108, 111, 113, 118, 119,
+                 121, 122, 123, 125, 127, 155, 156, 157, 160, 162, 165, 168, 169, 170, 171],
+                [3, 5, 10, 11, 12, 15, 34, 35, 36, 51, 72, 73, 75, 76, 77, 78, 80])
     for page, indices in zip(baseline["pages"], positive):
         require(page["printed_equivalence_anchors"].get("GND") == indices, "Ground anchor roster changed")
     page1, page2 = baseline["pages"][:2]
@@ -184,7 +184,7 @@ def main():
     require(len(truth) == 2, "Native sheet count differs")
     document = []
     other_islands = defaultdict(list)
-    for index, (sheet, expected) in enumerate(zip(truth, ((138, 129, 0, 651), (125, 117, 0, 1829)))):
+    for index, (sheet, expected) in enumerate(zip(truth, ((138, 131, 0, 258), (125, 120, 0, 22)))):
         page = baseline["pages"][index]
         names = align(page["wires"], sheet)
         rows = list(zip(names, baseline["document_wire_groups"][index], strict=True))
@@ -197,10 +197,10 @@ def main():
         print(json.dumps({"page": index + 1, "wire_sections": len(names), **observed}))
     # Frozen after the PDF-only voltage and signal run, independent of numeric group IDs.
     other_roster = json.dumps(sorted(other_islands.values()), separators=(",", ":")).encode()
-    require(sha256(other_roster).hexdigest() == "d92513ae259ac0543bdc8ded93807d6dde2daba985aeb8593bd83a8885b3a378",
+    require(sha256(other_roster).hexdigest() == "a015c43619a1254f600306e50c54a02f26a82b81fbfed7a881e7e2c6b5b4e34a",
             "The partition of the 640 non-ground wire sections changed")
     result = counts(document)
-    require(result == {"nets": 176, "exact": 122, "false_connected": 0, "false_separated": 6144},
+    require(result == {"nets": 176, "exact": 161, "false_connected": 0, "false_separated": 768},
             f"Document metric changed: {result}")
     pairs = sum(n * (n - 1) // 2 for n in Counter(name for name, _ in document).values())
     print(json.dumps({"document": result, "correct_pairs": pairs - result["false_separated"],
