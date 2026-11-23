@@ -159,7 +159,12 @@ def _decode_signal_grid(edges, left, baseline, step_x, step_y):
 
 
 def wire_words(wires, segments, pitch):
-    """Read a complete word only when its baseline and pen register to one wire."""
+    """Read complete wire-aligned words without snapping text origins to a grid.
+
+    Baseline, size and pen width identify signal lettering. Its position along
+    a wire is continuous. A word mostly beyond a short wire must instead align
+    with an actual endpoint; an interior grid step is not an attachment.
+    """
     for vertical in (False, True):
         def project(p):
             return (-p[1], p[0]) if vertical else p
@@ -200,19 +205,20 @@ def wire_words(wires, segments, pitch):
                     if before or after:
                         continue
                     overlap = min(end, right) - max(start, left)
-                    if overlap < .60*(end-start) or not 4 <= len(edges) <= 140:
+                    if overlap <= 0 or not 4 <= len(edges) <= 140:
                         continue
                     name = _signal_word(edges, scan_y-.03*pitch, pitch)
                     if name:
                         occurrence = tuple(sorted(tuple(sorted(line)) for line in edges))
-                        # A horizontal label origin can be left- or right-aligned.
+                        # Overhanging text may be left- or right-end aligned.
                         offsets = []
                         if left-.08*pitch < start < right+.08*pitch:
                             offsets.append((start-left)/pitch-.03)
                         if left-.08*pitch < end < right+.08*pitch:
                             offsets.append((right-end)/pitch-.03)
-                        registered = any(abs(v-round(v)) < .025 for v in offsets)
-                        yield index, name, (vertical, occurrence), registered
+                        endpoint = any(abs(v) < .025 for v in offsets)
+                        if overlap >= .60*(end-start) or endpoint:
+                            yield index, name, (vertical, occurrence)
 
 def _fit_voltage(nearby, center, direction, units, name):
     """Compare the entire word and both adjacent-cell margins to the exact font."""

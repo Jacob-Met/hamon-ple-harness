@@ -834,8 +834,8 @@ def _outlined_supplies(paths, wire_ink, pitch, wires, membership):
                     "tip": glyph["tip"], "label_source": "outlined_supply_strokes"}
             evidence.append((index, name, occurrence, mark))
 
-    for index, name, occurrence, registered in outlined.wire_words(wires, signal_strokes, pitch):
-        if (registered and (name == "GND" or not _GROUND_NAME.fullmatch(name))
+    for index, name, occurrence in outlined.wire_words(wires, signal_strokes, pitch):
+        if ((name == "GND" or not _GROUND_NAME.fullmatch(name))
                 and not _POWER_NAME.fullmatch(name)
                 and not re.fullmatch(r"(?:R|C|L|Q|U|J)[0-9]+", name)):
             evidence.append((index, name, occurrence, None))
