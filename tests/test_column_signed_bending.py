@@ -45,6 +45,18 @@ class ColumnSignedBending(unittest.TestCase):
                 self.assertEqual(r["interaction_ratio"], 1.0)
                 self.assertIs(r["passes"], passes)
 
+    def test_customary_bending_quantities_share_the_exact_moment_basis(self):
+        for source, capacity in (("psf*ft3","lbf_ft"), ("ksi*in3","kip_in"),
+                                 ("pcf*ft4","lbf_ft"), ("klf*ft2","kip_ft"),
+                                 ("231*lbf_in","psi*gal")):
+            for sign in (-1,1):
+                exact=solve(0,f"{sign}*({source})",0,Mcx=capacity)
+                over=solve(0,f"{sign}*(1+1e-17)*({capacity})",0,Mcx=source)
+                self.assertEqual(exact["interaction_ratio"], 1.0)
+                self.assertTrue(exact["passes"])
+                self.assertEqual(over["interaction_ratio"], 1.0)
+                self.assertFalse(over["passes"])
+
     def test_available_strengths_are_positive(self):
         for updates in (dict(Pc=-100),dict(Mcx=-100),dict(Mcy=-100),
                         dict(Pc=0),dict(Mcx=0),dict(Mcy=0)):
