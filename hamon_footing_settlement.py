@@ -63,25 +63,62 @@ def _depth_intervals(top, bottom, rectangles):
 
 
 def _yield_intervals(top, bottom, rectangles, yield_increment):
-    """Split at bracketed changes of compression law, including near the surface."""
+    """Isolate compression transitions, including shallow and buried yield pockets.
+
+    For the positive point-load kernel K, z²K''/K = 6-35u+35u² with
+    u=z²/(r²+z²). Thus |K''| <= 6K/z². Near the surface subtract the
+    local tangent sector, whose integral is constant: its difference from
+    the rectangle vanishes inside the nearest nonzero edge distance d.
+    Integrating the same bound over r>=d gives 6z/(d²+z²)^(3/2).
+    """
+    from functools import lru_cache
     from scipy.optimize import brentq
+
+    active = [r for r in rectangles if r[-1] > 0]
+    pressure = math.fsum(r[-1] for r in active)
+    if yield_increment <= 0 or yield_increment >= pressure:
+        yield from _depth_intervals(top, bottom, rectangles)
+        return
+    distance = min(abs(v) for r in active for v in r[:4] if v)
+    # Footprints containing the column shrink monotonically in coordinates
+    # normalized by depth, so their combined stress is nonincreasing.
+    decreasing = all(x0 <= 0 <= x1 and y0 <= 0 <= y1 for x0,x1,y0,y1,_ in active)
+
+    @lru_cache(maxsize=2048)
+    def residual(z):
+        return _depth_stress(active, z, _precise_corner) - yield_increment
+
+    def isolate(a, b, cuts, remaining):
+        fa, fb = residual(a), residual(b)
+        width = b-a
+        # Bound curvature times width² directly to avoid powers of physical depth.
+        rel_surface = (width/distance) * (width/distance) * (b/distance)
+        rel_depth = (width/a) * (width/a) if a else math.inf
+        deviation = .75 * pressure * min(rel_surface, rel_depth)  # M*width²/8
+        if not decreasing:
+            if max(fa, fb) < -deviation or min(fa, fb) > deviation:
+                return
+            # The derivative differs from the secant slope by at most M*width/2.
+            if abs(fb-fa) <= 4*deviation:
+                middle = a+width/2
+                if remaining == 0 or not a < middle < b:
+                    raise ValueError("Cannot resolve a possible buried compression transition")
+                isolate(a, middle, cuts, remaining-1)
+                isolate(middle, b, cuts, remaining-1)
+                return
+        if fa == 0:
+            cuts.add(a)
+        if fb == 0:
+            cuts.add(b)
+        if (fa < 0 < fb) or (fb < 0 < fa):
+            t = brentq(lambda t: residual(a+width*t), 0., 1., xtol=1e-14)
+            cuts.add(a+width*t)
+
     for start, end in _depth_intervals(top, bottom, rectangles):
-        if yield_increment <= 0:
-            yield start, end
-            continue
-        probes = [start, start+(end-start)/2, end]
-        offsets = [_depth_stress(rectangles, z, _precise_corner)-yield_increment for z in probes]
-        cuts = [start, end]
-        for a, b, fa, fb in zip(probes, probes[1:], offsets, offsets[1:]):
-            if fa == 0:
-                cuts.append(a)
-            if (fa < 0 < fb) or (fb < 0 < fa):
-                def residual(t):
-                    return _depth_stress(rectangles, a+(b-a)*t, _precise_corner)-yield_increment
-                root = brentq(residual, 0., 1., xtol=1e-14)
-                cuts.append(a+(b-a)*root)
-        cuts = sorted(set(cuts))
-        yield from zip(cuts, cuts[1:])
+        cuts = {start, end}
+        isolate(start, end, cuts, 48)
+        ordered = sorted(cuts)
+        yield from zip(ordered, ordered[1:])
 
 
 def _gauss_integral(function, nodes, lo=0., hi=1.):
@@ -176,7 +213,7 @@ def verify_finite_layer_settlement(spec):
         proposed = _number(spec, "proposed_settlement_m") if "proposed_settlement_m" in spec else None
         total = data["primary_consolidation_settlement_m"]
         valid = proposed is None or (0 <= proposed <= data["initial_void_height_m"]
-                                     and math.isclose(proposed, total, rel_tol=1e-6, abs_tol=1e-12))
+                                     and math.isclose(proposed, total, rel_tol=1e-6))
         result.update(data, ok=True, conservation_verified=valid)
     except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError) as exc:
         result["reason"] = str(exc)

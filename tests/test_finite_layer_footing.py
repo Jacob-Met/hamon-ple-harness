@@ -106,6 +106,30 @@ class FiniteDepthFootingTests(unittest.TestCase):
         self.assertTrue(out["conservation_verified"], out)
         self.assertAlmostEqual(out["primary_consolidation_settlement_m"]/8.53711478665e-12, 1., places=5)
 
+    def test_buried_yield_has_two_boundaries(self):
+        # The observation column stands 1 m beyond the nearest footing edge.
+        # Direct positive Cartesian pressure attains its interior peak at 2.09075 m.
+        from scipy.integrate import quad
+        from scipy.optimize import brentq
+        threshold = 18966.379138799333
+
+        def pressure(z):
+            def x_slice(x):
+                return quad(lambda y: 3*z**3/(2*math.pi*(x*x+y*y+z*z)**2.5),0,1)[0]
+            return 400000*quad(x_slice,1,3)[0]
+
+        lower = brentq(lambda z: pressure(z)-threshold, 2.08, 2.09075)
+        upper = brentq(lambda z: pressure(z)-threshold, 2.09075, 2.10)
+        coefficient = .32/(1.8*math.log(10))
+        expected = quad(lambda z: coefficient*math.log1p((pressure(z)-threshold)/(75000+threshold)),
+                        lower, upper, epsabs=1e-22)[0]
+        spec = footing(layer(0,8,Cr=0.,sigma_preconsolidation_Pa=75000+threshold),xy=(2,0))
+        out = check(spec)
+        self.assertTrue(out["conservation_verified"], out)
+        self.assertLess(upper-lower, .00101)
+        self.assertAlmostEqual(out["primary_consolidation_settlement_m"]/expected, 1., places=6)
+        self.assertFalse(check({**spec, "proposed_settlement_m":0})["conservation_verified"])
+
     def test_finite_inputs_cannot_be_silently_scalarized(self):
         good = footing(layer(.1,1.1))
         for case in (footing(layer(.1,1,delta_sigma_v_Pa=999)), footing(layer(.1,1,time_s=2)),
