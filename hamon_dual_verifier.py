@@ -2723,6 +2723,19 @@ def _column_quantity(spec: dict[str, Any], field: str, unit: str) -> float:
     raise ValueError(f"{field} must have units compatible with {unit}, got {quantity.dim_list()}")
 
 
+# The H1 equality gate accepts equivalent customary force and moment expressions.
+# Expand compound units in terms of their defined bases before evaluating a ratio.
+_H1_UNIT_DEFINITIONS = {
+    "in2": "inch**2", "in3": "inch**3", "in4": "inch**4",
+    "ft2": "ft**2", "ft3": "ft**3", "ft4": "ft**4",
+    "psi": "lbf/in2", "ksi": "kip/in2", "psf": "lbf/ft2", "ksf": "kip/ft2",
+    "plf": "lbf/ft", "klf": "kip/ft", "pcf": "lbf/ft3", "kcf": "kip/ft3",
+    "lbf_ft": "lbf*ft", "lbf_in": "lbf*inch", "kip_ft": "kip*ft", "kip_in": "kip*inch",
+    "tonf": "2000*lbf", "slug": "lbf*s**2/ft", "gal": "231*in3",
+    "hp": "550*lbf*ft/s", "cfs": "ft3/s", "cfm": "ft3/min_", "gpm": "gal/min_",
+}
+
+
 def _column_exact_quantity(spec: dict[str, Any], field: str, unit: str) -> Fraction:
     """Keep force and moment ratios exact through the H1 branch and capacity checks."""
     _column_quantity(spec, field, unit)
@@ -2737,18 +2750,8 @@ def _column_exact_quantity(spec: dict[str, Any], field: str, unit: str) -> Fract
                 raise ValueError(f"{field} exceeds the supported exact load precision")
             return Fraction(literal)
         if isinstance(node, ast.Name):
-            # Pressure times area is also a force. Preserve the exact customary
-            # definitions when converting between pressure and load units.
-            if node.id in ("psi", "ksi", "psf", "ksf"):
-                force = "kip" if node.id.startswith("k") else "lbf"
-                length = "ft" if node.id.endswith("f") else "inch"
-                return Fraction(_EXACT_SI_SCALES[force][0]) / Fraction(_EXACT_SI_SCALES[length][0])**2
-            if node.id in ("lbf_ft", "lbf_in", "kip_ft", "kip_in"):
-                force, length = node.id.split("_")
-                length = "inch" if length == "in" else length
-                return Fraction(_EXACT_SI_SCALES[force][0]) * Fraction(_EXACT_SI_SCALES[length][0])
-            if node.id == "tonf":
-                return 2000 * Fraction(_EXACT_SI_SCALES["lbf"][0])
+            if node.id in _H1_UNIT_DEFINITIONS:
+                return amount(ast.parse(_H1_UNIT_DEFINITIONS[node.id], mode="eval").body)
             if node.id in _EXACT_SI_SCALES:
                 return Fraction(_EXACT_SI_SCALES[node.id][0])
             return Fraction(str(SI_UNITS[node.id].val))
