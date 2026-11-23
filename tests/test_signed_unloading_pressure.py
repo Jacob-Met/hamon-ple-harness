@@ -39,7 +39,8 @@ def reference_pressures(start, end, observation):
 class SignedUnloadingPressure(unittest.TestCase):
     def test_signed_pressure_and_supplied_claim_at_reversal(self):
         for start, end, time in ((.25, .25, 1), (.125, .125, .375),
-                                 (.125, .375, 1), (.25, .75, .625)):
+                                 (.125, .375, 1), (.25, .75, .625),
+                                 (2**-10, 2**-10, 2**-9), (2**-10, 3*2**-11, 2**-9)):
             for level, expected in reference_pressures(start, end, time):
                 with self.subTest(start=start, end=end, time=time, level=level):
                     spec = {"H_clay_m": 1, "cv_m2_s": 1, "mv_per_Pa": 1e-7,
