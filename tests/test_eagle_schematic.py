@@ -69,6 +69,50 @@ class EagleSchematicTests(unittest.TestCase):
                 shifted[1]["baseline_origin"] = origin
             self.assertEqual(_graph(wires, [], shifted)[0], [0, 1])
 
+    def test_numbered_bank_loose_label_requires_independent_native_evidence(self):
+        # Three rows inside the symbol; only the second has a loose wire.
+        wires = [[(0, 20), (44, 20)], [(0, 60), (30, 60)], [(0, 80), (30, 80)]]
+        box = [(35, 5), (60, 5), (60, 35), (35, 35)]
+        lines = list(zip(box, box[1:] + box[:1]))
+        lines.extend([((44, y), (46, y)) for y in (10, 20, 30)])
+        numbers = [{"text": str(i), "page_bbox_pt": (43, y-2, 45, y+1)}
+                   for i, y in enumerate((10, 20, 30), 1)]
+        labels = [word("SENSE", (0, 17, 14, 24)), word("SENSE", (1, 54, 15, 61)),
+                  word("SENSE", (1, 74, 15, 81))]
+        _word_directions(labels, [((x+i*2, y), "font") for x, y in ((0, 22), (1, 60), (1, 80))
+                                  for i in range(5)])
+        incidental = word("J3", (17, 54, 25, 61))
+
+        def linked(green=wires, red=lines, text=None):
+            evidence = []
+            groups, _, _ = _graph(green, red, text if text is not None else numbers+labels+[incidental],
+                                  wire_end_witnesses=evidence)
+            return groups[0] == groups[1], [e["pin_bank_terminal"] for e in evidence
+                                            if "pin_bank_terminal" in e]
+
+        joined, records = linked()
+        self.assertTrue(joined)
+        self.assertEqual(len(records), 1)
+        self.assertEqual((records[0]["pin"], records[0]["count"]), (2, 3))
+        self.assertEqual(records[0]["incidental_singletons"], ["J3"])
+        negatives = {
+            "open outline": dict(red=lines[1:]),
+            "missing terminal stroke": dict(red=lines[:5]+lines[6:]),
+            "missing pin number": dict(text=numbers[:1]+numbers[2:]+labels),
+            "duplicate pin number": dict(text=numbers+[numbers[1]]+labels),
+            "nonsequential numbering": dict(text=numbers[:1]+[dict(numbers[1], text="7")]+numbers[2:]+labels),
+            "branch crosses terminal": dict(green=wires+[[(44, 17), (44, 23)]]),
+            "single supporting island": dict(text=numbers+labels[:2]),
+            "broken paint run": dict(text=numbers+labels[:2]+[dict(labels[2], glyph_span=(15, 20))]),
+            "every support has a rival": dict(text=numbers+labels+[incidental, word("R4", (17, 74, 25, 81))]),
+            "other occurrence of rival": dict(text=numbers+labels+[incidental, word("J3", (90, 90, 98, 96))]),
+            "competing supply": dict(text=numbers+labels+[word("VCC", (17, 54, 25, 61))]),
+            "free endpoint obstruction": dict(red=lines+[[(-1, 20), (1, 20)]]),
+        }
+        for name, changes in negatives.items():
+            with self.subTest(name=name):
+                self.assertEqual(linked(**changes), (False, []))
+
     def test_wire_end_supply_label_requires_a_physical_same_page_anchor(self):
         wires = [[(0, 10), (30, 10)], [(50, 40), (80, 40)]]
         labels = [word("VCC", (1, 3, 13, 11)), word("VCC", (45, 33, 58, 41))]

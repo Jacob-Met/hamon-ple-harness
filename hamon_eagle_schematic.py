@@ -160,6 +160,7 @@ def _word_directions(words, glyphs):
                 prefix = "" if ordinary_name else "power_"
                 word[prefix + "baseline_direction"] = (dx, dy)
                 word[prefix + "baseline_origin"] = run[0][0]
+                word[prefix + "glyph_span"] = (indices[0], indices[-1] + 1)
                 break
 
 
@@ -214,7 +215,57 @@ def _touches_segment(point, segment, tolerance):
     return math.dist(point, (a[0] + t * dx, a[1] + t * dy)) <= tolerance
 
 
-def _wire_end_labels(wires, roots, endpoints, lines, words, symbol_bounds=()):
+def _numbered_pin_terminals(lines, words, direction):
+    """Index red pin stubs in closed boxes with one complete, numbered pin bank."""
+    vertical = defaultdict(set)
+    horizontal = defaultdict(set)
+    for a, b in lines:
+        (x, y), (u, v) = _label_frame(a, direction), _label_frame(b, direction)
+        if y == v and x != u:
+            horizontal[tuple(sorted((x, u)))].add(y)
+        elif x == u and y != v:
+            vertical[tuple(sorted((y, v)))].add(x)
+    numbers = []
+    for word in words:
+        if not re.fullmatch("[1-9][0-9]{0,2}", word["text"]):
+            continue
+        x, y, u, v = word["page_bbox_pt"]
+        (a, b), (c, d) = _label_frame((x, y), direction), _label_frame((u, v), direction)
+        numbers.append((min(a, c), max(a, c), min(b, d), max(b, d), int(word["text"])))
+    banks = defaultdict(list)
+    for (left, right), edges in horizontal.items():
+        if len(edges) < 2:
+            continue
+        for (top, bottom), sides in vertical.items():
+            if top not in edges or bottom not in edges or left not in sides or right not in sides:
+                continue
+            for (start, stop), ys in horizontal.items():
+                if not left < start < stop < right:
+                    continue
+                rows = sorted(y for y in ys if top < y < bottom)
+                if len(rows) < 3:
+                    continue
+                pitch = (rows[-1] - rows[0]) / (len(rows) - 1)
+                if pitch <= stop - start or any(abs(y - rows[0] - j * pitch) > .12
+                                                for j, y in enumerate(rows)):
+                    continue
+                pins = []
+                for y in rows:
+                    ids = [n for x0, x1, y0, y1, n in numbers
+                           if left < x0 <= start <= x1 < right and y0 <= y <= y1 + .12
+                           and top < y0 < y1 < bottom and y1 - y0 < pitch]
+                    if len(ids) != 1:
+                        break
+                    pins.append(ids[0])
+                consecutive = list(range(1, len(rows) + 1))
+                if pins != consecutive and pins != consecutive[::-1]:
+                    continue
+                for y, pin in zip(rows, pins):
+                    banks[start, y].append((pin, len(rows), left))
+    return banks
+
+
+def _wire_end_labels(wires, roots, endpoints, lines, words, symbol_bounds=(), pin_lines=()):
     """Find collinear native text at an electrically free end of a single green wire."""
     # Only scan ink for endpoints actually overlapped by a qualifying text run.
     # A symbol stroke or a different wire can meet an endpoint at its interior.
@@ -242,6 +293,7 @@ def _wire_end_labels(wires, roots, endpoints, lines, words, symbol_bounds=()):
                 parallel[direction].append((index, min(start, end), max(start, end), y, other_y,
                                             ((start, a), (end, b))))
     candidates = []
+    banks = {}
     for word_index, word in enumerate(words):
         if "baseline_origin" not in word:
             continue
@@ -251,11 +303,31 @@ def _wire_end_labels(wires, roots, endpoints, lines, words, symbol_bounds=()):
         bx, by = _label_frame((u, v), direction)
         left, right = sorted((ax, bx))
         height = abs(by - ay)
-        _, baseline = _label_frame(word["baseline_origin"], direction)
+        origin, baseline = _label_frame(word["baseline_origin"], direction)
         hits, witnesses = set(), []
         for index, start, end, y0, y1, loose in parallel[direction]:
-            if (max(abs(y0 - baseline), abs(y1 - baseline)) > .12
-                    or min(right, end) - max(left, start) < .5 * (right - left)):
+            if min(right, end) - max(left, start) < .5 * (right - left):
+                continue
+            if max(abs(y0 - baseline), abs(y1 - baseline)) > .12:
+                # A manually offset loose label must start at the physical end.
+                # The opposite end must enter the numbered terminal in its box.
+                if not (abs(origin - start) <= .12 and min(ay, by) <= y0 <= max(ay, by)):
+                    continue
+                if direction not in banks:
+                    banks[direction] = _numbered_pin_terminals(pin_lines, words, direction)
+                (_, free_end), (_, pin_end) = sorted(loose)
+                matches = [pin for pin in banks[direction].get(_label_frame(pin_end, direction), ())
+                           if right < pin[2]]
+                if (len(matches) != 1 or not is_free(index, free_end)
+                        or set(endpoints.near(pin_end)) != {index}
+                        or any(i != index and _touches_segment(pin_end, wire, .12)
+                               for i, wire in enumerate(wires))):
+                    continue
+                pin = matches[0]
+                hits.add(roots[index])
+                witnesses.append({"name": word["text"], "wire_index": index, "endpoint": free_end,
+                                  "baseline_origin": word["baseline_origin"], "_word_index": word_index,
+                                  "pin_bank_terminal": {"endpoint": pin_end, "pin": pin[0], "count": pin[1]}})
                 continue
             hits.add(roots[index])
             for pos, point in loose:
@@ -382,6 +454,43 @@ def _side_supply_labels(glyphs, words):
     return candidates
 
 
+def _corroborated_bank_label(witness, root, target, words, anchors, label_words,
+                             word_roots, label_roots, occurrences, glyphs):
+    """Require a contiguous native paint run and independent existing wire anchors."""
+    name = witness["name"]
+    same = [(i, w) for i, w in enumerate(words) if w["text"] == name]
+    if len(same) < 3 or any("glyph_span" not in w for _, w in same):
+        return False
+    same.sort(key=lambda pair: pair[1]["glyph_span"][0])
+    if any(a["glyph_span"][1] != b["glyph_span"][0] for (_, a), (_, b) in zip(same, same[1:])):
+        return False
+    supporting = set()
+    for index, _ in same:
+        if index == witness["_word_index"]:
+            continue
+        if index not in label_words or len(word_roots[index]) != 1:
+            return False
+        supporting.update(word_roots[index])
+    if len(supporting - {root}) < 2 or supporting != anchors.get(name):
+        return False
+    competing = set(label_roots[target]) - {name}
+    if any(_POWER_NAME.fullmatch(other) or _GROUND_NAME.fullmatch(other)
+           or sum(w["text"] == other for w in words) != 1
+           or len(occurrences[other]) != 1 or len(label_roots[target][other]) != 1
+           for other in competing):
+        return False
+    if any(mark[0] != name for mark in glyphs[target]):
+        return False
+    occupied = set().union(*(label_roots[target][other] for other in competing))
+    clean = supporting - occupied
+    if not clean:
+        return False
+    witness["pin_bank_terminal"]["supporting_wire_islands"] = sorted(supporting)
+    witness["pin_bank_terminal"]["text_glyph_spans"] = [w["glyph_span"] for _, w in same]
+    witness["pin_bank_terminal"]["incidental_singletons"] = sorted(competing)
+    return True
+
+
 def _graph(wires, lines, words, *, wire_end_witnesses=None, symbol_obstacles=((), ())):
     groups, endpoints = Groups(len(wires)), Points(.12)
     for i, (a, b) in enumerate(wires):
@@ -406,7 +515,7 @@ def _graph(wires, lines, words, *, wire_end_witnesses=None, symbol_obstacles=(()
     # Snapshot existing groups before adding joins so inference cannot bootstrap.
     extra_lines, symbol_bounds = symbol_obstacles
     clearance_lines = [*lines, *extra_lines] if extra_lines else lines
-    candidates = (_wire_end_labels(wires, roots, endpoints, clearance_lines, words, symbol_bounds)
+    candidates = (_wire_end_labels(wires, roots, endpoints, clearance_lines, words, symbol_bounds, lines)
                   + _side_supply_labels(all_glyphs, words))
     # An ordinary glyph and a proposed wire end can overlap the same printed
     # occurrence. Track its actual island for every role before admitting joins.
@@ -443,12 +552,17 @@ def _graph(wires, lines, words, *, wire_end_witnesses=None, symbol_obstacles=(()
         existing = anchors.get(name)
         if not existing or set(label_roots[groups.root(root)]) != {name}:
             continue
-        if (_GROUND_NAME.fullmatch(name) or _POWER_NAME.fullmatch(name)) and name not in supplies:
-            continue
         target = groups.root(next(iter(existing)))
-        if (set(label_roots[target]) != {name} and
-                not _ground_glyph_precedence(name, [target], glyphs, label_roots, occurrences)):
-            continue
+        if "pin_bank_terminal" in witness:
+            if not _corroborated_bank_label(witness, root, target, words, anchors, label_words,
+                                            word_roots, label_roots, occurrences, glyphs):
+                continue
+        else:
+            if (_GROUND_NAME.fullmatch(name) or _POWER_NAME.fullmatch(name)) and name not in supplies:
+                continue
+            if (set(label_roots[target]) != {name} and
+                    not _ground_glyph_precedence(name, [target], glyphs, label_roots, occurrences)):
+                continue
         if target != groups.root(root):
             accepted.append((root, witness))
     for root, witness in accepted:
