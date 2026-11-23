@@ -1929,6 +1929,31 @@ def _distillation_underwood(z, xd, xb, volatility, quality):
     return n_min, float(1+width*u), uw, vw, float(pinch), max(float(error),float(wire_error),float(law_error))
 
 
+def _fenske_contacts_suffice(stages, alpha, top, bottom):
+    """Can this many whole total-reflux contacts span the specified product odds?"""
+    odds = top * (1 - bottom) / (bottom * (1 - top))
+    if stages <= odds.numerator.bit_length():
+        # This covers every possible equality: alpha's reduced numerator is
+        # at least two, so alpha**stages has at least stages + 1 numerator bits.
+        return alpha**stages >= odds
+
+    # A near-unity volatility can require quadrillions of contacts. Check
+    # the logarithmic inequality with directed intervals, without expanding
+    # those rational powers or rounding the integer count to binary64.
+    from mpmath.ctx_iv import MPIntervalContext
+    interval = MPIntervalContext()
+    for digits in (50, 100, 200, 400):
+        interval.dps = digits
+        log_alpha = interval.ln(interval.mpf(alpha.numerator) / alpha.denominator)
+        log_odds = interval.ln(interval.mpf(odds.numerator) / odds.denominator)
+        difference = stages * log_alpha - log_odds
+        if difference.a >= 0:
+            return True
+        if difference.b < 0:
+            return False
+    return False
+
+
 class _TrayPrecisionError(ArithmeticError):
     pass
 
@@ -2177,7 +2202,7 @@ def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]
             "N_theoretical": float(frac_stages),
             "feed_stage": feed_stage if feed_stage is not None else stages,
             "residual": residual,
-            "verified": bool((one_stage or frac_stages > n_min) and residual < 1e-10),
+            "verified": bool(residual < 1e-10 and _fenske_contacts_suffice(stages, volatility, xd, xb)),
         }
 
     return {"domain": "electrochem_separations", "subkind": subkind, "verified": False, "error": f"unsupported_electrochem_separation:{subkind}"}

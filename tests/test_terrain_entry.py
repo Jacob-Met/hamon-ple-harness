@@ -23,13 +23,13 @@ PROPOSED = [
 ]
 
 
-def drawing(proposed=PROPOSED):
+def drawing(proposed=PROPOSED, existing=EXISTING):
     pairs = [(0, "SECTION"), (2, "HEADER"), (9, "$INSUNITS"),
              (70, 6), (0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES")]
-    for layer, triangles in [("EG", EXISTING), ("FG", proposed)]:
-        for triangle in triangles:
+    for layer, faces in [("EG", existing), ("FG", proposed)]:
+        for face in faces:
             pairs += [(0, "3DFACE"), (8, layer)]
-            for i, point in enumerate([*triangle, triangle[-1]]):
+            for i, point in enumerate(face if len(face) == 4 else [*face, face[-1]]):
                 pairs += [(10 + i, point[0]), (20 + i, point[1]), (30 + i, point[2])]
     pairs += [(0, "ENDSEC"), (0, "EOF")]
     return "".join(f"{code}\n{value}\n" for code, value in pairs).encode()
@@ -72,6 +72,52 @@ class ProvisionedTerrainEntryTests(unittest.TestCase):
         self.assertEqual(reply["net_fill_m3"], 0)
         self.assertEqual(reply["common_area_m2"], 1)
         self.assertEqual(hashlib.sha256(self.source.read_bytes()).hexdigest(), original)
+
+    def test_clockwise_skew_quad_matches_triangles_and_keeps_signed_volumes(self):
+        # Over 0<=x<=2, width is 1+x/2 and proposed minus existing is x-1.
+        # Integrating each sign separately gives 7/12 cut and 11/12 fill.
+        footprint = [(0, 0), (2, 0), (2, 2), (0, 1)]
+        flat = [(x, y, 0) for x, y in footprint]
+        grade = [(x, y, x-1) for x, y in reversed(footprint)]
+        for existing in [[flat], [flat[:3], [flat[0], flat[2], flat[3]]]]:
+            with self.subTest(existing_faces=len(existing)):
+                self.source.write_bytes(drawing([grade], existing))
+                code, reply = self.run_cli("--existing-layer", "EG", "--proposed-layer", "FG")
+                self.assertEqual(code, 0, reply)
+                self.assertEqual(reply["common_area_m2"], 3)
+                self.assertEqual(reply["existing_face_count"], len(existing))
+                self.assertEqual(reply["proposed_face_count"], 1)
+                self.assertAlmostEqual(reply["cut_m3"], 7/12)
+                self.assertAlmostEqual(reply["fill_m3"], 11/12)
+                self.assertAlmostEqual(reply["net_fill_m3"], 1/3)
+
+    def test_fourth_edge_clips_partial_coverage(self):
+        old = [(0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)]
+        new = [(x+1, y, 1) for x, y, _ in old]
+        self.source.write_bytes(drawing([new], [old]))
+        code, reply = self.run_cli("--existing-layer", "EG", "--proposed-layer", "FG")
+        self.assertEqual(code, 3, reply)
+        self.assertEqual(reply["common_area_m2"], 1)
+        self.assertEqual(reply["uncovered_existing_area_m2"], 1)
+        self.assertEqual(reply["uncovered_proposed_area_m2"], 1)
+        self.assertIsNone(reply["fill_m3"])
+
+    def test_ambiguous_quadrilaterals_withhold_volumes(self):
+        a, b, c, d = [(0, 0, 0), (2, 0, 0), (2, 2, 0), (0, 2, 0)]
+        for label, bad in [
+            ("warped", [a, b, c, (0, 2, "0.00000000000000001")]),
+            ("concave", [a, b, (1, 0.5, 0), d]),
+            ("bow tie", [a, c, d, b]),
+            ("collinear fourth edge", [a, b, c, (1, 1, 0)]),
+            ("repeated first corner", [a, b, c, a]),
+        ]:
+            with self.subTest(label=label):
+                self.source.write_bytes(drawing([bad], [[a, b, c, d]]))
+                code, reply = self.run_cli("--existing-layer", "EG", "--proposed-layer", "FG")
+                self.assertEqual(code, 3, reply)
+                self.assertFalse(reply["qualified"])
+                for field in ("cut_m3", "fill_m3", "net_fill_m3"):
+                    self.assertIsNone(reply[field])
 
     def test_partial_surface_keeps_diagnostics_and_withholds_site_total(self):
         self.source.write_bytes(drawing(PROPOSED[:1]))

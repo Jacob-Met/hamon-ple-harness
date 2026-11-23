@@ -15,6 +15,7 @@ from decimal import Decimal, InvalidOperation, getcontext
 import io
 import json
 import math
+import operator
 import pathlib
 import re
 import shutil
@@ -523,16 +524,158 @@ def _verify_lookup(sheet, formula, cached, literals):
     return {"status": "unverified"}
 
 
+_ARITHMETIC_TOKEN = re.compile(
+    rf"{_local_reference('ref')}|(?P<number>(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:E[+-]?[0-9]+)?)"
+    r"|(?P<operator>[()+*/-])|(?P<space>\s+)", re.I | re.ASCII)
+
+
+class _DimensionConflict(ValueError):
+    def __init__(self, key, left, right):
+        super().__init__("incompatible_additive_dimensions")
+        self.key, self.left, self.right = key, left, right
+
+
+# Bare formula numbers can scale a quantity. A bare additive offset carries no
+# declared physical unit; only two independently grounded dimensions can conflict.
+_COEFFICIENT = object()
+
+
+def _arithmetic_dimension(key, op, left, right):
+    if left is None or right is None:
+        return None
+    if left is _COEFFICIENT and right is _COEFFICIENT:
+        return _COEFFICIENT
+    if isinstance(op, (ast.Add, ast.Sub)):
+        if left is _COEFFICIENT or right is _COEFFICIENT:
+            return None
+        if left != right:
+            raise _DimensionConflict(key, left, right)
+        return left
+    left = ZERO if left is _COEFFICIENT else left
+    right = ZERO if right is _COEFFICIENT else right
+    return scaled(left, right) if isinstance(op, ast.Mult) else reduced(left, right)
+
+
+def _arithmetic_audit(producers, literals, converted):
+    """Reconstruct ordinary scalar formulas from numeric literals across worksheets."""
+    results, visiting = {}, set()
+    operations = {ast.Add: operator.add, ast.Sub: operator.sub,
+                  ast.Mult: operator.mul, ast.Div: operator.truediv}
+
+    def cell(key):
+        if key in results:
+            return results[key]
+        if key in converted:
+            return converted[key]
+        if key not in producers:
+            value = literals[key[0]].get(key[1])
+            if value is None:
+                raise ValueError("unsupported_or_missing_dependency")
+            return value, None
+        if key in visiting or len(visiting) >= 40:
+            raise ValueError("cyclic_or_deep_dependency")
+        visiting.add(key)
+        try:
+            value = formula(key, producers[key][0])
+        finally:
+            visiting.remove(key)
+        results[key] = value
+        return value
+
+    def formula(key, expression):
+        sheet = key[0]
+        # Python supplies grouping and precedence; only the scalar AST below is interpreted.
+        tokens, values = [], {}
+        pos = 0
+        while pos < len(expression):
+            token = _ARITHMETIC_TOKEN.match(expression, pos)
+            if token is None or len(tokens) >= 96:
+                raise ValueError("unsupported_or_oversize_formula")
+            pos = token.end()
+            if token["space"]:
+                continue
+            if token["operator"]:
+                tokens.append(token["operator"])
+                continue
+            if token["number"]:
+                value, dimension = float(token["number"]), _COEFFICIENT
+            else:
+                name = token["ref_sheet"] or sheet
+                if name.startswith("'"):
+                    name = name[1:-1].replace("''", "'")
+                sheets = [s for s in literals if s == name or (
+                    s.isascii() and name.isascii() and s.lower() == name.lower())]
+                if len(sheets) != 1:
+                    raise ValueError("unknown_or_ambiguous_worksheet")
+                value, dimension = cell((sheets[0], _address(*_grid_position(token["ref_start"]))))
+            if not math.isfinite(value) or 0 < abs(value) < sys.float_info.min:
+                raise ValueError("unsupported_operand_range")
+            operand = f"v{len(values)}"
+            values[operand] = value, dimension
+            tokens.append(operand)
+
+        def scalar(node):
+            if isinstance(node, ast.Name):
+                return values[node.id]
+            if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+                value, dimension = scalar(node.operand)
+                return (-value if isinstance(node.op, ast.USub) else value), dimension
+            if not isinstance(node, ast.BinOp) or type(node.op) not in operations:
+                raise ValueError("unsupported_arithmetic_operator")
+            left, left_dimension = scalar(node.left)
+            right, right_dimension = scalar(node.right)
+            dimension = _arithmetic_dimension(key, node.op, left_dimension, right_dimension)
+            value = operations[type(node.op)](left, right)
+            if isinstance(node.op, (ast.Add, ast.Sub)) and 0 < max(abs(left), abs(right)):
+                if abs(value) <= 1e-14 * max(abs(left), abs(right)):
+                    raise ValueError("cancellation_sensitive_result")
+            if not math.isfinite(value) or 0 < abs(value) < sys.float_info.min:
+                raise ValueError("unsupported_result_range")
+            return value, dimension
+
+        return scalar(ast.parse(" ".join(tokens), mode="eval").body)
+
+    for key, (_, cached, incompatible_type) in producers.items():
+        record = {"sheet": key[0], "cell": key[1], "cached": cached, "status": "unverified"}
+        try:
+            expected, dimension = cell(key)
+            if isinstance(dimension, tuple):
+                record["si_dimension"] = list(dimension)
+            record["expected"] = expected
+            if incompatible_type:
+                record.update(status="mismatch", cached_type=incompatible_type, reason="nonnumeric_cache")
+            elif cached is None:
+                record["reason"] = "missing_numeric_cache"
+            else:
+                record["status"] = "matched" if math.isclose(cached, expected, rel_tol=1e-12) else "mismatch"
+        except _DimensionConflict as exc:
+            if exc.key == key:
+                record.update(status="dimension_mismatch", reason=str(exc),
+                              left_dimension=list(exc.left), right_dimension=list(exc.right))
+            else:
+                record.update(reason="upstream_dimension_mismatch",
+                              source_sheet=exc.key[0], source_cell=exc.key[1])
+        except (ValueError, SyntaxError, ArithmeticError, RecursionError) as exc:
+            record["reason"] = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+        yield record
+
+
 def xlsx_audit(filename: str):
     """Audit declared worksheet cells and formula caches without evaluating a workbook."""
     manifest = {"file": filename, "kind": "xlsx-formula-audit", "sheets": [], "other_sheets": []}
     literals = {}
     lookups = []
     conversions = []
+    arithmetic = {}
+    arithmetic_total = 0
     conversion_total = lookup_total = indexed = 0
     complete_index = True
     with zipfile.ZipFile(filename) as archive:
         workbook, parts = _xlsx_parts(archive)
+        full_precision = True
+        if workbook:
+            settings = _xlsx_xml(archive, workbook, 2_000_000).find("{*}calcPr")
+            full_precision = settings is None or settings.get("fullPrecision", "1") in ("1", "true")
         manifest["workbook_part"] = workbook
         manifest["discovery"] = "workbook_relationships" if workbook else "standalone_parts"
         if len(parts) > 300:
@@ -556,6 +699,7 @@ def xlsx_audit(filename: str):
             unresolved_shared_followers = 0
             masters = _shared_lookup_masters(root.iterfind(cell_path), ns)
             first_conversion = len(conversions)
+            sheet_arithmetic = {}
             for cell in root.iterfind(cell_path):
                 cells += 1
                 formula = cell.find(ns + "f")
@@ -605,6 +749,19 @@ def xlsx_audit(filename: str):
                         conversion_total += 1
                         if len(conversions) < 256 and len(expression) <= 512 and formula_type == "normal":
                             conversions.append((name, address, expression, _numeric_cell(cell, value)))
+                    if not expression.upper().startswith(("CONVERT(", "VLOOKUP(", "HLOOKUP(", "INDEX(")):
+                        arithmetic_total += 1
+                        if (complete_index and full_precision and formula_type == "normal"
+                                and len(expression) <= 512 and len(arithmetic) + len(sheet_arithmetic) < 256):
+                            # Typed string and Boolean results are physically distinct
+                            # from a missing numeric cache. A date may use another encoding.
+                            typed_cache = None
+                            if value is not None and (typ == "str" or (
+                                    typ in ("s", "b", "e") and value.text is not None)):
+                                typed_cache = typ
+                            if typ == "inlineStr" and cell.find(ns + "is") is not None:
+                                typed_cache = typ
+                            sheet_arithmetic[(name, address)] = (expression, _numeric_cell(cell, value), typed_cache)
                     formulas += 1
                     if value is None:
                         missing += 1
@@ -624,6 +781,7 @@ def xlsx_audit(filename: str):
             if derived_ranges is None:
                 sheet_values.clear()
                 del conversions[first_conversion:]
+                sheet_arithmetic.clear()
             elif derived_ranges and complete_index:
                 def is_derived(address):
                     x, y = _grid_position(address)
@@ -633,12 +791,16 @@ def xlsx_audit(filename: str):
                     for address, numeric in sheet_values.items():
                         if numeric is not None and is_derived(address):
                             sheet_values[address] = None
+                    sheet_arithmetic = {key: row for key, row in sheet_arithmetic.items()
+                                        if not is_derived(key[1])}
                     conversions[first_conversion:] = [
                         row for row in conversions[first_conversion:] if not is_derived(row[1])
                     ]
                 except ValueError:
                     sheet_values.clear()
                     del conversions[first_conversion:]
+                    sheet_arithmetic.clear()
+            arithmetic.update(sheet_arithmetic)
             manifest["sheets"].append({**sheet, "cells": cells, "formulas": formulas,
                                        "formulas_without_cached_values": missing,
                                        "formulas_with_empty_string_cache": empty_strings,
@@ -658,14 +820,28 @@ def xlsx_audit(filename: str):
     manifest["lookup_audit"] = {"counts": counts, "examples": examples}
     counts = {"matched": 0, "mismatch": 0, "dimension_mismatch": 0, "unverified": conversion_total}
     examples = []
+    converted = {}
     if complete_index:
         for result in _conversion_audit(conversions, literals):
+            if "expected" in result:
+                converted[(result["sheet"], result["cell"])] = (
+                    result["expected"], _CONVERT_UNITS[result["to_unit"]].dim)
             if result["status"] != "unverified":
                 counts["unverified"] -= 1
                 counts[result["status"]] += 1
             examples.append(result)
     manifest["conversion_audit"] = {"counts": counts, "examples": examples}
-    manifest["note"] = "Checked lookups use literal cells. Checked conversion chains start at a numeric literal. Other caches can be stale."
+    counts = {"matched": 0, "mismatch": 0, "unverified": arithmetic_total}
+    examples = []
+    if complete_index and full_precision:
+        for record in _arithmetic_audit(arithmetic, literals, converted):
+            if record["status"] != "unverified":
+                counts["unverified"] -= 1
+                counts[record["status"]] = counts.get(record["status"], 0) + 1
+            examples.append(record)
+    manifest["arithmetic_audit"] = {"counts": counts, "examples": examples}
+    manifest["note"] = ("Checked numeric formulas are reconstructed from literal inputs. Explicit conversion units "
+                        "can establish arithmetic dimensions. Unverified caches can be stale.")
     return manifest
 
 
@@ -928,8 +1104,14 @@ def audit_local_deliverable(path: str | pathlib.Path) -> dict[str, Any]:
         mismatches = audit.get("lookup_audit", {}).get("counts", {}).get("mismatch", 0)
         conversion = audit["conversion_audit"]["counts"]
         conversion_errors = conversion["mismatch"] + conversion["dimension_mismatch"]
-        if err_cells > 0 or mismatches > 0 or conversion_errors:
+        arithmetic = audit["arithmetic_audit"]["counts"]
+        dimension_errors = arithmetic.get("dimension_mismatch", 0)
+        if err_cells > 0 or mismatches > 0 or conversion_errors or arithmetic["mismatch"] or dimension_errors:
             detail = f"error_cells={err_cells},lookup_mismatches={mismatches}"
+            if arithmetic["mismatch"]:
+                detail += f",arithmetic_mismatches={arithmetic['mismatch']}"
+            if dimension_errors:
+                detail += f",arithmetic_dimension_mismatches={dimension_errors}"
             if conversion_errors:
                 detail += f",conversion_errors={conversion_errors}"
             return {
@@ -937,6 +1119,10 @@ def audit_local_deliverable(path: str | pathlib.Path) -> dict[str, Any]:
                 "path": str(p),
                 "reason": f"xlsx_errors({detail})",
             }
+        unresolved = {"arithmetic": arithmetic["unverified"], "conversion": conversion["unverified"],
+                      "lookup": audit["lookup_audit"]["counts"]["unverified"]}
+        if any(unresolved.values()):
+            return {"ok": True, "path": str(p), "bytes": sz, "unverified_formula_caches": unresolved}
     elif ext in (".zip", ".docx"):
         try:
             with zipfile.ZipFile(p, "r") as zf:

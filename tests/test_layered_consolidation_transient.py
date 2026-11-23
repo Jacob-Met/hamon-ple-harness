@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from scipy.integrate import quad
-from hamon_layered_consolidation import verify_layered_transient
+from hamon_transient_footing import verify_layered_transient
 from hamon_conservation_cad_verifier import run_router_conservation_cad_verifier
 from hamon_pareto import route_from_intake_prompt
 
@@ -140,3 +140,17 @@ class LayeredConsolidationTests(unittest.TestCase):
             s = column(layer(0,1),layer(1,2,4e-7),proposed_settlement_m=claim)
             asyncio.run(exchange(ROOT,json.dumps(dict(mode="civil_geotech",spec=s)),
                                  "independent settlement: %.10g m" % ref,valid,inspect))
+
+    def test_existing_uniform_history_route_agrees_on_shared_domain(self):
+        from hamon_layered_consolidation import verify_layered_consolidation
+        s = column(layer(0,1),layer(1,2,4e-7))
+        history = dict(calculation="layered_consolidation_1d", time_s=s["time_s"], drainage="single",
+                       load_history=[dict(time_s=0,surcharge_Pa=s["delta_sigma_v_Pa"])],
+                       consolidation_layers=[dict(thickness_m=x["bottom_depth_m"]-x["top_depth_m"],
+                                                  mv_per_Pa=x["mv_per_Pa"],cv_m2_s=x["cv_m2_s"])
+                                             for x in s["hydraulic_layers"]])
+        earlier = verify_layered_consolidation(history)
+        new = verify_layered_transient(s)
+        self.assertTrue(earlier["conservation_verified"], earlier)
+        self.assertTrue(new["conservation_verified"], new)
+        self.assertAlmostEqual(new["settlement_at_time_m"],earlier["settlement_at_time_m"],delta=1e-8)

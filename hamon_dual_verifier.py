@@ -3106,7 +3106,7 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
         result = verify_bearing_capacity(spec, legacy_rectangle=("B_m" in spec or "L_m" in spec))
         return {**result, "kind": kind, "dual_verified": result["conservation_verified"]}
     if kind == "layered_consolidation_transient":
-        from hamon_layered_consolidation import verify_layered_transient
+        from hamon_transient_footing import verify_layered_transient
         result = verify_layered_transient(spec)
         return {**result, "kind": kind, "dual_verified": result["conservation_verified"]}
     if kind == "consolidation_settlement":

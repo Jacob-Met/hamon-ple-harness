@@ -1,4 +1,4 @@
-"""Exact cut/fill over two named layers of model-space triangular DXF faces."""
+"""Exact cut/fill over two named layers of model-space planar DXF faces."""
 from __future__ import annotations
 
 import math
@@ -72,19 +72,27 @@ def _face(groups):
     if coords.keys() != _COORD_CODES:
         raise _Unqualified("terrain 3DFACE needs four explicit complete WCS corners")
     a, b, c, d = (tuple(coords[10+i+10*j] for j in range(3)) for i in range(4))
-    if c != d:
-        raise _Unqualified("terrain 3DFACE is not triangular")
     cross = _orient(a, b, c)
     if not cross:
-        raise _Unqualified("vertical or degenerate terrain triangle")
-    if cross < 0:
-        b, c, cross = c, b, -cross
+        raise _Unqualified("vertical or degenerate terrain face")
     ux, uy, uz = (b[i]-a[i] for i in range(3))
     vx, vy, vz = (c[i]-a[i] for i in range(3))
+    dz_dx = (uz*vy-uy*vz)/cross
+    dz_dy = (ux*vz-uz*vx)/cross
     pts = (a[:2], b[:2], c[:2])
+    if d != c:
+        if d[2] != a[2] + dz_dx*(d[0]-a[0]) + dz_dy*(d[1]-a[1]):
+            raise _Unqualified("nonplanar terrain quadrilateral")
+        pts += (d[:2],)
+        # Strict turns in boundary order also reject bow ties and duplicate XYs.
+        for i in range(1, 4):
+            if _orient(pts[i], pts[(i+1) % 4], pts[(i+2) % 4])*cross <= 0:
+                raise _Unqualified("terrain quadrilateral needs a strictly convex XY boundary")
+    if cross < 0:
+        pts = (pts[0], *reversed(pts[1:]))
     xs, ys = zip(*pts)
-    return _Face(pts, a[2], (uz*vy-uy*vz)/cross, (ux*vz-uz*vx)/cross,
-                 cross/2, min(xs), max(xs), min(ys), max(ys))
+    return _Face(pts, a[2], dz_dx, dz_dy, _integrate(pts),
+                 min(xs), max(xs), min(ys), max(ys))
 
 
 def _records(data):
@@ -168,7 +176,7 @@ def _read(data, names, report):
     if units not in INSUNITS_TO_METERS:
         raise _Unqualified("terrain needs known $INSUNITS")
     if not all(surfaces.values()):
-        raise _Unqualified("each terrain layer needs model-space triangles")
+        raise _Unqualified("each terrain layer needs model-space terrain faces")
     return units, surfaces
 
 
@@ -193,7 +201,7 @@ def _clip(poly, side):
 def _intersection(left, right):
     poly = left.footprint
     for i, a in enumerate(right.footprint):
-        b = right.footprint[(i+1) % 3]
+        b = right.footprint[(i+1) % len(right.footprint)]
         poly = _clip(poly, lambda p: _orient(a, b, p))
     return poly
 
