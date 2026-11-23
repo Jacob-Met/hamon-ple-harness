@@ -122,7 +122,7 @@ def sanitize_scalar_or_json_answer(raw_text: str, expected_format: str = "auto")
 _WAVE8_INPUTS = {
     "pipe_network": (
         "thermal_fluid",
-        "nodes pipes kinematic_viscosity_m2_s",
+        "nodes pipes kinematic_viscosity_m2_s gravity_m_s2",
         "max_mass_residual_m3_s max_energy_residual_m max_nodal_cycle_flow_difference_m3_s",
     ),
     "ac_power_flow": (

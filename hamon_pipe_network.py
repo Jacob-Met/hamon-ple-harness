@@ -198,6 +198,9 @@ def network(spec):
     viscosity = number(spec.get("kinematic_viscosity_m2_s", 1e-6))
     if viscosity <= 0:
         raise ValueError("Kinematic viscosity must be positive")
+    gravity = number(spec.get("gravity_m_s2", 9.80665))
+    if gravity <= 0:
+        raise ValueError("Gravity must be positive")
     index = {name: i for i, name in enumerate(node_ids)}
     incidence = np.zeros((len(nodes), len(pipes)))
     endpoints = [(index[p["from"]], index[p["to"]]) for p in pipes]
@@ -225,7 +228,7 @@ def network(spec):
         raise ValueError(
             "Require positive pipe dimensions, 0 <= roughness < diameter and nonnegative minor losses"
         )
-    law, inverse, re_per_flow = pipe_law(length, diameter, roughness, minor, viscosity)
+    law, inverse, re_per_flow = pipe_law(length, diameter, roughness, minor, viscosity, gravity)
     d = demands[junctions]
     scale = max(float(np.abs(d).sum()), 1e-12)
 
