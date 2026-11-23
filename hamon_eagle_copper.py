@@ -364,7 +364,7 @@ def dimension_records(board):
                     or row.get("style", "continuous") != "continuous"):
                 raise ValueError("unsupported layer 20 outline primitive")
             curve = Decimal(row.get("curve", "0"))
-            if not curve.is_finite() or curve not in (0, -90, 90):
+            if not curve.is_finite() or curve not in (0, -90, 90, -180, 180):
                 raise ValueError("unsupported layer 20 outline sweep")
             points, mirror = [], False
             for suffix in ("1", "2"):

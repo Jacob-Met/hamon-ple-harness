@@ -161,10 +161,71 @@ def _straight_runs(rows):
     return runs
 
 
+def _stadium_domain(ordered, source_rows, removed):
+    """Validate two opposite parallel tangents and their two circular caps exactly."""
+    first = next(i for i, row in enumerate(ordered) if not row["curve"])
+    cycle = ordered[first:] + ordered[:first]
+    second = next(i for i, row in enumerate(cycle[1:], 1) if not row["curve"])
+    sides = cycle[0], cycle[second]
+    caps = cycle[1:second], cycle[second+1:]
+    centers, proof = [], []
+    for side, other, arcs in zip(sides, sides[::-1], caps):
+        dx, dy = (q-p for p, q in zip(side["a"], side["b"]))
+        if (other["a"][0]-other["b"][0], other["a"][1]-other["b"][1]) != (dx, dy):
+            raise ValueError("stadium sides must be equal and opposite")
+        if dx*dx + dy*dy <= (4*_GUARD)**2:
+            raise ValueError("stadium sides have unresolved length")
+        sweeps = [r["curve"] for r in arcs]
+        if sweeps not in ([180], [-180], [90, 90], [-90, -90]):
+            raise ValueError("stadium ends require one semicircle or two equal quarters")
+        a, b = side["b"], other["a"]
+        center = tuple(Fraction(x+y)/2 for x, y in zip(a, b))
+        ux, uy = a[0]-center[0], a[1]-center[1]
+        sign = 1 if sweeps[0] > 0 else -1
+        tx, ty = -sign*uy, sign*ux
+        if dx*ty != dy*tx or dx*tx + dy*ty <= 0:
+            raise ValueError("stadium end does not follow its straight tangent")
+        if len(arcs) == 2 and arcs[0]["b"] != (center[0]+tx, center[1]+ty):
+            raise ValueError("stadium quarters do not share their semicircle center")
+        radius = hypot(ux, uy)
+        if radius <= 4*_GUARD:
+            raise ValueError("stadium radius is unresolved")
+        centers.append(center)
+        proof.append({"arc_sources": [list(r["source"]) for r in arcs],
+                      "center_nm": [str(v) for v in center], "sweeps_deg": sweeps})
+
+    # GEOS buffers the spine with a regular inscribed polygon at each end.
+    # Scaling the radius by sec(half_step) makes each edge a supporting
+    # tangent of the true circle, including across the straight sides.
+    count = max(1, ceil((pi/2)*sqrt(radius/8)))
+    while count <= 4096:
+        half_step = pi/(4*count)
+        error = radius*half_step**2/(2*cos(half_step))
+        if error <= 1:
+            break
+        count += 1
+    else:
+        raise ValueError("stadium exceeds bounded circular approximation")
+    spine = LineString([tuple(map(float, p)) for p in centers])
+    polygon = spine.buffer(radius/cos(half_step) if removed else radius, quad_segs=count)
+    domain = polygon.buffer(_GUARD if removed else -_GUARD, join_style="mitre",
+                            mitre_limit=_MITRE_LIMIT)
+    if domain.is_empty or not domain.is_valid or (removed and not domain.covers(polygon)):
+        raise ValueError("unresolved stadium guard")
+    return domain, {"model": "stadium", "caps": proof,
+                    "sources": [list(row["source"]) for row in source_rows],
+                    "wire_count": len(source_rows), "quarter_count": 0,
+                    "boundary_guard_nm": _GUARD, "arc_sagitta_upper_bound_nm": error,
+                    ("removed_area_upper_bound_mm2" if removed else
+                     "interior_area_lower_bound_mm2"): domain.area/1e12}
+
+
 def _contour_domain(source_rows, *, removed=False):
     """Enclose removed material, or inset retained material, at validated quarters."""
     ordered = _straight_runs(source_rows)
     curved = [row for row in ordered if row["curve"]]
+    if len(ordered) - len(curved) == 2 and 2 <= len(curved) <= 4:
+        return _stadium_domain(ordered, source_rows, removed)
     if removed and len(curved) > 1:
         # The supported multi-arc opening has four equal convex quarters and
         # four straight tangent bridges. The contour checks below establish
@@ -444,7 +505,10 @@ def nominal_board_domain(records):
         raise ValueError("layer 20 outline exceeds the supported edge count")
     cycles = _outline_cycles(records)
     if len(cycles) == 1:
-        return _contour_domain(cycles[0])
+        domain, info = _contour_domain(cycles[0])
+        if info["model"] == "stadium":
+            raise ValueError("stadium supported only as an isolated interior opening")
+        return domain, info
 
     # A qualified outer inset strictly contains the entire inner enclosure.
     # Its area must therefore exceed the inner inset's area. This ordering is
@@ -452,6 +516,9 @@ def nominal_board_domain(records):
     candidates = [(_contour_domain(rows), rows) for rows in cycles]
     candidates.sort(key=lambda candidate: candidate[0][0].area, reverse=True)
     (domain, info), _ = candidates[0]
+    if info["model"] == "stadium" or (len(cycles) > 2 and any(
+            candidate[0][1]["model"] == "stadium" for candidate in candidates)):
+        raise ValueError("stadium supported only as an isolated interior opening")
     cutouts = []
     # Order by physical position so swapping loops of equal area preserves their roles.
     inner_rows = sorted((candidate[1] for candidate in candidates[1:]), key=lambda rows: rows[0]["a"])
@@ -480,6 +547,11 @@ def nominal_board_domain(records):
     if len(holes) == 1:
         hole_info = holes[0]
         hole_model = "outer_outline_with_one_straight_dimension_hole"
+        if hole_info["model"] == "stadium":
+            hole_model = "outer_outline_with_stadium_dimension_hole"
+            info = dict(info, hole_caps=hole_info["caps"],
+                        hole_arc_error_upper_bound_nm=hole_info["arc_sagitta_upper_bound_nm"],
+                        removed_area_upper_bound_mm2=hole_info["removed_area_upper_bound_mm2"])
         if hole_info["quarter_count"]:
             hole_model = "outer_outline_with_one_tangent_quarter_dimension_hole"
             info = dict(info, hole_quarter_count=hole_info["quarter_count"])
