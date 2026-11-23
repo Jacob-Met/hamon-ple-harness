@@ -692,9 +692,13 @@ async def solve(session: taskbridge.Session) -> str:
                 session, delivery_targets, deadline=final_deadline - 10))
           final_issues = delivery_guard.compare(before_delivery, terminal.after)
           if final_issues:
+            generator_probes = delivery_materialize.snapshot_targets(materialize_candidates)
+            member_paths = sorted(first_publication.required_outputs) if archive_plan else []
+            if len(generator_probes) + len(member_paths) > delivery_guard.MAX_TARGETS:
+                member_paths = []
+            loose_probes = [{"path": path, "kind": "file"} for path in member_paths]
             after_generators = await delivery_guard.snapshot(
-                session, delivery_materialize.snapshot_targets(materialize_candidates),
-                deadline=final_deadline - 10,
+                session, generator_probes + loose_probes, deadline=final_deadline - 10,
             )
             selected = delivery_materialize.plan(
                 materialize_candidates, final_issues, before_generators, after_generators,
@@ -705,6 +709,10 @@ async def solve(session: taskbridge.Session) -> str:
               observed = await delivery_materialize.materialize(
                   session, selected, reserve_sec=10, deadline=final_deadline,
               )
+              if member_paths and any(row["state"] == "executed" for row in observed):
+                await archive_contract.publish_generated(
+                    session, archive_plan[1], member_paths, after_generators, deadline=final_deadline - 10,
+                )
               terminal.observe(await delivery_guard.snapshot(
                   session, delivery_targets, deadline=final_deadline,
               ))
