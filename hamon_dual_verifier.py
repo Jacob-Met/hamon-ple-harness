@@ -2857,17 +2857,8 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
             "dual_verified": True,
         }
     if kind == "pv_interconnection":
-        v_ll, p_w, pf = float(spec["V_ll_V"]), float(spec["P_export_W"]), float(spec["pf_absorbing"])
-        q_var = -p_w * math.tan(math.acos(pf))
-        s_kva = math.hypot(p_w, q_var) / 1e3
-        dv_pu = (p_w * float(spec["R_feeder_ohm"]) + q_var * float(spec["X_feeder_ohm"])) / (v_ll**2)
-        return {
-            "Q_reactive_var": q_var,
-            "S_apparent_kVA": s_kva,
-            "voltage_rise_pu": dv_pu,
-            "thermal_and_voltage_ok": (s_kva <= float(spec["transformer_rating_kVA"])) and (abs(dv_pu) <= float(spec["max_vrise_pu"])),
-            "dual_verified": True,
-        }
+        from hamon_pv_feeder import solve_pv_interconnection
+        return solve_pv_interconnection(spec)
     if kind == "rc_precharge":
         v_b, c_f, r_o, frac = float(spec["V_bus_V"]), float(spec["C_uF"]) * 1e-6, float(spec["R_precharge_ohm"]), float(spec["target_fraction"])
         tau = r_o * c_f
