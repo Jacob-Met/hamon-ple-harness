@@ -146,11 +146,11 @@ def network(spec):
         return 32 * np.finfo(float).eps * np.abs(v) * (np.abs(ybus) @ np.abs(v))
 
     def power_tolerances(v, targets, positions):
-        # Terminal currents can cancel even when the specified net injection
-        # is exactly zero. Allow local floating-point cancellation, not a
-        # whole-network relative error that can erase a small bus load.
-        rounding = power_roundoff(v)
-        return np.minimum(1e-6, 1e-7 * np.abs(targets[positions]) + rounding[positions])
+        # A specified load or generation must close on its own scale. A zero
+        # specification still needs the allowance for cancelling terminal flows.
+        magnitude = np.abs(targets[positions])
+        return np.minimum(1e-6, np.where(magnitude == 0, power_roundoff(v)[positions],
+                                        1e-7 * magnitude))
 
     def reactive_violation(value, lower, upper, roundoff):
         bound = float(np.clip(value, lower, upper))

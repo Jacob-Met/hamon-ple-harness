@@ -473,3 +473,31 @@ def test_saturated_claim_requires_reactive_power_at_its_bound(upper, angle):
     rejected = verify_ac_power_flow(spec)
     assert not rejected["conservation_verified"]
     assert rejected["proposed_pv_limits_consistent"] is False
+
+
+@pytest.mark.parametrize("p,x", [(-1e-9, 1e-6), (1e-12, 1e-6), (-1e-7, 1e-8)])
+@pytest.mark.parametrize("kind,reverse", [("PQ", False), ("PV", True)])
+def test_stiff_line_preserves_signed_active_injection_in_the_published_map(p, x, kind, reverse):
+    # For a lossless line and a unit slack S=V*conj((V-1)/(jX)),
+    # so P=Im(V)/X and Q=(|V|²-Re(V))/X, independent of line orientation.
+    load = {"id": "L", "type": kind, "p_injection_pu": p}
+    load.update({"q_injection_pu": 0} if kind == "PQ" else {"vm_pu": 1})
+    start, end = ("L", "S") if reverse else ("S", "L")
+    spec = {
+        "buses": [{"id": "S", "type": "slack", "vm_pu": 1}, load],
+        "lines": [{"id": "SL", "from": start, "to": end, "r_pu": 0, "x_pu": x}],
+    }
+    result = verify_ac_power_flow(spec)
+    assert result["conservation_verified"], result
+    leaf = result["voltages"]["L"]
+    assert leaf["vm_pu"] * math.sin(math.radians(leaf["va_deg"])) / x == pytest.approx(
+        p, rel=1e-7, abs=0)
+    assert result["bus_injections"]["L"]["p_pu"] == pytest.approx(p, rel=1e-7, abs=0)
+
+    # Both high-voltage branches have vm=1 to binary64 precision here.
+    # The separating angle is representable even for the smallest loading.
+    angle = math.degrees(math.asin(p * x))
+    for multiplier, valid in [(1, True), (0, False), (-1, False)]:
+        proposed = {"S": {"vm_pu": 1, "va_deg": 0},
+                    "L": {"vm_pu": 1, "va_deg": multiplier * angle}}
+        assert verify_ac_power_flow({**spec, "proposed_voltages": proposed})["conservation_verified"] is valid
