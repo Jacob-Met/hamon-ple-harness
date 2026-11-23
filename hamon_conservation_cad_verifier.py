@@ -410,7 +410,7 @@ def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, densi
     }
 
 
-def _rectangular_sweep(entities, et, args, unit_scale, frame=None):
+def _rectangular_sweep(entities, et, args, unit_scale, frame=None, magnification=1.):
     prof_id = _ref_id(args[0] if et == "IFCEXTRUDEDAREASOLID" else args[1])
     pos_id = _ref_id(args[1] if et == "IFCEXTRUDEDAREASOLID" else args[2])
     depth = float(args[3]) * unit_scale
@@ -431,12 +431,118 @@ def _rectangular_sweep(entities, et, args, unit_scale, frame=None):
                 direction = local[0] * x_ax + local[1] * y_ax + local[2] * z_ax
                 normal = local[2]
             vertices, faces = _extrude_polygon_2d(poly, origin, x_ax, y_ax, direction, depth)
-            return vertices, faces if normal > 0 else faces[:, ::-1], lx * ly * depth * abs(normal)
+            # Keep the scale product exact until physical volume is rounded.
+            volume = float(Fraction(lx) * Fraction(ly) * Fraction(depth) * Fraction(abs(normal))
+                           * Fraction(magnification) ** 3)
+            return vertices, faces if normal > 0 else faces[:, ::-1], volume
+
+
+def _ifc_mass_mapped_body(entities, product, unit_scale):
+    """Resolve one complete rectangular occurrence, including nested reusable maps.
+
+    The qualified map has an identity source origin, finite positive uniform
+    scale, and either three orthogonal target axes or the default axes. Each
+    Body resolves to one rectangular extrusion; map cycles and partial Bodies
+    are refused. Reusing a definition does not merge distinct product instances.
+    """
+    from hamon_ifc_spatial_clash import _required_ifc_entity, _rigid_ifc_frame
+
+    def required(ref, kind):
+        return _required_ifc_entity(entities, ref, kind)
+
+    def vector(ref, kind):
+        args = required(ref, kind)
+        if len(args) != 1 or not isinstance(args[0], list) or len(args[0]) != 3:
+            raise ValueError(f"Mapped IFC mass requires three coordinates for {kind}")
+        result = np.asarray(args[0], dtype=float)
+        if not np.isfinite(result).all():
+            raise ValueError("Mapped IFC coordinates must be finite")
+        if kind == "IFCDIRECTION":
+            size = max(abs(result))
+            if size == 0:
+                raise ValueError("Mapped IFC direction must be nonzero")
+            result /= size
+            result /= np.linalg.norm(result)
+        return result
+
+    def item(ref):
+        rep = required(ref, "IFCSHAPEREPRESENTATION")
+        if len(rep) != 4 or str(rep[1]).upper() != "BODY" or not isinstance(rep[3], list) or len(rep[3]) != 1:
+            raise ValueError("Mapped IFC mass requires one complete item in each Body")
+        context = rep[0]
+        kind, attrs = entities.get(context[1], (None, [])) if isinstance(context, tuple) else (None, [])
+        if kind == "IFCGEOMETRICREPRESENTATIONSUBCONTEXT" and len(attrs) > 6:
+            attrs = required(attrs[6], "IFCGEOMETRICREPRESENTATIONCONTEXT")
+            kind = "IFCGEOMETRICREPRESENTATIONCONTEXT"
+        if kind != "IFCGEOMETRICREPRESENTATIONCONTEXT" or len(attrs) < 5 or attrs[2] != 3:
+            raise ValueError("Expected a 3D IFC representation context")
+        if not np.array_equal(_rigid_ifc_frame(entities, attrs[4], 1.), np.eye(4)):
+            raise ValueError("Only an identity IFC world coordinate system is qualified")
+        return rep[3][0]
+
+    shape = required(entities[product][1][6], "IFCPRODUCTDEFINITIONSHAPE")
+    if len(shape) < 3 or not isinstance(shape[2], list):
+        raise ValueError("Invalid IFC product definition shape")
+    bodies = []
+    for ref in shape[2]:
+        rep = required(ref, "IFCSHAPEREPRESENTATION")
+        if len(rep) >= 2 and str(rep[1]).upper() in ("AXIS", "BOX", "FOOTPRINT"):
+            continue
+        bodies.append(item(ref))
+    if len(bodies) != 1:
+        raise ValueError("IFC mass requires one complete Body per product")
+
+    current = bodies[0]
+    mapping = np.eye(4)
+    magnification = 1.
+    visited = set()
+    while True:
+        if not isinstance(current, tuple) or current[0] != "ref" or current[1] not in entities:
+            raise ValueError("Unresolved mapped IFC body item")
+        if current[1] in visited:
+            raise ValueError("Cyclic IFC representation map")
+        visited.add(current[1])
+        kind, args = entities[current[1]]
+        if kind == "IFCEXTRUDEDAREASOLID":
+            if len(args) != 4:
+                raise ValueError("Incomplete IFC swept Body")
+            profile = required(args[0], "IFCRECTANGLEPROFILEDEF")
+            if len(profile) != 5 or str(profile[0]).upper() != "AREA":
+                raise ValueError("IFC mass requires a rectangular area profile")
+            return current[1], mapping, magnification
+        if kind != "IFCMAPPEDITEM" or len(args) != 2:
+            raise ValueError("Only rectangular swept Bodies and their mapped occurrences are qualified")
+        source = required(args[0], "IFCREPRESENTATIONMAP")
+        if len(source) != 2 or not np.array_equal(_rigid_ifc_frame(entities, source[0], 1.), np.eye(4)):
+            raise ValueError("Only an identity IFC MappingOrigin is qualified")
+        operator = required(args[1], "IFCCARTESIANTRANSFORMATIONOPERATOR3D")
+        if len(operator) != 5:
+            raise ValueError("Expected a uniform 3D IFC mapping operator")
+        xref, yref, origin, scale, zref = operator
+        scale = 1. if scale is None else float(scale)
+        if not math.isfinite(scale) or scale <= 0:
+            raise ValueError("IFC mapping scale must be finite and positive")
+        rotation = np.eye(3)
+        if any(ref is not None for ref in (xref, yref, zref)):
+            if any(ref is None for ref in (xref, yref, zref)):
+                raise ValueError("Qualified IFC mapping needs all three axes or none")
+            x, y, z = (vector(ref, "IFCDIRECTION") for ref in (xref, yref, zref))
+            rotation = np.column_stack((x, y, z))
+            if not np.allclose(rotation.T @ rotation, np.eye(3), rtol=0, atol=64*np.finfo(float).eps):
+                raise ValueError("Qualified IFC mapping axes must be orthogonal")
+        transform = np.eye(4)
+        transform[:3, :3] = rotation * scale
+        transform[:3, 3] = vector(origin, "IFCCARTESIANPOINT") * unit_scale
+        mapping = mapping @ transform
+        magnification *= scale
+        if not np.isfinite(mapping).all() or not math.isfinite(magnification) or magnification == 0:
+            raise ValueError("IFC mapping is outside the representable geometry range")
+        current = item(source[1])
 
 
 def _ifc_product_properties(typed, raw, unit_scale, density):
     from hamon_ifc_spatial_clash import (
-        MASS_PRODUCT_TYPES, _placed_product_frame, _product_shapes, _require_single_swept_body,
+        MASS_PRODUCT_TYPES, _placed_product_frame, _product_shapes,
         _rigid_ifc_frame,
     )
 
@@ -447,6 +553,8 @@ def _ifc_product_properties(typed, raw, unit_scale, density):
         return None
     if not math.isfinite(density) or density <= 0:
         raise ValueError("IFC product mass requires a positive finite density")
+    if not math.isfinite(unit_scale) or unit_scale <= 0:
+        raise ValueError("IFC product mass requires a positive finite length unit")
     if any(kind == "IFCRELVOIDSELEMENT" for kind, _ in typed.values()):
         raise ValueError("IFC products with opening subtraction are unsupported")
 
@@ -455,20 +563,22 @@ def _ifc_product_properties(typed, raw, unit_scale, density):
     for eid, kind, args, _ in owners:
         if kind not in MASS_PRODUCT_TYPES:
             raise ValueError(f"Unsupported IFC mass occurrence type {kind} on #{eid}")
-        item = _require_single_swept_body(typed, eid, mass_takeoff=True)
+        item, mapping, magnification = _ifc_mass_mapped_body(typed, eid, unit_scale)
         if item not in raw or len(typed[item][1]) != 4:
             raise ValueError(f"Unresolved IFC rectangular swept Body on #{eid}")
-        world = _placed_product_frame(typed, args[5], unit_scale)
+        world = _placed_product_frame(typed, args[5], unit_scale) @ mapping
         position = typed[item][1][1]
         if position is not None:
             world = world @ _rigid_ifc_frame(typed, position, unit_scale)
         rotation, origin = world[:3, :3], world[:3, 3]
         # Integrate in world-axis directions about the body's origin. This keeps
         # survey-scale translation out of the local mesh and its central moments.
-        swept = _rectangular_sweep(raw, *raw[item], unit_scale, (np.zeros(3), *rotation.T))
+        swept = _rectangular_sweep(raw, *raw[item], unit_scale, (np.zeros(3), *rotation.T), magnification)
         if swept is None:
             raise ValueError(f"Expected a rectangular swept IFC Body on #{eid}")
         vertices, faces, analytic = swept
+        if not math.isfinite(analytic) or analytic <= 0:
+            raise ValueError("Mapped IFC volume is outside the representable range")
         props = _compute_mesh_mass_properties(vertices, faces, density)
         if "reason" in props:
             return props, None
