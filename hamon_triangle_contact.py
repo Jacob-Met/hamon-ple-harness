@@ -1,4 +1,5 @@
 """Compression-only affine contact over three actual support vertices."""
+from decimal import Decimal, localcontext
 from fractions import Fraction as F
 
 from hamon_rectangle_contact import _claim_checks, _close, _integrate_displayed, _quantity, _render
@@ -18,24 +19,24 @@ def _centroid_terms(width, ratio):
     # A is unloaded, B has unit corner pressure, C has pressure ratio.
     # width and k*width are the contact depths on BA and CA. Factoring out
     # width keeps the centroid test conditioned for small representable edge depths.
-    if width == 1.:
-        return 1., (2.+ratio)/(1.+ratio)
-    k = ratio / ((1.-width) + ratio*width)
+    if width == 1:
+        return 1, (2+ratio)/(1+ratio)
+    k = ratio / ((1-width) + ratio*width)
     ccut = k*width
-    total = k*(1.+ratio) + (1.-ccut)
-    a = (k*k*(1.+ratio) + (1.-ccut)*(1.+k))/total
-    b = (k*(2.+ratio) + (1.-ccut)*(3.-width))/total
+    total = k*(1+ratio) + (1-ccut)
+    a = (k*k*(1+ratio) + (1-ccut)*(1+k))/total
+    b = (k*(2+ratio) + (1-ccut)*(3-width))/total
     return a, b  # 4*lambda_A/width and 4*lambda_B
 
 
-def _bisect(lo, hi, fn):
+def _bisect(lo, hi, fn, steps=64):
     # Endpoints bracket zero in increasing orientation. Any zero supplies a
     # candidate. The separate displayed force/three-coordinate gate is final.
     if fn(lo) >= 0:
         return lo
     if fn(hi) <= 0:
         return hi
-    for _ in range(64):
+    for _ in range(steps):
         mid = (lo+hi)/2
         if mid == lo or mid == hi:
             break
@@ -46,7 +47,7 @@ def _bisect(lo, hi, fn):
     return (lo+hi)/2
 
 
-def _pressures(centroid):
+def _pressures(centroid, *, precise=False):
     """Nodal affine values up to a positive scalar, in the supplied vertex order."""
     low, middle, high = sorted(range(3), key=centroid.__getitem__)
     a, b = centroid[low], centroid[high]
@@ -61,18 +62,24 @@ def _pressures(centroid):
             p[i] -= 1/(4*centroid[i])
         return p, 'one_positive_corner'
 
-    depth = float(4*a)
-    if not depth:
-        raise ValueError('The contact depth is outside binary64 range')
-    def width_at(r):
-        # width/4 <= lambda_A <= width/3. Keep the interval local to the
-        # measured depth, then solve on dimensionless width/(4*lambda_A).
-        t = _bisect(0., 1., lambda t: t*_centroid_terms(depth*t, r)[0]-1.)
-        return depth*t
-    # At r=0, lambda_B=3/4-lambda_A. At r=1, lambda_B=(1-lambda_A)/2.
-    ratio = _bisect(0., 1., lambda r: float(4*b)-_centroid_terms(width_at(r), r)[1])
-    width = F(width_at(ratio))
-    if not width:
+    def solve(depth, four_b, zero, one, steps):
+        def width_at(r):
+            # Solve in width/(4*lambda_A), which stays between 3/4 and 1.
+            t = _bisect(zero, one, lambda t: t*_centroid_terms(depth*t, r)[0]-1, steps)
+            return depth*t
+        ratio = _bisect(zero, one, lambda r: four_b-_centroid_terms(width_at(r), r)[1], steps)
+        return F(width_at(ratio)), F(ratio)
+
+    if precise:
+        # Recompute an inverse that binary64 placed exactly on the transition.
+        with localcontext() as ctx:
+            ctx.prec = 64
+            def dec(q):
+                return Decimal(q.numerator)/Decimal(q.denominator)
+            width, ratio = solve(dec(4*a), dec(4*b), Decimal(0), Decimal(1), 224)
+    else:
+        width, ratio = solve(float(4*a), float(4*b), 0., 1., 64)
+    if width <= 0:
         raise ValueError('Unresolved contact edge')
     p = [F(0)]*3
     p[low], p[middle], p[high] = -(1-width)/width, F(ratio), F(1)
@@ -92,6 +99,24 @@ def _positive_polygon(vertices, p):
             points.append(point)
             pressures.append(p[i])
     return points, pressures
+
+
+def _strictly_convex_on_display(points):
+    rendered = [tuple(F(float(x)) for x in point) for point in points]
+    turns = [_det(rendered[i-2], rendered[i-1], point) for i, point in enumerate(rendered)]
+    return len(rendered) == 4 and (all(t > 0 for t in turns) or all(t < 0 for t in turns))
+
+
+def _displayed_shape(vertices, points, corners, pressures):
+    if len(points) == 3:
+        if set(points) == {tuple(F(float(x)) for x in point) for point in vertices}:
+            return 'full_triangle'
+        if sum(p > 0 for p in corners) == sum(p > 0 for p in pressures) == 1:
+            return 'one_positive_corner'
+    if (_strictly_convex_on_display(points)
+            and sum(p > 0 for p in corners) == sum(p > 0 for p in pressures) == 2):
+        return 'two_positive_corners'
+    return 'release_boundary_unresolved'
 
 
 def _normalized_balance(vertices, points, pressures, centroid):
@@ -147,6 +172,13 @@ def verify_rigid_triangle_contact(spec):
                 return {**failure, 'equilibrium_status':'no_finite_equilibrium',
                         'reason':'A positive finite area load has a centroid strictly inside the triangle'}
             p, shape = _pressures(centroid)
+            if shape == 'two_positive_corners' and (min(p) >= 0 or sum(h > 0 for h in p) != 2):
+                finer, _ = _pressures(centroid, precise=True)
+                candidate, _ = _positive_polygon(vertices, finer)
+                # If the finer cuts coalesce or invert on display, preserve the
+                # original quantitative solution and qualify its topology below.
+                if _strictly_convex_on_display(candidate):
+                    p = finer
             clipped, heights = _positive_polygon(vertices, p)
             area, volume, *_ = _integrate_displayed(clipped, heights)
             scale = n/volume
@@ -173,6 +205,12 @@ def verify_rigid_triangle_contact(spec):
             def displayed_affine(xy):
                 return F(peak)+sum(F(g)*(x-F(ref)) for g, x, ref in zip(gradient, xy, reference))
 
+            shown_shape = _displayed_shape(vertices, rendered, corner, pressures)
+            topology_verified = shown_shape == shape
+            if shape == 'two_positive_corners':
+                # Magnitude tolerances alone can accept the wrong signed side.
+                topology_verified = topology_verified and all(
+                    displayed_affine(xy)*h > 0 for xy, h in zip(vertices, p))
             tolerance = exact['q_max_Pa']/10**9
             # At an interior release intersection the signed plane must be zero.
             # Only base corners outside the contact polygon may be below zero.
@@ -191,9 +229,14 @@ def verify_rigid_triangle_contact(spec):
                        integrated_moment_x_Nm=_render(rx,'first moment'),
                        integrated_moment_y_Nm=_render(ry,'first moment'),
                        output_geometry_verified=bool(verified))
+            if not topology_verified:
+                out.update(footprint_shape='release_boundary_unresolved', contact_regime='boundary_unresolved')
+        out['topology_verified'] = bool(topology_verified and out['output_geometry_verified']) if n else True
         out.update(ok=True, calculation=calculation, equilibrium_status='finite',
                    pressure_model='positive_part_affine', moment_convention='Mx=integral(x*p); My=integral(y*p)')
         checks = _claim_checks(spec, out, exact, dims, n, moments)
+        if 'proposed_contact_regime' in checks and not out['topology_verified']:
+            checks['proposed_contact_regime'] = False
         key = 'proposed_contact_polygon_m'
         if n and checks.get(key):
             proposed = [tuple(_quantity(v,key,'m') for v in xy) for xy in spec[key]]

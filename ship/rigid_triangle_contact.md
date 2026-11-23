@@ -23,6 +23,8 @@ For the remaining regime name the unloaded corner A, the highest pressure corner
 
 The solver brackets w at fixed r using the measured depth z_A, then brackets r between zero and one. At these r endpoints z_B equals 3/4−z_A and (1−z_A)/2 respectively. The implementation factors the common w from D and works with w/(4 z_A) so it can resolve thin loaded edges. It recovers the negative vertex pressure from w, clips the actual input triangle, and scales the field to its specified force.
 
+At a two-corner transition, binary64 can round a small positive corner pressure to zero. When the first inverse reaches such a boundary, the solver retries using decimal arithmetic and checks whether the four contact vertices stay distinct and convex after conversion to the output coordinates. A verified two-corner label requires two positive emitted vertex pressures, two positive base corners and the matching signs of the published affine plane. The other shapes are also compared with the emitted material vertices. If the numerical field balances the prescribed force and moments but the output cannot distinguish the exact topology, `topology_verified` is false, `footprint_shape` is `release_boundary_unresolved` and `contact_regime` is `boundary_unresolved`. Any proposed regime then fails its claim check.
+
 A field which passes all three moment checks is unique within this model. If two affine planes f,g gave equal force and first moments, ∫(f−g)(max(f,0)−max(g,0)) would vanish. The integrand is everywhere nonnegative. Positive total load provides a positive-area region on which the planes agree, fixing both planes everywhere.
 
 ## Verification and limits
