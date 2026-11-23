@@ -9,6 +9,8 @@ task-ID or filename shortcuts:
 2. Electrical / SPICE Nodal KCL/KVL & Complex Power Conservation: dual-engine
    Modified Nodal Analysis (exact complex Gaussian elimination + NumPy LU)
    with explicit per-node KCL, per-branch KVL, and Tellegen complex power checks.
+   Linear SPICE K cards couple ideal constant inductors through their dotted
+   first terminals. Structured K records use name, inductors (names), and value.
 3. Civil / Geotechnical Equilibrium & Conservation: cut/fill earthwork mass
    balance with shrink/swell factors, effective-stress Terzaghi/Vesic bearing
    capacity, consolidation settlement, and open-channel energy continuity.
@@ -22,6 +24,7 @@ from __future__ import annotations
 import base64
 import cmath
 from fractions import Fraction
+from itertools import combinations
 import json
 import math
 from pathlib import Path
@@ -1299,7 +1302,9 @@ def _parse_spice_netlist(netlist: str, frequency_override: Optional[float] = Non
                 (len(first) == 6 and _LINEAR_GAIN.fullmatch(first[5]))
                 or (len(first) >= 4 and _BEHAVIORAL_E.match(first[3]))
             )
-            if not is_e_card:
+            is_k_card = (first[0][0].upper() == "K" and len(first) >= 3
+                         and all(name.upper().startswith("L") for name in first[1:3]))
+            if not (is_e_card or is_k_card):
                 continue
         if line.lower().startswith(".end"):
             break
@@ -1313,11 +1318,20 @@ def _parse_spice_netlist(netlist: str, frequency_override: Optional[float] = Non
         toks = line.split()
         kind = toks[0][0].upper()
         if kind in ("R", "L", "C") and len(toks) >= 4:
-            branches.append({"name": toks[0], "type": kind, "n_pos": toks[1], "n_neg": toks[2], "value": _parse_spice_num(toks[3])})
+            branch = {"name": toks[0], "type": kind, "n_pos": toks[1], "n_neg": toks[2],
+                      "value": _parse_spice_num(toks[3])}
+            if kind == "L" and len(toks) != 4:
+                branch["winding_options"] = toks[4:]
+            branches.append(branch)
         elif kind in ("V", "I") and (len(toks) >= 4 or (idx > 0 and len(toks) == 3)):
             branch = {"name": toks[0], "type": kind, "n_pos": toks[1], "n_neg": toks[2]}
             branches.append(branch)
             source_clauses.append((branch, toks[3:]))
+        elif kind == "K":
+            if len(toks) < 4 or not _LINEAR_GAIN.fullmatch(toks[-1]):
+                raise ValueError("Expected K name, winding names, and a coupling coefficient")
+            branches.append({"name": toks[0], "type": "K", "inductors": toks[1:-1],
+                             "value": _parse_spice_num(toks[-1])})
         elif kind == "E":
             if len(toks) != 6 or _BEHAVIORAL_E.match(toks[3]) or not _LINEAR_GAIN.fullmatch(toks[5]):
                 raise ValueError("Expected a linear E source: name out+ out- ctrl+ ctrl- gain")
@@ -1330,6 +1344,64 @@ def _parse_spice_netlist(netlist: str, frequency_override: Optional[float] = Non
     for branch, tokens in source_clauses:
         branch["value"], branch["phase_deg"] = _independent_source_value(tokens, freq_hz)
     return branches, freq_hz
+
+
+def _mutual_inductances(branches):
+    """Resolve K records to winding indices and check the normalized magnetic energy form."""
+    cards = [br for br in branches if str(br["type"]).upper() == "K"]
+    if not cards:
+        return {}
+    indices = {}
+    for index, branch in enumerate(branches):
+        indices.setdefault(str(branch["name"]).casefold(), []).append(index)
+
+    coefficients = {}
+    mutual = {}
+    for card in cards:
+        if len(indices[str(card["name"]).casefold()]) != 1:
+            raise ValueError("Ambiguous mutual coupling name")
+        names = card.get("inductors")
+        k = float(card["value"])
+        if not (0 < k <= 1) or not isinstance(names, (list, tuple)) or len(names) < 2:
+            raise ValueError("Coupling requires at least two windings and 0 < k <= 1")
+        windings = []
+        for name in names:
+            hits = indices.get(str(name).casefold(), [])
+            if len(hits) != 1 or str(branches[hits[0]]["type"]).upper() != "L":
+                raise ValueError(f"Unknown or ambiguous coupled inductor {name!r}")
+            index = hits[0]
+            if branches[index].get("winding_options"):
+                raise ValueError("Coupled winding options are unsupported")
+            inductance = float(branches[index]["value"])
+            if not math.isfinite(inductance) or inductance <= 0:
+                raise ValueError("Coupled windings need positive finite inductance")
+            windings.append(index)
+            coefficients.setdefault(index, {index: Fraction(1)})
+            mutual.setdefault(index, {})
+        for a, b in combinations(windings, 2):
+            if b in coefficients[a]:
+                raise ValueError("Self or duplicate mutual inductance")
+            coefficients[a][b] = coefficients[b][a] = Fraction(k)
+            la, lb = float(branches[a]["value"]), float(branches[b]["value"])
+            # Equal windings should yield M = k L exactly at unit coupling.
+            mean = la if la == lb else math.sqrt(la) * math.sqrt(lb)
+            mutual[a][b] = mutual[b][a] = k * mean
+
+    # L = diag(sqrt(Li)) C diag(sqrt(Li)). Check C by exact symmetric
+    # elimination on the input coefficients, including singular ideal coupling.
+    for index, row in coefficients.items():
+        pivot = row[index]
+        neighbors = [j for j in row if j != index and row[j]]
+        if pivot < 0 or (pivot == 0 and neighbors):
+            raise ValueError("Coupling matrix permits negative magnetic energy")
+        for pos, a in enumerate(neighbors):
+            for b in neighbors[pos:]:
+                reduced = coefficients[a].get(b, 0) - row[a] * row[b] / pivot
+                coefficients[a][b] = coefficients[b][a] = reduced
+        for j in row:
+            if j != index:
+                del coefficients[j][index]
+    return mutual
 
 
 def _complex_gauss_solve(a_mat: np.ndarray, b_vec: np.ndarray) -> np.ndarray:
@@ -1371,14 +1443,17 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
     # An ideal inductor has zero terminal voltage at DC. Its current, like
     # the current of a voltage source, is an independent MNA unknown.
     constraint_types = {"V", "E", "L"} if freq_hz == 0 else {"V", "E"}
-    voltage_constraints = [br for br in branches if str(br["type"]).upper() in constraint_types]
-    dim = len(nodes) + len(voltage_constraints)
+    mutual = _mutual_inductances(branches)
+    constraints = [i for i, br in enumerate(branches)
+                   if str(br["type"]).upper() in constraint_types or i in mutual]
+    current_row = {i: len(nodes) + offset for offset, i in enumerate(constraints)}
+    dim = len(nodes) + len(constraints)
     mna = np.zeros((dim, dim), dtype=np.complex128)
     rhs = np.zeros(dim, dtype=np.complex128)
     ni = lambda s: None if str(s) in gnd else n_idx[str(s)]
 
-    for k, vs in enumerate(voltage_constraints):
-        row = len(nodes) + k
+    for index, row in current_row.items():
+        vs = branches[index]
         ip, im = ni(vs["n_pos"]), ni(vs["n_neg"])
         if ip is not None: mna[ip, row] += 1.0; mna[row, ip] += 1.0
         if im is not None: mna[im, row] -= 1.0; mna[row, im] -= 1.0
@@ -1389,15 +1464,19 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
             icp, icm = ni(vs["nc_pos"]), ni(vs["nc_neg"])
             if icp is not None: mna[row, icp] -= value
             if icm is not None: mna[row, icm] += value
+        elif index in mutual and freq_hz > 0:
+            mna[row, row] -= 1j * omega * value
+            for winding, inductance in mutual[index].items():
+                mna[row, current_row[winding]] -= 1j * omega * inductance
         elif str(vs["type"]).upper() == "V":
             rhs[row] = cmath.rect(value, math.radians(float(vs.get("phase_deg", 0.0))))
 
     admittances = {}
     for index, br in enumerate(branches):
         bt = str(br["type"]).upper()
-        ip, im = ni(br["n_pos"]), ni(br["n_neg"])
-        if bt in constraint_types:
+        if bt == "K" or index in current_row:
             continue
+        ip, im = ni(br["n_pos"]), ni(br["n_neg"])
         if bt in ("R", "L", "C"):
             val = float(br["value"])
             y = (1.0 / val) if bt == "R" else (1.0 / (1j * omega * val) if bt == "L" else 1j * omega * val)
@@ -1427,18 +1506,24 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
     s_tot = 0j
     s_deliv = 0j
     branch_currents = []
-    constraint_currents = iter(sol_lu[len(nodes):])
     for index, br in enumerate(branches):
         nm, bt = str(br["name"]), str(br["type"]).upper()
+        if bt == "K":
+            continue  # K relates existing windings; it has no additional terminal current.
         vd = v_node.get(str(br["n_pos"]), 0j) - v_node.get(str(br["n_neg"]), 0j)
-        if bt in constraint_types:
-            ibr = complex(next(constraint_currents))
+        if index in current_row:
+            ibr = complex(sol_lu[current_row[index]])
             expected_voltage = 0j
             if bt == "V":
                 expected_voltage = cmath.rect(float(br["value"]), math.radians(float(br.get("phase_deg", 0.0))))
             elif bt == "E":
                 control = v_node.get(str(br["nc_pos"]), 0j) - v_node.get(str(br["nc_neg"]), 0j)
                 expected_voltage = float(br["value"]) * control
+            elif index in mutual and freq_hz > 0:
+                flux = float(br["value"]) * ibr
+                for winding, inductance in mutual[index].items():
+                    flux += inductance * sol_lu[current_row[winding]]
+                expected_voltage = 1j * omega * flux
             if bt in {"V", "E"}:
                 s_deliv += vd * (-ibr).conjugate()
             kvl_max = max(kvl_max, abs(vd - expected_voltage))
