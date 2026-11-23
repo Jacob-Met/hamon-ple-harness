@@ -131,15 +131,34 @@ def _close(value, target):
     return abs(value-target) <= abs(target)/10**9
 
 
-def _preserves_eccentricity(force, moments, normal, demands, center):
-    # Global equilibrium tolerances scale with the full base. A resolvable
-    # small tilt can fit those tolerances even when the diagram leans backwards.
-    for moment, demand, origin in zip(moments, demands, center):
-        target = demand - normal * origin
-        actual = moment - force * origin
-        if target and (not actual or (actual > 0) != (target > 0)):
-            return False
-    return True
+def _centered_moments(force, moments, center):
+    return tuple(m - force*c for m,c in zip(moments,center))
+
+
+def _moments_agree(actual, target, limits):
+    return all(abs(a-t)<=limit for a,t,limit in zip(actual,target,limits))
+
+
+def _preserves_eccentricity(actual, target):
+    return all(not t or a*t>0 for a,t in zip(actual,target))
+
+
+def _full_corner_moments(pressures, dimensions):
+    # Integral of x or y against a rectangular corner shape function is
+    # area * dimension / 24, with the sign of the corresponding corner.
+    p0,p1,p2,p3 = map(Fraction,pressures)
+    b,l = dimensions
+    return (b*l*b*(-p0+p1+p2-p3)/24, b*l*l*(-p0-p1+p2+p3)/24)
+
+
+def _displayed_moment_limits(actual, target, radii, area, pressures):
+    # The exact reference residual includes solver and coordinate display
+    # error. One binary64 pressure ULP at each vertex perturbs the continuous
+    # interpolant by at most the largest ULP, since its basis is nonnegative
+    # and sums to one. Integral(|local coordinate|) <= area * radius.
+    step = Fraction(max(math.ulp(float(p)) for p in pressures))
+    return tuple(abs(a-t) + abs(t)/10**9 + area*r*step
+                 for a,t,r in zip(actual,target,radii))
 
 
 def _preserves_corner_slopes(corners, normal, demands, center):
@@ -235,9 +254,11 @@ def _solve_rectangle(b,l,n,mx,my,cx,cy):
     corners = [_render(peak*Fraction(max(0.,math.fsum((1.,-rx*(1-sx*x),-ry*(1-sy*y))))),'corner pressure')
                for x,y in [(-1,-1),(1,-1),(1,1),(-1,1)]]
     exact = dict(contact_area_m2=expected_area,q_min_Pa=Fraction(min(corners)),q_max_Pa=peak)
+    actual = _centered_moments(f,(fx,fy),(cx,cy))
+    target = (local_mx,local_my)
     geometry = (_close(area,expected_area) and abs(f-n)<=n/10**9
-                and abs(fx-mx)<=n*b/10**9 and abs(fy-my)<=n*l/10**9
-                and _preserves_eccentricity(f,(fx,fy),n,(mx,my),(cx,cy))
+                and _moments_agree(actual,target,(n*b/10**9,n*l/10**9))
+                and _preserves_eccentricity(actual,target)
                 and _preserves_corner_slopes(corners,n,(mx,my),(cx,cy)))
     for point,p in zip(points,pressures):
         affine = Fraction(plane['pressure_at_reference_Pa'])+sum(
@@ -255,6 +276,15 @@ def _solve_rectangle(b,l,n,mx,my,cx,cy):
                integrated_moment_y_Nm=_render(fy,'integrated moment'),
                force_residual_N=float(f-n),moment_residual_Nm=[float(fx-mx),float(fy-my)],
                output_geometry_verified=bool(geometry))
+    if out['contact_regime']=='full_contact':
+        radii = [max(abs(Fraction(v[k])-c) for v in points) for k,c in enumerate((cx,cy))]
+        polygon_limits = _displayed_moment_limits(actual,target,radii,area,pressures)
+        corner_limits = _displayed_moment_limits(_full_corner_moments(corners,(b,l)),
+                                                 target,(b/2,l/2),b*l,corners)
+        exact['full_contact_moment_limits'] = (target,polygon_limits,corner_limits)
+        out['full_contact_moment_resolution'] = {
+            name: [None if not t else abs(t)>limit for t,limit in zip(target,limits)]
+            for name,limits in [('polygon',polygon_limits),('corners',corner_limits)]}
     return out,exact
 
 
@@ -278,6 +308,10 @@ def _claim_checks(spec,out,exact,dimensions,normal,moments,center=None):
             if checks[key] and field == 'corner_pressure_Pa' and center is not None:
                 corners = [_quantity(v,key,unit) for v in value]
                 checks[key] = _preserves_corner_slopes(corners,normal,moments,center)
+                if 'full_contact_moment_limits' in exact:
+                    targets,_,limits = exact['full_contact_moment_limits']
+                    checks[key] = checks[key] and _moments_agree(
+                        _full_corner_moments(corners,dimensions),targets,limits)
     key = 'proposed_contact_polygon_m'
     if key in spec:
         if out['contact_polygon_m'] is None:
@@ -324,6 +358,15 @@ def _polygon_claim(spec,out,exact,dimensions,normal,moments,center):
         pressures = [p*peak/Fraction(out['q_max_Pa']) for p in defaults]
     if not all(p>=0 and (p==0 if q==0 else _close(p,q)) for p,q in zip(pressures,defaults)): return False
     area,f,mx,my = _integrate_displayed(points,pressures)
+    # A triangle caller supplies moments in its existing working frame.
+    # A translated rectangle needs independent force and centered moments.
+    actual, target = (mx,my), moments
+    if center is not None:
+        actual = _centered_moments(f,actual,center)
+        target = _centered_moments(normal,target,center)
+        if not _preserves_eccentricity(actual,target): return False
+        if 'full_contact_moment_limits' in exact:
+            _,limits,_ = exact['full_contact_moment_limits']
+            if not _moments_agree(actual,target,limits): return False
     return (_close(area,exact['contact_area_m2']) and abs(f-normal)<=abs(normal)/10**9
-            and (center is None or _preserves_eccentricity(f,(mx,my),normal,moments,center))
-            and all(abs(a-b)<=abs(normal*d)/10**9 for a,b,d in zip((mx,my),moments,dimensions)))
+            and _moments_agree(actual,target,[abs(normal*d)/10**9 for d in dimensions]))
