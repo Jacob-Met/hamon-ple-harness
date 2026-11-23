@@ -527,3 +527,59 @@ def test_native_flat_map_must_replay_its_terminal_injections():
     assert not verify_ac_power_flow({
         **spec, "proposed_voltages": {key: {"vm_pu": 1, "va_deg": 0} for key in "ABC"},
     })["conservation_verified"]
+
+
+@pytest.mark.parametrize("winding", [-360, 360])
+def test_whole_turn_cannot_create_active_flow(winding):
+    reactance = 1e-6
+    prescribed = math.sin(math.radians(winding)) / reactance
+    spec = {
+        "buses": [{"id": "S", "type": "slack", "vm_pu": 1},
+                  {"id": "L", "type": "PQ", "p_injection_pu": prescribed, "q_injection_pu": 0}],
+        "lines": [{"id": "SL", "from": "S", "to": "L", "r_pu": 0, "x_pu": reactance}],
+    }
+    assert verify_ac_power_flow(spec)["conservation_verified"]
+    for angle in (0, winding):
+        # V_L and V_S are physically identical, and the branch current is zero.
+        claim = {"S": {"vm_pu": 1, "va_deg": 0}, "L": {"vm_pu": 1, "va_deg": angle}}
+        assert not verify_ac_power_flow({**spec, "proposed_voltages": claim})["conservation_verified"]
+
+
+def test_one_ulp_at_rotated_pv_bus_has_its_own_signed_transfer():
+    reference = 17.0
+    angle = math.nextafter(reference, math.inf)
+    reactance = 2**-20
+    prescribed = 5.5664262965032565e-11
+    # For two unit magnitudes the exact terminal transfer depends on delta,
+    # not the difference of two separately rounded rectangular phasors.
+    physical = math.sin(math.radians(angle - reference)) / reactance
+    assert abs(physical - prescribed) > 0.15 * prescribed
+    spec = {
+        "buses": [{"id": "S", "type": "slack", "vm_pu": 1, "va_deg": reference},
+                  {"id": "L", "type": "PV", "vm_pu": 1, "p_injection_pu": prescribed}],
+        "lines": [{"id": "SL", "from": "S", "to": "L", "r_pu": 0, "x_pu": reactance}],
+        "proposed_voltages": {"S": {"vm_pu": 1, "va_deg": reference},
+                              "L": {"vm_pu": 1, "va_deg": angle}},
+    }
+    assert not verify_ac_power_flow(spec)["conservation_verified"]
+    del spec["proposed_voltages"]
+    result = verify_ac_power_flow(spec)
+    if result["conservation_verified"]:
+        v = result["voltages"]
+        actual = (v["S"]["vm_pu"] * v["L"]["vm_pu"]
+                  * math.sin(math.radians(v["L"]["va_deg"] - v["S"]["va_deg"])) / reactance)
+        assert actual == pytest.approx(prescribed, rel=1e-7, abs=0)
+
+
+def test_stiff_line_large_transfer_still_meets_absolute_power_tolerance():
+    target = 149922522.2315777
+    reactance = 2**-36
+    assert abs(math.sin(math.radians(0.125)) / reactance - target) > 6e-6
+    spec = {
+        "buses": [{"id": "S", "type": "slack", "vm_pu": 1, "va_deg": 45},
+                  {"id": "L", "type": "PV", "vm_pu": 1, "p_injection_pu": target}],
+        "lines": [{"id": "SL", "from": "S", "to": "L", "r_pu": 0, "x_pu": reactance}],
+        "proposed_voltages": {"S": {"vm_pu": 1, "va_deg": 45},
+                              "L": {"vm_pu": 1, "va_deg": 45.125}},
+    }
+    assert not verify_ac_power_flow(spec)["conservation_verified"]

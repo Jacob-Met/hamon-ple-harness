@@ -463,6 +463,57 @@ def network(spec):
         return (np.all(np.abs(power.real[nonslack] - p[nonslack]) <= power_tolerances(v, p, nonslack))
                 and np.all(np.abs(power.imag[pq] - q[pq]) <= power_tolerances(v, q, pq)))
 
+    def resolved_wire_injections(wire):
+        # A tiny angular separation on a stiff line can turn ordinary phasor
+        # roundoff into an entire specified load. Replay only the nonzero
+        # bus components whose relative tolerance is that small.
+        magnitude = np.array([wire[k]["vm_pu"] for k in ids])
+        tapped_magnitude = magnitude[f] / np.abs(tap)
+        # Opposing parallel admittances can cancel in Ybus. Bound their
+        # individual terminal contributions before summing at a bus.
+        series_scale = np.abs(y) * (tapped_magnitude + magnitude[t])
+        scale = magnitude**2 * np.abs(shunt)
+        np.add.at(scale, f, tapped_magnitude * (series_scale + np.abs(yc) * tapped_magnitude))
+        np.add.at(scale, t, magnitude[t] * (series_scale + np.abs(yc) * magnitude[t]))
+        rounding = 32 * np.finfo(float).eps * scale
+        checks = [(i, axis, target[i]) for target, positions, axis
+                  in ((p, nonslack, "real"), (q, pq, "imag")) for i in positions
+                  if target[i] and rounding[i] >= min(1e-6, 1e-7 * abs(target[i]))]
+        if not checks:
+            return True
+        from mpmath import mp
+
+        ctx = mp.clone()
+        tolerances = {(i, axis): min(ctx.mpf(1e-6), ctx.mpf(1e-7) * abs(target))
+                      for i, axis, target in checks}
+        # Reserve guard bits beyond the precision needed to resolve the
+        # absolute or relative tolerance, including subnormal specifications.
+        ctx.prec = 100 + max(0, max(ctx.mag(rounding[i]) - ctx.mag(tolerances[i, axis])
+                                    for i, axis, _ in checks))
+
+        def phase(degrees):
+            return ctx.expjpi(ctx.mpf(math.remainder(degrees, 360)) / 180)
+
+        v = [ctx.mpf(wire[k]["vm_pu"]) * phase(wire[k]["va_deg"]) for k in ids]
+        currents = {i: [ctx.mpc(shunt[i]) * v[i]] for i, _, _ in checks}
+        for k, line in enumerate(branches):
+            i, j = f[k], t[k]
+            if i not in currents and j not in currents:
+                continue
+            ratio = ctx.mpf(line.get("tap_ratio", 1)) * phase(line.get("phase_shift_deg", 0))
+            tapped = v[i] / ratio
+            series = (tapped - v[j]) / ctx.mpc(line["r_pu"], line["x_pu"])
+            charging = ctx.mpc(0, line.get("line_charging_b_pu", 0)) / 2
+            if i in currents:
+                currents[i].append((series + charging * tapped) / ratio.conjugate())
+            if j in currents:
+                currents[j].append(-series + charging * v[j])
+        for i, axis, target in checks:
+            power = v[i] * ctx.fsum(currents[i]).conjugate()
+            if abs(getattr(power, axis) - target) > tolerances[i, axis]:
+                return False
+        return True
+
     def polar_phasor(magnitude, degrees):
         return magnitude * np.exp(1j * math.radians(degrees))
 
@@ -477,6 +528,8 @@ def network(spec):
     verified = (
         complementarity
         and specified_power_matches(emitted, emitted_power)
+        and regulated_state(emitted, emitted_power)
+        and resolved_wire_injections(published)
         and independent_res < 1e-6
         and difference < 1e-6
         and tellegen < 1e-6
@@ -504,6 +557,7 @@ def network(spec):
             and abs(claimed[slack] - initial[slack])
             <= 16 * np.finfo(float).eps * vset[slack]
             and specified_power_matches(claimed, power)
+            and resolved_wire_injections(claims)
             and np.all(
                 np.abs(np.abs(claimed[pv]) - vset[pv])
                 <= 16 * np.finfo(float).eps * vset[pv]
