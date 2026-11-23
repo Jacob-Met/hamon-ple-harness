@@ -441,7 +441,10 @@ async def solve(session: taskbridge.Session) -> str:
       ]
       run = Run(session, model)
       if archive_plan:
-        run.archive_watch = archive_contract.FirstPublication(archive_plan)
+        run.archive_watch = archive_contract.FirstPublication(
+            archive_plan, target=delivery_targets[0]["path"],
+            members=archive_contract.declared_members(session.instruction, delivery_targets),
+        )
       done = await taskbridge.run_process(
           argv,
           session,

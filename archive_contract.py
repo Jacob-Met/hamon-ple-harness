@@ -220,8 +220,11 @@ async def recover_after_refinement(session, command):
 class FirstPublication:
     """Publish the first complete staged set at an acknowledged task-tool boundary."""
 
-    def __init__(self, plan):
+    def __init__(self, plan, *, target=None, members=()):
         self.stage, self.command = plan
+        self.required_outputs = {str(Path(target).parent / name) for name in members} if target else set()
+        self.written_outputs: set[str] = set()
+        self.pending_outputs: dict[str, tuple[str, str]] = {}
         self.pending: dict[str, bool] = {}
         self.published = False
 
@@ -231,6 +234,10 @@ class FirstPublication:
         if event.get("type") == "tool_execution_start":
             call_id = event.get("toolCallId")
             args = event.get("args") or {}
+            tool = event.get("toolName")
+            if (isinstance(call_id, str) and isinstance(args, dict) and tool in {"write", "edit"}
+                    and isinstance(args.get("path"), str) and args["path"] in self.required_outputs):
+                self.pending_outputs[call_id] = (tool, args["path"])
             if (isinstance(call_id, str) and isinstance(args, dict)
                     and event.get("toolName") in {"write", "edit", "bash"}
                     and any(isinstance(arg, str) and self.stage in arg for arg in args.values())):
@@ -239,6 +246,14 @@ class FirstPublication:
         elif event.get("type") == "message_end":
             msg = event.get("message") or {}
             call_id = msg.get("toolCallId")
+            if msg.get("role") == "toolResult" and call_id in self.pending_outputs:
+                tool, path = self.pending_outputs.pop(call_id)
+                if msg.get("toolName") == tool and msg.get("isError") is False:
+                    self.written_outputs.add(path)
+                    if self.written_outputs == self.required_outputs and await run_command(session, self.command):
+                        self.published = True
+                        await session.log("delivery_gate: complete archive published from acknowledged output members")
+                return
             if msg.get("role") == "toolResult" and call_id in self.pending:
                 explicit_publisher = self.pending.pop(call_id)
                 if msg.get("isError"):
