@@ -190,5 +190,6 @@ if __name__ == "__main__":
         print(json.dumps({"action": recover(Path(stage), Path(target), members)}))
     elif not sys.argv[2:]:
         publish(Path(stage), Path(target), members)
+        print("PLE_ARCHIVE_PUBLISHED", end="")
     else:
         raise ValueError("unknown archive operation")
