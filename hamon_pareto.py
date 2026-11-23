@@ -215,12 +215,88 @@ def _bounded_wave8_field(key, value):
     return type(value) in (int, float, str)
 
 
+# Only these delivery-neutral covers are part of the certified instruction grammar.
+# Additional prose can change units, requested comparisons or output obligations.
+_WAVE8_COVERS = {
+    "Run the calculation below and return its JSON result.": "single",
+    "Run the calculations below and return their JSON results in the same order.": "batch",
+}
+
+
+def _wave8_request(instruction):
+    text = instruction.strip()
+    lines = text.splitlines()
+    cover = _WAVE8_COVERS.get(lines[0]) if lines else None
+    if cover:
+        text = "\n".join(lines[1:]).strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if (len(lines) < 3 or lines[0] not in ("```", "```json")
+                or lines[-1] != "```"):
+            return None
+        text = "\n".join(lines[1:-1])
+    value = json.loads(text, object_pairs_hook=_unique_keys)
+    if isinstance(value, list):
+        if cover == "single" or not 1 <= len(value) <= 2:
+            return None
+    elif cover == "batch" or not isinstance(value, dict):
+        return None
+    return value
+
+
+def _wave8_result(req):
+    """Check one existing operation and its physical residuals."""
+    if (
+        not isinstance(req, dict)
+        or set(req) != {"mode", "spec"}
+        or not isinstance(req["spec"], dict)
+    ):
+        return None
+    spec = req["spec"]
+    calculation = spec["calculation"]
+    mode, fields, required = _WAVE8_INPUTS[calculation]
+    if req["mode"] not in ("auto", mode) or not spec.keys() <= {
+        "calculation",
+        *fields.split(),
+    }:
+        return None
+    if not all(_bounded_wave8_field(k, v) for k, v in spec.items()):
+        return None
+    result = dispatch_ple_tool("hamon_conservation_cad_verifier", req)
+    if (
+        result.get("calculation") != calculation
+        or result.get("ok") is not True
+        or not result.get("conservation_verified")
+    ):
+        return None
+    names = required.split()
+    if calculation == "euler_rotor":
+        for measured, residual in (
+            ("measured_fluid_torque_N_m", "measured_torque_residual_N_m"),
+            (
+                "measured_rotor_static_enthalpy_change_J_kg",
+                "measured_rothalpy_residual_J_kg",
+            ),
+        ):
+            if measured in spec:
+                names.append(residual)
+        if len(names) == 1:
+            return None
+    if not all(
+        type(result[k]) in (float, int)
+        and math.isfinite(result[k])
+        and abs(result[k]) < 1e-6
+        for k in names
+    ):
+        return None
+    return result
+
+
 def _wave8_certificate(instruction, inventory, mcp_server_count, deliverable_count):
-    """Solve only a complete inline tool request with a confirmed empty workspace."""
+    """Certify every requested calculation in the original order, or abstain."""
     if (
         not isinstance(instruction, str)
         or len(instruction) > 12000
-        or not instruction.lstrip().startswith("{")
         or mcp_server_count
         or deliverable_count
         or inventory.get("schema") != "hamon.ple.intake.v1"
@@ -235,50 +311,20 @@ def _wave8_certificate(instruction, inventory, mcp_server_count, deliverable_cou
     ):
         return None
     try:
-        req = json.loads(instruction, object_pairs_hook=_unique_keys)
-        if (
-            not isinstance(req, dict)
-            or set(req) != {"mode", "spec"}
-            or not isinstance(req["spec"], dict)
-        ):
+        request = _wave8_request(instruction)
+        if request is None:
             return None
-        spec = req["spec"]
-        calculation = spec["calculation"]
-        mode, fields, required = _WAVE8_INPUTS[calculation]
-        if req["mode"] not in ("auto", mode) or not spec.keys() <= {
-            "calculation",
-            *fields.split(),
-        }:
-            return None
-        if not all(_bounded_wave8_field(k, v) for k, v in spec.items()):
-            return None
-        result = dispatch_ple_tool("hamon_conservation_cad_verifier", req)
-        if (
-            result.get("calculation") != calculation
-            or result.get("ok") is not True
-            or not result.get("conservation_verified")
-        ):
-            return None
-        names = required.split()
-        if calculation == "euler_rotor":
-            for measured, residual in (
-                ("measured_fluid_torque_N_m", "measured_torque_residual_N_m"),
-                (
-                    "measured_rotor_static_enthalpy_change_J_kg",
-                    "measured_rothalpy_residual_J_kg",
-                ),
-            ):
-                if measured in spec:
-                    names.append(residual)
-            if len(names) == 1:
+        if isinstance(request, list):
+            result = []
+            for case in request:
+                verified = _wave8_result(case)
+                if verified is None:
+                    return None
+                result.append(verified)
+        else:
+            result = _wave8_result(request)
+            if result is None:
                 return None
-        if not all(
-            type(result[k]) in (float, int)
-            and math.isfinite(result[k])
-            and abs(result[k]) < 1e-6
-            for k in names
-        ):
-            return None
         # Reject non-JSON results and keep the additional model context bounded.
         encoded = json.dumps(result, allow_nan=False, separators=(",", ":"))
         return encoded if len(encoded) <= 12000 else None
