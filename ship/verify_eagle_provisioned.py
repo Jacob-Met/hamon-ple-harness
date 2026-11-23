@@ -48,7 +48,7 @@ async def qualify(repo, raw, expected_module, cases, material_case):
     tool = "/tmp/hamon-engineering-toolkit.py"
     completed, written = [], {}
     runs = [(label, status, board, ()) for label, status, board in boards]
-    runs += [(label, "witnessed" if label == "original" else "unresolved", board, ("-S",))
+    runs += [(label, "unresolved", board, ("-S",))
              for label, _, board in boards if label in {"original", material_case}]
     commands = [shlex.join(["python3", *flags, tool, "eagle-netlist", str(sch), "--board", str(board),
                             "--routed-net", "N$3"]) for _, _, board, flags in runs]
@@ -68,7 +68,9 @@ async def qualify(repo, raw, expected_module, cases, material_case):
             check(routed["status"] == wanted and bool(routed["witnesses"]) == (wanted == "witnessed"),
                   "Physical result differs on " + label + ": " + str(routed["status"]))
             reason = routed.get("material", {}).get("reason")
-            if flags and label == material_case:
+            if flags:
+                check(routed.get("board_domain", {}).get("status") == "unresolved",
+                      "Declared board outline must not become unbounded when its backend is missing")
                 check(reason == "finite_width_geometry_dependency_unavailable",
                       "Missing backend must remain explicitly unresolved")
             elif label == material_case:

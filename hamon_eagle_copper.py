@@ -298,10 +298,10 @@ def wire_material(row, ref):
                            a=a, b=b, width=width, cap=cap, curve=float(curve))
 
 
-def milling_sources(board):
-    """Layer 46 artwork in the board and in actually placed packages."""
+def milling_sources(board, layer=46):
+    """Selected fabrication-layer artwork in the board and placed packages."""
     def on_milling_layer(row):
-        return re.fullmatch(r"\+?0*46", row.get("layer", "").strip()) is not None
+        return re.fullmatch(rf"\+?0*{layer}", row.get("layer", "").strip()) is not None
 
     plain = [row for row in board.findall("plain/*") if on_milling_layer(row)]
     groups = [(None, plain)] if plain else []
@@ -320,25 +320,74 @@ def milling_sources(board):
 
 
 def milling_edges(groups):
-    """Yield separate board-coordinate edge sets for closed nominal cutouts."""
+    """Yield placed straight edges or signed axis-quarter milling edges."""
     coordinate = partial(nm, subgrid=True)
     for element, rows in groups:
         edges = []
         for row in rows:
+            curve = Decimal(row.get("curve", "0"))
             if (row.tag != "wire" or coordinate(row.get("width")) != 0
-                    or Decimal(row.get("curve", "0")) != 0
+                    or not curve.is_finite() or curve not in (0, -90, 90)
                     or row.get("style", "continuous") != "continuous"):
                 raise ValueError("unsupported layer 46 milling primitive")
-            ends = []
+            ends, mirror = [], False
             for suffix in ("1", "2"):
                 vertex = {axis: row.attrib[axis + suffix] for axis in ("x", "y")}
                 if element is None:
                     point = coordinate(vertex["x"]), coordinate(vertex["y"])
                 else:
-                    point = placed_center(element, vertex, coordinate)[:2]
-                ends.append(point)
-            edges.append(tuple(ends))
+                    x, y, mirror = placed_center(element, vertex, coordinate)
+                    point = x, y
+                ends.append(tuple(Fraction(value) for value in point))
+            sweep = -int(curve) if mirror else int(curve)
+            edges.append((*ends, sweep) if sweep else tuple(ends))
         yield edges
+
+
+
+def dimension_records(board):
+    """Parse placed layer-20 wires without treating their pen width as substrate."""
+    coordinate = partial(nm, subgrid=True)
+    records = []
+    libraries = _named(board.findall("libraries/library"))
+    for element, rows in milling_sources(board, 20):
+        if element is None:
+            parent = board.find("plain")
+            prefix = ("plain",)
+        else:
+            parent = _named(libraries[element.get("library")].findall(
+                "packages/package"))[element.get("package")]
+            prefix = ("element", element.get("name"), "library", element.get("library"),
+                      "package", element.get("package"))
+        for row in rows:
+            if (row.tag != "wire" or coordinate(row.get("width")) < 0
+                    or row.get("style", "continuous") != "continuous"):
+                raise ValueError("unsupported layer 20 outline primitive")
+            curve = Decimal(row.get("curve", "0"))
+            if not curve.is_finite() or curve not in (0, -90, 90):
+                raise ValueError("unsupported layer 20 outline sweep")
+            points, mirror = [], False
+            for suffix in ("1", "2"):
+                vertex = {axis: row.attrib[axis+suffix] for axis in ("x", "y")}
+                if element is None:
+                    point = coordinate(vertex["x"]), coordinate(vertex["y"])
+                else:
+                    x, y, mirror = placed_center(element, vertex, coordinate)
+                    point = x, y
+                points.append(tuple(Fraction(v) for v in point))
+            records.append(dict(a=points[0], b=points[1],
+                curve=-int(curve) if mirror else int(curve),
+                source=prefix+(row.tag, parent.findall(row.tag).index(row))))
+    return records
+
+
+def resolved_board_domain(board, result):
+    """Keep absence of an outline distinct from an unsupported declared outline."""
+    from hamon_eagle_material import nominal_board_domain
+    result["board_domain"] = {"status": "unresolved", "layer": 20}
+    domain, evidence = nominal_board_domain(dimension_records(board))
+    result["board_domain"] = evidence
+    return domain
 
 
 def material_fallback(result, board, signal, terminals, elements, footprints, bores, milling=()):
@@ -425,19 +474,25 @@ def material_fallback(result, board, signal, terminals, elements, footprints, bo
         except (KeyError, ValueError, InvalidOperation) as exc:
             omitted(ref, exc)
     try:
-        cutouts = milling_cutouts(milling_edges(milling))
-        proof = material_continuity(result["terminals"], primitives, bores, cutouts)
+        domain = resolved_board_domain(board, result)
+        milling_evidence = {}
+        cutouts = milling_cutouts(milling_edges(milling), milling_evidence)
+        proof = material_continuity(result["terminals"], primitives, bores, cutouts, domain)
     except (ShapelyError, KeyError, InvalidOperation, ValueError, OverflowError) as exc:
         result["material"] = {"reason": "finite_width_geometry_unresolved", "detail": str(exc)}
         return result
     result["material"] = proof["material"]
+    if milling:
+        result["material"]["milling"] = milling_evidence
     if derived_vias:
         result["material"]["rule_derived_vias"] = derived_vias
     if approximations:
         result["material"]["conservative_shapes"] = approximations
     if proof["witnesses"] and not proof["unreachable"]:
         result.update(status="witnessed", witnesses=proof["witnesses"],
-                      scope="Finite outer-layer copper regions minus known circular drills and supported milling cutouts")
+                      scope=("Finite outer-layer copper clipped to the nominal board domain, drills and milling"
+                             if domain is not None else
+                             "Unbounded nominal artwork minus drills and milling; no board outline supplied"))
         result.pop("reason", None)
         result.pop("unreachable", None)
     return result
@@ -461,6 +516,7 @@ def routed_continuity(prediction, board_path, signal_name, *, pad_pair=None):
         targets = sorted([("pad", *pad_pair[:2]), ("pad", *pad_pair[2:])])
         if targets[0] == targets[1] or any(t not in terminals for t in targets):
             raise ValueError("choose two distinct schematic pads on the selected net")
+    dimensions = milling_sources(board, 20)
     result = dict(
         status="unresolved",
         signal=signal_name,
@@ -470,7 +526,9 @@ def routed_continuity(prediction, board_path, signal_name, *, pad_pair=None):
         terminals=[list(t) for t in targets],
         witnesses=[],
         unsupported=[],
-        scope="Straight outer-layer centerlines with drill clearance and supported plated approaches",
+        board_domain=({"status": "unresolved", "layer": 20} if dimensions else
+                      {"status": "unbounded_artwork", "reason": "no_layer_20_outline"}),
+        scope="Unbounded straight outer-layer artwork with drill clearance and plated approaches",
     )
     if pad_pair is not None:
         result.update(query="pad_pair", net_terminal_count=len(terminals))
@@ -518,8 +576,9 @@ def routed_continuity(prediction, board_path, signal_name, *, pad_pair=None):
         except (KeyError, ValueError, InvalidOperation) as exc:
             unsupported(ref, exc)
     milling = milling_sources(board)
-    if milling:
-        # Centerline routes do not model removal of substrate under copper.
+    if milling or dimensions:
+        result["board_domain"] = {"status": "unresolved", "layer": 20}
+        # Centerline routes do not model the bounded substrate or its cutouts.
         result["reason"] = "no_supported_copper_path"
         return material_fallback(result, board, signal, terminals, elements, footprints, bores, milling)
     ordinal = defaultdict(int)
@@ -616,7 +675,10 @@ def inter_net_contact(board_path, net_names):
     signals = _named(board.findall("signals/signal"))
     if any(name not in signals for name in net_names):
         raise ValueError("Unknown board signal in contact query")
+    dimensions = milling_sources(board, 20)
     result = dict(status="unresolved", signals=list(net_names), board_sha256=digest,
+                  board_domain=({"status": "unresolved", "layer": 20} if dimensions else
+                                {"status": "unbounded_artwork", "reason": "no_layer_20_outline"}),
                   scope="Same-layer outer wires minus known circular drills and supported milling cutouts",
                   clearance="not_certified", contacts=[], unsupported=[])
     try:
@@ -644,8 +706,17 @@ def inter_net_contact(board_path, net_names):
                 except (KeyError, ValueError, InvalidOperation) as exc:
                     result["unsupported"].append(dict(signal=name, source=ref, reason=str(exc)))
             groups.append(wires)
-        cutouts = milling_cutouts(milling_edges(milling_sources(board)))
-        result["contacts"] = wire_contact_witnesses(groups, bores, net_names, result["unsupported"], cutouts)
+        domain = resolved_board_domain(board, result)
+        milling = milling_sources(board)
+        milling_evidence = {}
+        cutouts = milling_cutouts(milling_edges(milling), milling_evidence)
+        if milling:
+            result["milling"] = milling_evidence
+        result["contacts"] = wire_contact_witnesses(
+            groups, bores, net_names, result["unsupported"], cutouts, domain)
+        result["scope"] = ("Same-layer outer wires clipped to the nominal board domain, drills and milling"
+                           if domain is not None else
+                           "Unbounded nominal wire artwork minus drills and milling; no board outline supplied")
     except (KeyError, ValueError, InvalidOperation, ShapelyError, OverflowError) as exc:
         result["reason"] = "material_geometry_unresolved"
         result["detail"] = str(exc)
