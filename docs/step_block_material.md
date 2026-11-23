@@ -21,8 +21,13 @@ rational square class, recognized with integer square roots without factoring.
 This preserves cancellation between independently scaled irrational axes and
 combines rational sums before nearest-even midpoint rounding. Remaining
 irrational sums use the existing interval publication contract: one determined
-binary64 rounding, nonzero values retained, and componentwise relative error
-at most 1e-12. No fixed physical volume threshold, welding grid or global-origin
+binary64 rounding and a proved error bound of1e-12. Primary material properties,
+centroids, extents, diagonal inertia and principal moments retain their own
+relative scale and nonzero values. Off-diagonal tensor entry error is normalized
+by sqrt(I_ii*I_jj), permitting a negligible cross entry to round to zero.
+The output explicitly states this separate tensor error model; principal
+moments are qualified from the source material frame rather than a rounded
+world-tensor eigensolve. No fixed physical volume threshold, welding grid or global-origin
 subtraction controls material existence.
 
 One complete standalone material definition is required. Extra blocks, other
@@ -50,3 +55,19 @@ tests qualify the extracted shared interval publication helper.
 
 Production execution and independent course outcomes are reported only from
 official CI. No local Python execution is claimed during the executor outage.
+
+First production70b5b3a9 ran1106 methods in CI45160030630/job137642750654.
+All new material and independent cubature cases passed. One inherited frame
+control with z=(1,1e-400,0) and omitted reference failed because an overly strict
+per-entry nonzero requirement refused its negligible cross inertia. The exact
+direction must still choose the correct material frame. The revised publication
+contract permits nearest-zero cross entries only with an interval proof against
+their diagonal energy scale; all primary and principal material values retain
+the strict contract. The original failed candidate is preserved.
+
+The tensor bound is entrywise. With D=diag(I_ii), the off-diagonal publication
+error satisfies |v^T E_off v| <= 2e-12 v^T D v in three dimensions.
+For a nearly rank-deficient rotated tensor this does not supply the same
+relative bound on v^T I v in its weakest direction. The separately reported
+principal moments and exact characteristic identities refer to the original
+material tensor. Symmetric published entries are identical.

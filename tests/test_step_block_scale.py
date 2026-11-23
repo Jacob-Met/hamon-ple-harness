@@ -95,4 +95,15 @@ class ExactBlockScaleTests(unittest.TestCase):
                     continue
                 self.assertFalse(result["conservation_verified"],result)
 
+    def test_subresolution_cross_moment_retains_material_orientation(self):
+        text=block_text(("2.","3.","4."),axis=("1.","1e-400","0."))
+        text=text.replace("AXIS2_PLACEMENT_3D('',#1,#2,#3)","AXIS2_PLACEMENT_3D('',#1,#2,$)")
+        result=verify_step_cad_geometry({"step_text":text,"unit_scale_m":1.,"density_kg_m3":1.})
+        self.assertTrue(result["conservation_verified"],result)
+        np.testing.assert_array_equal(result["centroid_m"],[2.,-1.,-1.5])
+        np.testing.assert_array_equal(result["inertia_tensor_centroid_kg_m2"],np.diag([26.,50.,40.]))
+        np.testing.assert_array_equal(result["principal_moments_kg_m2"],[26.,40.,50.])
+        self.assertEqual(result["output_error_model"]["inertia_off_diagonal"],
+                         "relative to sqrt(I_ii * I_jj)")
+
 if __name__=="__main__":unittest.main()

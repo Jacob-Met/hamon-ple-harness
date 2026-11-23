@@ -75,7 +75,7 @@ def _determinant(a):
             - a[0][1]*(a[1][0]*a[2][2]-a[1][2]*a[2][0])
             + a[0][2]*(a[1][0]*a[2][1]-a[1][1]*a[2][0]))
 
-def _round_public(evaluator):
+def _round_public(evaluator, tensor_scales=None):
     def endpoint_float(endpoint):
         # Convert exact dyadic endpoints with Python's ties-to-even rounding.
         sign, mantissa, exponent, bits = endpoint._mpi_[0]
@@ -95,8 +95,9 @@ def _round_public(evaluator):
         iv = MPIntervalContext()
         iv.dps = digits
         values = evaluator(iv)
+        scales = {} if tensor_scales is None else tensor_scales(iv, values)
         rounded = []
-        for value in values:
+        for index, value in enumerate(values):
             try:
                 low, high = endpoint_float(value.a), endpoint_float(value.b)
             except (OverflowError, ValueError) as exc:
@@ -105,10 +106,10 @@ def _round_public(evaluator):
                 raise ValueError("STEP analytic result exceeds finite binary64 range")
             if low != high:
                 break
-            if low == 0 and (value.a > 0 or value.b < 0):
+            if low == 0 and index not in scales and (value.a > 0 or value.b < 0):
                 raise ValueError("STEP analytic nonzero result is lost in binary64")
             if value != iv.mpf(0) and not (
-                    abs(iv.mpf(low)-value) <= abs(value)*iv.mpf("1e-12")):
+                    abs(iv.mpf(low)-value) <= scales.get(index, abs(value))*iv.mpf("1e-12")):
                 break
             rounded.append(low)
         if len(rounded) == len(values):

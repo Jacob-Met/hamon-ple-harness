@@ -84,7 +84,13 @@ def block_mass_properties(entities, selected, unit_scale, density):
                 + [radical_sum(terms) for terms in extents]
                 + [num(value) for row in tensor for value in row]
                 + [num(value) for value in principal])
-    rounded = _round_public(evaluate)
+    def tensor_scales(iv, values):
+        # A cross entry has no independent positive material magnitude.
+        # Normalize its representation error by the diagonal energy scales;
+        # all primary, diagonal and principal quantities keep their own scale.
+        return {10+3*i+j: iv.sqrt(values[10+4*i]*values[10+4*j])
+                for i in range(3) for j in range(3) if i != j}
+    rounded = _round_public(evaluate, tensor_scales)
     if min(rounded[0], rounded[2], *rounded[7:10]) <= 0 or (
             rho > 0 and min(rounded[1], rounded[3], *rounded[19:22]) <= 0):
         raise ValueError("STEP block positive material property vanished on output")
@@ -98,7 +104,13 @@ def block_mass_properties(entities, selected, unit_scale, density):
         "solid_geometry_kind": "analytic_block",
         "mass_properties_method": "exact positioned rectangular material moments",
         "analytic_invariants_verified": True,
+        "analytic_invariant_source": "exact source material tensor",
         "output_rounding_verified": True,
         "output_relative_error_bound": 1e-12,
+        "output_error_model": {
+            "default": "relative to the source quantity",
+            "inertia_off_diagonal": "relative to sqrt(I_ii * I_jj)",
+            "principal_moments": "independently qualified in the material frame",
+        },
     }
     return properties, rounded[0]
