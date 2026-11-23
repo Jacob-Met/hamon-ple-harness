@@ -8,7 +8,7 @@ from functools import lru_cache
 import math
 
 import numpy as np
-from scipy.sparse import coo_matrix, diags
+from scipy.sparse import coo_matrix, diags, eye
 from hamon_diaphragm_modes import diaphragm_coordinates
 from scipy.sparse.linalg import splu
 
@@ -187,7 +187,43 @@ def solve_diaphragm(spec):
         ground[dof] += k
     if not np.isfinite(ground).all():
         raise ValueError("nonfinite assembled spring stiffness")
-    transform, elastic, bar_free, elastic_only_bars = diaphragm_coordinates(xy, panel_nodes, bars, ground)
+    basis = diaphragm_coordinates(xy, panel_nodes, bars, ground)
+    for use_nodal in (False, True):
+        if use_nodal:
+            # Mixed restraints on slender panels can lose spring displacement
+            # when reconstructed from rigid and elastic coordinates. In nodal
+            # coordinates every spring acts on its own displacement directly.
+            active = np.ones(ndof, dtype=bool)
+            basis = eye(ndof, format="csc"), active, active, np.ones(len(bars), dtype=bool)
+        result = _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, basis, use_nodal)
+        if result is not None:
+            return result
+    raise ValueError("diaphragm failed local/global equilibrium or work-energy balance")
+
+
+def _coordinate_estimates(coordinates, use_nodal, force, ground, panels, bars, scale, factor):
+    yield coordinates
+    if not use_nodal:
+        return
+    # Use element strains to form the correction load independently of the
+    # assembled matrix, whose small stiffness terms can round away beside a
+    # stiff ground spring. Reuse its sparse factors for at most two corrections.
+    x = coordinates.astype(np.longdouble)
+    for _ in range(2):
+        residual = force - ground * x
+        for dofs, quadrature, weights, _ in panels:
+            local = x[dofs]
+            for strain in quadrature:
+                residual[dofs] -= strain.T @ (weights * (strain @ local))
+        for dofs, axis, stiffness in bars:
+            residual[dofs] -= axis * (stiffness * (axis @ x[dofs]))
+        x = x + scale * factor.solve(scale * residual.astype(float))
+        yield x
+
+
+def _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, basis, use_nodal):
+    ndof = len(force)
+    transform, elastic, bar_free, elastic_only_bars = basis
     projection = diags(elastic.astype(float))
     stiffness = (projection @ membrane @ projection + transform.T @ diags(ground) @ transform).tocsc()
     if bars:
@@ -217,46 +253,49 @@ def solve_diaphragm(spec):
     if pivots.min() <= 1e-12 * pivots.max():
         raise ValueError("unsupported or ill-conditioned diaphragm")
     coordinates = scale * factor.solve(scale * (transform.T @ force))
-    deformation = elastic * coordinates
-    u = transform @ coordinates
+    for coordinates in _coordinate_estimates(coordinates, use_nodal, force, ground, panels, bars, scale, factor):
+        deformation = elastic * coordinates
+        u = transform @ coordinates
 
-    if not np.isfinite(u).all():
-        raise ValueError("nonfinite diaphragm displacement")
+        if not np.isfinite(u).all():
+            raise ValueError("nonfinite diaphragm displacement")
 
-    reactions = np.zeros(ndof)
-    spring_forces, bar_forces, panel_shears, double_energy = [], [], [], []
-    for dof, k in springs:
-        value = k * u[dof]
-        reactions[dof] += value
-        spring_forces.append(value)
-        double_energy.append(value * u[dof])
-    internal_force = membrane @ deformation
-    if bars:
-        extensions = bar_map @ coordinates
-        bar_forces = axial_k * extensions
-        internal_force += bar_axes.T @ bar_forces
-        double_energy.extend(bar_forces * extensions)
-    for dofs, gauss, weights, recover in panels:
-        local_u = deformation[dofs]
-        panel_shears.append(recover @ local_u)
-        double_energy.extend(weights @ (b @ local_u)**2 for b in gauss)
+        reactions = np.zeros(ndof)
+        spring_forces, bar_forces, panel_shears, double_energy = [], [], [], []
+        for dof, k in springs:
+            value = k * u[dof]
+            reactions[dof] += value
+            spring_forces.append(value)
+            double_energy.append(value * u[dof])
+        internal_force = membrane @ deformation
+        if bars:
+            extensions = bar_map @ coordinates
+            bar_forces = axial_k * extensions
+            internal_force += bar_axes.T @ bar_forces
+            double_energy.extend(bar_forces * extensions)
+        for dofs, gauss, weights, recover in panels:
+            local_u = deformation[dofs]
+            panel_shears.append(recover @ local_u)
+            double_energy.extend(weights @ (b @ local_u)**2 for b in gauss)
 
-    # Ground forces below are forces transmitted TO the supports. Taking moments
-    # about a point in the model avoids cancellation under large world offsets.
-    arms = xy - xy[0]
-    balance = (force - reactions).reshape((-1, 2))
-    force_error = np.sum(balance, axis=0)
-    moment_error = float(arms[:, 0] @ balance[:, 1] - arms[:, 1] @ balance[:, 0])
-    load_scale = max(np.linalg.norm(force, 1) + np.linalg.norm(reactions, 1), 1e-30)
-    span = np.max(np.ptp(xy, axis=0))
-    work = float(force @ u)
-    energy = math.fsum(double_energy)
-    errors = [np.linalg.norm(internal_force + reactions - force, np.inf) / load_scale,
-              np.linalg.norm(force_error, 1) / load_scale,
-              abs(moment_error) / (span * load_scale),
-              abs(work - energy) / max(abs(work), abs(energy), 1e-30)]
-    if not np.isfinite(errors).all() or max(errors) > 1e-7:
-        raise ValueError("diaphragm failed local/global equilibrium or work-energy balance")
+        # Ground forces below are forces transmitted TO the supports. Taking moments
+        # about a point in the model avoids cancellation under large world offsets.
+        arms = xy - xy[0]
+        balance = (force - reactions).reshape((-1, 2))
+        force_error = np.sum(balance, axis=0)
+        moment_error = float(arms[:, 0] @ balance[:, 1] - arms[:, 1] @ balance[:, 0])
+        load_scale = max(np.linalg.norm(force, 1) + np.linalg.norm(reactions, 1), 1e-30)
+        span = np.max(np.ptp(xy, axis=0))
+        work = float(force @ u)
+        energy = math.fsum(double_energy)
+        errors = [np.linalg.norm(internal_force + reactions - force, np.inf) / load_scale,
+                  np.linalg.norm(force_error, 1) / load_scale,
+                  abs(moment_error) / (span * load_scale),
+                  abs(work - energy) / max(abs(work), abs(energy), 1e-30)]
+        if np.isfinite(errors).all() and max(errors) <= 1e-7:
+            break
+    else:
+        return None
     member_checks = []
     for i, (bar, tension) in enumerate(zip(spec.get("bars", []), bar_forces)):
         if any(k in bar for k in ("allowable_tension_N", "allowable_compression_N", "demand_factor")):
@@ -267,7 +306,7 @@ def solve_diaphragm(spec):
             member_checks.append({"bar": i, "ratio": float(ratio), "passes": bool(ratio <= 1)})
     stations = _recover_stations(spec.get("stations", []), spec["panels"], xy, panel_shears)
     return {"stations": stations, "bar_capacity_checks": member_checks,
-            "displacements_m": u.reshape((-1, 2)).tolist(),
+            "displacements_m": u.astype(float, copy=False).reshape((-1, 2)).tolist(),
             "panel_center_shear_N_m": list(map(float, panel_shears)),
             "bar_tension_N": list(map(float, bar_forces)),
             "spring_transmitted_N": list(map(float, spring_forces)),
