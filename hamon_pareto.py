@@ -395,6 +395,39 @@ def _distillation_result(req):
     return result
 
 
+def _jacketed_cstr_certificate(spec):
+    """Admit a complete first-order liquid jacket model and check every reported balance."""
+    required = {"reactor_type", "order", "C_A0", "v0", "T0", "delta_T_adiabatic",
+                "jacket_to_feed_heat_capacity_ratio", "coolant_T_K", "volume"}
+    optional = {"steady_state_branch", "gas_phase"}
+    rate_laws = ({"k"}, {"k_ref", "T_ref", "E_a"}, {"A_preexp", "E_a"})
+    if (not any(required | law == spec.keys() - optional for law in rate_laws)
+            or spec["reactor_type"] != "cstr" or spec["order"] != 1
+            or spec.get("gas_phase", False) is not False):
+        return None
+    for key in spec.keys() - {"reactor_type", "gas_phase", "steady_state_branch"}:
+        if type(spec[key]) not in (int, float) or not math.isfinite(spec[key]):
+            return None
+    branch = spec.get("steady_state_branch")
+    if "steady_state_branch" in spec and not (branch == "all" or type(branch) is int and branch >= 0):
+        return None
+    result = dispatch_ple_tool("hamon_conservation_cad_verifier", {"mode": "reactor_kinetics", "spec": spec})
+    if not isinstance(result, dict):
+        return None
+    states = result.get("steady_states")
+    if (result.get("verified") is not True or not isinstance(states, list)
+            or not states or len(states) != result.get("steady_state_count")):
+        return None
+    for row in states:
+        if not isinstance(row, dict) or row.get("verified") is not True:
+            return None
+        for key in ("mass_balance_residual", "energy_balance_residual"):
+            value = row.get(key)
+            if type(value) not in (int, float) or not 0 <= value < 1e-9:
+                return None
+    return result
+
+
 def _wave8_result(req):
     """Check one existing operation and its physical residuals."""
     if (
@@ -404,6 +437,8 @@ def _wave8_result(req):
     ):
         return None
     spec = req["spec"]
+    if req["mode"] == "reactor_kinetics":
+        return _jacketed_cstr_certificate(spec)
     if req["mode"] == "electrochem_separations":
         if spec.get("subkind") == "electrochemistry":
             return _nernst_equilibrium_result(req)

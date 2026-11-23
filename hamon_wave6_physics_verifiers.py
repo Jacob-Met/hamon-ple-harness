@@ -1798,7 +1798,7 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
         raise ValueError("CSTR inputs must be finite")
     if volume < 0 or min(c0, feed, t0) <= 0 or epsilon <= -1:
         raise ValueError("CSTR requires nonnegative volume, positive feed/concentration/temperature and epsilon_A > -1")
-    slope = delta if abs(delta) > 1e-15 else 0.0
+    slope = delta if "jacket_to_feed_heat_capacity_ratio" in params or abs(delta) > 1e-15 else 0.0
     inlet = t0 if slope else top
     if min(inlet, inlet + slope) <= 0:
         raise ValueError("CSTR temperature must stay positive on 0 <= conversion <= 1")
@@ -2186,6 +2186,8 @@ def _constant_rate_pfr(params, concentration, feed, flow, order, rate, inlet_t, 
 def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
     """Deterministic solver for CSTR, PFR, N-CSTRs, Arrhenius, and adiabatic reactor design."""
     reactor_type = str(params.get("reactor_type", "pfr")).strip().lower()
+    if reactor_type != "cstr" and any(k in params for k in ("jacket_to_feed_heat_capacity_ratio", "coolant_T_K")):
+        raise ValueError("constant jacket temperature requires one constant-density liquid CSTR")
     if reactor_type == "cstr_series" and params.get("conversion") is not None:
         from hamon_cstr_series_design import solve_equal_volume_cstr_design
         return solve_equal_volume_cstr_design(params)
@@ -2252,8 +2254,81 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
     elif reactor_type not in ("cstr", "cstr_series"):
         raise ValueError(f"Unsupported reactor_type: {reactor_type}")
 
+    jacket = None
+    if "jacket_to_feed_heat_capacity_ratio" in params or "coolant_T_K" in params:
+        if gas_phase or eps_a != 0:
+            raise ValueError("constant jacket temperature requires one constant-density liquid CSTR")
+        if not all(k in params for k in ("jacket_to_feed_heat_capacity_ratio", "coolant_T_K", "T0")):
+            raise ValueError("jacketed CSTR requires a conductance/feed-heat-capacity ratio, coolant_T_K and T0")
+        if "T" in params:
+            raise ValueError("a jacket heat balance determines the tank temperature; omit prescribed T")
+        if any(isinstance(params[k], bool) for k in ("jacket_to_feed_heat_capacity_ratio", "coolant_T_K", "T0")):
+            raise ValueError("jacket ratio and temperatures must be numeric")
+        ratio = float(params["jacket_to_feed_heat_capacity_ratio"])
+        coolant = float(params["coolant_T_K"])
+        if not all(map(math.isfinite, (ratio, coolant, t0_k, delta_t_ad))) or ratio < 0 or min(coolant, t0_k) <= 0:
+            raise ValueError("jacket ratio must be finite and nonnegative and inlet/coolant temperatures positive")
+        if min(c_a0, v0, f_a0) <= 0 or not all(map(math.isfinite, (c_a0, v0, f_a0, order_n))):
+            raise ValueError("jacketed CSTR needs finite positive feed and flow and finite kinetic order")
+        if "F_A0" in params and not math.isclose(f_a0, c_a0 * v0, rel_tol=1e-12):
+            raise ValueError("jacketed liquid CSTR requires F_A0 to agree with C_A0 times v0")
+        if "A_preexp" in params and "E_a" in params:
+            rate, reference, activation = float(params["A_preexp"]), 1., float(params["E_a"])
+        elif all(k in params for k in ("k_ref", "T_ref", "E_a")):
+            rate, reference, activation = map(float, (params["k_ref"], params["T_ref"], params["E_a"]))
+        else:
+            rate, reference, activation = float(params["k"]), 1., 0.
+        if not all(map(math.isfinite, (rate, reference, activation))) or min(rate, reference) <= 0:
+            raise ValueError("jacketed CSTR requires a positive finite rate and reference temperature")
+        if params.get("conversion") is not None:
+            target = float(params["conversion"])
+            if not 0 <= target <= 1 or (target == 1 and order_n > 0):
+                raise ValueError("requested jacketed CSTR conversion has no finite design volume")
+        jacket = (Fraction(ratio), Fraction(coolant))
+        # From (T0 - T) + delta_T_ad * X - UA/Cdot * (T - Tc) = 0.
+        # Keep both coefficients rational through stationary-point isolation.
+        thermal_origin = (Fraction(t0_k) + jacket[0] * jacket[1]) / (1 + jacket[0])
+        thermal_slope = Fraction(delta_t_ad) / (1 + jacket[0])
+        if min(thermal_origin, thermal_origin + thermal_slope) <= 0:
+            raise ValueError("the jacket energy balance gives a nonpositive physical temperature")
+    else:
+        thermal_origin = t0_k if abs(delta_t_ad) > 1e-15 else t_op
+        thermal_slope = delta_t_ad if abs(delta_t_ad) > 1e-15 else 0.
+
+    def outlet_temperature(conversion):
+        if jacket is not None:
+            return float(thermal_origin + thermal_slope * Fraction(conversion))
+        return thermal_origin + thermal_slope * conversion
+
+    def jacket_balance(conversion, unreacted, temperature, volume):
+        x = Fraction(conversion) if conversion <= unreacted else 1 - Fraction(unreacted)
+        temperature = Fraction(temperature)
+        feed_heat = Fraction(t0_k) - temperature
+        generated = Fraction(delta_t_ad) * x
+        removed = jacket[0] * (temperature - jacket[1])
+        imbalance = feed_heat + generated - removed
+        scale = max(abs(feed_heat), abs(generated), abs(removed), abs(temperature))
+        # Independently replay the mass balance from the reported state and
+        # volume, including the unreacted coordinate when conversion rounds to 1.
+        with localcontext() as check:
+            check.prec = 80
+            xd = Decimal(x.numerator) / Decimal(x.denominator)
+            remaining = 1 - x
+            cd = Decimal.from_float(c_a0) * Decimal(remaining.numerator) / Decimal(remaining.denominator)
+            td = Decimal(temperature.numerator) / Decimal(temperature.denominator)
+            k = Decimal.from_float(k_at_temp(float(td)))
+            if not k.is_finite() or k < 0:
+                raise ValueError("nonfinite jacketed CSTR rate at the reported outlet temperature")
+            fed = Decimal.from_float(f_a0) * xd
+            reacted = Decimal.from_float(volume) * k * (cd ** Decimal.from_float(order_n) if order_n else Decimal(1))
+            denom = max(abs(fed), abs(reacted))
+            mass_error = float(abs(fed - reacted) / denom) if denom else 0.
+        return {"mass_balance_residual": mass_error,
+                "jacket_heat_removed_per_feed_heat_capacity_K": float(removed),
+                "energy_balance_residual_K": float(imbalance), "energy_balance_residual": float(abs(imbalance) / scale)}
+
     def rate_minus_ra(x_conv: float) -> float:
-        temp_x = (t0_k + delta_t_ad * x_conv) if abs(delta_t_ad) > 1e-15 else t_op
+        temp_x = outlet_temperature(x_conv)
         k_val = k_at_temp(temp_x)
         vol_factor = (1.0 + eps_a * x_conv) * (temp_x / t0_k if gas_phase else 1.0)
         ca_x = c_a0 * max(1.0 - x_conv, 0.0) / vol_factor
@@ -2296,7 +2371,12 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
                         ud = 1-xd
                     else:
                         xd = 1-ud
-                    td = D(t0_k)+D(delta_t_ad)*xd if abs(delta_t_ad) > 1e-15 else D(t_op)
+                    if jacket is None:
+                        td = D(thermal_origin) + D(thermal_slope) * xd
+                    else:
+                        origin = Decimal(thermal_origin.numerator) / Decimal(thermal_origin.denominator)
+                        slope = Decimal(thermal_slope.numerator) / Decimal(thermal_slope.denominator)
+                        td = origin + slope * xd
                     if "A_preexp" in params and "E_a" in params:
                         kd = D(float(params["A_preexp"]))*((-D(float(params["E_a"]))/(D(r_gas)*td)).exp())
                     elif "k_ref" in params and "T_ref" in params and "E_a" in params:
@@ -2314,14 +2394,21 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
                     temperature = float(td)
                     energy_error = float(abs(D(temperature)-td)/td)
                 error = max(error, energy_error)
-                return {"conversion_X": conversion, "unreacted_fraction": unreacted,
+                row = {"conversion_X": conversion, "unreacted_fraction": unreacted,
                         "exit_T_K": temperature, "k_exit": k_at_temp(temperature),
                         "residual": error, "verified": error < 1e-9}
+                if jacket is not None:
+                    row.update(jacket_balance(conversion, unreacted, temperature, vol_m3))
+                    row["residual"] = max(error, row["energy_balance_residual"], row["mass_balance_residual"])
+                    row["verified"] = row["residual"] < 1e-9
+                return row
 
             # Each tank can have several steady outlets even for one inlet.
             # Keep complete trajectories: an inlet with no downstream root
             # does not eliminate a different, physically realizable path.
-            inputs = (params, stage_volume, c_a0, f_a0, t0_k, t_op, delta_t_ad, eps_a, order_n, gas_phase)
+            inputs = (params, stage_volume, c_a0, f_a0,
+                      thermal_origin if jacket is not None else t0_k, thermal_origin,
+                      thermal_slope, eps_a, order_n, gas_phase)
             branch = params.get("steady_state_branch")
             ambiguity = ("multiple physical CSTR steady states; set steady_state_branch to 'all' "
                          "or an ascending zero-based branch index")
@@ -2371,7 +2458,7 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
         raise ValueError("reactor_kinetics requires either 'conversion' or 'volume'")
 
     tau_total = vol_m3 / v0
-    temp_exit = (t0_k + delta_t_ad * x_out) if abs(delta_t_ad) > 1e-15 else t_op
+    temp_exit = outlet_temperature(x_out)
     result = {
         "domain": "reactor_kinetics",
         "reactor_type": reactor_type,
@@ -2393,6 +2480,10 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
         result["verified"] = cstr_branches[branch]["verified"]
         if reactor_type == "cstr_series":
             result["stages"] = cstr_branches[branch]["stages"]
+    if jacket is not None:
+        result.update(jacket_balance(x_out, result.get("unreacted_fraction", 1 - x_out), result["exit_T_K"], vol_m3))
+        result["residual"] = max(result["residual"], result["energy_balance_residual"], result["mass_balance_residual"])
+        result["verified"] = result["residual"] < 1e-9
     return result
 
 
