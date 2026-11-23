@@ -50,3 +50,13 @@ class RigidPatchModes(unittest.TestCase):
             self.assertTrue(math.isclose(value, expected, rel_tol=2e-15))
             self.assertLessEqual(interval[0], expected)
             self.assertGreaterEqual(interval[1], expected)
+
+    def test_published_subnormal_eigenvalues_must_resolve_the_physical_balance(self):
+        u = math.ulp(0.)
+        for multiple in (2, 3, 4, 5):
+            out = solve([[2.]], [[multiple*u]])
+            self.assertEqual(out["verified"], multiple % 2 == 0, out)
+            if out["verified"]:
+                expected = (multiple//2)*u
+                self.assertEqual(out["eigenvalues_omega2"], [expected])
+                self.assertEqual(out["eigenvalue_intervals_omega2"], [[expected, expected]])

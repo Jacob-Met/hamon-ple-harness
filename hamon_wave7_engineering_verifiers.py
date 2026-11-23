@@ -1020,6 +1020,26 @@ def _lagrangian_modes(params):
 
         physical = [float(Fraction(float(v))*unit) for v in values]
         intervals = [[outward(lo*unit, False), outward(hi*unit, True)] for lo, hi in bounds]
+        # Restoring physical units can consume most of a subnormal
+        # eigenvalue's significant bits after the normalized solve passed.
+        for i in range(nullity, len(physical)):
+            value = physical[i]
+            if value >= np.finfo(float).tiny:
+                continue
+            if value <= 0:
+                raise ArithmeticError("unrepresentable_modal_frequency")
+            published = Fraction(value)
+            target = published / unit
+            k_int, kd = _dyadic_matrix(k)
+            m_int, md = _dyadic_matrix(m)
+            below, equal = _inertia_counts(k_int*(md*target.denominator) - m_int*(kd*target.numerator))
+            if below <= i < below+equal:
+                intervals[i] = [value, value]
+                continue
+            relative = max(abs(bound*unit-published)/published for bound in bounds[i])
+            if relative >= Fraction(1, 10**10):
+                raise ArithmeticError("unrepresentable_modal_frequency")
+            residual = max(residual, float(relative))
         if any(low <= 0.0 or val <= 0.0 for (low, _), val in zip(intervals[nullity:], physical[nullity:])):
             raise ArithmeticError("unrepresentable_modal_frequency")
         omega = [math.sqrt(val) for val in physical]
