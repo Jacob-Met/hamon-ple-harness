@@ -1261,6 +1261,146 @@ def _mohr_stress(params):
         return {"verified": False, "error": str(exc)}
 
 
+def _lame_annulus(params):
+    """Resolve a common wall and sample radius before evaluating its tractions."""
+    def observation(name):
+        raw = params[name]
+        if isinstance(raw, bool):
+            raise ValueError(f"{name} must be numeric")
+        if type(raw) is int:
+            value = Fraction(raw)
+            return value, value, value, True
+        f = float(raw)
+        if not math.isfinite(f):
+            raise ValueError(f"{name} must be finite")
+        value = Fraction(f)
+        low = math.nextafter(f, -math.inf)
+        high = math.nextafter(f, math.inf)
+        lo = Fraction(low) if math.isfinite(low) else 2*value-Fraction(high)
+        hi = Fraction(high) if math.isfinite(high) else 2*value-Fraction(low)
+        return value, (value+lo)/2, (value+hi)/2, False
+
+    def agrees(coord, value):
+        center,lo,hi,exact = coord
+        if exact:
+            return value == center
+        if lo < value < hi:
+            return True
+        if value != lo and value != hi:
+            return False
+        # Endpoint ties belong to a stored significand with an even low bit.
+        return (center/Fraction(math.ulp(float(center)))) % 2 == 0
+
+    inner = observation("r_i")
+    outer = observation("r_o") if params.get("r_o") is not None else None
+    wall = observation("t") if params.get("t") is not None else None
+    sample = observation("r_eval") if params.get("r_eval") is not None else None
+    if not (outer or wall):
+        raise ValueError("Supply an outer radius or a wall thickness")
+    if any(u[0] <= 0 for u in (inner, outer, wall, sample) if u is not None):
+        raise ValueError("Radii and thickness must be positive")
+
+    if outer is None:
+        candidates = [(inner[0], inner[0]+wall[0])]
+    elif wall is None:
+        candidates = [(inner[0], outer[0])]
+    else:
+        # Prefer supplied centers when they form an admissible annulus. If
+        # all three measurements constrain it off-center, project ri+t=ro
+        # onto the outer-radius interval and take an interior representative.
+        candidates = [(inner[0], outer[0]), (inner[0], inner[0]+wall[0]),
+                      (outer[0]-wall[0], outer[0])]
+        ri_lo, ri_hi = inner[1:3]
+        ro_lo, ro_hi = outer[1:3]
+        if sample:
+            ri_hi = min(ri_hi, sample[2])
+            ro_lo = max(ro_lo, sample[1])
+        lo = max(ro_lo, ri_lo+wall[1])
+        hi = min(ro_hi, ri_hi+wall[2])
+        if ri_lo <= ri_hi and ro_lo <= ro_hi and lo <= hi:
+            ro = (lo+hi)/2
+            inside_lo, inside_hi = max(ri_lo,ro-wall[2]), min(ri_hi,ro-wall[1])
+            if inside_lo <= inside_hi:
+                candidates.append(((inside_lo+inside_hi)/2,ro))
+
+    for ri,ro in candidates:
+        if not 0 < ri < ro or not agrees(inner,ri):
+            continue
+        if outer and not agrees(outer,ro) or wall and not agrees(wall,ro-ri):
+            continue
+        r = min(ro,max(ri,sample[0])) if sample else ri
+        if sample is None or agrees(sample,r):
+            return ri,ro,r
+    raise ValueError("No positive annular wall and material radius satisfy all supplied dimensions")
+
+
+def _lame_stress(params):
+    result = {"domain":"solid_mohr_vessel_buckling", "subkind":"pressure_vessel", "verified":False}
+    try:
+        def pressure(name):
+            raw = params.get(name,0) if name == "p_o" else params[name]
+            if isinstance(raw,bool):
+                raise ValueError(f"{name} must be a finite pressure")
+            return Fraction(raw) if type(raw) is int else Fraction(float(raw))
+
+        ri,ro,r = _lame_annulus(params)
+        pi,po = pressure("p_i"),pressure("p_o")
+        closed = params.get("closed_ends", True)
+        if type(closed) is int and closed in (0, 1):
+            closed = bool(closed)
+        if type(closed) is not bool:
+            raise ValueError("closed_ends must be a boolean")
+        area = (ro-ri)*(ro+ri)
+        uniform = (pi*ri**2-po*ro**2)/area
+        b = (pi-po)*ri**2*ro**2/area
+        amplitude = b/r**2
+        sr,st = uniform-amplitude,uniform+amplitude
+        sz = uniform if closed else Fraction(0)
+        mean = (sr+st+sz)/3
+        # Radial equilibrium, diametral cut force and end closure are
+        # checked in the original pressure/stress coordinates.
+        if (uniform-b/ri**2 != -pi or uniform-b/ro**2 != -po or
+                uniform*(ro-ri)+b*(1/ri-1/ro) != pi*ri-po*ro or
+                sz*area != (pi*ri**2-po*ro**2 if closed else 0)):
+            raise ValueError("Annular pressure tractions do not balance")
+        vm2 = 3*amplitude**2+(sz-uniform)**2
+        if 2*vm2 != (st-sr)**2+(sr-sz)**2+(sz-st)**2:
+            raise ValueError("Deviatoric invariant does not match the principal stress differences")
+
+        errors = []
+        def report(x):
+            shown = float(x)
+            if not math.isfinite(shown):
+                raise ValueError("Annular result exceeds finite reporting range")
+            if x:
+                errors.append(abs(Fraction(shown)/x-1))
+            return shown
+        def vm_compare(trial):
+            if trial < 0:
+                return 1
+            radicand = vm2-trial**2
+            return (radicand>0)-(radicand<0)
+        vm = _rounded_stress_root(vm_compare)
+        if vm2:
+            errors.append(abs(Fraction(vm)**2/vm2-1))
+        membrane = (pi-po)*ri/(ro-ri)
+        out = dict(r_i=report(ri),r_o=report(ro),r_eval=report(r),wall_thickness=report(ro-ri),
+                   sigma_hoop_lame=report(st),sigma_radial_lame=report(sr),sigma_axial_lame=report(sz),
+                   sigma_hoop_thin=report(-po+membrane),
+                   sigma_axial_thin=report(-po+membrane/2) if closed else 0.,sigma_von_mises=vm,
+                   thin_wall_model="Hoop mean includes external pressure. Closed ends use the inner-radius axial membrane approximation. Freely open ends carry zero axial stress.")
+        out["stress_split"] = dict(uniform_in_plane=report(uniform), radial_hoop_amplitude=report(amplitude),
+                                   mean_normal_stress=report(mean), deviatoric_radial=report(sr-mean),
+                                   deviatoric_hoop=report(st-mean), deviatoric_axial=report(sz-mean))
+        residual = max(errors,default=Fraction(0))
+        if residual >= Fraction(1,10**11):
+            raise ValueError("Resolved wall geometry or stress exceeds the supported reporting resolution")
+        result.update(out,verified=True,residual=float(residual))
+    except (ArithmeticError,KeyError,ValueError,TypeError) as exc:
+        result["error"] = str(exc)
+    return result
+
+
 def solve_mohr_vessel_buckling(params: Mapping[str, Any]) -> Dict[str, Any]:
     """Deterministic solver for 2D/3D stress states, Lame/thin vessels, and Euler-Johnson buckling."""
     subkind = str(params.get("subkind", "mohr_stress")).strip().lower()
@@ -1269,61 +1409,7 @@ def solve_mohr_vessel_buckling(params: Mapping[str, Any]) -> Dict[str, Any]:
         return {"domain": "solid_mohr_vessel_buckling", "subkind": subkind, **_mohr_stress(params)}
 
     if subkind == "pressure_vessel":
-        ri = float(params["r_i"])
-        ro = float(params["r_o"]) if "r_o" in params and params["r_o"] is not None else ri + float(params["t"])
-        pi = float(params["p_i"])
-        po = float(params.get("p_o", 0.0))
-        r_eval = float(params.get("r_eval", ri))
-        if not all(math.isfinite(value) for value in (ri, ro, r_eval, pi, po)):
-            return {"domain": "solid_mohr_vessel_buckling", "subkind": subkind,
-                    "verified": False, "error": "Pressures and radii must be finite."}
-        if not (0.0 < ri < ro and ri <= r_eval <= ro):
-            return {"domain": "solid_mohr_vessel_buckling", "subkind": subkind,
-                    "verified": False, "r_i": ri, "r_o": ro, "r_eval": r_eval,
-                    "error": "Solid stress requires 0 < r_i < r_o and r_i <= r_eval <= r_o."}
-
-        t_wall = ro - ri
-        closed = bool(params.get("closed_ends", True))
-        dp = pi - po
-        # Express the Lamé solution relative to the uniform external pressure.
-        # Keeping (ro - r) explicit preserves the outer traction at a thin wall.
-        inner = ri / ro
-        denominator = (t_wall / ro) * (1.0 + inner)
-        axial_pressure = -po + dp * (inner * inner / denominator)
-
-        def radial_stress(radius):
-            position = radius / ro
-            span = ((ro - radius) / ro) * (1.0 + position)
-            return -po - dp * ((ri / radius) ** 2 * (span / denominator))
-
-        sigma_r = radial_stress(r_eval)
-        sigma_theta = -po + dp * ((ri / r_eval) ** 2 * (1.0 + (r_eval / ro) ** 2) / denominator)
-        sigma_z = axial_pressure if closed else 0.0
-        sigma_vm = math.hypot(sigma_theta - sigma_z, sigma_z - sigma_r, sigma_r - sigma_theta) / math.sqrt(2.0)
-        # The mean hoop stress balances a diametral cut. The thin axial estimate
-        # uses the inner radius and leading wall area; the Lamé axial value above
-        # uses the full annular area. A freely open end has no axial end load.
-        pressure_membrane = dp * (ri / t_wall)
-        thin_hoop = -po + pressure_membrane
-        thin_axial = -po + 0.5 * pressure_membrane if closed else 0.0
-        residual = max(abs(radial_stress(ri) + pi), abs(radial_stress(ro) + po)) / max(abs(pi), abs(po), 1.0)
-        if not all(math.isfinite(value) for value in (sigma_r, sigma_theta, sigma_z,
-                                                       sigma_vm, thin_hoop, thin_axial, residual)):
-            return {"domain": "solid_mohr_vessel_buckling", "subkind": subkind,
-                    "verified": False, "error": "Stress at the requested wall point exceeds numerical range."}
-        return {
-            "domain": "solid_mohr_vessel_buckling",
-            "subkind": subkind,
-            "sigma_hoop_lame": sigma_theta,
-            "sigma_radial_lame": sigma_r,
-            "sigma_axial_lame": sigma_z,
-            "sigma_hoop_thin": thin_hoop,
-            "sigma_axial_thin": thin_axial,
-            "thin_wall_model": "Hoop mean includes external pressure. Closed ends use the inner-radius axial membrane approximation. Freely open ends carry zero axial stress.",
-            "sigma_von_mises": sigma_vm,
-            "residual": residual,
-            "verified": residual < 1e-11,
-        }
+        return _lame_stress(params)
 
     if subkind == "column_buckling":
         e_mod = float(params["E"])

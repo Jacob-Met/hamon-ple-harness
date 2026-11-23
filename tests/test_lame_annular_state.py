@@ -44,3 +44,54 @@ class LameAnnularState(unittest.TestCase):
                 result = vessel(p_i=100000, p_o=100000, closed_ends=closed, t=1)
                 self.assertTrue(result["verified"], result)
                 self.assertEqual(result["sigma_von_mises"], expected)
+
+    def test_independent_end_area_and_diametral_force_balances(self):
+        ri,ro=2,5
+        for pi,po in ((5000,1000),(1000,5000),(-30,10),(350,350)):
+            for closed in (False,True):
+                for radius in (ri,3,ro):
+                    with self.subTest(pi=pi,po=po,closed=closed,r=radius):
+                        out=vessel(r_i=ri,r_o=ro,t=ro-ri,r_eval=radius,
+                                   p_i=pi,p_o=po,closed_ends=closed)
+                        self.assertTrue(out["verified"],out)
+                        a=Fraction(pi*ri**2-po*ro**2,ro**2-ri**2)
+                        b=Fraction((pi-po)*ri**2*ro**2,ro**2-ri**2)
+                        radial,hoop,axial=a-b/radius**2,a+b/radius**2,a if closed else 0
+                        mean=(radial+hoop+axial)/3
+                        for name,exact in (("sigma_radial_lame",radial),("sigma_hoop_lame",hoop),
+                                          ("sigma_axial_lame",axial)):
+                            self.assertEqual(out[name],float(exact))
+                        for name,exact in (("radial_hoop_amplitude",b/radius**2),
+                                           ("uniform_in_plane",a),("mean_normal_stress",mean),
+                                           ("deviatoric_radial",radial-mean),
+                                           ("deviatoric_hoop",hoop-mean),
+                                           ("deviatoric_axial",axial-mean)):
+                            self.assertEqual(out["stress_split"][name],float(exact))
+                        self.assertEqual(a*(ro-ri)+b*(Fraction(1,ri)-Fraction(1,ro)),pi*ri-po*ro)
+
+    def test_integer_wall_and_float_measurements_and_sampling(self):
+        # An exact integer unit of wall thickness remains distinct at this datum.
+        datum=2**54
+        for spec in (dict(r_i=datum,r_o=datum+1,t=1),
+                     dict(r_i=datum,r_o=None,t=1),
+                     dict(r_i=float(datum),r_o=float(datum),t=1)):
+            out=vessel(p_i=100,p_o=99,**spec)
+            self.assertTrue(out["verified"],out)
+            self.assertEqual(out["wall_thickness"],1.)
+        for spec in (dict(r_i=.1,r_o=.3,t=.2),dict(r_i=.1,r_o=.3,t=.2,r_eval=.3)):
+            self.assertTrue(vessel(**spec)["verified"])
+        self.assertFalse(vessel(r_i=datum,r_o=datum,t=1)["verified"])
+        self.assertFalse(vessel(r_eval=math.nextafter(2., math.inf))["verified"])
+        self.assertFalse(vessel(closed_ends="false")["verified"])
+
+    def test_public_split_recovers_small_signed_outer_face_deviation(self):
+        for excess in (-1,1):
+            out=vessel(r_i=1,r_o=2**20,r_eval=2**20,p_o=10**6,p_i=10**6+excess)
+            split=out["stress_split"]
+            shear=Fraction(excess,2**40-1)
+            self.assertEqual(split["radial_hoop_amplitude"],float(shear))
+            self.assertEqual(split["deviatoric_hoop"],float(shear))
+            self.assertEqual(split["deviatoric_radial"],-float(shear))
+            self.assertEqual(split["deviatoric_axial"],0.)
+            self.assertEqual(out["sigma_hoop_lame"],out["sigma_radial_lame"])
+            self.assertGreater(out["sigma_von_mises"],0.)
