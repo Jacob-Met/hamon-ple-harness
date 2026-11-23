@@ -420,7 +420,70 @@ def _numeric_cell(cell, value):
     return number if math.isfinite(number) else None
 
 
+_SHEET_TOKEN = r"'(?:[^'\[\]:*!?/\\]|'')+'|[A-Z_][A-Z0-9_.]*"
+
+
+def _local_reference(prefix, vector=False):
+    sheet = rf"(?:(?P<{prefix}_sheet>{_SHEET_TOKEN})!)?"
+    start = rf"(?P<{prefix}_start>{_CELL_REF})"
+    end = rf":(?P<{prefix}_end>{_CELL_REF})" if vector else ""
+    return sheet + start + end
+
+
+_INDEX_MATCH = re.compile(
+    rf"INDEX\(\s*{_local_reference('values', True)}\s*,\s*"
+    rf"MATCH\(\s*{_local_reference('needle')}\s*,\s*{_local_reference('keys', True)}"
+    r"\s*,\s*0\s*\)\s*\)", re.I | re.ASCII)
+
+
+def _verify_index_match(sheet, formula, cached, literals):
+    match = _INDEX_MATCH.fullmatch(formula)
+    if match is None:
+        return {"status": "unverified", "reason": "requires_vertical_INDEX_and_exact_MATCH_0"}
+    if cached is None:
+        return {"status": "unverified", "reason": "missing_numeric_cache"}
+    resolved = {}
+    for field in ("needle", "keys", "values"):
+        name = match[field + "_sheet"] or sheet
+        if name.startswith("'"):
+            name = name[1:-1].replace("''", "'")
+        candidates = [s for s in literals if s is not None and s.casefold() == name.casefold()]
+        if len(candidates) != 1 or (candidates[0] != name and not (name.isascii() and candidates[0].isascii())):
+            return {"status": "unverified", "reason": "missing_or_ambiguous_sheet"}
+        resolved[field] = candidates[0]
+    try:
+        key_x, key_y = _grid_position(match["keys_start"])
+        key_end_x, key_end_y = _grid_position(match["keys_end"])
+        val_x, val_y = _grid_position(match["values_start"])
+        val_end_x, val_end_y = _grid_position(match["values_end"])
+        needle_cell = _address(*_grid_position(match["needle_start"]))
+    except ValueError:
+        return {"status": "unverified", "reason": "invalid_cell_reference"}
+    length = key_end_y - key_y + 1
+    if (key_x != key_end_x or val_x != val_end_x or length != val_end_y - val_y + 1
+            or not 1 <= length <= 2048):
+        return {"status": "unverified", "reason": "requires_equal_bounded_vertical_vectors"}
+    needle = literals[resolved["needle"]].get(needle_cell)
+    if needle is None:
+        return {"status": "unverified", "reason": "requires_literal_numeric_lookup_key"}
+    for offset in range(length):
+        key = literals[resolved["keys"]].get(_address(key_x, key_y + offset))
+        if key is None:
+            return {"status": "unverified", "reason": "unresolved_preceding_lookup_key"}
+        if key == needle:
+            address = _address(val_x, val_y + offset)
+            expected = literals[resolved["values"]].get(address)
+            if expected is None:
+                return {"status": "unverified", "reason": "requires_literal_numeric_return_cell"}
+            return {"status": "matched" if cached == expected else "mismatch",
+                    "source_sheet": resolved["values"], "source_cell": address,
+                    "expected": expected, "cached": cached}
+    return {"status": "unverified", "reason": "no_exact_numeric_match"}
+
+
 def _verify_lookup(sheet, formula, cached, literals):
+    if formula.upper().startswith("INDEX("):
+        return _verify_index_match(sheet, formula, cached, literals)
     match = _EXACT_LOOKUP.fullmatch(formula)
     if match is None or cached is None:
         return {"status": "unverified"}
@@ -532,7 +595,7 @@ def xlsx_audit(filename: str):
                                 unresolved_shared_followers += 1
                             else:
                                 expression = shared_master[2]
-                    if expression.upper().startswith(("VLOOKUP(", "HLOOKUP(")):
+                    if expression.upper().startswith(("VLOOKUP(", "HLOOKUP(", "INDEX(")):
                         lookup_total += 1
                         if len(lookups) < 256 and len(expression) <= 512 and formula_type in ("normal", "shared"):
                             if formula_type == "shared":
