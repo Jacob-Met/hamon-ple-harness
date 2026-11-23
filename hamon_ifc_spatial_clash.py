@@ -85,11 +85,12 @@ class ClashResult:
     element_b: str
     status: str  # "hard_clash" | "clearance_violation" | "clear"
     min_distance_m: Optional[float]
-    overlap_aabb_volume_m3: float
+    overlap_aabb_volume_m3: Optional[float]
     witness_point_m: Optional[Tuple[float, float, float]]
     required_clearance_m: float = 0.0
     distance_lower_bound_m: Optional[float] = None
     closest_points_m: Optional[Tuple[Tuple[float, ...], Tuple[float, ...]]] = None
+    closest_points_rounding_error_m: Optional[Tuple[float, float]] = None
 
 
 
@@ -1278,142 +1279,33 @@ def parse_obj_mesh(obj_text: str, element_id: str = "obj_0", name: str = "obj_pa
     )
 
 
-def _segment_pierces_triangle(p0: np.ndarray, p1: np.ndarray, v0: np.ndarray, v1: np.ndarray, v2: np.ndarray) -> Optional[np.ndarray]:
-    d = p1 - p0
-    e1 = v1 - v0
-    e2 = v2 - v0
-    h = np.cross(d, e2)
-    a = float(np.dot(e1, h))
-    if abs(a) < 1e-12:
+def _segment_pierces_triangle(p0, p1, v0, v1, v2):
+    from hamon_mesh_distance import point, segment_triangle, wire_point
+    hit = segment_triangle(point(p0), point(p1), tuple(map(point, (v0, v1, v2))))
+    return None if hit is None else np.array(wire_point(hit)[0], dtype=float)
+
+def _triangles_intersect_3d(a0, a1, a2, b0, b1, b2):
+    from hamon_mesh_distance import point, bounds, bounds_distance_squared, triangle_distance, wire_point
+    a, b = tuple(map(point, (a0, a1, a2))), tuple(map(point, (b0, b1, b2)))
+    if bounds_distance_squared(bounds(a), bounds(b)) > 0:
         return None
-    f = 1.0 / a
-    s = p0 - v0
-    u = f * float(np.dot(s, h))
-    if u < -1e-9 or u > 1.0 + 1e-9:
-        return None
-    q = np.cross(s, e1)
-    v = f * float(np.dot(d, q))
-    if v < -1e-9 or (u + v) > 1.0 + 1e-9:
-        return None
-    t = f * float(np.dot(e2, q))
-    if -1e-9 <= t <= 1.0 + 1e-9:
-        return p0 + max(0.0, min(1.0, t)) * d
-    return None
+    distance, first, _ = triangle_distance(a, b)
+    return np.array(wire_point(first)[0], dtype=float) if distance == 0 else None
 
+def _closest_point_on_triangle(p, a, b, c):
+    from hamon_mesh_distance import point, closest_triangle, wire_point
+    closest = closest_triangle(point(p), tuple(map(point, (a, b, c))))
+    return np.array(wire_point(closest)[0], dtype=float)
 
-def _triangles_intersect_3d(a0: np.ndarray, a1: np.ndarray, a2: np.ndarray, b0: np.ndarray, b1: np.ndarray, b2: np.ndarray) -> Optional[np.ndarray]:
-    amin = np.minimum(np.minimum(a0, a1), a2)
-    amax = np.maximum(np.maximum(a0, a1), a2)
-    bmin = np.minimum(np.minimum(b0, b1), b2)
-    bmax = np.maximum(np.maximum(b0, b1), b2)
-    if np.any(amax < bmin - 1e-9) or np.any(bmax < amin - 1e-9):
-        return None
-    for (p0, p1) in ((a0, a1), (a1, a2), (a2, a0)):
-        hit = _segment_pierces_triangle(p0, p1, b0, b1, b2)
-        if hit is not None:
-            return hit
-    for (p0, p1) in ((b0, b1), (b1, b2), (b2, b0)):
-        hit = _segment_pierces_triangle(p0, p1, a0, a1, a2)
-        if hit is not None:
-            return hit
-    return None
+def _segment_segment_dist_3d(p1, q1, p2, q2):
+    from hamon_mesh_distance import point, segment_distance, wire_distance, wire_point
+    distance, a, b = segment_distance(*map(point, (p1, q1, p2, q2)))
+    return wire_distance(distance), np.array(wire_point(a)[0]), np.array(wire_point(b)[0])
 
-
-def _closest_point_on_triangle(p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
-    ab = b - a
-    ac = c - a
-    ap = p - a
-    d1 = float(np.dot(ab, ap))
-    d2 = float(np.dot(ac, ap))
-    if d1 <= 0.0 and d2 <= 0.0:
-        return a
-    bp = p - b
-    d3 = float(np.dot(ab, bp))
-    d4 = float(np.dot(ac, bp))
-    if d3 >= 0.0 and d4 <= d3:
-        return b
-    vc = d1 * d4 - d3 * d2
-    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
-        v = d1 / (d1 - d3)
-        return a + v * ab
-    cp = p - c
-    d5 = float(np.dot(ab, cp))
-    d6 = float(np.dot(ac, cp))
-    if d6 >= 0.0 and d5 <= d6:
-        return c
-    vb = d5 * d2 - d1 * d6
-    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
-        w = d2 / (d2 - d6)
-        return a + w * ac
-    va = d3 * d6 - d5 * d4
-    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
-        w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
-        return b + w * (c - b)
-    denom = 1.0 / (va + vb + vc)
-    v = vb * denom
-    w = vc * denom
-    return a + ab * v + ac * w
-
-
-def _segment_segment_dist_3d(p1: np.ndarray, q1: np.ndarray, p2: np.ndarray, q2: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray]:
-    d1 = q1 - p1
-    d2 = q2 - p2
-    r = p1 - p2
-    a = float(np.dot(d1, d1))
-    e = float(np.dot(d2, d2))
-    f = float(np.dot(d2, r))
-    if a <= 1e-15 and e <= 1e-15:
-        return float(np.linalg.norm(p1 - p2)), p1, p2
-    if a <= 1e-15:
-        s = 0.0
-        t = max(0.0, min(1.0, f / e))
-    else:
-        c = float(np.dot(d1, r))
-        if e <= 1e-15:
-            t = 0.0
-            s = max(0.0, min(1.0, -c / a))
-        else:
-            b = float(np.dot(d1, d2))
-            denom = a * e - b * b
-            s = max(0.0, min(1.0, (b * f - c * e) / denom)) if denom > 1e-15 else 0.0
-            t = (b * s + f) / e
-            if t < 0.0:
-                t = 0.0
-                s = max(0.0, min(1.0, -c / a))
-            elif t > 1.0:
-                t = 1.0
-                s = max(0.0, min(1.0, (b - c) / a))
-    c1 = p1 + s * d1
-    c2 = p2 + t * d2
-    return float(np.linalg.norm(c1 - c2)), c1, c2
-
-
-def _triangle_triangle_distance_3d(a0: np.ndarray, a1: np.ndarray, a2: np.ndarray, b0: np.ndarray, b1: np.ndarray, b2: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray]:
-    hit = _triangles_intersect_3d(a0, a1, a2, b0, b1, b2)
-    if hit is not None:
-        return 0.0, hit, hit
-    best_d = float("inf")
-    best_a, best_b = a0, b0
-    for p in (a0, a1, a2):
-        q = _closest_point_on_triangle(p, b0, b1, b2)
-        d = float(np.linalg.norm(p - q))
-        if d < best_d:
-            best_d = d
-            best_a, best_b = p, q
-    for p in (b0, b1, b2):
-        q = _closest_point_on_triangle(p, a0, a1, a2)
-        d = float(np.linalg.norm(p - q))
-        if d < best_d:
-            best_d = d
-            best_a, best_b = q, p
-    for (p1, q1) in ((a0, a1), (a1, a2), (a2, a0)):
-        for (p2, q2) in ((b0, b1), (b1, b2), (b2, b0)):
-            d, point_a, point_b = _segment_segment_dist_3d(p1, q1, p2, q2)
-            if d < best_d:
-                best_d = d
-                best_a, best_b = point_a, point_b
-    return best_d, best_a, best_b
-
+def _triangle_triangle_distance_3d(a0, a1, a2, b0, b1, b2):
+    from hamon_mesh_distance import point, triangle_distance, wire_distance, wire_point
+    distance, a, b = triangle_distance(tuple(map(point, (a0, a1, a2))), tuple(map(point, (b0, b1, b2))))
+    return wire_distance(distance), np.array(wire_point(a)[0]), np.array(wire_point(b)[0])
 
 def _closed_surface_components(vertices: np.ndarray, faces: np.ndarray):
     """Return one boundary vertex per closed shell and their triangle indices."""
@@ -1476,54 +1368,17 @@ def _material_boundaries(mesh: SolidMesh3D):
     return boundaries
 
 
-def _point_inside_mesh(pt: np.ndarray, mesh: SolidMesh3D, faces: np.ndarray, coherent: bool) -> bool:
+def _point_inside_mesh(pt, mesh, faces, coherent):
+    from hamon_mesh_distance import point, point_inside, bounds
     if len(faces) == 0:
         return False
-    if np.any(pt < mesh.aabb_min - 1e-9) or np.any(pt > mesh.aabb_max + 1e-9):
+    p = point(pt)
+    vertices = tuple(map(point, mesh.vertices))
+    lo, hi = bounds(vertices)
+    if any(p[i] < lo[i] or p[i] > hi[i] for i in range(3)):
         return False
-    if coherent:
-        # The signed solid angle is additive. Outward shells add occupied
-        # material; an inward shell subtracts a true nested cavity.
-        rays = mesh.vertices[faces] - pt
-        lengths = np.linalg.norm(rays, axis=2)
-        if np.any(lengths == 0):
-            return True
-        unit = rays / lengths[:, :, None]
-        a, b, c = unit[:, 0], unit[:, 1], unit[:, 2]
-        numerator = np.einsum("ij,ij->i", a, np.cross(b, c))
-        denominator = 1 + np.sum(a * b + b * c + c * a, axis=1)
-        # A whole turn in occupied volume subtends 4π steradians.
-        return abs(float(np.sum(2 * np.arctan2(numerator, denominator)))) > 2 * math.pi
-    # Preserve orientation-independent parity for a closed, inconsistently
-    # wound tessellation. Separate IFC items are still tested independently.
-    ray_dir = np.array([0.931723, 0.271828, 0.240719], dtype=np.float64)
-    ray_dir /= np.linalg.norm(ray_dir)
-    far = pt + ray_dir * (float(np.linalg.norm(mesh.aabb_max - mesh.aabb_min)) * 4.0 + 10.0)
-    hits = 0
-    v = mesh.vertices
-    for f in faces:
-        v0, v1, v2 = v[f[0]], v[f[1]], v[f[2]]
-        e1 = v1 - v0
-        e2 = v2 - v0
-        d = far - pt
-        h = np.cross(d, e2)
-        a = float(np.dot(e1, h))
-        if abs(a) < 1e-13:
-            continue
-        inv_a = 1.0 / a
-        s = pt - v0
-        u = inv_a * float(np.dot(s, h))
-        if u < 0.0 or u > 1.0:
-            continue
-        q = np.cross(s, e1)
-        vv = inv_a * float(np.dot(d, q))
-        if vv < 0.0 or (u + vv) > 1.0:
-            continue
-        t = inv_a * float(np.dot(e2, q))
-        if 1e-9 < t <= 1.0:
-            hits += 1
-    return (hits % 2) == 1
-
+    triangles = tuple(tuple(vertices[int(i)] for i in face) for face in faces)
+    return point_inside(p, triangles, coherent)
 
 def _aabb_overlap_volume(min_a: np.ndarray, max_a: np.ndarray, min_b: np.ndarray, max_b: np.ndarray) -> float:
     ox = max(0.0, float(min(max_a[0], max_b[0]) - max(min_a[0], min_b[0])))
@@ -1532,97 +1387,73 @@ def _aabb_overlap_volume(min_a: np.ndarray, max_a: np.ndarray, min_b: np.ndarray
     return ox * oy * oz
 
 
-def evaluate_pair_clash(mesh_a: SolidMesh3D, mesh_b: SolidMesh3D, required_clearance_m: float = 0.0) -> ClashResult:
-    ov_vol = _aabb_overlap_volume(mesh_a.aabb_min, mesh_a.aabb_max, mesh_b.aabb_min, mesh_b.aabb_max)
-    va, fa = mesh_a.vertices, mesh_a.faces
-    vb, fb = mesh_b.vertices, mesh_b.faces
-    b_tri_verts = vb[fb]
-    b_mins = np.min(b_tri_verts, axis=1)
-    b_maxs = np.max(b_tri_verts, axis=1)
+def _exact_pair_clash(mesh_a, mesh_b, required_clearance_m):
+    from hamon_mesh_distance import (point, mesh_triangles, bounds,
+        bounds_distance_squared, positive_overlap, overlap_volume,
+        point_inside, triangle_distance, wire_distance, wire_point, requested_clearance)
+    required,reported_required=requested_clearance(required_clearance_m)
+    va,ta=mesh_triangles(mesh_a.vertices,mesh_a.faces)
+    vb,tb=mesh_triangles(mesh_b.vertices,mesh_b.faces)
+    box_a,box_b=bounds(va),bounds(vb)
+    overlap=overlap_volume(box_a,box_b)
 
-    best_dist = float("inf")
-    best_a, best_b = mesh_a.aabb_min, mesh_b.aabb_min
+    def report(distance_squared,a,b,status):
+        pa,error_a=wire_point(a)
+        pb,error_b=wire_point(b)
+        midpoint,_=wire_point(tuple((x+y)/2 for x,y in zip(a,b)))
+        return ClashResult(
+            element_a=mesh_a.element_id, element_b=mesh_b.element_id,
+            status=status, min_distance_m=wire_distance(distance_squared),
+            overlap_aabb_volume_m3=overlap if status=="hard_clash" else 0.,
+            witness_point_m=midpoint, closest_points_m=(pa,pb),
+            closest_points_rounding_error_m=(error_a,error_b),
+            required_clearance_m=reported_required)
 
-    if ov_vol > 0.0:
-        for tri_a in fa:
-            a0, a1, a2 = va[tri_a[0]], va[tri_a[1]], va[tri_a[2]]
-            amin = np.minimum(np.minimum(a0, a1), a2)
-            amax = np.maximum(np.maximum(a0, a1), a2)
-            mask = np.all(b_maxs >= amin - 1e-9, axis=1) & np.all(b_mins <= amax + 1e-9, axis=1)
-            for j in np.nonzero(mask)[0]:
-                b0, b1, b2 = b_tri_verts[j]
-                hit = _triangles_intersect_3d(a0, a1, a2, b0, b1, b2)
-                if hit is not None:
-                    return ClashResult(
-                        element_a=mesh_a.element_id,
-                        element_b=mesh_b.element_id,
-                        status="hard_clash",
-                        min_distance_m=0.0,
-                        overlap_aabb_volume_m3=ov_vol,
-                        witness_point_m=tuple(map(float, hit)),
-                        closest_points_m=(tuple(map(float, hit)),) * 2,
-                        required_clearance_m=required_clearance_m,
-                    )
-        a_parts = _material_boundaries(mesh_a)
-        b_parts = _material_boundaries(mesh_b)
-        for candidate, container, containing_parts in ((a_parts, mesh_b, b_parts),
-                                                       (b_parts, mesh_a, a_parts)):
-            for seeds, _, _ in candidate:
-                for point in seeds:
-                    if any(_point_inside_mesh(point, container, faces, coherent)
-                           for _, faces, coherent in containing_parts):
-                        witness = tuple(map(float, point))
-                        return ClashResult(
-                            element_a=mesh_a.element_id,
-                            element_b=mesh_b.element_id,
-                            status="hard_clash",
-                            min_distance_m=0.0,
-                            overlap_aabb_volume_m3=ov_vol,
-                            witness_point_m=witness,
-                            closest_points_m=(witness, witness),
-                            required_clearance_m=required_clearance_m,
-                        )
+    # The overlap predicate is independent of whether its volume is printable.
+    # Preserve positive Body unions, oriented cavities and incoherent parity.
+    if positive_overlap(box_a,box_b):
+        def material(mesh,vertices):
+            return [([point(p) for p in seeds],
+                     [tuple(vertices[int(i)] for i in face) for face in faces],coherent)
+                    for seeds,faces,coherent in _material_boundaries(mesh)]
+        parts_a,parts_b=material(mesh_a,va),material(mesh_b,vb)
+        for candidates,containers,container_bounds in (
+                (parts_a,parts_b,box_b),(parts_b,parts_a,box_a)):
+            for seeds,_,_ in candidates:
+                for seed in seeds:
+                    if any(seed[i]<container_bounds[0][i] or seed[i]>container_bounds[1][i]
+                           for i in range(3)):
+                        continue
+                    if any(point_inside(seed,triangles,coherent) for _,triangles,coherent in containers):
+                        return report(0,seed,seed,"hard_clash")
 
-    for tri_a in fa:
-        a0, a1, a2 = va[tri_a[0]], va[tri_a[1]], va[tri_a[2]]
-        amin = np.minimum(np.minimum(a0, a1), a2)
-        amax = np.maximum(np.maximum(a0, a1), a2)
-        dx = np.maximum(0.0, np.maximum(amin[0] - b_maxs[:, 0], b_mins[:, 0] - amax[0]))
-        dy = np.maximum(0.0, np.maximum(amin[1] - b_maxs[:, 1], b_mins[:, 1] - amax[1]))
-        dz = np.maximum(0.0, np.maximum(amin[2] - b_maxs[:, 2], b_mins[:, 2] - amax[2]))
-        lb_dists = np.sqrt(dx * dx + dy * dy + dz * dz)
-        order = np.argsort(lb_dists)
-        for j in order:
-            if lb_dists[j] >= best_dist - 1e-12:
+    bounds_b=[bounds(triangle) for triangle in tb]
+    best=None
+    for triangle_a in ta:
+        bound_a=bounds(triangle_a)
+        if best is not None and bounds_distance_squared(bound_a,box_b)>=best[0]:
+            continue
+        order=sorted((bounds_distance_squared(bound_a,box),j) for j,box in enumerate(bounds_b))
+        for lower,j in order:
+            if best is not None and lower>=best[0]:
                 break
-            b0, b1, b2 = b_tri_verts[j]
-            d, point_a, point_b = _triangle_triangle_distance_3d(a0, a1, a2, b0, b1, b2)
-            if d < best_dist:
-                best_dist = d
-                best_a, best_b = point_a, point_b
-                if best_dist <= 1e-12:
-                    break
-        if best_dist <= 1e-12:
-            break
+            candidate=triangle_distance(triangle_a,tb[j])
+            if best is None or candidate[0]<best[0]:
+                best=candidate
+                if best[0]==0:
+                    return report(*best,"hard_clash")
+    if best is None:
+        raise ValueError("mesh clearance did not find an attained feature")
+    status="clearance_violation" if best[0]<required*required else "clear"
+    return report(*best,status)
 
-    if best_dist <= 1e-9:
-        status = "hard_clash"
-        best_dist = 0.0
-    elif best_dist < required_clearance_m - 1e-9:
-        status = "clearance_violation"
-    else:
-        status = "clear"
 
-    return ClashResult(
-        element_a=mesh_a.element_id,
-        element_b=mesh_b.element_id,
-        status=status,
-        min_distance_m=float(best_dist),
-        overlap_aabb_volume_m3=ov_vol if status == "hard_clash" else 0.0,
-        witness_point_m=tuple(map(float, 0.5 * (best_a + best_b))),
-        closest_points_m=(tuple(map(float, best_a)), tuple(map(float, best_b))),
-        required_clearance_m=required_clearance_m,
-    )
+def evaluate_pair_clash(mesh_a: SolidMesh3D, mesh_b: SolidMesh3D, required_clearance_m: float = 0.0) -> ClashResult:
+    try:
+        return _exact_pair_clash(mesh_a,mesh_b,required_clearance_m)
+    except (ValueError,OverflowError) as exc:
+        raise UnresolvedSolidGeometry("Unresolved represented mesh clearance: "+str(exc)) from exc
+
 
 
 def detect_ifc_clashes(
@@ -1630,34 +1461,40 @@ def detect_ifc_clashes(
     required_clearance_m: float = 0.0,
     cross_discipline_only: bool = False,
 ) -> Dict[str, Any]:
+    from fractions import Fraction
+    from hamon_mesh_distance import (point, bounds_distance_squared,
+                                    requested_clearance, lower_distance_bound)
+    try:
+        required, reported_required = requested_clearance(required_clearance_m)
+    except (ValueError, OverflowError) as exc:
+        raise UnresolvedSolidGeometry(str(exc)) from exc
     solids = load_ifc_solids(ifc_text)
-    # Bounds can prove clearance and eliminate candidates for the minimum.
-    # Only a narrow-phase result supplies an attainable distance and witness.
     use_broadphase = len(solids) > 25
-    mins = [s.aabb_min for s in solids]
-    maxs = [s.aabb_max for s in solids]
+    boxes = [(point(s.aabb_min), point(s.aabb_max)) for s in solids]
     pairs = []
     for i, sa in enumerate(solids):
         for j in range(i + 1, len(solids)):
             if cross_discipline_only and sa.discipline == solids[j].discipline:
                 continue
-            bound = 0.0
-            if use_broadphase:
-                gap = np.maximum(0.0, np.maximum(mins[i] - maxs[j], mins[j] - maxs[i]))
-                bound = math.hypot(*gap)
-            pairs.append((bound, i, j))
+            bound_squared = bounds_distance_squared(boxes[i], boxes[j]) if use_broadphase else Fraction(0)
+            pairs.append((bound_squared, i, j))
 
-    # Store rows in model order even though nearest bounds are refined first.
+    # Refine an attained minimum first. A rounded distance's next larger
+    # binary64 value bounds the exact distance above for conservative pruning.
     results = [None] * len(pairs)
     min_clear = float("inf")
     for position in sorted(range(len(pairs)), key=lambda k: pairs[k][0]):
-        bound, i, j = pairs[position]
+        bound_squared, i, j = pairs[position]
         sa, sb = solids[i], solids[j]
-        if use_broadphase and bound > max(required_clearance_m, min_clear) + 1e-6:
+        upper = math.nextafter(min_clear, math.inf)
+        skip = (use_broadphase and math.isfinite(upper) and
+                bound_squared > max(required * required, Fraction(upper) ** 2))
+        if skip:
             result = ClashResult(element_a=sa.element_id, element_b=sb.element_id,
                                  status="clear", min_distance_m=None, witness_point_m=None,
-                                 overlap_aabb_volume_m3=0.0, distance_lower_bound_m=bound,
-                                 required_clearance_m=required_clearance_m)
+                                 overlap_aabb_volume_m3=0.0,
+                                 distance_lower_bound_m=lower_distance_bound(bound_squared),
+                                 required_clearance_m=reported_required)
         else:
             result = evaluate_pair_clash(sa, sb, required_clearance_m)
             min_clear = min(min_clear, result.min_distance_m)
@@ -1677,8 +1514,6 @@ def detect_ifc_clashes(
     }
 
 
-
-# --- Wave-3 Live Router Endpoint & Single-File Preflight Adapter ---
 def _wave3_to_jsonable(obj):
     import dataclasses as _dc
     from pathlib import Path as _Path
@@ -1714,7 +1549,14 @@ def run_router_ifc_clash(payload: dict) -> dict:
     import tempfile as _tf
     from pathlib import Path as _Path
 
-    req_clear = float(payload.get("required_clearance_m", payload.get("clearance_m", 0.05)))
+    from hamon_mesh_distance import requested_clearance
+    req_clear = payload.get("required_clearance_m", payload.get("clearance_m", 0.05))
+    try:
+        requested_clearance(req_clear)
+    except (ValueError, OverflowError) as exc:
+        return {"ok": False, "tool": "hamon_ifc_spatial_clash",
+                "status": "unresolved_solid_geometry", "reason": str(exc),
+                "total_solid_volume_m3": None}
     cross_only = bool(payload.get("cross_discipline_only", True))
     tmp_file = None
     try:
