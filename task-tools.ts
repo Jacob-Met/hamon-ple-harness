@@ -265,7 +265,7 @@ function _registerPleWave3DomainTools(pi: any) {
   pi.registerTool({
     name: "hamon_ifc_spatial_clash",
     label: "IFC4 Spatial Clash & Solid Takeoff",
-    description: "Run deterministic IFC4 solid volume takeoff, AABB broadphase, and cross-discipline spatial clash/clearance analysis.",
+    description: "Run deterministic IFC4 solid volume takeoff, AABB broadphase, and cross-discipline spatial clash/clearance analysis. The model minimum uses measured solid distances. Each measured pair includes closest_points_m in element order. For a pruned clear pair, distance_lower_bound_m is available and min_distance_m and the witness fields are null.",
     parameters: {
       type: "object",
       properties: {
