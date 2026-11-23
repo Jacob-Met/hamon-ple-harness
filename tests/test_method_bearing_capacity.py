@@ -214,3 +214,20 @@ def test_meyerhof_cohesion_depth_uses_the_actual_friction_angle():
     assert embedded["cohesion_term_Pa"] / surface["cohesion_term_Pa"] == pytest.approx(
         depth_factor, rel=1e-12
     )
+
+
+@pytest.mark.parametrize("field", ["q_net_ult_Pa", "q_net_allow_Pa"])
+def test_net_bearing_claim_uses_the_reported_overburden_basis(field):
+    # For a frictionless Terzaghi strip the surcharge bearing factor is one.
+    spec = {**base("terzaghi"), "phi_deg": 0}
+    net_ultimate = spec["c_prime_Pa"] * (1 + 1.5 * math.pi)
+    net = net_ultimate if field == "q_net_ult_Pa" else net_ultimate / spec["FS"]
+    key = "proposed_" + field
+    result = verify_bearing_capacity({**spec, key: net})
+    assert result["conservation_verified"], result
+    gross_field = field.replace("_net", "")
+    gross = result[gross_field]
+    assert gross > net
+    mixed = {**spec, key: gross, "proposed_" + gross_field: gross}
+    assert not verify_bearing_capacity(mixed)["conservation_verified"]
+    assert not verify_bearing_capacity({**spec, key: "unknown"})["ok"]
