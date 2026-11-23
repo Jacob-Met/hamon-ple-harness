@@ -201,26 +201,36 @@ def witness_package(file, output=None):
         result["document"] = str(output)
     return result
 
-def match_installation(pages, catalog):
-    """Report an exact equipment-row join only for an explicit installed-model field."""
+def match_installation(pages, catalog, equipment_type="inverter"):
+    """Match a labeled equipment field to complete, case-sensitive catalog identifiers."""
     import re
+    labels = {"inverter": "inverter", "pcs": "power conversion equipment|PCS"}
+    pattern = re.compile(
+        rf"^\s*(?:{labels[equipment_type]})\s+model\b"
+        r"(?P<role>\s*\([^)]*\))?(?:\s*:\s*|\s{2,})(?P<name>.+)$",
+        re.IGNORECASE,
+    )
     claims = []
-    pattern = re.compile(r"^\s*(?:inverter|power conversion equipment|PCS)\s+model\b(?P<role>\s*\([^)]*\))?(?:\s*:\s*|\s{2,})(?P<name>.+)$", re.I)
+    installed = set()
     for page, content in enumerate(pages.split("\f"), 1):
         for line, raw in enumerate(content.splitlines(), 1):
             found = pattern.match(raw)
-            if not found: continue
+            if not found:
+                continue
             role = " ".join((found["role"] or "").split()).casefold()
-            value = re.split(r"\s+·\s+",found["name"],maxsplit=1)[0].strip()
-            claims.append({"role":"installed" if role=="(as installed)" else "reference",
-                           "text":raw.strip(),"equipment":value,"page":page,"line":line})
-    installed = {" ".join(c["equipment"].split()).casefold() for c in claims if c["role"]=="installed"}
+            value = " ".join(found["name"].split())
+            is_installed = role == "(as installed)"
+            if is_installed:
+                installed.add(value)
+            claims.append({"role": "installed" if is_installed else "reference", "text": raw.strip(),
+                           "equipment": value, "page": page, "line": line})
     matches = []
-    if len(installed)>1: status="conflicting_installation_evidence"
-    elif not installed: status="installation_unresolved"
+    if len(installed) > 1:
+        status = "conflicting_installation_evidence"
+    elif not installed:
+        status = "installation_unresolved"
     else:
         matches = catalog.get(next(iter(installed)), [])
-        status = "matched_installed_equipment" if len(matches)==1 else "ambiguous_catalog_rows" if matches else "no_exact_catalog_row"
-    return {"status":status, "evidence":claims, "catalog_rows":matches}
-
-
+        status = {0: "no_exact_catalog_row", 1: "matched_installed_equipment"}.get(
+            len(matches), "ambiguous_catalog_rows")
+    return {"status": status, "equipment_type": equipment_type, "evidence": claims, "catalog_rows": matches}

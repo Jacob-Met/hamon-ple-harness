@@ -62,11 +62,20 @@ class EquipmentJoin(unittest.TestCase):
 
     def test_unresolved_inputs_and_no_prefix_match(self):
         line='Inverter model (as installed): North M-8B'
-        catalog={'north m-8':[{'model':'M-8'}]}
+        catalog={'North M-8':[{'model':'M-8'}]}
         self.assertEqual(match_installation(line,catalog)['status'],'no_exact_catalog_row')
         self.assertEqual(match_installation(line.replace('as installed','cover sheet'),catalog)['status'],'installation_unresolved')
         self.assertEqual(match_installation(line+'\f'+line.replace('M-8B','M-8'),catalog)['status'],'conflicting_installation_evidence')
-        self.assertEqual(match_installation(line,{'north m-8b':[{},{}]})['status'],'ambiguous_catalog_rows')
+        self.assertEqual(match_installation(line,{'North M-8B':[{},{}]})['status'],'ambiguous_catalog_rows')
+
+    def test_preserves_full_variant_and_device_family(self):
+        line = 'Inverter model (as installed): North M-8'
+        catalog = {'North M-8':[{'model':'M-8'}]}
+        for revised in (line + ' · Rev B', line.replace('M-8','m-8')):
+            self.assertEqual(match_installation(revised,catalog)['status'],'no_exact_catalog_row')
+        self.assertEqual(match_installation(line,catalog,'pcs')['status'],'installation_unresolved')
+        self.assertEqual(match_installation(line.replace('Inverter','PCS'),catalog,'pcs')['status'],
+                         'matched_installed_equipment')
 
 if __name__ == '__main__':
     unittest.main()

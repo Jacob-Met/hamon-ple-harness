@@ -686,7 +686,10 @@ def _equipment_catalog(filename, edition, sheet_name, title_sheet):
             shared = [rich_string(node) for node in table.findall("{*}si")]
         def read(name):
             rows = defaultdict(dict)
-            for c in _xlsx_xml(archive,part(name),25000000).findall("{*}sheetData/{*}row/{*}c"):
+            worksheet = _xlsx_xml(archive, part(name), 25000000)
+            if any(r.get("hidden") in ("1", "true") for r in worksheet.findall("{*}sheetData/{*}row")):
+                raise ValueError(f"hidden rows in source worksheet {name!r}")
+            for c in worksheet.findall("{*}sheetData/{*}row/{*}c"):
                 match = re.fullmatch(r"([A-Z]{1,3})([1-9][0-9]{0,6})", c.get("r",""))
                 if not match:
                     raise ValueError("invalid worksheet cell reference")
@@ -704,6 +707,8 @@ def _equipment_catalog(filename, edition, sheet_name, title_sheet):
                 elif typ == "inlineStr":
                     node = c.find("{*}is")
                     value = rich_string(node) if node is not None else ""
+                elif typ not in ("str",):
+                    value = None if value else ""
                 rows[int(number)][col] = value
             return rows
         def norm(s):
@@ -724,7 +729,7 @@ def _equipment_catalog(filename, edition, sheet_name, title_sheet):
             if n<=start or all(v=="" for v in row.values()): continue
             if not norm(row.get(maker)) or not norm(row.get(model)):
                 raise ValueError(f"missing literal manufacturer or model at {sheet_name} row {n}")
-            key = norm(row[maker]+" "+row[model])
+            key = " ".join((row[maker]+" "+row[model]).split())
             catalog[key].append({"manufacturer":row[maker],"model":row[model],
                                  "cells":[f"{sheet_name}!{maker}{n}",f"{sheet_name}!{model}{n}"]})
         if not catalog:
@@ -732,7 +737,7 @@ def _equipment_catalog(filename, edition, sheet_name, title_sheet):
         return catalog, f"{title_sheet}!B{issues[0][0]}"
 
 
-def witness_equipment(pdf, filename, edition, sheet, title_sheet):
+def witness_equipment(pdf, filename, edition, sheet, title_sheet, equipment_type):
     import hashlib
     import hamon_witness_package
     documents = [pathlib.Path(pdf), pathlib.Path(filename)]
@@ -748,7 +753,7 @@ def witness_equipment(pdf, filename, edition, sheet, title_sheet):
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25)
     if converted.returncode:
         raise ValueError("unable to read PDF text")
-    result = hamon_witness_package.match_installation(converted.stdout.decode("utf-8"), catalog)
+    result = hamon_witness_package.match_installation(converted.stdout.decode("utf-8"), catalog, equipment_type)
     result.update(edition=edition, title_cell=title_cell, catalog_sheet=sheet,
                   sources=[{"file":str(p),"sha256":hashlib.sha256(b).hexdigest()} for p,b in zip(documents,payloads)])
     return result
@@ -1236,6 +1241,7 @@ def run(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     sub=p.add_subparsers(dest="cmd",required=True)
     we=sub.add_parser("witness-equipment", help="Join explicit as-installed PDF evidence to an exact model row in a named workbook edition")
+    we.add_argument("--equipment-type", choices=("inverter","pcs"), default="inverter")
     we.add_argument("pdf"); we.add_argument("catalog"); we.add_argument("--edition", required=True)
     we.add_argument("--sheet", required=True); we.add_argument("--title-sheet", required=True)
     wp=sub.add_parser("witness-package", help="Reconcile dated scope, release evidence and standing case items before writing a Word package")
@@ -1317,7 +1323,7 @@ def run(argv=None):
     args=p.parse_args(argv)
     try:
         if args.cmd=="witness-equipment":
-            out=witness_equipment(args.pdf,args.catalog,args.edition,args.sheet,args.title_sheet)
+            out=witness_equipment(args.pdf,args.catalog,args.edition,args.sheet,args.title_sheet,args.equipment_type)
         elif args.cmd=="witness-package":
             import hamon_witness_package
             if args.example and args.file is None and args.output is None:
