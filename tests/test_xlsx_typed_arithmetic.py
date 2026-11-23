@@ -10,13 +10,31 @@ from zipfile import ZipFile
 from test_xlsx_exact_lookup import package, worksheet
 
 
+def workbook_parts(source):
+    """Include the package manifest and root relationship used by spreadsheet applications."""
+    with ZipFile(source) as original:
+        parts = {name: original.read(name) for name in original.namelist()}
+    parts["[Content_Types].xml"] = (
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.'
+        'spreadsheetml.sheet.main+xml"/>'
+        + ''.join(f'<Override PartName="/xl/worksheets/{i}.xml" ContentType="application/vnd.'
+                  'openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' for i in (1,2))
+        + '</Types>').encode()
+    parts["_rels/.rels"] = (
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rWorkbook" Type="http://schemas.openxmlformats.org/officeDocument/'
+        '2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>').encode()
+    return parts
+
+
 class TypedWorkbookTests(unittest.TestCase):
     def guards(self, results, ratings):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "support-load.xlsx"
             package(path)
-            with ZipFile(path) as original:
-                parts = {name: original.read(name) for name in original.namelist()}
+            parts = workbook_parts(path)
             parts["xl/worksheets/1.xml"] = worksheet([results])
             parts["xl/worksheets/2.xml"] = worksheet([ratings])
             with ZipFile(path, "w") as book:
