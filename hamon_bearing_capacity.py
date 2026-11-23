@@ -280,7 +280,7 @@ def calculate(spec, legacy_rectangle=False):
         "stress_integration_residual_Pa": error,
     }
     checks = [error < 1e-6]
-    for name in ("q_ult_Pa", "q_allow_Pa"):
+    for name in ("q_ult_Pa", "q_allow_Pa", "q_net_ult_Pa", "q_net_allow_Pa"):
         key = "proposed_" + name
         if key in spec:
             checks.append(
