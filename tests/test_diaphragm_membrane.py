@@ -3,7 +3,7 @@ import json
 import math
 from decimal import Decimal, localcontext
 from fractions import Fraction
-from itertools import product
+from itertools import permutations, product
 
 import unittest
 
@@ -309,6 +309,27 @@ class DiaphragmTests(unittest.TestCase):
             solve({**full, "nodes_m": full["nodes_m"] + [[40,40]],
                    "springs": full["springs"][:100] +
                    [{"node": 32, "axis": axis, "k_N_m": 2} for axis in ("x","y")]})
+
+    def test_repeated_nodal_loads_cancel_before_binary64_rounding(self):
+        spec = strip()
+        def result(values):
+            loads = [{"node": 4, "force_N": [v, -v]} for v in values]
+            loads.append({"node": 5, "force_N": [0, 2]})
+            return run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": {**spec, "loads": loads}})
+
+        reference = result([1.0])
+        self.assertTrue(reference["dual_verified"])
+        reactions = reference["spring_transmitted_N"]
+        assert_allclose([sum(reactions[::2]), sum(reactions[1::2])], [1, 1])
+        for values in permutations((2.**250, 1.0, -2.**250)):
+            with self.subTest(values=values):
+                self.assertEqual(result(values), reference)
+
+        # A partial sum can overflow even when the final load is just one newton.
+        high = 2.**1023
+        self.assertEqual(result([high, high, 1, -high, -high]), reference)
+        with self.assertRaisesRegex(ValueError, "nodal load exceeds binary64 range"):
+            result([high, high])
 
     def test_compensated_cancellation_and_rounded_capacity_boundary(self):
         spec = {**strip(), "displacement_precision": "compensated",
