@@ -956,6 +956,74 @@ def _solve_rlc_transient(params):
     }
 
 
+_DISTRIBUTED_LINE_KEYS = ("R_ohm_per_m", "L_H_per_m", "G_S_per_m", "C_F_per_m", "frequency_Hz")
+
+
+def _distributed_line(ctx, values, length, real):
+    """Uniform passive line, exp(+jωt); quarter-wave landmarks use exact sources."""
+    r, l, g, c, f = values
+    resistance, inductance, conductance, capacitance, frequency = map(real, values)
+    omega = 2 * ctx.pi * frequency
+    series = ctx.mpc(resistance, omega * inductance)
+    shunt = ctx.mpc(conductance, omega * capacitance)
+    # Distortionless lines have real Z0 and β=2πf√(LC). Reducing in
+    # turns before multiplying by π preserves exact lossless port nodes.
+    if l and c and r * c == g * l:
+        line = ctx.sqrt(inductance / capacitance)
+        alpha = resistance / line
+        beta = omega * ctx.sqrt(inductance * capacitance)
+        turns_squared = (f * length)**2 * l * c
+        turns = ctx.sqrt(real(turns_squared))
+        landmark = int(ctx.nint(8 * turns))
+        near = Fraction(landmark, 8)
+        # Difference of squares keeps the full source-coordinate offset even
+        # when rounding the square root alone lands exactly on an eighth turn.
+        offset = real(turns_squared - near**2) / (turns + real(near)) if turns else 0
+        phase = 2 * ctx.pi * offset
+    elif not series or not shunt:
+        return None, 0, 0, (0, 0), series, shunt
+    else:
+        propagation = ctx.sqrt(series * shunt)
+        alpha, beta = propagation.real, propagation.imag
+        line = series / propagation
+        landmark = 0
+        phase = beta * real(length)
+    return line, alpha, beta, (landmark, phase), series, shunt
+
+
+def _degenerate_line_port(ctx, result, modal, termination, load, length, series, shunt, chart):
+    # The generator is nilpotent. Its exact exponential is I + length*M,
+    # even when γ and the two traveling-wave coordinates coalesce.
+    port_v, port_i = (1, 0) if termination == "open" else (load, 1)
+    v = port_v + series * length * port_i
+    i = port_i + shunt * length * port_v
+    zr, zi = chart(v, i)
+    yr, yi = chart(i, v)
+    if zr is None and yr is None:
+        raise ArithmeticError("Both finite port charts exceed the output range")
+    # Reconstruct the load, including its boundary condition, from
+    # each published input chart through the inverse line segment.
+    charts = []
+    if zr is not None:
+        charts.append((ctx.mpc(zr, zi), 1))
+    if yr is not None:
+        charts.append((1, ctx.mpc(yr, yi)))
+    errors = []
+    for vv, ii in charts:
+        lv = vv - series * length * ii
+        li = ii - shunt * length * vv
+        scale = max(abs(lv), abs(li)) * max(abs(port_v), abs(port_i))
+        errors.append(abs(lv * port_i - li * port_v) / scale)
+    error = max(errors)
+    return dict(result, **modal, load_kind=termination, Z0_real=None, Z0_imag=None,
+                Z_in_kind="open" if not i else "short" if not v else "finite",
+                Z_in_real=zr, Z_in_imag=zi, Y_in_real=yr, Y_in_imag=yi,
+                gamma_load_mag=None, gamma_load_deg=None, VSWR=None,
+                VSWR_status="no_characteristic_impedance", return_loss_dB=None,
+                return_loss_status="no_characteristic_impedance", quarter_wave_Z_T=None,
+                residual=float(error), verified=error < 1e-10)
+
+
 def _transmission_port(params):
     """Propagate voltage and Z0-scaled current without dividing at a port node."""
     from mpmath import mp
@@ -983,9 +1051,6 @@ def _transmission_port(params):
             return None, None
 
     try:
-        characteristic = complex(params.get("Z0", 50.))
-        if not characteristic or not all(map(math.isfinite, (characteristic.real, characteristic.imag))):
-            raise ValueError("Characteristic impedance must be finite and nonzero")
         termination = params.get("load_kind", "impedance")
         if termination not in ("impedance", "open", "short"):
             raise ValueError("load_kind must be impedance, open, or short")
@@ -997,29 +1062,71 @@ def _transmission_port(params):
         if termination == "impedance" and r == x == 0:
             termination = "short"
         length = scalar("length_m", 1.)
-        attenuation = scalar("alpha_np_m", 0.)*length
-        in_turns = params.get("length_wavelengths") is not None
-        landmark = 0
-        if in_turns:
-            turns = scalar("length_wavelengths", 0.)
-            landmark = round(8*turns)
-            remaining = turns-Fraction(landmark, 8)
-        else:
-            remaining = scalar("beta_rad_m", 0.)*length
-
+        distributed = any(key in params for key in _DISTRIBUTED_LINE_KEYS)
         ctx = mp.clone()
-        # Retain the weak wave as well as the strong one, including a small
-        # departure from an exact standing-wave node. Radian input can require
-        # additional bits to resolve the phase of a long propagation interval.
-        scales = [abs(s) for s in (r, x, Fraction(characteristic.real),
-                  Fraction(characteristic.imag), attenuation, remaining, 1) if s]
-        contrast = max(scales)/min(scales)
-        ctx.prec = 160+2*(contrast.numerator.bit_length()-contrast.denominator.bit_length())
+        scales = [r, x, length, Fraction(1)]
+        if distributed:
+            if not all(key in params for key in (*_DISTRIBUTED_LINE_KEYS, "length_m")):
+                raise ValueError("Distributed line requires R, L, G, C per metre, frequency_Hz and length_m")
+            if any(key in params for key in ("Z0", "alpha_np_m", "beta_rad_m", "length_wavelengths")):
+                raise ValueError("Specify distributed constants or modal line parameters exclusively")
+            if any(type(params[key]) not in (int, float) for key in (*_DISTRIBUTED_LINE_KEYS, "length_m")):
+                raise ValueError("Distributed constants, length and frequency must be JSON numbers")
+            unknown = params.keys() - {*_DISTRIBUTED_LINE_KEYS, "length_m", "load_kind", "R_L", "X_L", "subkind", "domain"}
+            if unknown:
+                raise ValueError(f"Unrecognized distributed line inputs: {sorted(unknown)}")
+            length = Fraction(params["length_m"])
+            scales.append(length)
+            inputs = [Fraction(params[key]) for key in _DISTRIBUTED_LINE_KEYS]
+            if min(*inputs, length) < 0:
+                raise ValueError("Passive distributed line requires nonnegative constants, length and frequency")
+            scales.extend(inputs)
+        else:
+            characteristic = complex(params.get("Z0", 50.))
+            if not characteristic or not all(map(math.isfinite, (characteristic.real, characteristic.imag))):
+                raise ValueError("Characteristic impedance must be finite and nonzero")
+            attenuation = scalar("alpha_np_m", 0.)*length
+            in_turns = params.get("length_wavelengths") is not None
+            landmark = 0
+            if in_turns:
+                turns = scalar("length_wavelengths", 0.)
+                landmark = round(8*turns)
+                remaining = turns-Fraction(landmark, 8)
+            else:
+                remaining = scalar("beta_rad_m", 0.)*length
+            scales.extend((Fraction(characteristic.real), Fraction(characteristic.imag), attenuation, remaining))
+
+        # Keep source exponent range for long phases, tiny loss and weak waves.
+        positive_scales = [abs(s) for s in scales if s]
+        contrast = max(positive_scales) / min(positive_scales)
+        ctx.prec = 160 + (4 if distributed else 2) * (contrast.numerator.bit_length()-contrast.denominator.bit_length())
 
         def real(q):
             return ctx.mpf(q.numerator)/q.denominator
 
-        line = ctx.mpc(characteristic.real, characteristic.imag)
+        modal = {}
+        constitutive_residual = 0
+        if distributed:
+            line, alpha, beta, coordinates, series, shunt = _distributed_line(
+                ctx, inputs, length, real)
+            modal = {"line_model": "distributed_rlgc", "alpha_np_m": wire(alpha), "beta_rad_m": wire(beta)}
+            if line is None:
+                return _degenerate_line_port(ctx, result, modal, termination, ctx.mpc(real(r), real(x)),
+                                             real(length), series, shunt, chart)
+            landmark, phase = coordinates
+            loss = alpha * real(length)
+            modal.update(Z0_real=wire(line.real), Z0_imag=wire(line.imag))
+            published_gamma = ctx.mpc(modal["alpha_np_m"], modal["beta_rad_m"])
+            published_z0 = ctx.mpc(modal["Z0_real"], modal["Z0_imag"])
+            for actual, expected in ((published_gamma * published_z0, series),
+                                     (published_gamma / published_z0, shunt)):
+                if expected:
+                    constitutive_residual = max(constitutive_residual, abs(actual-expected)/abs(expected))
+            modal["constitutive_residual"] = float(constitutive_residual)
+        else:
+            line = ctx.mpc(characteristic.real, characteristic.imag)
+            loss = real(attenuation)
+            phase = real(remaining) * (2*ctx.pi if in_turns else 1)
         # Homogeneous coordinates (V, Z0*I) include an ideal open without
         # an infinite number. Finite impedances use an arbitrary unit current.
         if termination == "open":
@@ -1028,13 +1135,11 @@ def _transmission_port(params):
             load_v, load_i = ctx.mpc(real(r), real(x)), line
         if load_v+load_i == 0:
             raise ValueError("Load reflection coefficient is undefined")
-        phase = real(remaining)*(2*ctx.pi if in_turns else 1)
-        loss = real(attenuation)
         # At exact eighth turns, use only {0,±1,±i}. The common scale of V
         # and I is arbitrary, so no independently rounded sqrt(2) is needed.
         a, b = ((load_v, load_i), (load_v+ctx.j*load_i, load_i+ctx.j*load_v),
                 (load_i, load_v), (load_v-ctx.j*load_i, load_i-ctx.j*load_v))[landmark % 4]
-        if not remaining and not attenuation:
+        if not phase and not loss:
             v, i = a, b
         else:
             t = ctx.tanh(ctx.mpc(loss,phase))
@@ -1049,7 +1154,7 @@ def _transmission_port(params):
         reflected = reflection*eighth*ctx.exp(-2*ctx.mpc(loss,phase))
         v_check, i_check = 1+reflected, 1-reflected
         check_scale = max(abs(v), abs(i))*max(abs(v_check), abs(i_check))
-        mismatch = abs(v*i_check-i*v_check)/check_scale
+        mismatch = max(constitutive_residual, abs(v*i_check-i*v_check)/check_scale)
         kind = "open" if not i else "short" if not v else "finite"
         if abs(reflected) < ctx.mpf(".25"):
             # Preserve the small complex correction to a matched line: complex
@@ -1096,9 +1201,9 @@ def _transmission_port(params):
             except ArithmeticError:
                 loss_status = "outside_numeric_range"
         transformer = None
-        if termination != "open" and not x and r >= 0 and characteristic.real >= 0 and not characteristic.imag:
+        if termination != "open" and not x and r >= 0 and line.real >= 0 and not line.imag:
             transformer = wire(ctx.sqrt(real(r)*line.real))
-        return dict(result, load_kind=termination,
+        return dict(result, **modal, load_kind=termination,
                     Z_in_kind=kind, Z_in_real=zr, Z_in_imag=zi,
                     Y_in_real=yr, Y_in_imag=yi, gamma_load_mag=wire(gamma),
                     gamma_load_deg=wire(ctx.degrees(ctx.arg(reflection))),
