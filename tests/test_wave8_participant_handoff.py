@@ -30,15 +30,24 @@ def test_solver_receipt_reaches_low_effort_participant_with_original_request(tmp
     )
     relay = mock.MagicMock()
     relay.__aenter__.return_value = SimpleNamespace(env=lambda: {})
-    for overloaded, tier in ((False, "low"), (True, "medium")):
-        if overloaded:
-            spec["applied_gross_pressure_Pa"] = 1e12
-        instruction = json.dumps({"mode": "civil_geotech", "spec": spec})
+    single = json.dumps({"mode": "civil_geotech", "spec": spec})
+    alt = {"mode": "civil_geotech", "spec": {**spec, "footing_B_m": 3}}
+    pair = [json.loads(single), alt]
+    fence = "```json\n" + json.dumps(pair) + "\n```"
+    for instruction, tier, count in (
+        (single, "low", 1),
+        (json.dumps({"mode": "civil_geotech", "spec": {**spec, "applied_gross_pressure_Pa": 1e12}}),
+         "medium", 0),
+        ("Run the calculations below and return their JSON results in the same order.\n" + fence,
+         "low", 2),
+        (fence + "\nCompare against the project specification.", "medium", 0),
+    ):
         session = SimpleNamespace(
             instruction=instruction,
             workdir=str(tmp_path),
             mcp_servers=[],
             final_message="",
+            time_left=lambda: None,
             usage=mock.AsyncMock(),
             log=mock.AsyncMock(),
         )
@@ -46,15 +55,17 @@ def test_solver_receipt_reaches_low_effort_participant_with_original_request(tmp
         async def fake_process(argv, session, **kwargs):
             assert argv[argv.index("--thinking") + 1] == tier
             prompt = kwargs["stdin"].decode()
-            if overloaded:
+            if not count:
                 assert prompt == instruction
             else:
                 assert prompt.startswith(instruction + "\n\n")
                 answer = json.loads(prompt.splitlines()[-1])
-                assert (
-                    answer["conservation_verified"]
-                    and answer["bearing_method"] == "terzaghi"
-                )
+                results = answer if count == 2 else [answer]
+                assert len(results) == count
+                assert all(result["conservation_verified"]
+                           and result["bearing_method"] == "terzaghi" for result in results)
+                if count == 2:
+                    assert results[0] != results[1]
             await kwargs["on_line"](
                 json.dumps(
                     {
