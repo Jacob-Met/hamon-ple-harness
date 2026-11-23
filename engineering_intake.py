@@ -288,7 +288,7 @@ async def provision_engineering_cli(session: Any) -> str:
             session.write_file("/tmp/hamon_dxf.py", dxf_bytes), timeout=12)
         if dxf_size != len(dxf_bytes):
             return ""
-        for filename in ("office_package.py", "hamon_eagle_netlist.py", "hamon_consolidation.py", "hamon_pipe_network.py", "hamon_diaphragm.py", "hamon_diaphragm_modes.py", "hamon_turbomachinery.py", "hamon_ac_power_flow.py", "hamon_bearing_capacity.py"):
+        for filename in ("office_package.py", "hamon_eagle_netlist.py", "hamon_consolidation.py", "hamon_pipe_network.py", "hamon_diaphragm.py", "hamon_diaphragm_modes.py", "hamon_diaphragm_compensated.py", "hamon_turbomachinery.py", "hamon_ac_power_flow.py", "hamon_bearing_capacity.py"):
             module = pathlib.Path(__file__).with_name(filename).read_bytes()
             copied = await asyncio.wait_for(
                 session.write_file("/tmp/" + filename, module), timeout=12)
@@ -392,7 +392,9 @@ async def provision_engineering_cli(session: Any) -> str:
         " For semi-rigid roof load paths use domain kind diaphragm_membrane: nodes_m [[x,y],...],"
         " panels {nodes:[SW,SE,NE,NW],Dx_N_m,Dy_N_m,G_N_m}, bars {nodes:[a,b],EA_N},"
         " springs {node,axis:x or y,k_N_m}, loads {node,force_N:[Fx,Fy]}. Indices are zero-based;"
-        " omit cells over openings. Results follow input order (center shear, bar tension,"
+        " For bounded models, displacement_precision=compensated verifies displacements_m plus"
+        " displacement_remainders_m. Include both arrays when replaying equilibrium."
+        " Omit cells over openings. Results follow input order (center shear, bar tension,"
         " force transmitted to supports). Supply allowable_tension_N and allowable_compression_N on a bar"
         " for a capacity check; demand_factor defaults to 1. Optional stations {edge_nodes:[start,end],fraction,tie_rule}"
         " retain all equally near exterior panel centers; select first_from_start or max_abs to resolve ties."

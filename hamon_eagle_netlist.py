@@ -177,4 +177,3 @@ def compare_board(prediction, board_path):
                 exact_contacts=exact_contacts, schematic_contacts=len(actual), board_contacts=len(expected),
                 nets_with_contacts=len(nets_with_contacts), exact_nets=sorted(nets_with_contacts-unequal_nets),
                 mismatches=mismatches)
-
