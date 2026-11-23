@@ -311,7 +311,7 @@ class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
                 return True
             targets = [dict(kind="file",path=str(target))]
             async def snapshot(_, ts, *, deadline=None):
-                if ts != targets:
+                if [{k: row[k] for k in ("kind", "path")} for row in ts] != targets:
                     return {}
                 return {str(target): {"state": "ready" if target.exists() else "missing",
                                       "fingerprint": "after" if target.exists() else ""}}
