@@ -38,15 +38,26 @@ def events(model, answer):
 
 
 async def replay(root, expected):
-    sys.path.insert(0, str(root))
-    import harness
-    observation = {}
     expected_flux = independent_flux(SPEC)
     answer = format(expected_flux, ".15g") + " W"
     refusal = expected == "refused"
     instruction = INSTRUCTION.replace('"adiabatic"', '"unspecified"') if refusal else INSTRUCTION
     if refusal:
         answer = "Unspecified tip boundary"
+    def inspect(prompt, result, sha):
+        assert sha in prompt and result["passed"] is True
+        assert math.isclose(result["q_fin_w"], expected_flux, rel_tol=1e-13)
+        assert math.isclose(result["q_fvm_w"], expected_flux, rel_tol=1e-3)
+        return {k: result[k] for k in ("q_fin_w", "q_fvm_w")}
+
+    return await exchange(root, instruction, answer, expected == "verified", inspect,
+                          "unsupported or missing fin tip boundary" if refusal else None)
+
+
+async def exchange(root, instruction, answer, certified, inspect, refusal_log=None):
+    sys.path.insert(0, str(root))
+    import harness
+    observation = {}
     response_error = []
     async def respond(reader, writer):
         try:
@@ -67,12 +78,7 @@ async def replay(root, expected):
                             output_config=request.get("output_config"), max_tokens=request.get("max_tokens"),
                             instruction_sha256=sha, certificate=marker in prompt)
             if marker in prompt:
-                assert sha in prompt
-                result = json.loads(prompt.split(marker, 1)[1].splitlines()[0])
-                assert result["passed"] is True
-                assert math.isclose(result["q_fin_w"], expected_flux, rel_tol=1e-13)
-                assert math.isclose(result["q_fvm_w"], expected_flux, rel_tol=1e-3)
-                observed.update(q_fin_w=result["q_fin_w"], q_fvm_w=result["q_fvm_w"])
+                observed.update(inspect(prompt, json.loads(prompt.split(marker, 1)[1].splitlines()[0]), sha))
             assert not observation
             observation.update(observed)
             writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
@@ -102,12 +108,12 @@ async def replay(root, expected):
                 elapsed = perf_counter() - start
             assert not response_error, response_error
             assert observation["thinking"]["type"] == "enabled"
-            assert observation["thinking"]["budget_tokens"] == (2048 if expected == "verified" else 8192)
-            if refusal:
-                assert any("unsupported or missing fin tip boundary" in call.args[0]
+            assert observation["thinking"]["budget_tokens"] == (2048 if certified else 8192)
+            if refusal_log:
+                assert any(refusal_log in call.args[0]
                            for call in session.log.await_args_list)
             assert received == answer, (received, answer)
-            assert observation["certificate"] == (expected == "verified"), observation
+            assert observation["certificate"] == certified, observation
             assert session.usage.await_args.kwargs["output_tokens"] == 1
     return {**observation, "final_answer": received, "elapsed_seconds": elapsed}
 
