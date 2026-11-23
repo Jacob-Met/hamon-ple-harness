@@ -343,6 +343,35 @@ def network(spec):
             except ValueError:
                 pass
 
+        # Keep the established branch selection on small networks with multiple
+        # physical roots. This compatibility search visits at most 81 faces.
+        if len(limits) <= 4:
+            from itertools import product
+            ordered = sorted(limits, key=lambda idx: ids[idx])
+            choices = [(None, *dict.fromkeys(limits[idx])) for idx in ordered]
+            for values in product(*choices):
+                bounds = {idx: value for idx, value in zip(ordered, values)
+                          if value is not None}
+                try:
+                    q[:] = saved_q
+                    for idx, bound in bounds.items():
+                        q[idx] = bound
+                    pq_trial = np.asarray([idx for idx in nonslack
+                                           if pq_original[idx] or idx in bounds], dtype=int)
+                    voltage = polar(pq_trial, flat.copy())
+                    power = voltage * np.conj(ybus @ voltage)
+                    rounding = power_roundoff(voltage)
+                    if any(
+                        reactive_violation(power[idx].imag, *limit, rounding[idx]) is not None
+                        or (idx in bounds and voltage_violation(idx, bounds[idx], abs(voltage[idx])))
+                        for idx, limit in limits.items()
+                    ):
+                        continue
+                    return voltage * np.exp(1j * reference), bounds, iterations
+                except (ValueError, np.linalg.LinAlgError):
+                    continue
+                finally:
+                    q[:] = saved_q
         # Continue through a differentiable family of regulator projections.
         # Intermediate states only select a basin for the exact physical solve.
         n = len(nonslack)

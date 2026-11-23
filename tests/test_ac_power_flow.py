@@ -325,6 +325,28 @@ def test_alternative_reactive_pivot_after_inconsistent_intermediate(vb, angle, s
     assert not verify_ac_power_flow({**network, "proposed_voltages": claims})["conservation_verified"]
 
 
+def test_small_network_preserves_independently_verified_equilibrium():
+    # Both generators at their upper bounds admit a second physical root. The
+    # flat-start rectangular check instead agrees with the single-bound root.
+    spec = {
+        "buses": [
+            {"id": "S", "type": "slack", "vm_pu": 1},
+            {"id": "A", "type": "PV", "vm_pu": 1.24, "p_injection_pu": 1.91,
+             "q_min_injection_pu": 0.20, "q_max_injection_pu": 1.45},
+            {"id": "B", "type": "PV", "vm_pu": 1.09, "p_injection_pu": -1.84,
+             "q_min_injection_pu": -0.83, "q_max_injection_pu": -0.78},
+        ],
+        "lines": [
+            {"id": "SA", "from": "S", "to": "A", "r_pu": 0, "x_pu": 2.62},
+            {"id": "AB", "from": "A", "to": "B", "r_pu": 0, "x_pu": 0.15},
+            {"id": "BS", "from": "B", "to": "S", "r_pu": 0, "x_pu": 5.45},
+        ],
+    }
+    result = verify_ac_power_flow(spec)
+    assert result["conservation_verified"], result
+    assert result["clamped_pv_q_pu"] == {"A": 1.45}
+
+
 @pytest.mark.parametrize("injections", [(1.2,), (-1.2,), (1.2, -1.4), (1.2,) * 5])
 def test_reactive_bound_can_solve_unreachable_pv_setpoint(injections):
     # A unit slack and unit reactance give P=Im(V), Q=|V|²-Re(V).
