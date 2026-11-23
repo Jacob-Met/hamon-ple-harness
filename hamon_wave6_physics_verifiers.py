@@ -17,6 +17,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 import numpy as np
 from _scipy_compat import HAS_SCIPY, integrate, optimize
 from decimal import Decimal, getcontext, localcontext
+from fractions import Fraction
 try:
     import sympy as sp
     HAS_SYMPY = True
@@ -89,6 +90,75 @@ def _rayleigh_t0_ratio(mach: float, gamma: float) -> float:
     gp1 = gamma + 1.0
     gm1 = gamma - 1.0
     return (2.0 * gp1 * m2 * (1.0 + 0.5 * gm1 * m2)) / ((1.0 + gamma * m2) ** 2)
+
+
+def _passive_acoustic_interface(params: Mapping[str, Any]) -> Dict[str, Any]:
+    """Normal-incidence pressure and power at a lossless, passive fluid interface."""
+    result = {"domain": "compressible_acoustics", "subkind": "acoustics", "verified": False}
+
+    def positive(value):
+        value = float(value)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("Acoustic material and resonator parameters must be finite and positive")
+        return Fraction(value)
+
+    def represent(value, name):
+        rounded = float(value)
+        if not math.isfinite(rounded) or (value != 0 and rounded == 0):
+            raise ValueError(f"{name} is outside the representable output range")
+        return rounded
+
+    try:
+        rho1, c1, rho2, c2 = (positive(params.get(name, default)) for name, default in
+                               (("rho1", 1.204), ("c1", 343.0), ("rho2", 998.0), ("c2", 1481.0)))
+        z1, z2 = rho1 * c1, rho2 * c2
+        total = z1 + z2
+        r = (z2 - z1) / total
+        t = 2 * z2 / total
+        power = t * t * z1 / z2
+
+        # Near a match, 1 - R² can round to one although the loss is measurable
+        # in the returned numeric type. At high contrast, never floor the power.
+        if abs(r) <= Fraction(1, 2):
+            loss = -10.0 * math.log1p(-float(r * r)) / math.log(10.0)
+        else:
+            with localcontext() as context:
+                context.prec = 60
+                power_decimal = Decimal(power.numerator) / Decimal(power.denominator)
+                loss = float(-10 * power_decimal.log10())
+
+        frequency = None
+        dimensions = {"A_neck", "V_cavity", "L_eff"}
+        supplied = dimensions.intersection(params)
+        if supplied:
+            if supplied != dimensions:
+                raise ValueError("Helmholtz resonance requires A_neck, V_cavity and L_eff together")
+            area, volume, length = (positive(params[key]) for key in ("A_neck", "V_cavity", "L_eff"))
+            squared = c1 * c1 * area / (volume * length)
+            with localcontext() as context:
+                context.prec = 60
+                root = (Decimal(squared.numerator) / Decimal(squared.denominator)).sqrt()
+                frequency = represent(root / Decimal.from_float(math.tau), "resonant frequency")
+
+        # Check the reported binary coefficients against the two interface
+        # boundary equations (the velocity equation is impedance-scaled).
+        r_out = represent(r, "pressure reflection")
+        t_out = represent(t, "pressure transmission")
+        power_out = represent(power, "intensity transmission")
+        rr, tt = Fraction(r_out), Fraction(t_out)
+        pressure_error = abs(1 + rr - tt)
+        velocity_error = abs(z2 * (1 - rr) - z1 * tt) / total
+        energy_error = abs(rr * rr + Fraction(power_out) - 1)
+        residual = float(max(pressure_error, velocity_error, energy_error))
+        return {
+            **result, "Z1_rayl": represent(z1, "Z1"), "Z2_rayl": represent(z2, "Z2"),
+            "pressure_reflection_R": r_out, "pressure_transmission_T": t_out,
+            "intensity_transmission_TI": power_out, "transmission_loss_dB": loss,
+            "helmholtz_f0_Hz": frequency, "residual": residual,
+            "verified": 0 < power_out <= 1 and abs(r_out) <= 1 and residual < 1e-11,
+        }
+    except (TypeError, ValueError, OverflowError) as exc:
+        return {**result, "error": str(exc)}
 
 
 def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any]:
@@ -329,36 +399,7 @@ def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any
         }
 
     if subkind == "acoustics":
-        rho1 = float(params.get("rho1", 1.204))
-        c1 = float(params.get("c1", 343.0))
-        rho2 = float(params.get("rho2", 998.0))
-        c2 = float(params.get("c2", 1481.0))
-        z1 = rho1 * c1
-        z2 = rho2 * c2
-        r_p = (z2 - z1) / (z2 + z1)
-        t_p = 2.0 * z2 / (z1 + z2)
-        r_intensity = r_p * r_p
-        t_intensity = 4.0 * z1 * z2 / ((z1 + z2) ** 2)
-        tl_db = -10.0 * math.log10(max(t_intensity, 1e-300))
-        helmholtz_hz = None
-        if all(k in params for k in ("A_neck", "V_cavity", "L_eff")):
-            helmholtz_hz = (c1 / (2.0 * math.pi)) * math.sqrt(
-                float(params["A_neck"]) / (float(params["V_cavity"]) * float(params["L_eff"]))
-            )
-        residual = abs((r_intensity + t_intensity) - 1.0)
-        return {
-            "domain": "compressible_acoustics",
-            "subkind": subkind,
-            "Z1_rayl": z1,
-            "Z2_rayl": z2,
-            "pressure_reflection_R": r_p,
-            "pressure_transmission_T": t_p,
-            "intensity_transmission_TI": t_intensity,
-            "transmission_loss_dB": tl_db,
-            "helmholtz_f0_Hz": helmholtz_hz,
-            "residual": residual,
-            "verified": residual < 1e-11,
-        }
+        return _passive_acoustic_interface(params)
 
     raise ValueError(f"Unsupported compressible_acoustics subkind: {subkind}")
 
