@@ -105,6 +105,22 @@ def _area_integral(x0, x1, y0, y1, z):
     """Independently integrate the point-load kernel over the actual footprint."""
     from scipy.integrate import quad
 
+    if x0 <= 0 <= x1 and y0 <= 0 <= y1:
+        quadrants = [(x, y) for x in (-x0, x1) for y in (-y0, y1) if x and y]
+        if z <= .5*min(min(x, y) for x, y in quadrants):
+            # Radial integration of the positive point-load kernel leaves the
+            # small uncovered angular tail of each incident quadrant.
+            tails = []
+            for width, height in quadrants:
+                def tail(theta, edge):
+                    projected = z*math.cos(theta)
+                    return (projected/math.hypot(edge, projected))**3
+                tails.append(quad(tail, 0., math.atan2(height, width), args=(width,),
+                                  epsabs=1e-300, epsrel=1e-12)[0])
+                tails.append(quad(tail, 0., math.atan2(width, height), args=(height,),
+                                  epsabs=1e-300, epsrel=1e-12)[0])
+            return len(quadrants)/4 - math.fsum(tails)/(2*math.pi)
+
     # Far from a small footprint, taking differences of near-identical
     # angles loses significant digits. Integrate on a unit square there.
     width, length = x1 - x0, y1 - y0
@@ -124,26 +140,37 @@ def _area_integral(x0, x1, y0, y1, z):
 
     # x = z*tan(theta), y = hypot(z,x)*tan(phi). This bounds both
     # integration intervals even for a shallow point inside a wide footprint.
-    def strip(theta):
-        c = math.cos(theta)
-        phi0, phi1 = math.atan2(y0 * c, z), math.atan2(y1 * c, z)
-        inner, _ = quad(lambda phi: math.cos(phi)**3, phi0, phi1, epsabs=1e-13)
-        return c*c * inner
+    def angular_integral(low, high, scale, integrand):
+        # Cosine is even. Keep same-side, near-surface bounds as angles from
+        # the horizontal so close bounds never both round to pi/2.
+        intervals = [(low, high)]
+        if low < 0 < high:
+            intervals = [(0., -low), (0., high)]
+        elif high <= 0:
+            intervals = [(-high, -low)]
+        pieces = []
+        for left, right in intervals:
+            if left > scale:
+                start, end = math.atan2(scale, right), math.atan2(scale, left)
+                trig = math.sin
+            else:
+                start, end = math.atan2(left, scale), math.atan2(right, scale)
+                trig = math.cos
+            pieces.append(quad(lambda angle: integrand(trig(angle)), start, end, epsabs=1e-13)[0])
+        return math.fsum(pieces)
 
-    area, _ = quad(strip, math.atan2(x0, z), math.atan2(x1, z), epsabs=1e-13)
-    return 3 * area / (2 * math.pi)
+    def strip(cos_theta):
+        inner = angular_integral(y0*cos_theta, y1*cos_theta, z, lambda c: c**3)
+        return cos_theta**2 * inner
+
+    return 3 * angular_integral(x0, x1, z, strip) / (2 * math.pi)
 
 
-def rectangular_load_stress(spec, claim_key):
-    """Derive the increase in vertical stress from uniformly distributed net pressures."""
-    point = spec["stress_point"]
-    loads = spec["rectangular_loads"]
-    if not isinstance(point, dict) or not isinstance(loads, list) or not loads:
-        raise ValueError("Provide stress_point and a nonempty rectangular_loads list")
-    x, y, z = (_number(point, k) for k in ("x_m", "y_m", "depth_m"))
-    if z <= 0:
-        raise ValueError("Stress evaluation depth below the common loading plane must be positive")
-    closed, integrated = [], []
+
+def _rectangles(loads, x, y):
+    if not isinstance(loads, list) or not loads:
+        raise ValueError("Provide a nonempty rectangular_loads list")
+    rectangles = []
     for load in loads:
         if not isinstance(load, dict):
             raise ValueError("Each rectangular load must be an object")
@@ -156,6 +183,12 @@ def rectangular_load_stress(spec, claim_key):
         y0, y1 = (cy - y) - length / 2, (cy - y) + length / 2
         if not all(math.isfinite(v) for v in (x0, x1, y0, y1)) or not (x0 < x1 and y0 < y1):
             raise ValueError("Footprint offsets exceed finite coordinate resolution")
+        rectangles.append((x0, x1, y0, y1, pressure))
+    return rectangles
+
+
+def _scaled_footprints(rectangles, z):
+    for x0, x1, y0, y1, pressure in rectangles:
         # Influence is homogeneous of degree zero. Binary rescaling preserves
         # coordinate differences while keeping all Euclidean norms representable.
         exponent = math.frexp(max(abs(x0), abs(x1), abs(y0), abs(y1), z))[1]
@@ -164,6 +197,12 @@ def rectangular_load_stress(spec, claim_key):
         )
         if depth == 0 or not (x0 < x1 and y0 < y1):
             raise ValueError("Footprint and depth span unresolvable coordinate scales")
+        yield x0, x1, y0, y1, depth, pressure
+
+
+def _rectangular_stresses(rectangles, z):
+    closed, integrated = [], []
+    for x0, x1, y0, y1, depth, pressure in _scaled_footprints(rectangles, z):
         influence = math.fsum((_corner(x1, y1, depth), -_corner(x0, y1, depth),
                                -_corner(x1, y0, depth), _corner(x0, y0, depth)))
         check = _area_integral(x0, x1, y0, y1, depth)
@@ -177,6 +216,18 @@ def rectangular_load_stress(spec, claim_key):
     closed_value = math.fsum(closed)
     if not math.isfinite(value) or not math.isfinite(closed_value):
         raise ValueError("Superposed stress exceeds finite numerical range")
+    return value, closed_value
+
+
+def rectangular_load_stress(spec, claim_key):
+    """Derive the increase in vertical stress from uniformly distributed net pressures."""
+    point = spec["stress_point"]
+    if not isinstance(point, dict):
+        raise ValueError("Provide stress_point and a nonempty rectangular_loads list")
+    x, y, z = (_number(point, k) for k in ("x_m", "y_m", "depth_m"))
+    if z <= 0:
+        raise ValueError("Stress evaluation depth below the common loading plane must be positive")
+    value, closed_value = _rectangular_stresses(_rectangles(spec["rectangular_loads"], x, y), z)
     matched = claim_key not in spec or math.isclose(
         _number(spec, claim_key), value, rel_tol=1e-6, abs_tol=1e-6
     )
@@ -399,7 +450,7 @@ def verify_consolidation_history(spec):
         if min(h, cv, mv) <= 0 or elapsed < 0 or spec["drainage"] not in ("single", "double"):
             raise ValueError("Require positive H, Cv and mv, nonnegative time and single or double drainage")
         if {"Cc", "Cr", "e0", "sigma_preconsolidation_Pa", "delta_sigma_v_Pa",
-            "rectangular_loads", "stress_point", "proposed_degree_consolidation"} & spec.keys():
+            "rectangular_loads", "stress_point", "settlement_layers", "settlement_column", "proposed_degree_consolidation"} & spec.keys():
             raise ValueError("Use a single load history and constant mv; staged loads have no single degree of consolidation")
         path = h if spec["drainage"] == "single" else h/2
         factor = (cv/path)/path
@@ -470,6 +521,8 @@ def verify_consolidation_1d(spec):
     result = {"ok": False, "conservation_verified": False, "mode": "civil_geotech",
               "tool": "hamon_conservation_cad_verifier", "calculation": "consolidation_1d"}
     try:
+        if "settlement_layers" in spec or "settlement_column" in spec:
+            raise ValueError("Finite-layer footing inputs require layered_footing_settlement for the ultimate response")
         if "load_history" in spec or "mv_per_Pa" in spec:
             raise ValueError("Use calculation=consolidation_history_1d for staged loads with constant mv")
         h = _number(spec, "H_clay_m")
