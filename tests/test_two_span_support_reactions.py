@@ -45,7 +45,9 @@ class TwoSpanSupportReactions(unittest.TestCase):
             ("R_A_N", Fraction(511, 96)),
             ("R_B_N", Fraction(-643, 60)),
             ("R_C_N", Fraction(-1377, 160)),
-            ("M_B_hogging_Nm", Fraction(223, 32)),
+            ("M_B_abs_Nm", Fraction(223, 32)),
+            ("M_B_sagging_Nm", Fraction(223, 32)),
+            ("M_B_hogging_Nm", 0),
         ):
             self.assertEqual(result[field], float(expected))
 
