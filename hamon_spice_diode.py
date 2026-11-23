@@ -191,7 +191,7 @@ def junction_law(br, voltage):
     return current, conductance
 
 
-def solve_bias(branches, n_idx, matrix):
+def solve_bias(branches, n_idx, matrix, second_solve):
     """Damped nodal Newton solve, replayed with original currents and source constraints."""
     dc = [dict(br) for br in branches]
     for br in dc:
@@ -214,10 +214,25 @@ def solve_bias(branches, n_idx, matrix):
         volts = ports.T @ state
         laws = [junction_law(br, float(v)) for br, v in zip(devices, volts)]
         current, slope = np.array(laws).T
-        residual = base @ state - rhs + ports @ current
+        # Keep the reverse leakage and the smaller exponential contribution
+        # separate in KCL. A current one ULP above -Is determines a unique
+        # voltage even though rounding the total diode current erases its slope.
+        terms = [[-float(b), *(float(a)*float(x) for a, x in zip(row, state) if a)]
+                 for row, b in zip(base, rhs)]
+        for k, (br, v) in enumerate(zip(devices, volts)):
+            ratio = v / br["thermal"]
+            parts = (-br["value"], br["value"] * math.exp(ratio)) if ratio < -1 else (current[k],)
+            for j in np.flatnonzero(ports[:, k]):
+                terms[j].extend(ports[j, k] * x for x in parts)
+        residual = np.array([math.fsum(row) for row in terms])
         jacobian = base + (ports * slope) @ ports.T
+        row_scale = np.max(np.abs(jacobian), axis=1)
+        if np.any(row_scale == 0):
+            raise ValueError("Diode bias has an undetermined DC equation")
+        scaled = jacobian / row_scale[:, None]
+        correction_rhs = -residual / row_scale
         try:
-            step = np.linalg.solve(jacobian, -residual)
+            step = np.linalg.solve(scaled, correction_rhs)
         except np.linalg.LinAlgError as exc:
             raise ValueError("Diode bias has an undetermined DC potential or branch current") from exc
         if not np.all(np.isfinite(step)):
@@ -226,8 +241,11 @@ def solve_bias(branches, n_idx, matrix):
         scale = np.abs(base) @ np.abs(state) + np.abs(rhs) + np.abs(ports) @ np.abs(current)
         if (np.all(np.abs(residual) <= 1e-12 * scale) and
                 np.all(np.abs(delta_v) <= 1e-12 * thermal)):
-            return {br["name"]: {"voltage_V": float(v), "current_A": float(i), "conductance_S": float(g)}
-                    for br, v, i, g in zip(devices, volts, current, slope)}
+            second = second_solve(scaled, correction_rhs)
+            discrepancy = float(np.linalg.norm(second-step) / max(np.linalg.norm(state), 1e-30))
+            reported = {br["name"]: {"voltage_V": float(v), "current_A": float(i), "conductance_S": float(g)}
+                        for br, v, i, g in zip(devices, volts, current, slope)}
+            return reported, state.astype(np.complex128), discrepancy
         growth = float(np.max(delta_v/thermal))
         state += step * (min(1., 2./growth) if growth > 0 else 1.)
     raise ValueError("Nonlinear diode operating point did not converge")

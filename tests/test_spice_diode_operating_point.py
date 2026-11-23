@@ -75,10 +75,13 @@ class DiodeOperatingPoint(unittest.TestCase):
                 self.assertAlmostEqual(complex(*diode["current_A"]),g*expected,places=12)
 
     def test_imposed_current_requires_a_finite_junction_bias(self):
-        for i in (.001, -IS/2, 0.):
+        for i in (.001, -IS/2, 0., math.nextafter(-IS, 0.)):
             r = route(common(f"I1 0 out DC {i}\nD1 out 0 silicon"))
             self.assertTrue(r["conservation_verified"])
-            self.assertAlmostEqual(r["node_voltages"]["out"],THERMAL*math.log1p(i/IS),places=10)
+            expected = THERMAL * (math.log((IS+i)/IS) if i < -IS/2 else math.log1p(i/IS))
+            self.assertAlmostEqual(r["node_voltages"]["out"], expected, places=10)
+            g = (IS+i)/THERMAL
+            self.assertLessEqual(abs(r["diode_operating_point"]["D1"]["conductance_S"]-g),1e-9*g)
         for i in (-IS, -2*IS):
             with self.assertRaises(ValueError):
                 route(common(f"I1 0 out DC {i}\nD1 out 0 silicon"))
