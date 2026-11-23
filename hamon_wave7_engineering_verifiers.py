@@ -1313,6 +1313,149 @@ def _orbital_transfer(params: Mapping[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _euler_rigid_body(params: Mapping[str, Any]) -> Dict[str, Any]:
+    """Euler equations for positive principal moments and constant body-frame torque."""
+    result = {"domain": "lagrangian_orbital", "subkind": "euler_rigid_body", "verified": False}
+
+    def vector(name, default=None):
+        raw = np.asarray(params.get(name, default), dtype=float)
+        if raw.shape != (3,) or not np.isfinite(raw).all():
+            raise ValueError(name)
+        return tuple(Fraction(float(v)) for v in raw)
+
+    try:
+        moments = vector("I")
+        initial = vector("omega0")
+        torque = vector("torque", [0, 0, 0])
+        duration = Fraction(float(params.get("t_final", 1)))
+        steps = max(1, int(params.get("n_steps", 2000)))
+        if min(moments) <= 0 or duration < 0:
+            raise ValueError("invalid_rigid_body_inputs")
+    except (TypeError, ValueError, OverflowError):
+        return {**result, "error": "invalid_rigid_body_inputs"}
+
+    # I_j + I_k - I_i = 2 integral(x_i^2 dm). Equality allows planar bodies.
+    # Check the exact parsed binary values before rounding any sums or ratios.
+    if 2 * max(moments) > sum(moments):
+        return {**result, "error": "unrealizable_principal_moments"}
+
+    free = not any(torque)
+    acceleration = [tau / inertia for tau, inertia in zip(torque, moments)]
+    rotation_scale = max(max(map(abs, initial)), duration * max(map(abs, acceleration))) or 1
+    moment_scale = max(moments)
+
+    def representable(x):
+        value = float(x)
+        if not math.isfinite(value) or (x != 0 and value == 0):
+            raise FloatingPointError("unrepresentable_rigid_body_quantity")
+        return value
+
+    def relative_balance(start, end, integral):
+        scale = max(abs(start), abs(end), abs(integral))
+        return float(abs(end - start - integral) / scale) if scale else 0.0
+
+    try:
+        # s=t/t_final, u=omega/rotation_scale. The angular acceleration and
+        # initial velocity set the same scale for independently integrated paths.
+        omega_scale = representable(rotation_scale)
+        u0 = np.array([representable(x / rotation_scale) for x in initial])
+        inertia = np.array([representable(x / moment_scale) for x in moments])
+        forcing = np.array([representable(duration * a / rotation_scale) for a in acceleration])
+        spin = np.array([
+            representable(duration * rotation_scale * (moments[j] - moments[k]) / moments[i])
+            for i, j, k in ((0, 1, 2), (1, 2, 0), (2, 0, 1))
+        ])
+        def velocity_rhs(_s, u):
+            x, y, z = u
+            return spin * np.array([y*z, z*x, x*y]) + forcing
+
+        # Accumulate work and torque contribution to half |H|^2 along the
+        # primary trajectory. These follow dT/dt=tau.omega, d(|H|^2/2)/dt=tau.H.
+        scaled_torque = np.array([representable(tau * duration / (moment_scale * rotation_scale))
+                                  for tau in torque])
+        def primary_rhs(s, state):
+            u = state[:3]
+            return np.r_[velocity_rhs(s, u), scaled_torque @ u, scaled_torque @ (inertia * u)]
+
+        state = np.r_[u0, 0.0, 0.0]
+        dual = u0
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            if duration:
+                ds = 1.0 / steps
+                for step in range(steps):
+                    s = step * ds
+                    k1 = primary_rhs(s, state)
+                    k2 = primary_rhs(s + ds/2, state + ds*k1/2)
+                    k3 = primary_rhs(s + ds/2, state + ds*k2/2)
+                    k4 = primary_rhs(s + ds, state + ds*k3)
+                    state += (ds/6) * (k1 + 2*k2 + 2*k3 + k4)
+                solution = integrate.solve_ivp(velocity_rhs, (0.0, 1.0), u0, method="DOP853",
+                                               rtol=1e-12, atol=1e-14)
+                if not solution.success or solution.t[-1] != 1.0:
+                    return {**result, "error": "incomplete_rigid_body_integrator"}
+                dual = solution.y[:, -1]
+            if not np.isfinite(state).all() or not np.isfinite(dual).all():
+                raise FloatingPointError("nonfinite_rigid_body_solution")
+            u = state[:3]
+            # Finite endpoint norms can have nonrepresentable squares. Evaluate
+            # the two small endpoint quadratic forms exactly on parsed floats.
+            def invariants(v):
+                h = [(i / moment_scale) * Fraction(float(w)) for i, w in zip(moments, v)]
+                return (sum(x * Fraction(float(w)) for x, w in zip(h, v)) / 2,
+                        sum(x*x for x in h) / 2)
+            e0, h02 = invariants(u0)
+            ef, hf2 = invariants(u)
+            energy_balance = relative_balance(e0, ef, Fraction(float(state[3])))
+            momentum_balance = relative_balance(h02, hf2, Fraction(float(state[4])))
+            dual_error = math.hypot(*(u - dual)) / max(1.0, math.hypot(*u), math.hypot(*dual))
+        omega = ([representable(rotation_scale * Fraction(float(x))) for x in u]
+                 if duration else list(map(float, initial)))
+        final = [Fraction(x) for x in omega]
+        kinetic = representable(sum(i*w*w for i, w in zip(moments, final)) / 2)
+        momentum = math.hypot(*(representable(i*w) for i, w in zip(moments, final)))
+        physical_work = representable(Fraction(float(state[3])) * moment_scale * rotation_scale**2)
+        half_h2_change = Fraction(float(state[4])) * (moment_scale * rotation_scale)**2
+        # Squared SI momenta can exceed binary64 even when the angular momentum
+        # and its direction are well resolved. Preserve a scaled representation.
+        try:
+            physical_half_h2_change = representable(half_h2_change)
+        except (OverflowError, FloatingPointError):
+            physical_half_h2_change = None
+
+        x, y, z = initial
+        initial_phase_rate = None
+        if x or y:
+            dx = ((moments[1] - moments[2]) * y*z + torque[0]) / moments[0]
+            dy = ((moments[2] - moments[0]) * z*x + torque[1]) / moments[1]
+            initial_phase_rate = representable((x*dy - y*dx) / (x*x + y*y))
+        rate = initial_phase_rate if free and moments[0] == moments[1] else None
+        h = [i*w for i, w in zip(moments, initial)]
+        h2 = sum(xi*xi for xi in h)
+        direction_speed = None
+        if h2:
+            # Inertial dH/dt = torque. The norm can be evaluated in the
+            # instantaneous body basis without choosing an initial attitude.
+            direction_speed = math.hypot(*(representable((h[j]*torque[k] - h[k]*torque[j]) / h2)
+                                           for j, k in ((1, 2), (2, 0), (0, 1))))
+        residual = max(dual_error, energy_balance, momentum_balance)
+        if not all(map(math.isfinite, (momentum, residual, direction_speed or 0.0))):
+            raise FloatingPointError("nonfinite_rigid_body_output")
+    except (ArithmeticError, ValueError, RuntimeError):
+        return {**result, "error": "unresolved_rigid_body_numerics"}
+
+    return {**result, "omega_final_rad_s": omega, "kinetic_energy_J": kinetic,
+            "angular_momentum_norm_Nms": momentum, "precession_rate_rad_s": rate,
+            "initial_body_omega_azimuth_rate_rad_s": initial_phase_rate,
+            "initial_inertial_H_direction_speed_rad_s": direction_speed,
+            "work_done_J": physical_work, "torque_half_H2_change_Nms2": physical_half_h2_change,
+            "torque_half_H2_change_scaled": float(state[4]),
+            "moment_scale_kg_m2": float(moment_scale), "omega_scale_rad_s": omega_scale,
+            "torque_free": free, "solver_residual": float(dual_error),
+            "work_balance_residual": float(energy_balance),
+            "angular_momentum_balance_residual": float(momentum_balance),
+            "residual": float(residual), "verified": bool(residual < 1e-8)}
+
+
 def solve_lagrangian_orbital(params: Mapping[str, Any]) -> Dict[str, Any]:
     subkind = str(
         params.get("subkind")
@@ -1320,67 +1463,7 @@ def solve_lagrangian_orbital(params: Mapping[str, Any]) -> Dict[str, Any]:
     ).strip().lower()
 
     if subkind == "euler_rigid_body":
-        inertia = np.asarray(params["I"], dtype=float)
-        w0 = np.asarray(params["omega0"], dtype=float)
-        t_f = float(params.get("t_final", 1.0))
-        torque = np.asarray(params.get("torque", [0.0, 0.0, 0.0]), dtype=float)
-        n_steps = int(params.get("n_steps", 2000))
-        if inertia.shape != (3,) or w0.shape != (3,) or torque.shape != (3,) or np.any(inertia <= 0.0) or t_f < 0.0:
-            return {"domain": "lagrangian_orbital", "subkind": subkind, "verified": False, "error": "invalid_rigid_body_inputs"}
-
-        i1, i2, i3 = float(inertia[0]), float(inertia[1]), float(inertia[2])
-
-        def rhs(_t: float, w: np.ndarray) -> np.ndarray:
-            return np.array(
-                [
-                    ((i2 - i3) * w[1] * w[2] + torque[0]) / i1,
-                    ((i3 - i1) * w[2] * w[0] + torque[1]) / i2,
-                    ((i1 - i2) * w[0] * w[1] + torque[2]) / i3,
-                ],
-                dtype=float,
-            )
-
-        dt = t_f / max(n_steps, 1)
-        w_rk = w0.copy()
-        t_cur = 0.0
-        for _ in range(max(n_steps, 1) if t_f > 0.0 else 0):
-            k1 = rhs(t_cur, w_rk)
-            k2 = rhs(t_cur + 0.5 * dt, w_rk + 0.5 * dt * k1)
-            k3 = rhs(t_cur + 0.5 * dt, w_rk + 0.5 * dt * k2)
-            k4 = rhs(t_cur + dt, w_rk + dt * k3)
-            w_rk = w_rk + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
-            t_cur += dt
-
-        if t_f > 0.0:
-            sol = integrate.solve_ivp(rhs, (0.0, t_f), w0, method="DOP853", rtol=1e-12, atol=1e-14)
-            w_dop = sol.y[:, -1]
-        else:
-            w_dop = w0.copy()
-
-        t_ke0 = 0.5 * float(np.sum(inertia * (w0 ** 2)))
-        t_kef = 0.5 * float(np.sum(inertia * (w_rk ** 2)))
-        h_0_sq = float(np.sum((inertia * w0) ** 2))
-        h_f_sq = float(np.sum((inertia * w_rk) ** 2))
-
-        solver_diff = float(np.linalg.norm(w_rk - w_dop)) / max(float(np.linalg.norm(w0)), 1.0)
-        if float(np.linalg.norm(torque)) < 1e-15:
-            ke_err = abs(t_kef - t_ke0) / max(t_ke0, 1e-15)
-            casimir_err = abs(h_f_sq - h_0_sq) / max(h_0_sq, 1e-15)
-            residual = float(max(solver_diff, ke_err, casimir_err))
-        else:
-            residual = float(solver_diff)
-
-        precession_rate = float((i3 - i1) * w0[2] / i1) if abs(i1 - i2) < 1e-12 * max(i1, i2) else None
-        return {
-            "domain": "lagrangian_orbital",
-            "subkind": subkind,
-            "omega_final_rad_s": [float(x) for x in w_rk],
-            "kinetic_energy_J": float(t_kef),
-            "angular_momentum_norm_Nms": float(math.sqrt(h_f_sq)),
-            "precession_rate_rad_s": precession_rate,
-            "residual": residual,
-            "verified": bool(residual < 1e-8),
-        }
+        return _euler_rigid_body(params)
 
     if subkind == "lagrangian_modes":
         return _lagrangian_modes(params)
