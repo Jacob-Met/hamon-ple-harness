@@ -266,7 +266,7 @@ async def provision_engineering_cli(session: Any) -> str:
         for filename in (
             "hamon_geometry.py", "hamon_drawing.py", "hamon_eagle_schematic.py",
             "hamon_scale.py", "hamon_affine_metric.py", "hamon_callout.py",
-            "hamon_dxf.py", "office_package.py", "hamon_eagle_netlist.py", "hamon_eagle_copper.py", "hamon_eagle_walk.py",
+            "hamon_dxf.py", "office_package.py", "hamon_eagle_netlist.py", "hamon_eagle_copper.py",
             "hamon_consolidation.py", "hamon_pipe_network.py", "hamon_diaphragm.py",
             "hamon_diaphragm_modes.py", "hamon_diaphragm_compensated.py",
             "hamon_turbomachinery.py", "hamon_ac_power_flow.py",
