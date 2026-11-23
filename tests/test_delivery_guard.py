@@ -132,6 +132,37 @@ class DirectArchive(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(guard.compare(before, await guard.snapshot(self, targets)), [])
 
 
+class LargeDeliverable(unittest.IsolatedAsyncioTestCase):
+    async def test_middle_edit_and_identical_rewrite(self):
+        task_path = "/filesystem/output/site.ifc"
+        targets = [{"path": task_path, "kind": "file"}]
+        self.instruction = "Write your deliverable to " + task_path
+        with tempfile.TemporaryDirectory() as tmp:
+            graded = Path(tmp) / "site.ifc"
+            data = b"ISO-10303-21;" + b" " * (1 << 20) + b"123" + b" " * (1 << 20)
+
+            async def task_exec(command, timeout_sec):
+                _, _, program, argument = shlex.split(command)
+                output = io.StringIO()
+                with (mock.patch("pathlib.Path", return_value=graded),
+                      mock.patch.object(sys, "argv", ["-c", argument]),
+                      contextlib.redirect_stdout(output)):
+                    exec(program, {})
+                return {"exit_code": 0, "output": output.getvalue()}
+
+            self.exec = task_exec
+            graded.write_bytes(data)
+            before = await guard.snapshot(self, targets)
+            graded.write_bytes(data.replace(b"123", b"124"))
+            after = await guard.snapshot(self, targets)
+            self.assertEqual(after[task_path]["state"], "ready")
+            self.assertEqual(before[task_path]["size"], after[task_path]["size"])
+            self.assertEqual(guard.compare(before, after), [])
+            graded.write_bytes(data)
+            self.assertEqual(guard.compare(before, await guard.snapshot(self, targets)),
+                             [{"path": task_path, "reason": "unchanged"}])
+
+
 class CompareSnapshots(unittest.TestCase):
     def test_missing_and_invalid(self):
         before = {"/filesystem/output/submission.zip": {"state": "missing"}}
