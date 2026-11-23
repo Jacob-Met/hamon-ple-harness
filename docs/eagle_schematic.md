@@ -134,3 +134,16 @@ These are sufficient witnesses for nominal layout topology. `unresolved` does no
 The registered Arduino Due `N$3` and Adafruit Feather RP2040 Original `MISO` controls can be replayed with `python ship/verify_eagle_routed_copper.py --raw RAW --repo . --out OUT`. Supply the Due files as `due-0.sch` and `due-1.brd`, and the Feather Original files under `feather/` using their manufacturer filenames. The receiver checks each intact board digest, verifies every primitive in each ordered walk against the original XML, certifies the finite copper gaps after the registered edits, and tests that deleting contactrefs alone changes membership independently of the copper path.
 
 On the Arduino Due, a 0.60 mm hole at (12.4049, 28.4999) cuts the full width of the 0.254 mm diagonal trace on `N$3` for at least 0.54358 mm. The routed result becomes unresolved while all 605 contact and 163 net declarations still match. Moving the hole 2 mm in X restores the original witness.
+
+### Finite-width manufacturer controls
+
+The independent course in `ship/eagle_finite_course_v1.json` fixes the source hashes, all 19 edited-board hashes and expected physical outcomes before candidate execution. It contains nine connected layouts and ten layouts for which the supported artwork must not yield a route. On the pinned Due trace, a centered 0.127 mm bore leaves 0.0635 mm of copper on each side of the 0.254 mm trace; a 0.204 mm bore leaves 0.025 mm. Both now have explicit material paths. A centered 0.254 mm bore closes those passages and remains unresolved, as do the larger cut controls.
+
+The course also checks a rotated footprint drill, wire-end overlap versus tangency and separation, a transformed SMD landing, a valid parallel detour and a second hole severing it, and an off-center plated landing on the Feather. The independent receiver checks the emitted path against the true circular holes and the source wire capsules without importing the geometry backend. All 19 controls retain their original declared contact and net counts.
+
+```sh
+python ship/verify_eagle_finite_copper.py --raw RAW --repo . \
+  --frozen ship/eagle_finite_course_v1.json --out finite-copper-result.json
+```
+
+The provisioner transfers `hamon_eagle_material.py` with the ordinary toolkit modules. `ship/verify_eagle_provisioned.py` exercises that provisioner and the actual copied CLI through a local WebSocket receiver with Shapely available and with Python site packages disabled. Copying modules does not install third-party packages into the task container: if its interpreter lacks the finite-width backend, intact centerline witnesses remain available and an otherwise unsupported material route reports `finite_width_geometry_dependency_unavailable`. These local checks do not establish the official task image's installed packages or replace the organizer's Docker, cancellation and evaluation gates.

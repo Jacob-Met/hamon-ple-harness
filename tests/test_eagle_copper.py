@@ -166,6 +166,7 @@ class CopperWitnessTests(unittest.TestCase):
             wire(0, 0, 2, 1, 19),
             '<polygon layer="1" width=".1"/>',
             wire(0, 0, 2, 1).replace("/>", ' curve="90"/>'),
+            wire(0, 0, 2, 1).replace("/>", ' style="longdash"/>'),
         ):
             with self.subTest(item=item):
                 result = self.routed(item)

@@ -316,6 +316,7 @@ def material_fallback(result, board, signal, terminals, elements, footprints, bo
                 layer, width = int(row.attrib["layer"]), nm(row.get("width"))
                 cap = row.get("cap", "round")
                 if (layer not in FACES or width <= 0 or cap not in ("round", "flat")
+                        or row.get("style", "continuous") != "continuous"
                         or Decimal(row.get("curve", "0")) != 0):
                     raise ValueError("requires a straight positive-width outer-layer trace")
                 a, b = position(layer, row, "1")[2:], position(layer, row, "2")[2:]
@@ -430,6 +431,7 @@ def routed_continuity(prediction, board_path, signal_name):
                     or nm(row.get("width")) <= 0
                     or Decimal(row.get("curve", "0")) != 0
                     or row.get("cap", "round") != "round"
+                    or row.get("style", "continuous") != "continuous"
                 ):
                     raise ValueError(
                         "requires a straight positive-width outer-layer trace"
