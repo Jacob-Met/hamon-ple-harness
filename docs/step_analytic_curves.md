@@ -47,3 +47,20 @@ were unsupported. A wrongly typed cylinder placement and three individually
 negative BLOCK dimensions were incorrectly certified. The production candidate
 is executed by official CI; no local execution is claimed during the executor
 outage.
+
+## Exact midpoint revision
+
+The first production candidate25b468d9 passed official CI45156505847,
+1056 unittest methods plus360pytest/81subtests and downstream gates.
+Independent review then supplied four valid midpoint cases: both rounding
+parities for a translated centroid and a rotated extent. The tests-only
+2765cf56 revision genuinely reproduced four unresolved-output errors in
+CI45157291741/job137633380386. Non-dyadic component intervals straddled an
+exactly rational binary64 midpoint at every configured precision.
+
+The correction recognizes exact rational square roots and combines rational
+centroid/extent terms before interval evaluation. Exact dyadic midpoint
+conversion then follows Python's ties-to-even rule. The preserved independent
+volume cubature integrates actual world-space point-mass inertia and circular
+support coordinates; its seven physical cases include a 10^48 cylinder aspect
+ratio, transforms, scales, zero density and a small sphere.

@@ -64,6 +64,12 @@ def _scalar(value, name, positive):
         raise ValueError(name + " must be positive" if positive else name + " must be nonnegative")
     return result
 
+def _rational_sqrt(value):
+    numerator, denominator = math.isqrt(value.numerator), math.isqrt(value.denominator)
+    if numerator*numerator == value.numerator and denominator*denominator == value.denominator:
+        return Fraction(numerator, denominator)
+    return None
+
 def _determinant(a):
     return (a[0][0]*(a[1][1]*a[2][2]-a[1][2]*a[2][1])
             - a[0][1]*(a[1][0]*a[2][2]-a[1][2]*a[2][0])
@@ -139,6 +145,17 @@ def analytic_mass_properties(entities, selected, unit_scale, density):
                  Fraction(mantissa, 1 << -exponent))
         return float(-value if sign else value)
 
+    rational_norm = _rational_sqrt(norm)
+    exact_extents = []
+    for coordinate in axis:
+        radial_root = _rational_sqrt((norm-coordinate**2)/norm)
+        if kind == "SPHERE" or coordinate == 0:
+            exact_extents.append(2*radius)
+        elif rational_norm is not None and radial_root is not None:
+            exact_extents.append(height*abs(coordinate)/rational_norm+2*radius*radial_root)
+        else:
+            exact_extents.append(None)
+
     for digits in (80, 160, 320, 640, 1280, 2560, 5120):
         iv = MPIntervalContext()
         iv.dps = digits
@@ -146,6 +163,8 @@ def analytic_mass_properties(entities, selected, unit_scale, density):
             return iv.mpf(value.numerator)/value.denominator
         root = iv.sqrt(num(norm))
         def translated(a, b):
+            if rational_norm is not None:
+                return num(a+b/rational_norm)
             # Rationalize cancellation in a+b/sqrt(norm).
             if a*b < 0:
                 numerator = a*a*norm-b*b
@@ -154,10 +173,10 @@ def analytic_mass_properties(entities, selected, unit_scale, density):
                 return num(numerator)/(root*(num(a)*root-num(b)))
             return num(a)+num(b)/root
         centers = [translated(origin[i], center*axis[i]) for i in range(3)]
-        extents = ([num(2*radius)]*3 if kind == "SPHERE" else
-                   [num(height*abs(axis[i]))/root
-                    +2*num(radius)*iv.sqrt(num((norm-axis[i]**2)/norm))
-                    for i in range(3)])
+        extents = [num(exact_extents[i]) if exact_extents[i] is not None else
+                   num(height*abs(axis[i]))/root
+                   +2*num(radius)*iv.sqrt(num((norm-axis[i]**2)/norm))
+                   for i in range(3)]
         values = ([num(volume)*iv.pi, num(rho*volume)*iv.pi,
                    num(surface)*iv.pi, num(rho)] + centers + extents
                   + [num(v)*iv.pi for row in tensor for v in row]
