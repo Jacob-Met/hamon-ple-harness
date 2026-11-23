@@ -132,19 +132,42 @@ def passive_exchanger(spec, *, sizing):
         if not ctx.isfinite(error) or error > 1e-8:
             raise ValueError("Independent effectiveness check did not resolve the reported duty")
 
+        if arr == "parallel":
+            # Convert the coflow terminal gaps to the two cross-paired gaps
+            # H_in-C_out and H_out-C_in. Signed additions remain conditioned.
+            cross_in = duty/real(ch) + gap2
+            cross_out = duty/real(cc) + gap2
+        else:
+            cross_in, cross_out = gap1, gap2
+
         if not duty:
             entropy = ctx.mpf(0)
+        elif ch == cc:
+            # H_out*C_out - H_in*C_in = (Q/C)*(H_out-C_in). The product
+            # form retains the true entropy arbitrarily close to reversibility.
+            entropy = real(ch)*ctx.log1p((duty/real(ch))*cross_out/(inlet_h*inlet_c))
         else:
-            hot = real(ch)*ctx.log1p(-duty/(real(ch)*inlet_h))
-            cold = real(cc)*ctx.log1p(duty/(real(cc)*inlet_c))
-            entropy = hot+cold
-            if not ctx.isfinite(entropy) or abs(entropy) < ctx.mpf("1e-24")*(abs(hot)+abs(cold)):
-                # Integrate dQ*(Th-Tc)/(Th*Tc) with the physical terminal
-                # gaps. This keeps positive entropy near reversible exchange.
-                ca, cb = (inlet_c,out_c) if arr == "parallel" else (out_c,inlet_c)
-                entropy = duty*ctx.quad(
-                    lambda x: ((1-x)*gap1+x*gap2) /
-                        (((1-x)*inlet_h+x*out_h)*((1-x)*ca+x*cb)), [0,1])
+            # Two exact decompositions of the entropy difference. The first
+            # preserves small heat inputs; the second preserves near-swapped
+            # temperatures without subtracting two full inlet-log terms.
+            def change_log(delta_t, initial, final):
+                ratio = delta_t/initial
+                return ctx.log1p(ratio) if ratio > -ctx.mpf(".75") else ctx.log(final/initial)
+
+            terms = (real(ch)*change_log(-duty/real(ch), inlet_h, out_h),
+                     real(cc)*change_log(duty/real(cc), inlet_c, out_c))
+            complement = (real(cc-ch)*ctx.log(inlet_h/inlet_c),
+                          real(ch)*change_log(cross_out, inlet_c, out_h),
+                          real(cc)*change_log(-cross_in, inlet_h, out_c))
+
+            def conditioning(parts):
+                size = sum(map(abs,parts))
+                return abs(sum(parts))/size if size else 0
+
+            chosen = max((terms, complement), key=conditioning)
+            if conditioning(chosen) < ctx.mpf("1e-55"):
+                raise ValueError("Entropy difference is not resolved")
+            entropy = sum(chosen)
         if entropy < 0 or not ctx.isfinite(entropy):
             raise ValueError("Negative or unresolved passive entropy production")
         duty_wire = wire(duty)

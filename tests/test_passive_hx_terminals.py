@@ -84,3 +84,17 @@ class PassiveHXTests(unittest.TestCase):
             near = rating(1e7,arr)
             self.assertTrue(near["dual_verified"],near)
             self.assertGreater(near["entropy_generation_W_K"],0.)
+
+    def test_positive_entropy_survives_nearly_reversible_exchange(self):
+        from decimal import Decimal, localcontext
+        with localcontext() as ctx:
+            ctx.prec = 400
+            for hi, ci, ua in ((1e40,1.,1e180), (1e60,1.,1e180), (1e100,1.,1e180),
+                               (290.,350.,1e240), (350.,290.,1e240)):
+                with self.subTest(hi=hi,ci=ci,ua=ua):
+                    a,b,n = map(Decimal.from_float,(hi,ci,ua))
+                    gap_product = n*(a-b)**2/(a*b*(1+n)**2)
+                    expected = float((1+gap_product).ln())
+                    r = rating(ua,Th_in_K=hi,Tc_in_K=ci,cp_hot_J_kgK=1.,cp_cold_J_kgK=1.)
+                    self.assertTrue(r["dual_verified"],r)
+                    self.assertEqual(r["entropy_generation_W_K"],expected)
