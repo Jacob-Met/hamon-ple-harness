@@ -362,6 +362,10 @@ def routed(tmp_path_factory):
     calls.append({"id": "rotated-octahedral-plane", "mode": "solid_mohr_vessel_buckling",
                   "spec": {"subkind": "mohr_stress", "stress_tensor": [[72, 24, 0], [24, 58, 0], [0, 0, -30]],
                            "plane_normal": [7, -1, 5]}})
+    for reflux, case in [(11.5, "table-interior-pinch"), (12, "table-feasible-column")]:
+        calls.append({"id": case, "mode": "electrochem_separations", "spec": {
+            "subkind": "distillation", "x_B": .05, "z_F": .5, "x_D": .95, "q": .5, "R": reflux,
+            "equilibrium_table": [[0,0],[.25,.46],[.5,.63],[.7,.72],[.85,.94],[1,1]]}})
     calls.append({"id": "enriched-product-two-tray", "mode": "electrochem_separations",
                   "spec": {"subkind": "distillation", "z_F": .8, "x_D": .9, "x_B": .7,
                            "alpha": 2., "q": 1., "R": 1000., "F_mol_s": 100.}})
@@ -1485,3 +1489,17 @@ def test_registered_tensor_and_plane_traction(routed):
     assert math.isclose(plane["shear_magnitude"], result["tau_oct"])
     trace = sum((e-100/3)**2 for e in [72,58,-30])+2*24**2
     assert math.isclose(result["tau_oct"], math.sqrt(trace/3))
+
+
+def test_registered_tabulated_equilibrium(routed):
+    refused = routed["table-interior-pinch"]
+    assert refused["completed"], refused
+    result = refused["details"]
+    assert result["verified"] is False and "N_stages_integer" not in result
+    assert result["R_min"] == 11.5 and result["min_gap_composition"] == .7
+    assert result["min_operating_gap"] == 0
+    accepted = routed["table-feasible-column"]
+    assert accepted["completed"], accepted
+    result = accepted["details"]
+    assert result["verified"] and result["N_stages_integer"] == 23
+    assert math.isclose(result["N_theoretical"],22.620005,abs_tol=.00001)

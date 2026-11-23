@@ -1,4 +1,4 @@
-"""Materialize an agent-written generator before spending another model pass.
+"""Materialize fresh agent-written generators within the task's remaining time.
 
 Converts only explicit, still-incomplete deliverables whose SAME-DIRECTORY
 generator script was newly created/changed by the current task session.
@@ -13,6 +13,7 @@ import asyncio
 import json
 import posixpath
 import shlex
+from time import monotonic
 from typing import Any
 
 from taskbridge import Cancelled
@@ -102,7 +103,8 @@ def newly_written(before: dict | None, after: dict | None,
 
 
 def plan(items: list[dict[str, Any]], issues: list[dict[str, str]],
-         before: dict | None, after: dict | None) -> list[dict[str, Any]]:
+         before: dict | None, after: dict | None, *,
+         attempted: set[tuple[str, str]] | None = None) -> list[dict[str, Any]]:
     """Select new generators only for still-failed user-declared outputs."""
     failed = {i["path"] for i in issues}
     chosen: list[dict[str, Any]] = []
@@ -117,7 +119,10 @@ def plan(items: list[dict[str, Any]], issues: list[dict[str, str]],
                 or folder in folders
                 or not _safe_absolute(path) or not _safe_absolute(script)):
             continue
-        if newly_written(before, after, script):
+        latest = (after or {}).get(script)
+        fingerprint = latest.get("fingerprint") if isinstance(latest, dict) else None
+        if (newly_written(before, after, script)
+                and (attempted is None or (script, fingerprint) not in attempted)):
             chosen.append(item)
             folders.add(folder)
         if len(chosen) >= MAX_GENERATORS:
@@ -217,20 +222,26 @@ print(json.dumps(result, separators=(",",":")))
 '''
 
 
-async def materialize(session: Any, selected: list[dict[str, Any]]) -> list[dict]:
+async def materialize(session: Any, selected: list[dict[str, Any]], *,
+                      reserve_sec: float = 100,
+                      deadline: float | None = None) -> list[dict]:
     """Bounded task-native executions. Never assert engineering validity.
 
     session.exec is the competition action protocol, not host subprocesses.
-    Evaluator and asyncio cancellation propagate to the caller.
+    Evaluator and asyncio cancellation propagate to the caller. Keep the caller's
+    verification/repair reserve plus the entire remote and transport allowance.
+    A shared monotonic deadline bounds a final pass even if time_left is absent.
     """
     observations: list[dict] = []
     for item in selected[:MAX_GENERATORS]:
         left = session.time_left()
-        if left is not None and left < 160:
-            break
+        if deadline is not None:
+            left = deadline - monotonic() if left is None else min(left, deadline - monotonic())
         timeout = PER_SCRIPT_TIMEOUT if left is None else min(
-            PER_SCRIPT_TIMEOUT, max(1, int(left - 100))
+            PER_SCRIPT_TIMEOUT, int(left - reserve_sec - 13)
         )
+        if timeout < 1:
+            break
         spec = {"script": item["script"], "target": item["target"],
                 "timeout": timeout}
         command = ("python3 -c " + shlex.quote(REMOTE_MATERIALIZE)
@@ -258,3 +269,4 @@ async def materialize(session: Any, selected: list[dict[str, Any]]) -> list[dict
             # cancellation and asyncio cancellation still propagate.
             observations.append({"target": item["target"], "state": "unknown"})
     return observations
+

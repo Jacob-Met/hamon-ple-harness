@@ -1,159 +1,156 @@
-"""McCabe–Thiele verification for a supplied piecewise-linear binary VLE curve."""
+"""Binary McCabe–Thiele construction for a tabulated, piecewise-linear equilibrium."""
 from bisect import bisect_right
 from fractions import Fraction
-from math import isfinite
+import math
 
 
 def _number(value):
-    if isinstance(value, bool) or not isfinite(float(value)):
-        raise ValueError("nonfinite_or_invalid_distillation_input")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError("expected finite numeric inputs")
     return Fraction(str(value))
 
 
-def _interpolate(x, a, b):
-    return a[1] + (b[1]-a[1]) * (x-a[0]) / (b[0]-a[0])
+def _interpolate(x, xs, ys):
+    i = min(bisect_right(xs, x) - 1, len(xs) - 2)
+    return ys[i] + (x - xs[i]) * (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i])
 
 
-class _Equilibrium:
-    def __init__(self, raw):
-        if not isinstance(raw, (tuple, list)) or len(raw) < 2:
-            raise ValueError("invalid_equilibrium_points")
-        self.points = []
-        for row in raw:
-            if not isinstance(row, (tuple, list)) or len(row) != 2:
-                raise ValueError("invalid_equilibrium_points")
-            x, y = map(_number, row)
-            if not (0 <= x <= 1 and 0 <= y <= 1):
-                raise ValueError("invalid_equilibrium_points")
-            if self.points and self.points[-1][0] >= x:
-                raise ValueError("equilibrium_liquid_points_must_increase")
-            self.points.append((x, y))
-        self.xs = [x for x, _ in self.points]
-        self.ys = [y for _, y in self.points]
-        self.increasing = all(a < b for a, b in zip(self.ys, self.ys[1:]))
-
-    def at(self, x):
-        if not self.xs[0] <= x <= self.xs[-1]:
-            raise ValueError("equilibrium_table_does_not_cover_products")
-        i = min(bisect_right(self.xs, x)-1, len(self.points)-2)
-        return _interpolate(x, self.points[i], self.points[i+1])
-
-    def inverse(self, y):
-        if self.increasing:
-            if self.ys[0] <= y <= self.ys[-1]:
-                i = min(bisect_right(self.ys, y)-1, len(self.ys)-2)
-                return _interpolate(y, self.points[i][::-1], self.points[i+1][::-1])
-        else:
-            roots = set()
-            for a, b in zip(self.points, self.points[1:]):
-                if min(a[1], b[1]) <= y <= max(a[1], b[1]):
-                    if a[1] == b[1]:
-                        raise ValueError("ambiguous_equilibrium_inverse")
-                    roots.add(_interpolate(y, a[::-1], b[::-1]))
-                    if len(roots) > 1:
-                        raise ValueError("ambiguous_equilibrium_inverse")
-            if roots:
-                return roots.pop()
-        raise ValueError("stage_outside_equilibrium_table")
+def _inverse(y, xs, ys, increasing):
+    if increasing:
+        if ys[0] <= y <= ys[-1]:
+            return _interpolate(y, ys, xs)
+    else:
+        roots = set()
+        for x0, x1, y0, y1 in zip(xs, xs[1:], ys, ys[1:]):
+            if min(y0, y1) <= y <= max(y0, y1):
+                if y0 == y1:
+                    raise ValueError("ambiguous_equilibrium_inverse")
+                roots.add(x0 + (y-y0)*(x1-x0)/(y1-y0))
+                if len(roots) > 1:
+                    raise ValueError("ambiguous_equilibrium_inverse")
+        if roots:
+            return roots.pop()
+    raise ValueError("stage_outside_equilibrium_table")
 
 
-def _minimum(points, xb, z, xd, q, d, floor):
-    # At composition x, either section may lie below the equilibrium line.
-    # Its threshold in R is the smaller of the two line-specific ratios.
-    # Both ratios have affine numerator and common positive affine denominator
-    # on each table segment. Each is monotone there; their ordering changes
-    # only where q*x + (1-q)*y = z. Include every such crossing, not just one.
-    candidates = list(points)
-    for a, b in zip(points, points[1:]):
-        ga = q*a[0] + (1-q)*a[1] - z
-        gb = q*b[0] + (1-q)*b[1] - z
-        if ga*gb < 0:
-            x = a[0] - ga*(b[0]-a[0])/(gb-ga)
-            candidates.append((x, _interpolate(x, a, b)))
-    bounds = []
-    for x, y in candidates:
-        head = y-x
-        if head <= 0:
-            raise ValueError("equilibrium_on_or_below_diagonal_in_product_interval")
-        rect = (xd-x)/head - 1
-        strip = ((1-d)*(x-xb)/head + (1-q))/d - 1
-        bounds.append((min(rect, strip), x))
-    pinch, location = max(bounds)
-    return max(floor, pinch), location if pinch > floor else None
-
-
-def tabulated_distillation(params):
+def solve_tabulated_distillation(spec):
     result = {"domain": "electrochem_separations", "subkind": "distillation",
               "equilibrium_model": "piecewise_linear_table", "verified": False}
     try:
-        eq = _Equilibrium(params["equilibrium_points"])
-        xb, z, xd = (_number(params[k]) for k in ("x_B", "z_F", "x_D"))
-        q, feed = _number(params.get("q", 1)), _number(params.get("F_mol_s", 100))
-        if not (0 < xb < z < xd < 1 and feed > 0):
-            raise ValueError("invalid_distillation_compositions_or_flow")
-        points = [(xb, eq.at(xb)), *((x,y) for x,y in eq.points if xb < x < xd),
-                  (xd, eq.at(xd))]
-        d = (z-xb)/(xd-xb)
-        floor = max(Fraction(0), (1-q)/d-1)
-        minimum, pinch = _minimum(points, xb, z, xd, q, d, floor)
-        result.update(R_flow_floor=float(floor), R_min=float(minimum),
-                      limiting_pinch_x=None if pinch is None else float(pinch))
-        if params.get("R") is None:
-            factor = _number(params.get("R_mult", 1.25))
-            if factor < 0:
-                raise ValueError("invalid_reflux_multiplier")
-            reflux = factor*minimum
+        measured = "equilibrium_points" in spec
+        if measured and "equilibrium_table" in spec:
+            raise ValueError("supply only one equilibrium table")
+        if not measured and "alpha" in spec:
+            raise ValueError("supply either equilibrium_table or alpha")
+        table = spec["equilibrium_points" if measured else "equilibrium_table"]
+        if not isinstance(table, (list, tuple)) or len(table) < 2:
+            raise ValueError("equilibrium_table requires at least two [x,y] pairs")
+        if any(not isinstance(row, (list, tuple)) or len(row) != 2 for row in table):
+            raise ValueError("expected [liquid_fraction,vapor_fraction] pairs")
+        xs, ys = zip(*[(_number(x), _number(y)) for x, y in table])
+        if any(value < 0 or value > 1 for axis in (xs, ys) for value in axis):
+            raise ValueError("equilibrium fractions must lie between zero and one")
+        if any(a >= b for a, b in zip(xs, xs[1:])):
+            raise ValueError("liquid compositions must increase strictly")
+        increasing = all(a < b for a, b in zip(ys, ys[1:]))
+        if not measured:
+            if (xs[0], ys[0], xs[-1], ys[-1]) != (0, 0, 1, 1):
+                raise ValueError("equilibrium_table must span (0,0) to (1,1)")
+            if not increasing:
+                raise ValueError("equilibrium coordinates must increase strictly on both axes")
+        xb, z, xd = (_number(spec[k]) for k in ("x_B", "z_F", "x_D"))
+        q = _number(spec.get("q", 1))
+        feed = _number(spec.get("F_mol_s", 100))
+        if not 0 < xb < z < xd < 1 or feed <= 0:
+            raise ValueError("invalid feed or product compositions")
+        if xs[0] > xb or xs[-1] < xd:
+            raise ValueError("equilibrium table does not cover the product interval")
+        d = feed * (z - xb) / (xd - xb)
+        b = feed - d
+        floor = max(Fraction(0), (1 - q) * feed / d - 1)
+        result.update(D_mol_s=float(d), B_mol_s=float(b), R_flow_floor=float(floor))
+
+        knots = [xb, *[x for x in xs if xb < x < xd], xd]
+        points = [(x, _interpolate(x, xs, ys)) for x in knots]
+        for x, y in points:
+            if y <= x:
+                result.update(limiting_composition=float(x), equilibrium_y=float(y))
+                raise ValueError("separation crosses a total-reflux equilibrium barrier")
+
+        # Both operating lines approach the diagonal as R grows. At any x the
+        # active line is the lower of the two. Each of its two reflux thresholds
+        # is a linear fraction on a table interval, hence monotone or constant.
+        # Their ordering changes only where z = q*x + (1-q)*y.
+        candidates = list(points)
+        for (x0, y0), (x1, y1) in zip(points, points[1:]):
+            h0 = q*x0 + (1-q)*y0 - z
+            h1 = q*x1 + (1-q)*y1 - z
+            if h0*h1 < 0:
+                t = -h0 / (h1-h0)
+                candidates.append((x0+t*(x1-x0), y0+t*(y1-y0)))
+        lower, limiting_x = floor, None
+        for x, y in candidates:
+            rect = (xd-x)/(y-x) - 1
+            strip = b*(x-xb)/(d*(y-x)) - 1 + (1-q)*feed/d
+            needed = min(rect, strip)
+            if needed >= lower:
+                lower, limiting_x = needed, x
+        result.update(R_min=float(lower), limiting_composition=(
+            float(limiting_x) if limiting_x is not None else None))
+        if spec.get("R") is not None:
+            r = _number(spec["R"])
         else:
-            reflux = _number(params["R"])
-        vapor = (reflux+1)*d
-        strip_vapor = vapor-(1-q)
-        result.update(R_operating=float(reflux), D_mol_s=float(feed*d),
-                      B_mol_s=float(feed*(1-d)), L_rect_mol_s=float(feed*reflux*d),
-                      V_rect_mol_s=float(feed*vapor), V_strip_mol_s=float(feed*strip_vapor),
-                      L_strip_mol_s=float(feed*(strip_vapor+1-d)))
-        if reflux < 0 or strip_vapor < 0:
-            raise ValueError("negative_internal_section_flow")
-        if reflux == 0 and strip_vapor == 0:
-            if eq.inverse(xd) != xb:
-                raise ValueError("zero_circulation_flash_products_not_in_equilibrium")
-            return {**result, "section_mode": "single_equilibrium_flash", "verified": True,
-                    "N_stages_integer": 1, "N_theoretical": 1., "feed_stage": 1, "residual": 0.}
-        # Each line is active on its side of the feed intersection. For
-        # zero stripping vapour the rectifier extends down to the bottoms.
-        switch = ((reflux+1)*z+(q-1)*xd)/(reflux+q)
+            multiplier = _number(spec.get("R_mult", 1.25))
+            if multiplier < 0:
+                raise ValueError("negative reflux multiplier")
+            r = multiplier * lower
+        l, v = r*d, (r+1)*d
+        vs = v - (1-q)*feed
+        ls = vs + b
+        result.update(R_operating=float(r), L_rect_mol_s=float(l), V_rect_mol_s=float(v),
+                      L_strip_mol_s=float(ls), V_strip_mol_s=float(vs))
+        if l < 0 or vs < 0:
+            raise ValueError("negative internal section flow")
+
+        # The flow floor guarantees r+q>0 for an interior feed composition.
+        xi = ((r+1)*z + (q-1)*xd)/(r+q)
+        yi = (l*xi+d*xd)/v
+        if q*xi + (1-q)*yi != z or vs*yi != ls*xi-b*xb:
+            raise ArithmeticError("feed intersection violates the material balances")
+        result.update(feed_intersection_x=float(xi), feed_intersection_y=float(yi))
+        if not l and not vs:
+            if _inverse(xd, xs, ys, increasing) != xb:
+                raise ValueError("zero-circulation flash products are not in equilibrium")
+            return dict(result, verified=True, section_mode="single_equilibrium_flash",
+                        N_stages_integer=1, N_theoretical=1., feed_stage=1, residual=0.)
 
         def operating(x):
-            if x >= switch or strip_vapor == 0:
-                return (reflux*x+xd)/(reflux+1)
-            return x + (1-d)*(x-xb)/strip_vapor
+            return (l*x+d*xd)/v if x >= xi or not vs else (ls*x-b*xb)/vs
 
-        # On each interval partitioned by both table knots and the feed
-        # switch the difference is affine: endpoint minima certify its entirety.
-        locations = {x for x, _ in points}
-        if xb < switch < xd:
-            locations.add(switch)
-        gap, where = min((eq.at(x)-operating(x), x) for x in locations)
-        result.update(minimum_operating_gap=float(gap), minimum_gap_x=float(where))
+        # Equilibrium and the active line are affine between table knots and
+        # the feed switch, so these values certify the entire composition span.
+        active = points + [(xi, _interpolate(xi, xs, ys))]
+        gap, worst = min((y-operating(x), x) for x, y in active)
+        result.update(min_operating_gap=float(gap), min_gap_composition=float(worst))
         if gap <= 0:
-            raise ValueError("operating_line_intersects_equilibrium")
-        mode = ("stripping_only" if reflux == 0 else
-                "rectifying_only" if strip_vapor == 0 else "two_section")
+            raise ValueError("operating line reaches or crosses equilibrium")
+        mode = "stripping_only" if not l else "rectifying_only" if not vs else "two_section"
         result["section_mode"] = mode
-        vapor_y, previous, feed_stage = xd, xd, None
-        for stage in range(1, 2049):
-            x = eq.inverse(vapor_y)
+        stage_y, previous, feed_stage = xd, xd, None
+        for count in range(1, 4097):
+            x = _inverse(stage_y, xs, ys, increasing)
             if x >= previous:
-                raise ValueError("non_descending_equilibrium_stage")
-            if feed_stage is None and x <= switch:
-                feed_stage = stage
+                raise ArithmeticError("stage failed to descend")
+            if feed_stage is None and x <= xi:
+                feed_stage = count
             if x <= xb:
                 fraction = (previous-xb)/(previous-x)
-                return {**result, "verified": True, "N_stages_integer": stage,
-                        "N_theoretical": float(stage-1+fraction),
-                        "feed_stage": feed_stage or stage, "residual": 0.}
+                return dict(result, verified=True, N_stages_integer=count,
+                            N_theoretical=float(count-1+fraction), feed_stage=feed_stage or count,
+                            residual=0.)
             if max(x.numerator.bit_length(), x.denominator.bit_length()) > 32768:
                 break
-            previous, vapor_y = x, operating(x)
-        raise ValueError("tabulated_stage_resolution_limit")
-    except (ValueError, OverflowError, ZeroDivisionError, KeyError, TypeError) as exc:
-        return {**result, "error": str(exc)}
+            previous, stage_y = x, operating(x)
+        raise ValueError("finite separation exceeds exact contact evaluation budget")
+    except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+        return dict(result, error=str(exc))

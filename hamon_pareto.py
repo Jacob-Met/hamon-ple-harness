@@ -276,6 +276,48 @@ def _wave8_request(instruction):
     return value
 
 
+def _distillation_result(req):
+    """Admit only closed binary-column calculations with consistent stream flows."""
+    spec = req["spec"]
+    required = {"z_F", "x_D", "x_B", "alpha"}
+    numeric = required | {"F_mol_s", "q", "R", "R_mult"}
+    if (spec.get("subkind") != "distillation"
+            or spec.get("domain", req["mode"]) != req["mode"]
+            or not required <= spec.keys() <= numeric | {"subkind", "domain"}
+            or {"R", "R_mult"} <= spec.keys()
+            or not all(type(spec[k]) in (float, int) and math.isfinite(spec[k])
+                       for k in numeric & spec.keys())):
+        return None
+
+    result = dispatch_ple_tool("hamon_conservation_cad_verifier", req)
+    if (result.get("verified") is not True or result.get("domain") != req["mode"]
+            or result.get("subkind") != "distillation" or not 0 <= result["residual"] < 1e-10):
+        return None
+
+    feed = spec.get("F_mol_s", 100.0)
+    q = spec.get("q", 1.0)
+    d, b = result["D_mol_s"], result["B_mol_s"]
+    lr, vr = result["L_rect_mol_s"], result["V_rect_mol_s"]
+    ls, vs = result["L_strip_mol_s"], result["V_strip_mol_s"]
+    if not (feed > 0 and d > 0 and b > 0 and min(lr, vr, ls, vs) >= 0):
+        return None
+    # Normalize by the specified feed so the same gate works across flow units.
+    # Check the product split, condenser, reboiler and both sides of the feed tray.
+    reflux = spec.get("R", spec.get("R_mult", 1.25) * result["R_min"])
+    if not math.isclose(result["R_operating"], reflux, rel_tol=1e-12):
+        return None
+    balances = (
+        (d + b, feed),
+        (d * spec["x_D"] + b * spec["x_B"], feed * spec["z_F"]),
+        (lr, reflux * d), (vr, lr + d), (ls, vs + b),
+        (ls, lr + q * feed), (vr, vs + (1 - q) * feed),
+    )
+    if not all(math.isfinite(left) and math.isfinite(right)
+               and abs(left - right) / feed < 1e-10 for left, right in balances):
+        return None
+    return result
+
+
 def _wave8_result(req):
     """Check one existing operation and its physical residuals."""
     if (
@@ -285,6 +327,8 @@ def _wave8_result(req):
     ):
         return None
     spec = req["spec"]
+    if req["mode"] == "electrochem_separations":
+        return _distillation_result(req)
     calculation = spec["calculation"]
     mode, fields, required = _WAVE8_INPUTS[calculation]
     if req["mode"] not in ("auto", mode) or not spec.keys() <= {
@@ -534,4 +578,5 @@ from hamon_wave7_engineering_verifiers import (
     dispatch_wave7_verifier,
     infer_wave7_domain,
 )
+
 

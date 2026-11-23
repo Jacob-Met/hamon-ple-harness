@@ -382,8 +382,8 @@ def test_registered_distillation_uses_tabulated_equilibrium_over_scalar_volatili
             [[0,0], [.1,.2], [.3,.4], [.5,.75], [.7,.78], [.9,.95], [1,1]]}
     result = run_router_conservation_cad_verifier({"mode": "electrochem_separations", "spec": spec})
     assert result["verified"] is False
-    assert result["minimum_operating_gap"] == 0
-    assert result["limiting_pinch_x"] == .7
+    assert result["min_operating_gap"] == 0
+    assert result["limiting_composition"] == .7
     spec["R"] = 2
     result = run_router_conservation_cad_verifier({"mode": "electrochem_separations", "spec": spec})
     assert result["verified"] is True

@@ -53,24 +53,24 @@ class TabulatedDistillation(unittest.TestCase):
         for r, gap in [(1,-.02), (1.5,0), (2,1/75)]:
             row = solve(R=r, alpha=3)
             self.assertEqual(row["R_min"], 1.5)
-            self.assertEqual(row["limiting_pinch_x"], .7)
-            self.assertEqual(row["minimum_gap_x"], .7)
-            self.assertAlmostEqual(row["minimum_operating_gap"], gap)
+            self.assertEqual(row["limiting_composition"], .7)
+            self.assertEqual(row["min_gap_composition"], .7)
+            self.assertAlmostEqual(row["min_operating_gap"], gap)
             self.assertEqual(row["verified"], r>1.5)
             self.assertNotIn("underwood_theta", row)
         row = solve(q=0, R=3)
         self.assertFalse(row["verified"])
-        self.assertEqual((row["R_min"], row["limiting_pinch_x"]), (3, .3))
+        self.assertEqual((row["R_min"], row["limiting_composition"]), (3, .3))
 
     def test_feed_crossing_and_independent_staircase(self):
         at = solve(q=5, R=1)
         self.assertEqual(at["R_min"], 9/11)
-        self.assertEqual(at["limiting_pinch_x"], 31/40)
+        self.assertEqual(at["limiting_composition"], 31/40)
         for q, threshold in [(-1,5), (0,3), (.25,2.5), (.5,2), (1,1.5), (2,1.5), (5,9/11)]:
             with self.subTest(q=q):
                 below = solve(q=q, R=threshold-.01)
                 self.assertFalse(below["verified"])
-                self.assertLess(below["minimum_operating_gap"], 0)
+                self.assertLess(below["min_operating_gap"], 0)
                 r = threshold + 1
                 actual = solve(q=q, R=r)
                 self.assertTrue(actual["verified"], actual)
@@ -83,19 +83,19 @@ class TabulatedDistillation(unittest.TestCase):
         for y in (.695, .70):
             table = [[0,0],[.1,.21],[.69,.8],[.7,y],[.71,.82],[.9,.96],[1,1]]
             self.assertEqual(solve(equilibrium_points=table, R=100)["error"],
-                             "equilibrium_on_or_below_diagonal_in_product_interval")
+                             "separation crosses a total-reflux equilibrium barrier")
         for first, second in [(.92,.88),(.90,.90)]:
             table = [[0,0],[.1,.2],[.4,first],[.6,second],[.9,.97],[1,1]]
             row = solve(equilibrium_points=table, R=25)
-            self.assertGreater(row["minimum_operating_gap"], 0)
+            self.assertGreater(row["min_operating_gap"], 0)
             self.assertEqual(row["error"], "ambiguous_equilibrium_inverse")
         table = [[0,0],[.01,.015],[.02,.012],*TABLE[1:]]
         self.assertTrue(solve(equilibrium_points=table, R=2)["verified"])
         table = [[0,0],[.1,.2],[.5,.75],[.699999,.82],[.7,.779999],
                  [.700001,.82],[.9,.95],[1,1]]
         row = solve(equilibrium_points=table, R=1.5)
-        self.assertLess(row["minimum_operating_gap"], 0)
-        self.assertEqual(row["minimum_gap_x"], .7)
+        self.assertLess(row["min_operating_gap"], 0)
+        self.assertEqual(row["min_gap_composition"], .7)
 
     def test_table_refinement_and_three_feed_line_crossings(self):
         stock = dispatch_wave7_verifier("electrochem_separations",
@@ -113,7 +113,7 @@ class TabulatedDistillation(unittest.TestCase):
         table = [[0,0],[.1,.23],[.5,.65],[.6,.69],[.65,.70],[.7,.85],
                  [.8,.90],[.9,.96],[1,1]]
         row = solve(equilibrium_points=table, q=3, R=4)
-        self.assertEqual((row["R_min"], row["minimum_gap_x"], row["minimum_operating_gap"]),
+        self.assertEqual((row["R_min"], row["min_gap_composition"], row["min_operating_gap"]),
                          (4, .65, 0))
         self.assertFalse(row["verified"])
         row = solve(equilibrium_points=table, q=3, R=5)
@@ -129,10 +129,10 @@ class TabulatedDistillation(unittest.TestCase):
                          ("single_equilibrium_flash",1))
         self.assertEqual(solve(**args, q=0, R=1)["section_mode"],"rectifying_only")
         self.assertEqual(solve(**args, q=1, R=0)["section_mode"],"stripping_only")
-        self.assertEqual(solve(**args, q=0, R=.9)["error"],"negative_internal_section_flow")
+        self.assertEqual(solve(**args, q=0, R=.9)["error"],"negative internal section flow")
         args["equilibrium_points"] = [[0,0],[.4,.61],[.6,.8],[1,1]]
         self.assertEqual(solve(**args, q=.5, R=0)["error"],
-                         "zero_circulation_flash_products_not_in_equilibrium")
+                         "zero-circulation flash products are not in equilibrium")
 
     def test_malformed_and_partial_table(self):
         for table in [None, [], [[.2,.3],[.9,.95]], [[0,0],[.7,.7],[.6,.8]],
@@ -140,6 +140,7 @@ class TabulatedDistillation(unittest.TestCase):
             row = solve(equilibrium_points=table, alpha=3)
             self.assertFalse(row["verified"])
             self.assertEqual(row["equilibrium_model"], "piecewise_linear_table")
+        self.assertFalse(solve(equilibrium_table=TABLE, R=2)["verified"])
         row = solve(equilibrium_points=[[.1,.29],[.5,.75],[.9,.95]], R=5)
         self.assertEqual(row["error"],"stage_outside_equilibrium_table")
 
