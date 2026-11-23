@@ -124,8 +124,12 @@ class StepSolidRootTests(unittest.TestCase):
         combined = re.sub(r"MANIFOLD_SOLID_BREP\('[^']*',#\d+\)",
                           f"BREP_WITH_VOIDS('',#{shells[0]},(#900666))", combined)
         combined = add_records(combined, [f"#900666=ORIENTED_CLOSED_SHELL('',*,#{shells[1]},.F.);"])
-        with self.assertRaisesRegex(ValueError, "void shells"):
-            self.verify(combined)
+        result = self.verify(combined)
+        self.assertTrue(result["conservation_verified"], result)
+        self.assertTrue(result["void_containment_verified"], result)
+        self.assertEqual(result["volume_m3"], 7.875)
+        self.assertEqual(result["surface_area_m2"], 25.5)
+        self.assertEqual(result["principal_moments_kg_m2"], [341/64]*3)
 
 
 
