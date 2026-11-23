@@ -2919,18 +2919,8 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
             "dual_verified": True,
         }
     if kind == "pf_correction":
-        p_kw, v_ll, freq = float(spec["P_kW"]), float(spec["V_ll_V"]), float(spec["freq_Hz"])
-        q1 = p_kw * math.tan(math.acos(float(spec["pf_initial"])))
-        q2 = p_kw * math.tan(math.acos(float(spec["pf_target"])))
-        qc = q1 - q2
-        c_tot = (qc * 1e3) / (2.0 * math.pi * freq * v_ll**2)
-        return {
-            "Q_initial_kvar": q1,
-            "Q_target_kvar": q2,
-            "Qc_required_kvar": qc,
-            "C_equiv_delta_per_phase_F": c_tot / 3.0,
-            "dual_verified": True,
-        }
+        from hamon_shunt_bank import signed_shunt_bank
+        return signed_shunt_bank(spec)
     if kind == "cable_thermal_withstand":
         i_f, t_c, k_f, area = float(spec["I_fault_A"]), float(spec["t_clear_s"]), float(spec["k_factor"]), float(spec["area_mm2"])
         i2t = (i_f**2) * t_c
