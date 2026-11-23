@@ -121,6 +121,46 @@ class RigidTriangleContact(unittest.TestCase):
         self.assertEqual(route(payload(v,24,18,18))['footprint_shape'],'full_triangle')
         self.assertEqual(route(payload(v,24,9,18))['footprint_shape'],'one_positive_corner')
 
+    def test_near_release_retains_both_loaded_corners_and_distinct_cuts(self):
+        vertices = ((0,0),(1,0),(0,1))
+        for n, mx, my in ((9007199254740991, 5629499534213119, 2251799813685248),
+                          (7.999999999999999, 4.999999999999999, 2.0)):
+            with self.subTest(n=n):
+                result = route(payload(vertices, n, mx, my))
+                self.assertTrue(result['conservation_verified'], result)
+                self.assertTrue(result['topology_verified'])
+                self.assertEqual(result['footprint_shape'], 'two_positive_corners')
+                self.assertEqual(len({tuple(xy) for xy in result['contact_polygon_m']}), 4)
+                corners = result['corner_pressure_Pa']
+                self.assertEqual(corners[0], 0)
+                self.assertGreater(corners[1], corners[2])
+                self.assertGreater(corners[2], 0)
+                plane = result['pressure_plane']
+                peak = F(plane['pressure_at_reference_Pa'])
+                ref = tuple(map(F, plane['reference_point_m']))
+                gradient = tuple(map(F, plane['gradient_Pa_per_m']))
+                signed = [peak + sum(g*(F(x)-r) for g,x,r in zip(gradient,v,ref))
+                          for v in vertices]
+                self.assertLess(signed[0], 0)
+                self.assertGreater(min(signed[1:]), 0)
+        boundary = route(payload(vertices, 8, 5, 2))
+        self.assertTrue(boundary['conservation_verified'], boundary)
+        self.assertEqual(boundary['footprint_shape'], 'one_positive_corner')
+        self.assertEqual(len(boundary['contact_polygon_m']), 3)
+
+    def test_unresolved_release_keeps_balance_and_refuses_regime_claim(self):
+        # The rounded cuts of this exact input cannot describe a four-sided
+        # contact patch. The earlier 378-case quantitative course includes it.
+        spec = payload(((-4,1),(1,5),(6,-2)), 45.833333333333336, 103.125, 22.916666666666668)
+        out = route(spec)
+        self.assertTrue(out['conservation_verified'])
+        self.assertFalse(out['topology_verified'])
+        self.assertEqual(out['footprint_shape'], 'release_boundary_unresolved')
+        for proposed in ('full_contact', 'partial_contact', 'boundary_unresolved'):
+            result = route(dict(spec, proposed_contact_regime=proposed))
+            self.assertFalse(result['claim_checks']['proposed_contact_regime'])
+            self.assertFalse(result['conservation_verified'])
+
     def test_skinny_and_unresolved_geometry(self):
         v=((0,0),(4,4),(8,8+F(1,2**20)))
         # Use N=3 so both physical first moments of the uniform field are the
