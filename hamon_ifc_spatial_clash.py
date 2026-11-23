@@ -794,15 +794,144 @@ def _boolean_meshes(meshes, operator="UNION"):
         raise UnresolvedSolidGeometry("polyhedral Boolean kernel failed") from exc
 
 
-def _polygonal_solid_mesh(entities, args, unit_scale):
-    """Tessellate bounded planar regions; preserve all holes and oriented shell edges."""
-    from collections import Counter
+def _ear_clip_bounded_face(rings):
+    """Triangulate a planar region, bridging holes without adding mesh vertices."""
+    # Finite IEEE coordinates share a power-of-two denominator. Exact integer
+    # predicates keep collinear surveying vertices and narrow holes distinct.
+    coords = [[tuple(map(float, pt)) for pt in ring] for ring in rings]
+    scale = max(x.as_integer_ratio()[1] for ring in coords for pt in ring for x in pt)
+    def integer(x):
+        numerator, denominator = x.as_integer_ratio()
+        return 2 * numerator * (scale // denominator)
+    polygon = [[(integer(x), integer(y)) for x, y in ring] for ring in coords]
+    original = {p: uv for ring, uv_ring in zip(polygon, coords) for p, uv in zip(ring, uv_ring)}
+
+    def edges(ring):
+        return zip(ring, ring[1:] + ring[:1])
+
+    def orient(a, b, c):
+        return (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])
+
+    def area(ring):
+        return sum(a[0]*b[1] - a[1]*b[0] for a, b in edges(ring))
+
+    def conflict(a, b, c, d):
+        # Normal adjacency at a single endpoint is allowed. Collinear
+        # segments leaving their common endpoint in the same direction overlap.
+        common = {a, b}.intersection((c, d))
+        if len(common) == 2:
+            return True
+        if common:
+            p = common.pop()
+            u, v = (a if b == p else b), (c if d == p else d)
+            return orient(p, u, v) == 0 and (u[0]-p[0])*(v[0]-p[0]) + (u[1]-p[1])*(v[1]-p[1]) > 0
+        for i in (0, 1):
+            if max(a[i], b[i]) < min(c[i], d[i]) or max(c[i], d[i]) < min(a[i], b[i]):
+                return False
+        return orient(a, b, c)*orient(a, b, d) <= 0 and orient(c, d, a)*orient(c, d, b) <= 0
+
+    def inside(p, ring):
+        winding = 0
+        for a, b in edges(ring):
+            if a[1] <= p[1] < b[1] and orient(a, b, p) > 0:
+                winding += 1
+            elif b[1] <= p[1] < a[1] and orient(a, b, p) < 0:
+                winding -= 1
+        return winding != 0
+
+    def fail(reason):
+        raise UnresolvedSolidGeometry("polygonal Body: " + reason)
+
+    if len(original) != sum(map(len, polygon)):
+        fail("repeated or overlapping boundary vertex")
+    boundary = [edge for ring in polygon for edge in edges(ring)]
+    for i, (a, b) in enumerate(boundary):
+        if any(conflict(a, b, c, d) for c, d in boundary[:i]):
+            fail("intersecting polygon boundaries")
+    outer, holes = polygon[0], polygon[1:]
+    for i, hole in enumerate(holes):
+        if not inside(hole[0], outer) or any(inside(hole[0], other) for j, other in enumerate(holes) if j != i):
+            fail("invalid inner ring nesting")
+    if area(outer) < 0:
+        outer = outer[::-1]
+    holes = [h if area(h) < 0 else h[::-1] for h in holes]
+    needed_area = area(outer) + sum(map(area, holes))
+
+    chain = list(outer)
+    for hole in sorted(holes, key=max, reverse=True):
+        h = max(hole)
+        # A visible bridge joins a hole to the growing outer boundary. Both
+        # bridge copies cancel in the final triangulation's oriented edge sum.
+        candidates = sorted(enumerate(chain), key=lambda iv: (iv[1][0]-h[0])**2 + (iv[1][1]-h[1])**2)
+        for i, p in candidates:
+            prev, following = chain[i-1], chain[(i+1) % len(chain)]
+            left = orient(prev, p, h) >= 0
+            right = orient(p, following, h) >= 0
+            # A bridge endpoint can occur twice after joining earlier holes.
+            # Choose the occurrence whose interior wedge contains the new ray.
+            fits = (left and right) if orient(prev, p, following) >= 0 else (left or right)
+            if not fits:
+                continue
+            mid = ((p[0]+h[0])//2, (p[1]+h[1])//2)
+            if any(conflict(h, p, a, b) for a, b in boundary):
+                continue
+            if inside(mid, outer) and not any(inside(mid, inner) for inner in holes):
+                j = hole.index(h)
+                chain[i+1:i+1] = hole[j:] + hole[:j+1] + [p]
+                boundary.append((h, p))
+                break
+        else:
+            fail("could not connect inner ring without crossing a boundary")
+
+    result = []
+    while len(chain) > 3:
+        for i, b in enumerate(chain):
+            a, c = chain[i-1], chain[(i+1) % len(chain)]
+            if orient(a, b, c) <= 0:
+                continue
+            if any(orient(a, b, p) >= 0 and orient(b, c, p) >= 0 and orient(c, a, p) >= 0
+                   for p in chain if p not in (a, b, c)):
+                continue
+            if any(conflict(a, c, x, y) for x, y in edges(chain)):
+                continue
+            result.append((a, b, c))
+            chain.pop(i)
+            break
+        else:
+            fail("could not triangulate bounded planar region")
+    if orient(*chain) <= 0:
+        fail("degenerate final triangle")
+    result.append(tuple(chain))
+    if sum(orient(*tri) for tri in result) != needed_area:
+        fail("incomplete constrained triangulation")
+    return [tuple(original[p] for p in tri) for tri in result]
+
+
+def _bounded_face_triangles(rings):
     try:
         from shapely import Polygon, constrained_delaunay_triangles
         from shapely.errors import GEOSException
-    except ImportError as exc:
-        raise UnresolvedSolidGeometry("polygonal Body requires constrained polygon triangulation") from exc
+    except ImportError:
+        return _ear_clip_bounded_face(rings)
+    try:
+        polygon = Polygon(rings[0], rings[1:])
+        if not polygon.is_valid or polygon.is_empty or polygon.area <= 0:
+            raise UnresolvedSolidGeometry("polygonal Body: invalid polygon or inner ring nesting")
+        triangles = constrained_delaunay_triangles(polygon).geoms
+        if any(not polygon.covers(tri) for tri in triangles):
+            raise UnresolvedSolidGeometry("polygonal Body: constrained tessellation escaped polygon boundaries")
+        if not math.isclose(sum(tri.area for tri in triangles), polygon.area, rel_tol=1e-10, abs_tol=0.):
+            raise UnresolvedSolidGeometry("polygonal Body: incomplete constrained triangulation")
+        return [list(tri.exterior.coords)[:-1] for tri in triangles]
+    except (GEOSException, ValueError) as exc:
+        if isinstance(exc, UnresolvedSolidGeometry):
+            raise
+        raise UnresolvedSolidGeometry("invalid planar polygonal Body") from exc
 
+
+def _polygonal_solid_mesh(entities, args, unit_scale):
+    """Tessellate bounded planar regions; preserve all holes and oriented shell edges."""
+    from collections import Counter
     def fail(reason):
         raise UnresolvedSolidGeometry("polygonal Body: " + reason)
 
@@ -834,8 +963,8 @@ def _polygonal_solid_mesh(entities, args, unit_scale):
             fail("invalid face vertex indices")
         return [index_map[i - 1] - 1 for i in source]
 
-    triangles = []
-    directed = Counter()
+    face_rings = []
+    boundary = Counter()
     for ref in args[2]:
         kind, bounds = reference(ref, {"IFCINDEXEDPOLYGONALFACE", "IFCINDEXEDPOLYGONALFACEWITHVOIDS"})
         if not bounds:
@@ -846,6 +975,16 @@ def _polygonal_solid_mesh(entities, args, unit_scale):
                 fail("missing inner rings")
             rings.extend(indices(loop) for loop in bounds[1])
 
+        face_rings.append(rings)
+        for ring in rings:
+            for a, b in zip(ring, ring[1:] + ring[:1]):
+                boundary[(tuple(vertices[a]), tuple(vertices[b]))] += 1
+    if any(a == b or count != 1 or boundary[(b, a)] != 1 for (a, b), count in boundary.items()):
+        fail("shell is open, non-manifold or inconsistently oriented")
+
+    directed = Counter()
+    triangles = []
+    for rings in face_rings:
         # Coordinates are shifted before projection to keep survey origin out of the fit.
         exterior = vertices[rings[0]] - vertices[rings[0][0]]
         normal = np.cross(exterior, np.roll(exterior, -1, axis=0)).sum(axis=0)
@@ -872,34 +1011,21 @@ def _polygonal_solid_mesh(entities, args, unit_scale):
                     fail("repeated or overlapping boundary vertex")
                 vertex_for[key] = idx
             faces_2d.append(projected)
-        try:
-            polygon = Polygon(faces_2d[0], faces_2d[1:])
-            if not polygon.is_valid or polygon.is_empty or polygon.area <= 0:
-                fail("invalid polygon or inner ring nesting")
-            tessellation = constrained_delaunay_triangles(polygon)
-            area_sum = 0.
-            for triangle in tessellation.geoms:
-                coords = list(triangle.exterior.coords)[:-1]
-                if len(coords) != 3 or any(c not in vertex_for for c in coords) or not polygon.covers(triangle):
-                    fail("constrained tessellation escaped polygon boundaries")
-                area_sum += triangle.area
-                tri = [vertex_for[c] for c in coords]
-                if _signed_area_2d(np.asarray(coords)) * normal[omit] < 0:
-                    tri.reverse()
-                triangles.append(tri)
-                for a, b in zip(tri, tri[1:] + tri[:1]):
-                    directed[(tuple(vertices[a]), tuple(vertices[b]))] += 1
-            if not math.isclose(area_sum, polygon.area, rel_tol=1e-10, abs_tol=0.):
-                fail("incomplete constrained triangulation")
-        except (GEOSException, ValueError) as exc:
-            if isinstance(exc, UnresolvedSolidGeometry):
-                raise
-            raise UnresolvedSolidGeometry("invalid planar polygonal Body") from exc
+        for coords in _bounded_face_triangles(faces_2d):
+            if len(coords) != 3 or any(c not in vertex_for for c in coords):
+                fail("constrained tessellation escaped polygon boundaries")
+            tri = [vertex_for[c] for c in coords]
+            if _signed_area_2d(np.asarray(coords)) * normal[omit] < 0:
+                tri.reverse()
+            triangles.append(tri)
+            for a, b in zip(tri, tri[1:] + tri[:1]):
+                directed[(tuple(vertices[a]), tuple(vertices[b]))] += 1
     if not triangles or any(count != 1 or directed[(b, a)] != 1 for (a, b), count in directed.items()):
         fail("shell is open, non-manifold or inconsistently oriented")
     # Drop unreferenced coordinates: PnIndex may select only one part of a shared list.
     used, inverse = np.unique(np.asarray(triangles, dtype=np.int32), return_inverse=True)
     return [(vertices[used], inverse.reshape(-1, 3).astype(np.int32))]
+
 
 
 def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, unit_scale: float,
