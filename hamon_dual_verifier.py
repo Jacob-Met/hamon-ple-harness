@@ -2042,93 +2042,9 @@ def solve_transformer_dual(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def solve_heat_exchanger_ntu_dual(spec: dict[str, Any]) -> dict[str, Any]:
-    """Cross-check specified UA by LMTD, or forward effectiveness near saturation and for shells."""
-    mh, cph, thi = float(spec["m_hot_kg_s"]), float(spec["cp_hot_J_kgK"]), float(spec["Th_in_K"])
-    mc, cpc, tci = float(spec["m_cold_kg_s"]), float(spec["cp_cold_J_kgK"]), float(spec["Tc_in_K"])
-    ua = float(spec["UA_W_K"])
-    arr = str(spec.get("arrangement", "counterflow")).lower()
-
-    ch, cc = mh * cph, mc * cpc
-    c_min, c_max = min(ch, cc), max(ch, cc)
-    cr = c_min / c_max
-    ntu = ua / c_min
-
-    if cr < 1e-12:
-        eps = 1.0 - math.exp(-ntu)
-    elif arr == "counterflow":
-        if cr == 1.0:
-            eps = ntu / (1.0 + ntu)
-        else:
-            decayed_fraction = -math.expm1(-ntu * (1.0 - cr))
-            eps = decayed_fraction / ((1.0 - cr) + cr * decayed_fraction)
-    elif arr == "parallel":
-        eps = (1.0 - math.exp(-ntu * (1.0 + cr))) / (1.0 + cr)
-    elif arr == "shell_and_tube_1_2":
-        eb = math.sqrt(1.0 + cr * cr)
-        ex = math.exp(-ntu * eb)
-        eps = 2.0 / (1.0 + cr + eb * (1.0 + ex) / (1.0 - ex))
-    else:
-        raise ValueError(f"unsupported HX arrangement: {arr}")
-
-    duty_per_kelvin = eps * c_min
-    q_w = duty_per_kelvin * (thi - tci)
-    tho = thi - q_w / ch
-    tco = tci + q_w / cc
-
-    # Independent cross-check: use the LMTD energy balance or Decimal shell effectiveness.
-    if arr in ("counterflow", "parallel"):
-        # Check the forward rating at unit inlet difference. At equal inlets
-        # the physical duty is zero and measured temperatures cannot identify UA.
-        hot_drop = duty_per_kelvin / ch
-        cold_rise = duty_per_kelvin / cc
-        if arr == "counterflow":
-            dt1, dt2 = 1.0 - cold_rise, 1.0 - hot_drop
-        else:
-            dt1, dt2 = 1.0, 1.0 - (hot_drop + cold_rise)
-        low, high = sorted((dt1, dt2))
-        if low <= math.ulp(1.0) / 1e-8 and ua > 0 and math.isfinite(ntu):
-            # Near saturation, the inverse UA check is sensitive to rounding.
-            # Solve the forward balance independently for a fraction of its maximum duty.
-            eps_max = 1.0 if arr == "counterflow" else 1.0 / (1.0 + cr)
-            left, right = 0.0, 1.0
-            for _ in range(54):
-                fraction = (left + right) / 2.0
-                if fraction == left or fraction == right:
-                    break
-                small = 1.0 - fraction
-                large = 1.0 - cr * fraction if arr == "counterflow" else 1.0
-                spread = large - small
-                mean = small if spread == 0.0 else spread / math.log1p(spread / small)
-                if fraction * eps_max < ntu * mean:
-                    left = fraction
-                else:
-                    right = fraction
-            disc = max(_rel_diff(eps, eps_max * bound) for bound in (left, right))
-        else:
-            lmtd = low if low == high else (high - low) / math.log1p((high - low) / low)
-            ua_rec = duty_per_kelvin / lmtd
-            disc = _rel_diff(ua, ua_rec)
-    else:
-        with localcontext() as ctx:
-            ctx.prec = 45
-            cr_d = Decimal(repr(cr))
-            ntu_d = Decimal(repr(ntu))
-            eb_d = (Decimal(1) + cr_d * cr_d).sqrt()
-            ex_d = (-ntu_d * eb_d).exp()
-            eps_d = Decimal(2) / (Decimal(1) + cr_d + eb_d * (Decimal(1) + ex_d) / (Decimal(1) - ex_d))
-        disc = _rel_diff(eps, float(eps_d))
-
-    if disc > 1e-8:
-        raise ValueError(f"HX epsilon-NTU dual-verification mismatch: {disc:.3e}")
-    return {
-        "effectiveness": eps,
-        "NTU": ntu,
-        "Q_duty_W": q_w,
-        "Th_out_K": tho,
-        "Tc_out_K": tco,
-        "dual_rel_discrepancy": disc,
-        "dual_verified": True,
-    }
+    """Rate a passive exchanger with its stated flow arrangement and UA."""
+    from hamon_passive_heat_exchanger import passive_exchanger
+    return passive_exchanger(spec, sizing=False)
 
 
 def _cooling_coil_inventory(spec, dry_air):
@@ -2889,20 +2805,8 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
     if kind == "pipe_hydraulics_colebrook":
         return solve_pipe_colebrook_dual(spec)
     if kind == "heat_exchanger_lmtd":
-        mh, cph, thi, tho = float(spec["m_hot_kg_s"]), float(spec["cp_hot_J_kgK"]), float(spec["Th_in_K"]), float(spec["Th_out_K"])
-        mc, cpc, tci, u_val = float(spec["m_cold_kg_s"]), float(spec["cp_cold_J_kgK"]), float(spec["Tc_in_K"]), float(spec["U_W_m2K"])
-        q_duty = mh * cph * (thi - tho)
-        tco = tci + q_duty / (mc * cpc)
-        dt1, dt2 = thi - tco, tho - tci
-        lmtd = dt1 if abs(dt1 - dt2) < 1e-12 else (dt1 - dt2) / math.log(dt1 / dt2)
-        return {
-            "Q_duty_W": q_duty,
-            "Tc_out_K": tco,
-            "LMTD_K": lmtd,
-            "area_m2": q_duty / (u_val * lmtd),
-            "energy_balance_residual_W": abs(q_duty - mc * cpc * (tco - tci)),
-            "dual_verified": True,
-        }
+        from hamon_passive_heat_exchanger import passive_exchanger
+        return passive_exchanger(spec, sizing=True)
     if kind == "pump_npsha":
         rho = float(spec["rho_kg_m3"])
         npsha = float(spec["P_surface_Pa"]) / (rho * G0_SI) + float(spec["z_static_m"]) - float(spec["h_loss_suction_m"]) - float(spec["P_vapor_Pa"]) / (rho * G0_SI)
