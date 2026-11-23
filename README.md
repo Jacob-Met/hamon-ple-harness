@@ -61,6 +61,12 @@ reported force relative to the exact equilibrium solution is outside this compar
 
 The [rigid strip contact solver](docs/rigid_strip_contact.md) computes full or partial compression-only base contact from a signed force and moment. It is distinct from soil bearing capacity.
 
+## Complete inline engineering requests
+
+The live budget router can certify a complete inline calculation in an empty task workspace. Supply one existing `{"mode": ..., "spec": ...}` conservation-verifier request, or an ordered JSON list containing one or two such requests. JSON can be the whole instruction or the entire contents of a single Markdown code fence. The two supported delivery-only cover lines are `Run the calculation below and return its JSON result.` for an object and `Run the calculations below and return their JSON results in the same order.` for a list.
+
+For a list, every case must pass its existing physical checks before the participant receives the low-effort tier. It receives the original instruction and the complete ordered result, including repeated cases. A missing result, an added output-unit or comparison requirement, a local deliverable, an external tool, an inventory warning, or a combined result over 12,000 characters keeps the ordinary route. These tests measure the selected tier and what reaches the participant. Financial savings require a usage-metered model run.
+
 ## Files
 
 | File | Purpose |
