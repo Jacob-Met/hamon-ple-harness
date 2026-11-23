@@ -509,6 +509,25 @@ def _hx_inverse(arrangement, field, measurement, hot, cold, c_hot, c_cold, c_min
         return float(-remainder.ln() / factor)
 
 
+def _mixed_radiation_component(suspect, factors, temperatures, adiabatic):
+    """Does any suspect surface share an enclosure with distinct fixed temperatures?"""
+    while suspect:
+        first = suspect.pop()
+        seen, pending, fixed = {first}, [first], set()
+        while pending:
+            i = pending.pop()
+            if i not in adiabatic:
+                fixed.add(float(temperatures[i]))
+                if len(fixed) > 1:
+                    return True
+            for j in np.flatnonzero((factors[i] > 0) | (factors[:, i] > 0)):
+                if j not in seen:
+                    seen.add(j)
+                    pending.append(j)
+        suspect.difference_update(seen)
+    return False
+
+
 def _resolved_radiation_balance(factors, areas, emissivities, temperatures, adiabatic):
     """Resolve a weakly anchored diffuse-gray network before rounding its heat flux."""
     from sympy import Matrix, Rational, SparseMatrix
@@ -545,17 +564,20 @@ def _resolved_radiation_balance(factors, areas, emissivities, temperatures, adia
     for i, ji in enumerate(radiosity):
         outward = sum(w * (ji - radiosity[j]) for j, w in exchange[i])
         heat.append(Rational(float(areas[i])) * outward)
-        # Replay the independent local gray-surface law with the irradiation
-        # reconstructed from the net outward flux.
-        irradiation = ji - outward
+        # Replay both the gray-surface law and the outward flux against the
+        # submitted view factors, including the independently supplied self-view.
+        irradiation = Rational(float(factors[i, i])) * ji + sum(w * radiosity[j] for j, w in exchange[i])
+        scale = max(abs(ji), abs(irradiation))
         mismatch = ji - emit[i] * blackbody[i] - (1 - emit[i]) * irradiation
-        surface_errors.append(abs(mismatch) / max(abs(ji), 1))
+        if scale:
+            surface_errors.extend([abs(mismatch) / scale, abs(ji - irradiation - outward) / scale])
     balance = abs(sum(heat)) / max(sum(map(abs, heat)), 1)
-    residual = float(max(balance, *surface_errors))
     published_j = [float(j) for j in radiosity]
     published_q = [float(q) for q in heat]
     if not all(math.isfinite(v) for v in published_j + published_q) or any(j < 0 for j in radiosity):
         return {"verified": False, "error": "unrepresentable_radiation_balance"}
+    rounding = max((abs(Rational(qf) - q) / abs(q) for qf, q in zip(published_q, heat) if q), default=0)
+    residual = float(max([balance, rounding, *surface_errors]))
     return {
         "radiosity_W_m2": published_j,
         "Q_net_W": published_q,
@@ -563,6 +585,7 @@ def _resolved_radiation_balance(factors, areas, emissivities, temperatures, adia
                          if i in adiabatic else float(temperatures[i])) for i in range(n)],
         "residual": residual,
         "verified": residual < 1e-9,
+        **({"error": "unrepresentable_radiation_heat"} if rounding >= 1e-9 else {}),
     }
 
 
@@ -828,12 +851,15 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
         # surface balance at the verification tolerance.
         resolution = np.finfo(float).eps / 1e-9
         active_eps = [eps_vec[i] for i in range(n) if i not in adiabatic]
-        if min(active_eps) <= resolution or (adiabatic and np.linalg.cond(m_sys) * resolution >= 1.):
+        def resolved():
             return {
                 "domain": "exchangers_radiation", "subkind": subkind,
                 "row_sum_error": row_sum_err, "reciprocity_error": recip_err,
                 **_resolved_radiation_balance(f_mat, areas, eps_vec, t_raw, adiabatic),
             }
+
+        if min(active_eps) <= resolution or (adiabatic and np.linalg.cond(m_sys) * resolution >= 1.):
+            return resolved()
 
         j_primary = np.linalg.solve(m_sys, b_rhs)
         lu, piv = linalg.lu_factor(m_sys)
@@ -842,9 +868,20 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
         q_net = np.zeros(n, dtype=float)
         surf_res_err = 0.0
         t_effective: List[float] = []
+        suspect = set()
         for i in range(n):
-            q_encl = float(areas[i]) * float(np.sum(f_mat[i, :] * (j_primary[i] - j_primary)))
+            outward = float(np.sum(f_mat[i] * (j_primary[i] - j_primary)))
+            q_encl = float(areas[i]) * outward
             q_net[i] = q_encl
+            irradiation = float(f_mat[i] @ j_primary)
+            level = max(abs(j_primary[i]), abs(irradiation))
+            if level:
+                surf_res_err = max(surf_res_err, abs(j_primary[i] - irradiation - outward) / level)
+            if i not in adiabatic:
+                exchange_level = math.fsum(abs(f_mat[i, j]) * (abs(j_primary[i]) + abs(j_primary[j]))
+                                           for j in range(n) if j != i)
+                if (exchange_level and abs(outward) <= resolution * exchange_level) or abs(q_encl) < np.finfo(float).tiny:
+                    suspect.add(i)
             if i in adiabatic:
                 t_effective.append(float((max(float(j_primary[i]), 0.0) / SIGMA_SB) ** 0.25))
             else:
@@ -853,6 +890,9 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
                 if eps_vec[i] < 1.0 - 1e-12:
                     q_surf = float((areas[i] * eps_vec[i] / (1.0 - eps_vec[i])) * (SIGMA_SB * (ti ** 4) - j_primary[i]))
                     surf_res_err = max(surf_res_err, abs(q_surf - q_encl) / max(abs(q_encl), 1.0))
+
+        if _mixed_radiation_component(suspect, f_mat, t_raw, adiabatic):
+            return resolved()
 
         enclosure_balance_err = abs(float(np.sum(q_net))) / max(float(np.sum(np.abs(q_net))), 1.0)
         dual_err = float(np.linalg.norm(j_primary - j_dual)) / max(float(np.linalg.norm(j_primary)), 1.0)

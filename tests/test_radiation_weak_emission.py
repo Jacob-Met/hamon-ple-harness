@@ -57,3 +57,31 @@ class WeakRadiationBalance(unittest.TestCase):
         zero_emission = enclosure([[1.]], [400.], [0.])
         self.assertFalse(zero_emission["verified"])
         self.assertEqual(zero_emission["error"], "invalid_surface_properties")
+
+    def test_nearby_temperatures_preserve_heat_at_ordinary_emissivities(self):
+        import math
+        for high in (400.000001, math.nextafter(400., math.inf)):
+            for emissivity in (1., 1e-4, 1e-6):
+                with self.subTest(high=high, emissivity=emissivity):
+                    flux = SIGMA * (Fraction(high)**4 - 400**4) / (2/Fraction(emissivity) - 1)
+                    result = enclosure([[0., 1.], [1., 0.]], [high, 400.], [emissivity]*2)
+                    self.assertTrue(result["verified"])
+                    self.assertEqual(result["Q_net_W"], [float(flux), -float(flux)])
+
+    def test_closure_and_publication_are_independently_qualified(self):
+        for eps in (1., .1, 1e-16):
+            with self.subTest(eps=eps):
+                result = enclosure([[.999999]], [400.], [eps])
+                self.assertFalse(result["verified"])
+                self.assertGreaterEqual(result["residual"], 9.99e-7)
+        eps = 5e-324
+        for t, accepted in [(2., False), (400., False), (30000., True)]:
+            with self.subTest(t=t):
+                exact = SIGMA * (1 - Fraction(t)**4) / (2/Fraction(eps) - 1)
+                result = enclosure([[0., 1.], [1., 0.]], [1., t], [eps, eps])
+                self.assertEqual(result["verified"], accepted)
+                self.assertEqual(result["Q_net_W"][0], float(exact))
+                error = abs(Fraction(result["Q_net_W"][0]) / exact - 1)
+                self.assertEqual(float(error), result["residual"])
+                if not accepted:
+                    self.assertEqual(result["error"], "unrepresentable_radiation_heat")
