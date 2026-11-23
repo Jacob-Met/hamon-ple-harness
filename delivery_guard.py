@@ -106,7 +106,77 @@ def extract_targets(instruction: str, workdir: str) -> list[dict[str, str]]:
             if path:
                 found[path] = {"path": path, "kind": "dir"}
                 break
+    filing = named_return(instruction)
+    if filing and filing["destination"]:
+        destination = filing["destination"]
+        if destination.startswith(("/filesystem/", "/app/")):
+            target = _safe_path(posixpath.join(destination, filing["name"]), workdir)
+            if target:
+                found[target] = {"path": target, "kind": "file"}
     return list(found.values())
+
+
+def named_return(prompt: str) -> dict | None:
+    """A required returned filename need not identify a task-container path."""
+    for match in FILE.finditer(prompt):
+        sentence = re.split(r"[.!?]\s+|\n", prompt[max(0, match.start()-240):match.start()])[-1]
+        if not re.search(r"\breturn\b[^.;!?]*\b(?:named|called)\s+[`'\x22*]*$", sentence, re.I):
+            continue
+        name = match.group("path")
+        # Explicit paths are handled by the ordinary local-path check below.
+        if "/" in name:
+            continue
+        suffix = re.split(r"[.;!?]\s+|\n", prompt[match.end():match.end()+300], maxsplit=1)[0]
+        filing = re.match(r"^[`'\x22*]*\s*,?\s*(?:to be\s+)?(?:filed|uploaded|posted|submitted)\s+(?:in|to|under)\s+([^,.;!?\n]+)", suffix, re.I)
+        return {"name": name, "destination": filing.group(1).strip() if filing else None}
+    return None
+
+
+class TerminalDelivery:
+    """Keep file observations separate from the participant's delivery claims."""
+    def __init__(self, instruction, targets):
+        self.paths = [target["path"] for target in targets]
+        named = named_return(instruction)
+        self.filing = named if named and named["destination"] and not named["destination"].startswith(("/app/", "/filesystem/")) else None
+        self.before = None
+        self.after = None
+        self.observed = False
+
+    def invalidate(self):
+        self.after = None
+        self.observed = False
+
+    def observe(self, snapshot):
+        self.after = snapshot
+        self.observed = True
+
+    def summary(self, participant):
+        missing = []
+        unknown = []
+        for path in self.paths:
+            row = (self.after or {}).get(path) or {}
+            prior = (self.before or {}).get(path) or {}
+            state = row.get("state")
+            if state in ("missing", "empty", "invalid"):
+                missing.append(f"{path} ({row.get('reason') or state})")
+            elif state != "ready" or prior.get("state") in (None, "unknown"):
+                unknown.append(path)
+            elif prior.get("state") == "ready" and not (prior.get("fingerprint") and row.get("fingerprint")):
+                unknown.append(path)
+            elif prior.get("state") == "ready" and prior.get("fingerprint") == row.get("fingerprint"):
+                missing.append(f"{path} (unchanged starter)")
+        notes = []
+        if missing:
+            notes.append("Incomplete delivery: " + ", ".join(missing) + ".")
+        if unknown:
+            notes.append("Current delivery could not be verified for " + ", ".join(unknown) + ".")
+        if self.filing:
+            notes.append(f"External filing of {self.filing['name']} in {self.filing['destination']} was not independently verified.")
+        if not notes:
+            return participant
+        if participant and not missing:
+            notes.append("Participant report: " + participant)
+        return "\n".join(notes)
 
 
 # Executed in the evaluator's task container. The only transport payload is

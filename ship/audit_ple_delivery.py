@@ -14,6 +14,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import delivery_guard
+from delivery_guard import named_return
 
 
 def exported_path(key: str) -> str | None:
@@ -84,22 +85,6 @@ def evaluate_task(name: str, prompt: str, files: dict[str, str],
     }
 
 
-def named_return(prompt: str) -> dict | None:
-    """A required returned filename need not identify a task-container path."""
-    for match in delivery_guard.FILE.finditer(prompt):
-        sentence = re.split(r"[.!?]\s+|\n", prompt[max(0, match.start()-240):match.start()])[-1]
-        if not re.search(r"\breturn\b[^.;!?]*\b(?:named|called)\s+[`'\x22*]*$", sentence, re.I):
-            continue
-        name = match.group("path")
-        # Explicit paths are handled by the ordinary local-path check below.
-        if "/" in name:
-            continue
-        suffix = re.split(r"[.;!?]\s+|\n", prompt[match.end():match.end()+300], maxsplit=1)[0]
-        filing = re.match(r"^[`'\x22*]*\s*,?\s*(?:to be\s+)?(?:filed|uploaded|posted|submitted)\s+(?:in|to|under)\s+([^,.;!?\n]+)", suffix, re.I)
-        return {"name": name, "destination": filing.group(1).strip() if filing else None}
-    return None
-
-
 def verify_export(root: Path, key: str, expected: str) -> dict:
     """Join the frozen manifest to actual exported bytes by path AND Git blob ID."""
     if not exported_path(key) or not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{40}", expected):
@@ -129,11 +114,13 @@ def custody(prompt: str, row: dict, verified: dict) -> list[dict]:
     """Report exactly what the archived export proves about each destination."""
     results = []
     named = named_return(prompt)
+    named_path = None
     if named:
         name, destination = named["name"], named["destination"]
         local = [value for path, value in verified.items() if Path(path).name == name]
         if destination and destination.startswith(("/filesystem/", "/app/")):
             expected = destination.rstrip("/") + "/" + name
+            named_path = expected
             record = verified.get(expected.lstrip("/"))
             local = [record] if record else []
             state = record["state"] if record else "missing_export"
@@ -147,6 +134,8 @@ def custody(prompt: str, row: dict, verified: dict) -> list[dict]:
                         "name": name, "destination": destination, "state": state, "exports": local})
     for target in row["targets"]:
         path = target["path"]
+        if path == named_path:
+            continue
         if target["kind"] == "dir":
             local = [value for key, value in verified.items() if ("/"+key).startswith(path.rstrip("/")+"/")]
             state = "missing_export"
