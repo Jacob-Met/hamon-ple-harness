@@ -356,10 +356,12 @@ def verify_consolidation_history(spec):
         valid = residual <= 2e-6*scale
         if "proposed_settlement_m" in spec:
             proposed = _number(spec, "proposed_settlement_m")
-            valid = valid and 0 <= proposed < h and math.isclose(proposed, settlement, rel_tol=1e-6, abs_tol=1e-12)
+            valid = (valid and 0 <= proposed < h and (settlement != 0 or proposed == 0)
+                     and math.isclose(proposed, settlement, rel_tol=1e-6, abs_tol=1e-12))
         if "proposed_mean_excess_pore_pressure_Pa" in spec:
             proposed = _number(spec, "proposed_mean_excess_pore_pressure_Pa")
-            valid = valid and math.isclose(proposed, pressure, rel_tol=1e-6, abs_tol=1e-6)
+            same_direction = (proposed > 0) == (pressure > 0) and (proposed < 0) == (pressure < 0)
+            valid = valid and same_direction and math.isclose(proposed, pressure, rel_tol=1e-6, abs_tol=1e-6)
         result.update(ok=True, conservation_verified=valid, drainage_path_m=path,
                       surcharge_at_time_Pa=current, mean_effective_increment_Pa=effective,
                       mean_excess_pore_pressure_Pa=pressure, settlement_at_time_m=settlement,

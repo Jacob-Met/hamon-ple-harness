@@ -83,6 +83,11 @@ class SettlementHistoryTests(unittest.TestCase):
         jump = solve([(0,10000)], 0)
         self.assertEqual(jump["settlement_at_time_m"], 0.)
         self.assertEqual(jump["mean_excess_pore_pressure_Pa"], 10000.)
+        self.assertFalse(solve([(0,10000)], 0, proposed_settlement_m=1e-14)["conservation_verified"])
+        pulse = [(0,10000), (1,10000), (1,0)]
+        for wrong in (0., 1e-28):
+            self.assertFalse(solve(pulse, 30., proposed_mean_excess_pore_pressure_Pa=wrong)["conservation_verified"])
+        self.assertTrue(solve(pulse, 30., proposed_mean_excess_pore_pressure_Pa=-6.23e-28)["conservation_verified"])
         for history in ([], [(1,0)], [(0,-1)], [(0,0),(2,1),(1,3)], [(0,0),(0,1),(0,2)]):
             self.assertFalse(solve(history, 1)["conservation_verified"])
         for invalid in (dict(mv_per_Pa=0), dict(Cc=.2), dict(delta_sigma_v_Pa=10000),
