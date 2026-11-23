@@ -37,6 +37,44 @@ class EagleSchematicTests(unittest.TestCase):
                  word("SCK", (102, 77, 113, 86))]
         self.assertEqual(_graph(wires, [], words)[0], [0, 0, 1])
 
+    def test_native_text_overhanging_a_free_wire_end(self):
+        wires = [[(0, 10), (30, 10)], [(50, 40), (80, 40)]]
+        words = [word("CLK", (1, 3, 13, 11)), word("CLK", (45, 33, 58, 41))]
+        # First word qualifies under the ordinary printed-label rule.
+        # The second begins before its wire and only qualifies through the actual glyph baseline.
+        _word_directions(words, [((x, 10), "font") for x in (1, 5, 9)]
+                               + [((x, 40), "font") for x in (45, 49, 53)])
+        witnesses = []
+        self.assertEqual(_graph(wires, [], words, wire_end_witnesses=witnesses)[0], [0, 0])
+        self.assertEqual(witnesses, [{"name": "CLK", "wire_index": 1, "endpoint": (50, 40),
+                                      "baseline_origin": (45, 40)}])
+        for extra_wire, symbol in (([(50, 39), (50, 44)], None),
+                                   (None, [(50.1, 35), (50.1, 45)]),
+                                   ([(44, 40), (57, 40)], None)):
+            observed = _graph(wires + ([extra_wire] if extra_wire else []),
+                              [symbol] if symbol else [], words)[0]
+            self.assertNotEqual(observed[0], observed[1])
+
+        for label_index in (0, 1):
+            conflicting = [dict(w) for w in words]
+            x, y = ((20, 10), (65, 40))[label_index]
+            conflicting.append(word("ALT", (x, y-7, x+10, y+1)))
+            self.assertEqual(_graph(wires, [], conflicting)[0], [0, 1])
+
+        for origin in ((45, 40.2), None):
+            shifted = [dict(w) for w in words]
+            if origin is None:
+                shifted[1].pop("baseline_origin")
+            else:
+                shifted[1]["baseline_origin"] = origin
+            self.assertEqual(_graph(wires, [], shifted)[0], [0, 1])
+
+    def test_wire_end_supply_label_requires_a_physical_same_page_anchor(self):
+        wires = [[(0, 10), (30, 10)], [(50, 40), (80, 40)]]
+        labels = [word("VCC", (1, 3, 13, 11)), word("VCC", (45, 33, 58, 41))]
+        labels[1]["baseline_origin"] = (45, 40)
+        self.assertEqual(_graph(wires, [], labels)[0], [0, 1])
+
     def test_curve_and_unknown_transform_remain_unresolved(self):
         raw = b'<svg xmlns="http://www.w3.org/2000/svg"><g stroke="rgb(0%, 50%, 0%)" fill="none"><path d="M 1 2 C 1 3 4 6 7 8"/><path transform="wibble(8)" d="M 0 0 L 10 0"/></g></svg>'
         wires, red, marks, unknown = _ink(raw)
