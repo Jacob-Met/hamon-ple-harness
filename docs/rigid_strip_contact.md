@@ -1,0 +1,114 @@
+# Compression-only rigid strip contact
+
+Use `hamon_conservation_cad_verifier` with `mode: civil_geotech` and
+`spec.calculation: rigid_strip_contact`. The automatic router also recognizes
+that calculation. The provisioned CLI supports
+`dual-verify` with `mode: domain`, `kind: rigid_strip_contact`, and the same
+`spec`.
+
+## Model and signs
+
+A rigid horizontal strip has width B and coordinate x from -B/2 to +B/2.
+The normal resultant N is positive downward, per unit out-of-plane length.
+The signed load moment M is defined so that the balancing pressure satisfies
+
+    integral p(x) dx = N
+    integral x p(x) dx = M
+
+A positive M places the compression resultant toward positive x. Combine all
+applied moments about the base center with that sign before calling. A wall's
+horizontal thrust and its separately integrated toe moment must not be
+collapsed to a thrust location when the thrust is zero.
+
+This model requires **p(x) = max(0, a + b*x)** over the whole base. It is the
+standard linear pressure, compression-only contact idealization. An arbitrary
+affine patch with only the two equilibrium constraints is not enough: for
+N=100000 N/m and M=144000 N m/m, uniform pressure 1000000 Pa over
+[1.39, 1.49] m also satisfies those two integrals but violates this contact
+compatibility. The compatibility condition selects the edge-attached triangle.
+
+The solver supplies contact equilibrium, not bearing resistance, sliding
+resistance, soil settlement, or structural design approval. Existing
+`bearing_capacity` and its `meyerhof_effective_area` option remain separate:
+an equivalent uniform effective-area pressure is not the contact diagram here.
+
+## Inputs and outputs
+
+All three inputs are required:
+
+| Input | Numeric SI unit | Meaning |
+|---|---|---|
+| base_width_m | m | Positive strip width |
+| vertical_resultant_N_m | N/m | Downward normal load per unit length |
+| moment_Nm_m | N m/m | Signed load moment per unit length about the center |
+
+Numbers use those SI units. Strings must carry compatible dimensions, such as
+`"3000*mm"`, `"100*kN/m"`, and `"144*kN*m/m"`. Booleans, nonfinite
+values, wrong dimensions, unsupported inputs and alternate pressure models
+are rejected. The optional `pressure_model` must be `positive_part_affine`.
+The equilibrium calculation uses the exact rational values of the converted
+binary64 SI inputs and rounds its reported numbers once.
+
+For N>0, let e=M/N:
+
+- |e| <= B/6: full contact, including zero pressure at one endpoint at equality.
+  The edge pressures are N/B - 6M/B^2 and N/B + 6M/B^2.
+- B/6 < |e| < B/2: partial contact, with width 3(B/2-|e|), zero at the inner
+  edge and maximum pressure 2N/width at the loaded outer edge.
+- |e| >= B/2: no finite pressure equilibrium. The exact edge limit would
+  require a concentrated point reaction, which this pressure model excludes.
+- N=M=0: zero pressure, with no determined contact interval, width, or
+  eccentricity. Those three fields are null.
+- Negative N, or N=0 with nonzero M, has no nonnegative pressure solution.
+
+`contact_interval_m` is ordered from negative to positive x.
+`contact_edge_pressure_Pa` gives pressure at its two endpoints, linearly
+interpolated within that interval and zero outside.
+`q_left_Pa` and `q_right_Pa` are pressures at the base edges.
+`q_min_Pa` and `q_max_Pa` apply to the whole base.
+The analytic segment integrals are reported separately; displayed floating
+coordinates and pressures are rounded. Inputs whose required results cannot
+be represented finitely are refused instead of receiving an equilibrium
+certificate. The reported rounded segment is separately integrated;
+output_geometry_verified is false if its force error exceeds 1e-9 * N or
+its moment error exceeds 1e-9 * N * B (N and B denote the supplied force and
+width). This also prevents conservation_verified from certifying a contact
+interval whose narrow width is lost in rounded coordinates.
+
+To check a supplied answer, add `proposed_contact_width_m`,
+`proposed_eccentricity_m`, `proposed_q_min_Pa`, `proposed_q_max_Pa`,
+`proposed_q_left_Pa`, `proposed_q_right_Pa`,
+`proposed_contact_interval_m`, or `proposed_contact_regime`.
+Numeric claims allow relative error 1e-9 plus eight output ulps.
+An undetermined field matches only null. Inspect `conservation_verified`
+and `claim_checks`; a completed calculation can reject an answer.
+
+## Example
+
+```json
+{
+  "mode": "civil_geotech",
+  "spec": {
+    "calculation": "rigid_strip_contact",
+    "base_width_m": 3,
+    "vertical_resultant_N_m": 100000,
+    "moment_Nm_m": 144000
+  }
+}
+```
+
+This gives partial contact over [1.32, 1.50] m, contact width 0.18 m, and
+maximum pressure 1111111.111111111 Pa. Reversing M reflects the interval to
+[-1.50, -1.32] m with the same width and maximum pressure. The ordinary
+full-base extrapolation would instead demand -62666.6667 Pa at one edge.
+
+## Basis
+
+The relationship between resultant location, loss of contact and triangular
+base pressure is illustrated in USACE
+[EM 1110-2-2200, Figure 4-2](https://www.publications.usace.army.mil/portals/76/publications/engineermanuals/em_1110-2-2200.pdf).
+USACE [EM 1110-2-2100, section 2-4](https://www.publications.usace.army.mil/Portals/76/Publications/EngineerManuals/EM_1110-2-2100.pdf)
+states the no-tension interface assumption when the resultant leaves the
+middle third. This implementation derives its contact regime and pressure
+from the stated compatibility and two integrals. It does not implement
+the manuals' load combinations or acceptance criteria.
