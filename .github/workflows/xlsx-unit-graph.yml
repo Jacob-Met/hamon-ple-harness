@@ -1,0 +1,34 @@
+name: Saved workbook unit graph qualification
+on:
+  pull_request:
+    paths:
+      - "engineering_toolkit.py"
+      - "office_package.py"
+      - "engineering_intake.py"
+      - "taskbridge.py"
+      - "tests/test_xlsx*.py"
+      - "ship/verify_xlsx_unit_graph.py"
+      - ".github/workflows/xlsx-unit-graph.yml"
+  workflow_dispatch:
+jobs:
+  workbook-oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Independent spreadsheet engine and symbolic units
+        run: |
+          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=2 update -qq
+          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=2 install -y --no-install-recommends libreoffice-calc
+          pip install --disable-pip-version-check sympy==1.14.0
+      - name: Recalculate saved workbook and compare exact unit scales
+        run: python ship/verify_xlsx_unit_graph.py --out "$RUNNER_TEMP/xlsx-unit-graph" --min-memory-gib 4
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xlsx-unit-graph-oracle
+          path: ${{ runner.temp }}/xlsx-unit-graph
+          if-no-files-found: ignore
