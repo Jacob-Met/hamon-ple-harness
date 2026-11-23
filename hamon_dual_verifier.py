@@ -820,40 +820,62 @@ def solve_beam_dual(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def solve_static_equilibrium_2d(spec: dict[str, Any]) -> dict[str, Any]:
-    """Solve 2D static equilibrium (Sum Fx=0, Sum Fy=0, Sum Mz=0) for pin+roller beam/frame."""
+    """Balance a horizontal pin-and-roller beam. The reported roller moment is hogging-positive."""
     supports = spec["supports"]
-    pin = next(s for s in supports if s["type"] == "pin")
-    roller = next(s for s in supports if s["type"] == "roller")
-    x_a, x_b = float(pin["x"]), float(roller["x"])
-    L_tot = float(spec.get("total_length_m", abs(x_b - x_a)))
-    q = float(spec.get("udl_N_per_m", 0.0))
-    pts = spec.get("point_loads", [])
+    if len(supports) != 2 or {s["type"] for s in supports} != {"pin", "roller"}:
+        raise ValueError("Static equilibrium requires one pin and one vertical roller")
+    x_a, x_b = (Fraction(float(next(s["x"] for s in supports if s["type"] == kind)))
+                for kind in ("pin", "roller"))
+    if x_a == x_b:
+        raise ValueError("Pin and roller must have different horizontal locations")
+    # An explicit total length defines the beam from x=0. Without it the
+    # support span defines the uniform load's extent, in either orientation.
+    left, right = sorted((x_a, x_b))
+    if "total_length_m" in spec:
+        left, right = Fraction(0), Fraction(float(spec["total_length_m"]))
+        if not left <= min(x_a, x_b) < max(x_a, x_b) <= right:
+            raise ValueError("Both supports must lie within the specified beam length")
 
-    total_fx = sum(float(p.get("Fx", 0.0)) for p in pts)
-    total_fy_down = q * L_tot + sum(-float(p.get("Fy", 0.0)) for p in pts)
-    moment_about_a = q * L_tot * (0.5 * L_tot - x_a) + sum(
-        (-float(p.get("Fy", 0.0))) * (float(p["x"]) - x_a) for p in pts
-    )
-    # Linear system for [R_Ax, R_Ay, R_By]:
-    # [1, 0, 0] [R_Ax]   [-total_fx]
-    # [0, 1, 1] [R_Ay] = [total_fy_down]
-    # [0, 0, x_b - x_a] [R_By] = [moment_about_a]
-    lin = dual_solve_linear(
-        [[1.0, 0.0, 0.0], [0.0, 1.0, 1.0], [0.0, 0.0, x_b - x_a]],
-        [-total_fx, total_fy_down, moment_about_a],
-    )
-    rax, ray, rby = [float(v) for v in lin["solution"]]
-    # Overhang moment right of B
-    over_L = max(0.0, L_tot - x_b)
-    m_b = 0.5 * q * over_L**2 + sum(
-        (-float(p.get("Fy", 0.0))) * (float(p["x"]) - x_b) for p in pts if float(p["x"]) > x_b
-    )
+    q = Fraction(float(spec.get("udl_N_per_m", 0.0)))
+    points = [(Fraction(float(p["x"])), Fraction(float(p.get("Fx", 0.0))),
+               Fraction(float(p.get("Fy", 0.0)))) for p in spec.get("point_loads", [])]
+    if "total_length_m" in spec and any(not left <= x <= right for x, _, _ in points):
+        raise ValueError("Point loads must lie within the specified beam length")
+    uniform_down = q * (right - left)
+    total_down = uniform_down - sum(fy for _, _, fy in points)
+    total_fx = sum(fx for _, fx, _ in points)
+    moment_a = uniform_down * ((left + right) / 2 - x_a) - sum(
+        (x - x_a) * fy for x, _, fy in points)
+    span = x_b - x_a
+    moment_b = uniform_down * ((left + right) / 2 - x_b) - sum(
+        (x - x_b) * fy for x, _, fy in points)
+    # Independent reaction check from moments about each support. It does not
+    # subtract nearly equal vertical reactions to recover a lightly loaded pin.
+    lin = dual_solve_linear([[1., 0., 0.], [0., -float(span), 0.], [0., 0., float(span)]],
+                            [float(-total_fx), float(moment_b), float(moment_a)])
+    rby = moment_a / span
+    ray = total_down - rby
+    reactions = [float(-total_fx), float(ray), float(rby)]
+    if not all(math.isfinite(v) for v in reactions):
+        raise ValueError("Support reactions exceed numerical range")
+    discrepancy = max(lin["dual_rel_discrepancy"],
+                      *(_rel_diff(v, float(other)) for v, other in zip(reactions, lin["solution"])))
+    if discrepancy > 1e-7:
+        raise ValueError("Exact and numerical support reactions disagree")
+
+    # The two faces of a cut have opposite internal moments. Load at the
+    # roller has zero lever arm; the pin reaction belongs on its own side.
+    forces = [(x, fy) for x, _, fy in points] + [(x_a, ray)]
+    m_left = q * (x_b - left)**2 / 2 + sum((x - x_b) * fy for x, fy in forces if x < x_b)
+    m_right = q * (right - x_b)**2 / 2 - sum((x - x_b) * fy for x, fy in forces if x > x_b)
+    if m_left != m_right:
+        raise ValueError("Roller section cuts disagree")
     return {
-        "R_Ax_N": rax,
-        "R_Ay_N": ray,
-        "R_By_N": rby,
-        "M_support_B_Nm": m_b,
-        "dual_rel_discrepancy": lin["dual_rel_discrepancy"],
+        "R_Ax_N": reactions[0],
+        "R_Ay_N": reactions[1],
+        "R_By_N": reactions[2],
+        "M_support_B_Nm": float(m_right),
+        "dual_rel_discrepancy": discrepancy,
         "dual_verified": True,
     }
 
