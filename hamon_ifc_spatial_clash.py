@@ -919,7 +919,97 @@ def _subtract_opening_boxes(host, openings, frame):
                        {**host.metadata,"opening_ids":[opening.element_id for opening in openings]})
 
 
-def _require_single_swept_body(entities, step):
+# Physical element occurrences qualified for additive rectangular-Body takeoffs.
+MASS_PRODUCT_TYPES = frozenset({
+    "IFCBEAM", "IFCBEAMSTANDARDCASE", "IFCBUILDINGELEMENTPROXY", "IFCCOLUMN",
+    "IFCCOLUMNSTANDARDCASE", "IFCFOOTING", "IFCMEMBER", "IFCMEMBERSTANDARDCASE",
+    "IFCPLATE", "IFCPLATESTANDARDCASE", "IFCSLAB", "IFCSLABSTANDARDCASE",
+    "IFCWALL", "IFCWALLSTANDARDCASE",
+})
+
+
+def _product_shapes(entities, *, strict=False):
+    """Yield each product owning a shape and its representations."""
+    for eid, (etype, args) in sorted(entities.items()):
+        if len(args) < 7 or not etype.startswith("IFC"):
+            continue
+        placement, rep = args[5:7]
+        placed = (isinstance(placement, tuple) and placement[0] == "ref"
+                  and entities.get(placement[1], ("",))[0].endswith("PLACEMENT"))
+        shape = entities.get(rep[1]) if isinstance(rep, tuple) and rep[0] == "ref" else None
+        if not shape or shape[0] != "IFCPRODUCTDEFINITIONSHAPE":
+            if strict and (etype in MASS_PRODUCT_TYPES or (placed and rep is not None)):
+                raise ValueError(f"Unresolved IFC product representation on #{eid}")
+            continue
+        rargs = shape[1]
+        if len(rargs) < 3 or not isinstance(rargs[2], list):
+            if strict:
+                raise ValueError(f"Invalid IFC product definition shape on #{eid}")
+            continue
+        yield eid, etype, args, rargs
+
+
+def _required_ifc_entity(entities, ref, kind):
+    if isinstance(ref, tuple) and ref[0] == "ref":
+        entity = entities.get(ref[1])
+        if entity and entity[0] == kind:
+            return entity[1]
+    raise ValueError(f"Expected a resolved {kind} reference")
+
+
+def _rigid_ifc_frame(entities, ref, unit_scale):
+    """Resolve a qualified rigid 3D placement for mass properties."""
+    args = _required_ifc_entity(entities, ref, "IFCAXIS2PLACEMENT3D")
+    if len(args) != 3:
+        raise ValueError("Invalid IFC 3D frame attributes")
+
+    def vector(ref, kind):
+        attrs = _required_ifc_entity(entities, ref, kind)
+        if len(attrs) != 1 or not isinstance(attrs[0], list) or len(attrs[0]) != 3:
+            raise ValueError(f"Expected three coordinates for {kind}")
+        v = np.asarray(attrs[0], dtype=float)
+        if not np.isfinite(v).all():
+            raise ValueError(f"Nonfinite {kind}")
+        if kind == "IFCDIRECTION":
+            length = math.hypot(*v)
+            if not 0 < length < math.inf:
+                raise ValueError("Invalid IFC placement direction")
+            v = v / length
+        return v
+
+    origin = vector(args[0], "IFCCARTESIANPOINT") * unit_scale
+    if (args[1] is None) != (args[2] is None):
+        raise ValueError("Qualified IFC 3D frame needs both axes or neither")
+    mat = np.eye(4)
+    if args[1] is not None:
+        z = vector(args[1], "IFCDIRECTION")
+        xref = vector(args[2], "IFCDIRECTION")
+        y = np.cross(z, xref)
+        length = math.hypot(*y)
+        if length <= 64 * np.finfo(float).eps:
+            raise ValueError("Degenerate or unresolved IFC placement axes")
+        y /= length
+        mat[:3, :3] = np.column_stack((np.cross(y, z), y, z))
+    mat[:3, 3] = origin
+    return mat
+
+
+def _placed_product_frame(entities, placement, unit_scale):
+    if placement is None:
+        raise ValueError("An IFC product with a Body needs an object placement")
+    frame = np.eye(4)
+    visited = set()
+    while placement is not None:
+        args = _required_ifc_entity(entities, placement, "IFCLOCALPLACEMENT")
+        if placement[1] in visited or len(args) != 2:
+            raise ValueError("Cyclic or malformed IFC product placement")
+        visited.add(placement[1])
+        placement, local = args
+        frame = _rigid_ifc_frame(entities, local, unit_scale) @ frame
+    return frame
+
+
+def _require_single_swept_body(entities, step, *, mass_takeoff=False):
     """Refuse partial bodies and curves the vertex reader cannot certify."""
     def resolve(ref):
         if not isinstance(ref, tuple) or ref[0] != "ref" or ref[1] not in entities:
@@ -927,6 +1017,7 @@ def _require_single_swept_body(entities, step):
         return entities[ref[1]]
     _, shape = resolve(entities[step][1][6])
     items = []
+    body_count = 0
     for ref in shape[2]:
         kind, rep = resolve(ref)
         if kind != "IFCSHAPEREPRESENTATION" or len(rep) < 4:
@@ -935,20 +1026,31 @@ def _require_single_swept_body(entities, step):
             continue
         if str(rep[1]).upper() != "BODY" or not isinstance(rep[3], list):
             raise UnresolvedOpening("unverified opening body")
+        body_count += 1
+        if mass_takeoff:
+            kind, attrs = resolve(rep[0])
+            if kind == "IFCGEOMETRICREPRESENTATIONSUBCONTEXT" and len(attrs) > 6:
+                kind, attrs = resolve(attrs[6])
+            if kind != "IFCGEOMETRICREPRESENTATIONCONTEXT" or len(attrs) < 5 or attrs[2] != 3:
+                raise ValueError("Expected a 3D IFC representation context")
+            if not np.array_equal(_rigid_ifc_frame(entities, attrs[4], 1.), np.eye(4)):
+                raise ValueError("Only an identity IFC world coordinate system is qualified")
         items.extend(rep[3])
-    if len(items) != 1:
+    if len(items) != 1 or (mass_takeoff and body_count != 1):
         raise UnresolvedOpening("expected one complete swept opening or host body")
     kind, solid = resolve(items[0])
     if kind != "IFCEXTRUDEDAREASOLID":
         raise UnresolvedOpening("only direct cuboid extrusions are qualified")
+    if not solid:
+        raise UnresolvedOpening("missing swept profile")
     profile, attrs = resolve(solid[0])
     if profile == "IFCRECTANGLEPROFILEDEF":
-        return
-    if profile == "IFCARBITRARYCLOSEDPROFILEDEF":
+        return items[0][1]
+    if not mass_takeoff and profile == "IFCARBITRARYCLOSEDPROFILEDEF":
         curve, args = resolve(attrs[2])
         if curve == "IFCPOLYLINE" and len(args[0]) == 5 and args[0][0] == args[0][-1]:
             if all(resolve(ref)[0] == "IFCCARTESIANPOINT" for ref in args[0]):
-                return
+                return items[0][1]
     raise UnresolvedOpening("unsupported swept opening or host profile")
 
 
@@ -984,16 +1086,7 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
     related = _opening_relationships(entities)
     participants = set(related).union(*related.values())
 
-    for eid, (etype, args) in sorted(entities.items()):
-        if len(args) < 7 or not etype.startswith("IFC"):
-            continue
-        rep_ref = args[6]
-        if not (isinstance(rep_ref, tuple) and rep_ref[0] == "ref" and rep_ref[1] in entities):
-            continue
-        rtype, rargs = entities[rep_ref[1]]
-        if rtype != "IFCPRODUCTDEFINITIONSHAPE" or len(rargs) < 3 or not isinstance(rargs[2], list):
-            continue
-
+    for eid, etype, args, rargs in _product_shapes(entities):
         if eid in participants:
             _require_single_swept_body(entities, eid)
         global_id = str(args[0] or f"#{eid}")
