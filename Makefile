@@ -10,3 +10,7 @@ verify-distillation:
 .PHONY: verify-witness-equipment
 verify-witness-equipment:
 	$(PYTHON) -m unittest discover -s tests -p 'test_witness_equipment.py' -v
+
+.PHONY: verify-provider-wire
+verify-provider-wire:
+	$(PYTHON) ship/replay_engineering_provider_wire.py --reference

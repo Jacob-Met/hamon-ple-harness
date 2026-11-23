@@ -416,7 +416,7 @@ async def solve(session: taskbridge.Session) -> str:
       )
       if pareto_plan and "presolve_result_json" in pareto_plan:
         if "presolve_source_sha256" in pareto_plan:
-          first_request += ("\n\nPassive-fin analytic and finite-volume check for instruction SHA-256 "
+          first_request += ("\n\nDeterministic presolve for instruction SHA-256 "
                             + pareto_plan["presolve_source_sha256"])
         first_request += ("\n\nDeterministic engineering calculation for the inline request (JSON tool output):\n"
                           + pareto_plan["presolve_result_json"])
