@@ -1313,6 +1313,90 @@ def _orbital_transfer(params: Mapping[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _symmetric_euler_motion(moments, initial, torque, duration, axis):
+    """Integrate the transverse Euler equation in its rotating coordinates."""
+    from mpmath import mp
+
+    i, j = (axis+1) % 3, (axis+2) % 3
+    it, iz = moments[i], moments[axis]
+    coupling = (iz-it)/it
+    az = torque[axis]/iz
+    fx, fy = torque[i]/it, torque[j]/it
+    ctx = mp.clone()
+
+    def number(q):
+        return ctx.mpf(q.numerator)/q.denominator
+
+    def rational(v):
+        if not v:
+            return Fraction(0)
+        f, e = ctx.frexp(v)
+        return Fraction(int(ctx.ldexp(f, ctx.prec))) * Fraction(2)**(e-ctx.prec)
+
+    def advance(start, t, guard):
+        alpha = coupling*start[axis]*t
+        beta = coupling*az*t*t/2
+        if not alpha and not beta:
+            end = [w+t*f for w, f in zip(start, (tau/I for tau, I in zip(torque, moments)))]
+            work = [tau*t*(w+v)/2 for tau,w,v in zip(torque,start,end)]
+            return end, sum(work), sum(I*d for I,d in zip(moments,work))
+        phase_size = max(abs(alpha), abs(beta), Fraction(1))
+        force = (t*fx, t*fy)
+        imbalance = (force[0]-alpha*start[j], force[1]+alpha*start[i])
+        if beta and any(force):
+            # Completing the square introduces an absolute phase alpha²/(4 beta).
+            phase_size = max(phase_size, abs(alpha*alpha/(4*beta)))
+        # Near a force-balanced endpoint the first nonzero coordinate can be
+        # quadratic in a small spin phase, and full and split intervals could
+        # otherwise round that same coordinate to zero before comparison.
+        small_phase = max(abs(alpha), abs(beta))
+        if any(force) and small_phase < 1:
+            phase_size = max(phase_size, 1/small_phase**2)
+        ctx.prec = guard + max(0, phase_size.numerator.bit_length()-phase_size.denominator.bit_length())
+        turn = number(alpha+beta)
+        z0 = ctx.mpc(number(start[i]), number(start[j]))
+        impulse = ctx.mpc(*(number(v) for v in force))
+        if not impulse:
+            z1, lateral_work = z0*ctx.expj(turn), Fraction(0)
+        elif not beta:
+            # Propagate the exact unbalanced initial acceleration. Separate its
+            # small increment from the finite initial state when computing work.
+            change = ctx.expm1(ctx.j*turn)/(ctx.j*turn) * ctx.mpc(*(number(v) for v in imbalance))
+            z1 = z0+change
+            dx, dy = rational(change.real), rational(change.imag)
+            lateral_work = it*(start[i]*dx + start[j]*dy + (dx*dx+dy*dy)/2)
+        else:
+            # J = integral_0^1 exp(i*(alpha*s + beta*s²)) ds. Evaluate
+            # impulse work separately from the endpoint kinetic energy.
+            b = number(beta)
+            factor = ctx.sqrt(2*abs(b)/ctx.pi)
+            v0 = factor*number(alpha/(2*beta))
+            v1 = v0+factor
+            delta = (ctx.fresnelc(v1)-ctx.fresnelc(v0)
+                     + ctx.j*ctx.sign(b)*(ctx.fresnels(v1)-ctx.fresnels(v0)))
+            integral = ctx.expj(number(-alpha*alpha/(4*beta))) * delta/factor
+            transported = impulse*ctx.conj(integral)
+            z1 = ctx.expj(turn)*(z0+transported)
+            lateral_work = it*rational(ctx.re(ctx.conj(impulse)*z0*integral) + abs(transported)**2/2)
+        end = list(start)
+        end[i], end[j], end[axis] = rational(z1.real), rational(z1.imag), start[axis]+az*t
+        axial_work = torque[axis]*t*(start[axis]+end[axis])/2
+        return end, lateral_work+axial_work, it*lateral_work+iz*axial_work
+
+    # Resolve each signed observable against a separate split-interval evaluation.
+    # The smallest wire value sets only the absolute floor for a mathematical zero.
+    floor = Fraction(2)**-1074
+    for guard in (150, 300, 600, 1200, 2400, 4800):
+        full, work, impulse_h2 = advance(initial, duration, guard)
+        middle, w1, h1 = advance(initial, duration/2, guard+80)
+        halves, w2, h2 = advance(middle, duration/2, guard+80)
+        pairs = list(zip(full, halves)) + [(work, w1+w2), (impulse_h2, h1+h2)]
+        residual = max(abs(v-u)/max(abs(v), abs(u), floor) for v,u in pairs)
+        if residual < Fraction(1, 10**15):
+            return full, work, impulse_h2, float(residual)
+    raise ArithmeticError("unresolved_symmetric_top_motion")
+
+
 def _euler_rigid_body(params: Mapping[str, Any]) -> Dict[str, Any]:
     """Euler equations for positive principal moments and constant body-frame torque."""
     result = {"domain": "lagrangian_orbital", "subkind": "euler_rigid_body", "verified": False}
@@ -1358,63 +1442,93 @@ def _euler_rigid_body(params: Mapping[str, Any]) -> Dict[str, Any]:
         # s=t/t_final, u=omega/rotation_scale. The angular acceleration and
         # initial velocity set the same scale for independently integrated paths.
         omega_scale = representable(rotation_scale)
-        u0 = np.array([representable(x / rotation_scale) for x in initial])
-        inertia = np.array([representable(x / moment_scale) for x in moments])
-        forcing = np.array([representable(duration * a / rotation_scale) for a in acceleration])
-        spin = np.array([
-            representable(duration * rotation_scale * (moments[j] - moments[k]) / moments[i])
-            for i, j, k in ((0, 1, 2), (1, 2, 0), (2, 0, 1))
-        ])
-        def velocity_rhs(_s, u):
-            x, y, z = u
-            return spin * np.array([y*z, z*x, x*y]) + forcing
+        axis = next((k for k in range(3) if moments[(k+1)%3] == moments[(k+2)%3]
+                     and moments[k] != moments[(k+1)%3]), None)
+        if axis is not None and duration:
+            endpoint, work, half_h2_change, dual_error = _symmetric_euler_motion(
+                moments, initial, torque, duration, axis)
+            omega = [representable(w) for w in endpoint]
+            physical_work = representable(work)
+            scaled_half_h2 = float(half_h2_change/(moment_scale*rotation_scale)**2)
+            # Replay torque work against the actually reported endpoint.
+            f = list(map(Fraction, omega))
+            energy_balance = relative_balance(sum(i*w*w for i,w in zip(moments,initial))/2,
+                                              sum(i*w*w for i,w in zip(moments,f))/2, work)
+            momentum_balance = relative_balance(sum((i*w)**2 for i,w in zip(moments,initial))/2,
+                                                sum((i*w)**2 for i,w in zip(moments,f))/2, half_h2_change)
+        else:
+            u0 = np.array([representable(x / rotation_scale) for x in initial])
+            inertia = np.array([representable(x / moment_scale) for x in moments])
+            forcing = np.array([representable(duration * a / rotation_scale) for a in acceleration])
+            spin = np.array([
+                representable(duration * rotation_scale * (moments[j] - moments[k]) / moments[i])
+                for i, j, k in ((0, 1, 2), (1, 2, 0), (2, 0, 1))
+            ])
+            def velocity_rhs(_s, u):
+                x, y, z = u
+                return spin * np.array([y*z, z*x, x*y]) + forcing
 
-        # Accumulate work and torque contribution to half |H|^2 along the
-        # primary trajectory. These follow dT/dt=tau.omega, d(|H|^2/2)/dt=tau.H.
-        scaled_torque = np.array([representable(tau * duration / (moment_scale * rotation_scale))
-                                  for tau in torque])
-        def primary_rhs(s, state):
-            u = state[:3]
-            return np.r_[velocity_rhs(s, u), scaled_torque @ u, scaled_torque @ (inertia * u)]
+            # Accumulate work and torque contribution to half |H|^2 along the
+            # primary trajectory. These follow dT/dt=tau.omega, d(|H|^2/2)/dt=tau.H.
+            scaled_torque = np.array([representable(tau * duration / (moment_scale * rotation_scale))
+                                      for tau in torque])
+            def primary_rhs(s, state):
+                u = state[:3]
+                return np.r_[velocity_rhs(s, u), scaled_torque @ u, scaled_torque @ (inertia * u)]
 
-        state = np.r_[u0, 0.0, 0.0]
-        dual = u0
-        with np.errstate(over="raise", invalid="raise", divide="raise"):
-            if duration:
-                ds = 1.0 / steps
-                for step in range(steps):
-                    s = step * ds
-                    k1 = primary_rhs(s, state)
-                    k2 = primary_rhs(s + ds/2, state + ds*k1/2)
-                    k3 = primary_rhs(s + ds/2, state + ds*k2/2)
-                    k4 = primary_rhs(s + ds, state + ds*k3)
-                    state += (ds/6) * (k1 + 2*k2 + 2*k3 + k4)
-                solution = integrate.solve_ivp(velocity_rhs, (0.0, 1.0), u0, method="DOP853",
-                                               rtol=1e-12, atol=1e-14)
-                if not solution.success or solution.t[-1] != 1.0:
-                    return {**result, "error": "incomplete_rigid_body_integrator"}
-                dual = solution.y[:, -1]
-            if not np.isfinite(state).all() or not np.isfinite(dual).all():
-                raise FloatingPointError("nonfinite_rigid_body_solution")
-            u = state[:3]
-            # Finite endpoint norms can have nonrepresentable squares. Evaluate
-            # the two small endpoint quadratic forms exactly on parsed floats.
-            def invariants(v):
-                h = [(i / moment_scale) * Fraction(float(w)) for i, w in zip(moments, v)]
-                return (sum(x * Fraction(float(w)) for x, w in zip(h, v)) / 2,
-                        sum(x*x for x in h) / 2)
-            e0, h02 = invariants(u0)
-            ef, hf2 = invariants(u)
-            energy_balance = relative_balance(e0, ef, Fraction(float(state[3])))
-            momentum_balance = relative_balance(h02, hf2, Fraction(float(state[4])))
-            dual_error = math.hypot(*(u - dual)) / max(1.0, math.hypot(*u), math.hypot(*dual))
-        omega = ([representable(rotation_scale * Fraction(float(x))) for x in u]
-                 if duration else list(map(float, initial)))
+            state = np.r_[u0, 0.0, 0.0]
+            dual = u0
+            with np.errstate(over="raise", invalid="raise", divide="raise"):
+                if duration:
+                    ds = 1.0 / steps
+                    for step in range(steps):
+                        s = step * ds
+                        k1 = primary_rhs(s, state)
+                        k2 = primary_rhs(s + ds/2, state + ds*k1/2)
+                        k3 = primary_rhs(s + ds/2, state + ds*k2/2)
+                        k4 = primary_rhs(s + ds, state + ds*k3)
+                        state += (ds/6) * (k1 + 2*k2 + 2*k3 + k4)
+                    solution = integrate.solve_ivp(velocity_rhs, (0.0, 1.0), u0, method="DOP853",
+                                                   rtol=1e-12, atol=1e-14)
+                    if not solution.success or solution.t[-1] != 1.0:
+                        return {**result, "error": "incomplete_rigid_body_integrator"}
+                    dual = solution.y[:, -1]
+                if not np.isfinite(state).all() or not np.isfinite(dual).all():
+                    raise FloatingPointError("nonfinite_rigid_body_solution")
+                u = state[:3]
+                # Finite endpoint norms can have nonrepresentable squares. Evaluate
+                # the two small endpoint quadratic forms exactly on parsed floats.
+                def invariants(v):
+                    h = [(i / moment_scale) * Fraction(float(w)) for i, w in zip(moments, v)]
+                    return (sum(x * Fraction(float(w)) for x, w in zip(h, v)) / 2,
+                            sum(x*x for x in h) / 2)
+                e0, h02 = invariants(u0)
+                ef, hf2 = invariants(u)
+                energy_balance = relative_balance(e0, ef, Fraction(float(state[3])))
+                momentum_balance = relative_balance(h02, hf2, Fraction(float(state[4])))
+                dual_error = math.hypot(*(u-dual)) / max(1., math.hypot(*u), math.hypot(*dual))
+                for axis in range(3):
+                    plane = [k for k in range(3) if k != axis]
+                    h = max(math.hypot(*v[plane]) for v in (u0, u, dual, forcing))
+                    if h:
+                        dual_error = max(dual_error, math.hypot(*(u-dual)[plane])/h)
+                    if free:
+                        # This independent invariant cancels the axial spin
+                        # analytically before checking the smaller free wobble.
+                        weights = [moments[k]*(moments[axis]-moments[k]) for k in plane]
+                        old = [w*Fraction(float(u0[k]))**2 for w,k in zip(weights,plane)]
+                        new = [w*Fraction(float(u[k]))**2 for w,k in zip(weights,plane)]
+                        scale = max(sum(map(abs,old)),sum(map(abs,new)))
+                        if scale:
+                            dual_error = max(dual_error, float(abs(sum(new)-sum(old))/scale))
+            omega = ([representable(rotation_scale * Fraction(float(x))) for x in u]
+                     if duration else list(map(float, initial)))
+            physical_work = representable(Fraction(float(state[3])) * moment_scale * rotation_scale**2)
+            half_h2_change = Fraction(float(state[4])) * (moment_scale * rotation_scale)**2
+            scaled_half_h2 = float(state[4])
         final = [Fraction(x) for x in omega]
         kinetic = representable(sum(i*w*w for i, w in zip(moments, final)) / 2)
         momentum = math.hypot(*(representable(i*w) for i, w in zip(moments, final)))
-        physical_work = representable(Fraction(float(state[3])) * moment_scale * rotation_scale**2)
-        half_h2_change = Fraction(float(state[4])) * (moment_scale * rotation_scale)**2
         # Squared SI momenta can exceed binary64 even when the angular momentum
         # and its direction are well resolved. Preserve a scaled representation.
         try:
@@ -1448,7 +1562,7 @@ def _euler_rigid_body(params: Mapping[str, Any]) -> Dict[str, Any]:
             "initial_body_omega_azimuth_rate_rad_s": initial_phase_rate,
             "initial_inertial_H_direction_speed_rad_s": direction_speed,
             "work_done_J": physical_work, "torque_half_H2_change_Nms2": physical_half_h2_change,
-            "torque_half_H2_change_scaled": float(state[4]),
+            "torque_half_H2_change_scaled": scaled_half_h2,
             "moment_scale_kg_m2": float(moment_scale), "omega_scale_rad_s": omega_scale,
             "torque_free": free, "solver_residual": float(dual_error),
             "work_balance_residual": float(energy_balance),
