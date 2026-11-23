@@ -155,8 +155,16 @@ def _dot(a,b):
     return sum(x*y for x,y in zip(a,b))
 
 
-def _inverse(patches,target):
-    theta=_solve3(_gram(patches),target)
+def _inverse(patches,target,weights=None):
+    if weights is not None and (len(weights)!=len(patches) or any(w<=0 for w in weights)):
+        raise ValueError('Every contact patch requires one positive stiffness weight')
+    def gram(polygons):
+        if weights is None:
+            return _gram(polygons)
+        matrices=[_gram([poly]) for poly in polygons]
+        return [[sum(w*h[j][k] for w,h in zip(weights,matrices))
+                 for k in range(3)] for j in range(3)]
+    theta=_solve3(gram(patches),target)
     if all(_dot(theta,(1,*p))>=0 for poly in patches for p in poly):
         return theta
     # Put the prescribed centroid at zero and two supporting lines at -1.
@@ -184,13 +192,13 @@ def _inverse(patches,target):
         return _dot(u,offset),_dot(v,offset)
     transformed=[[coordinates(p) for p in poly] for poly in patches]
     local_target=(F(1),F(0),F(0))
-    local=_solve3(_gram(transformed),local_target)
+    local=_solve3(gram(transformed),local_target)
     polys=[[tuple(map(float,p)) for p in poly] for poly in transformed]
     theta=list(map(float,local))
     # One variational objective couples every occupied patch, including
     # disconnected contact islands. Its Hessian is the active second moment.
     def state(t):
-        h=_gram([[p for p,_ in _clip(poly,t)] for poly in polys])
+        h=gram([[p for p,_ in _clip(poly,t)] for poly in polys])
         load=[_dot(row,t) for row in h]
         return h,[load[0]-1,load[1],load[2]],_dot(t,load)/2-t[0]
     h,g,obj=state(theta)
