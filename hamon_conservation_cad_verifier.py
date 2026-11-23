@@ -256,12 +256,24 @@ def _cylinder_mesh(origin: np.ndarray, x_ax: np.ndarray, y_ax: np.ndarray, z_ax:
     return np.array(verts, dtype=np.float64), np.array(faces, dtype=np.int32)
 
 
-def _extrude_polygon_2d(poly2d: np.ndarray, origin: np.ndarray, x_ax: np.ndarray, y_ax: np.ndarray, z_ax: np.ndarray, depth: float) -> Tuple[np.ndarray, np.ndarray]:
+def _ifc_extrusion_direction(entities, reference):
+    kind, args = entities.get(_ref_id(reference), (None, []))
+    if kind != "IFCDIRECTION" or not args:
+        raise ValueError("IFC extrusion requires a three-dimensional direction")
+    ratios = np.array(_num_list(args[0]), dtype=float)
+    if ratios.shape != (3,) or not np.isfinite(ratios).all() or ratios[2] == 0:
+        raise ValueError("IFC extrusion must have a finite nonzero component normal to the profile")
+    # Direction ratios need not be unit length or share any particular scale.
+    ratios /= np.max(np.abs(ratios))
+    return ratios / np.linalg.norm(ratios)
+
+
+def _extrude_polygon_2d(poly2d: np.ndarray, origin: np.ndarray, x_ax: np.ndarray, y_ax: np.ndarray, direction: np.ndarray, depth: float) -> Tuple[np.ndarray, np.ndarray]:
     x, y = poly2d[:, 0], poly2d[:, 1]
     if float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y)) < 0:
         poly2d = poly2d[::-1].copy()
     k = len(poly2d)
-    verts = [origin + px * x_ax + py * y_ax + z_off * z_ax for z_off in (0.0, depth) for px, py in poly2d]
+    verts = [origin + px * x_ax + py * y_ax + offset * direction for offset in (0.0, depth) for px, py in poly2d]
     faces = []
     for i in range(1, k - 1):
         faces.extend([[0, i + 1, i], [k, k + i, k + i + 1]])
@@ -277,16 +289,19 @@ def _axis2_frame(entities: Dict[int, Tuple[str, List[str]]], aid: Optional[int],
     x_ax = np.array([1.0, 0.0, 0.0], dtype=np.float64)
     if aid is not None and aid in entities:
         et, args = entities[aid]
-        if et in ("AXIS2_PLACEMENT_3D", "IFCAXIS2PLACEMENT3D") and len(args) >= 2:
-            pid = _ref_id(args[1])
+        if et in ("AXIS2_PLACEMENT_3D", "IFCAXIS2PLACEMENT3D"):
+            # STEP representation items start with a name; IFC placements
+            # start with Location. Both then carry Axis and RefDirection.
+            placement = args[1:] if et == "AXIS2_PLACEMENT_3D" else args
+            pid = _ref_id(placement[0]) if placement else None
             if pid and pid in entities:
                 origin = np.array(_num_list(entities[pid][1][-1])[:3], dtype=np.float64) * scale
-            if len(args) >= 3 and _ref_id(args[2]) in entities:
-                zv = np.array(_num_list(entities[_ref_id(args[2])][1][-1])[:3], dtype=np.float64)  # type: ignore[index]
+            if len(placement) >= 2 and _ref_id(placement[1]) in entities:
+                zv = np.array(_num_list(entities[_ref_id(placement[1])][1][-1])[:3], dtype=np.float64)  # type: ignore[index]
                 if np.linalg.norm(zv) > 1e-12:
                     z_ax = zv / np.linalg.norm(zv)
-            if len(args) >= 4 and _ref_id(args[3]) in entities:
-                xv = np.array(_num_list(entities[_ref_id(args[3])][1][-1])[:3], dtype=np.float64)  # type: ignore[index]
+            if len(placement) >= 3 and _ref_id(placement[2]) in entities:
+                xv = np.array(_num_list(entities[_ref_id(placement[2])][1][-1])[:3], dtype=np.float64)  # type: ignore[index]
                 xv = xv - np.dot(xv, z_ax) * z_ax
                 if np.linalg.norm(xv) > 1e-12:
                     x_ax = xv / np.linalg.norm(xv)
@@ -469,8 +484,16 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
                 if pet in ("RECTANGLE_PROFILE_DEF", "IFCRECTANGLEPROFILEDEF") and len(pargs) >= 5:
                     lx, ly = float(pargs[3]) * unit_scale, float(pargs[4]) * unit_scale
                     poly = np.array([[-0.5*lx,-0.5*ly],[0.5*lx,-0.5*ly],[0.5*lx,0.5*ly],[-0.5*lx,0.5*ly]])
-                    _append(*_extrude_polygon_2d(poly, origin, x_ax, y_ax, z_ax, depth))
-                    analytic_vol = lx * ly * depth
+                    direction, normal = z_ax, 1.0
+                    if et == "IFCEXTRUDEDAREASOLID":
+                        if min(lx, ly, depth) <= 0 or not all(map(math.isfinite, (lx, ly, depth))):
+                            raise ValueError("Rectangular IFC extrusion dimensions must be finite and positive")
+                        local = _ifc_extrusion_direction(entities, args[2])
+                        direction = local[0] * x_ax + local[1] * y_ax + local[2] * z_ax
+                        normal = local[2]
+                    vertices, faces = _extrude_polygon_2d(poly, origin, x_ax, y_ax, direction, depth)
+                    _append(vertices, faces if normal > 0 else faces[:, ::-1])
+                    analytic_vol = lx * ly * depth * abs(normal)
 
     if not all_verts:
         raise ValueError("No supported 3D solid entities found in STEP input")

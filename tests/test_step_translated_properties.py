@@ -67,3 +67,48 @@ def test_open_inconsistent_or_area_unbalanced_prism_withholds_mass_properties(is
     else:assert not got['watertight_manifold']
     for prop in ['volume_m3','mass_kg','centroid_m','inertia_tensor_centroid_kg_m2','principal_moments_kg_m2']:
         assert prop not in got
+
+
+def rectangular_ifc_sweep(origin, scale, direction, dims=(0.002, 0.006, 0.010)):
+    dx, dy, dz = np.asarray(dims) / scale
+    point = ",".join(str(v / scale) for v in origin)
+    ratios = ",".join(map(str, direction))
+    data = f"""ISO-10303-21;
+HEADER;FILE_SCHEMA(('IFC4'));ENDSEC;
+DATA;
+#1=IFCCARTESIANPOINT(({point}));
+#2=IFCDIRECTION((3.,0.,4.));
+#3=IFCDIRECTION((0.,1.,0.));
+#4=IFCAXIS2PLACEMENT3D(#1,#2,#3);
+#5=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,{dx},{dy});
+#6=IFCDIRECTION(({ratios}));
+#7=IFCEXTRUDEDAREASOLID(#5,#4,#6,{dz});
+ENDSEC;END-ISO-10303-21;"""
+    return {"step_text": data, "unit_scale_m": scale, "density_kg_m3": 7800}
+
+
+@pytest.mark.parametrize("origin", [(0., 0., 0.), (500000., 4500000., 80.)])
+@pytest.mark.parametrize("scale", [1., 0.001])
+@pytest.mark.parametrize("direction", [(0., 0., 1.), (0., 0., -1.), (3., 0., 4.), (2., -3., -6.)])
+def test_rectangular_ifc_sweep_uses_its_body_placement(origin, scale, direction):
+    # Integrate the uniform parallelepiped in its three independent edge coordinates.
+    result = verify_step_cad_geometry(rectangular_ifc_sweep(origin, scale, direction))
+    assert result["conservation_verified"], result
+    rotation = np.array([[0., -0.8, 0.6], [1., 0., 0.], [0., 0.6, 0.8]])
+    sweep = rotation @ np.asarray(direction) * (0.010 / np.linalg.norm(direction))
+    edges = np.array([0.002 * rotation[:, 0], 0.006 * rotation[:, 1], sweep])
+    volume = abs(np.linalg.det(edges))
+    covariance = edges.T @ edges / 12
+    inertia = (7800 * volume) * (np.trace(covariance) * np.eye(3) - covariance)
+    assert result["volume_m3"] == pytest.approx(volume, rel=2e-6, abs=0)
+    np.testing.assert_allclose(result["centroid_m"], origin + sweep / 2, atol=2e-9, rtol=0)
+    np.testing.assert_allclose(result["inertia_tensor_centroid_kg_m2"], inertia, atol=1e-16, rtol=2e-6)
+
+
+@pytest.mark.parametrize("direction,dims", [
+    ((1., 2., 0.), (0.002, 0.006, 0.010)), ((0., 0., 0.), (0.002, 0.006, 0.010)),
+    ((0., 0., 1.), (0.002, 0., 0.010)), ((0., 0., 1.), (0.002, 0.006, 0.)),
+])
+def test_rectangular_ifc_sweep_rejects_zero_volume(direction, dims):
+    with pytest.raises(ValueError, match="IFC extrusion"):
+        verify_step_cad_geometry(rectangular_ifc_sweep((0., 0., 0.), 0.001, direction, dims))
