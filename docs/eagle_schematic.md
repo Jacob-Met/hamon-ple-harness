@@ -168,8 +168,12 @@ Run `python ship/verify_eagle_via_rules.py --repo . --raw RAW --out OUT` on the 
 
 ### Contact between two named board signals
 
-Run `python engineering_toolkit.py eagle-netlist FILE.sch --board FILE.brd --contact-nets 'D+' 'D-'`. The independent `inter_net_contact` result records the board digest, signal names, per-signal XML wire ordinals (zero-based), layer, and a strictly interior witness disk in nanometres. The area in mm² is the intersection of two conservatively inset wire regions after removing known circular drill voids. The query covers explicit continuous wires on layers 1 and 16. It can be combined with `--routed-net` to inspect within-signal terminal paths independently.
+Run `python engineering_toolkit.py eagle-netlist FILE.sch --board FILE.brd --contact-nets 'D+' 'D-'`. The independent `inter_net_contact` result records the board digest, signal names, per-signal XML wire ordinals (zero-based), layer, and a strictly interior witness disk in nanometres. The area in mm² is the intersection of two conservatively inset wire regions after removing known circular drill voids and supported milling cutouts. The query covers explicit continuous wires on layers 1 and 16. It can be combined with `--routed-net` to inspect within-signal terminal paths independently.
 
-A missing witness leaves clearance unresolved. Pads, via copper, pours, internal layers, milling, board outlines, manufactured tolerances, and electrical tests fall outside this wire-artwork check. The physical PCB and short-circuit impact are unverified.
+The finite-material checks remove closed layer 46 contours drawn with straight continuous zero-width wires on the board or in supported placed packages. Both outer layers lose copper inside the contour. Open, branched and unsupported milling geometry leaves the query unresolved. Nested cutout interiors are removed conservatively. Plated slots and finished cutter dimensions are outside this model.
+
+A missing witness leaves clearance unresolved. Pads, via copper, pours, internal layers, board outlines, manufactured tolerances, and electrical tests fall outside this wire-artwork check. The physical PCB and short-circuit impact are unverified.
 
 Replay the original Arduino Due board, the registered 0.1 mm bridge on D−, and the same bridge translated 10 mm in both coordinates with `python ship/verify_eagle_inter_net.py --raw RAW --repo . --out OUT`. Supply the manufacturer files named above. The receiver also checks four terminal paths for each signal on each board.
+
+The receiver also verifies that a closed internal milling contour removes all four bridge contacts, a partial cut leaves two, a translated contour and documentation-layer drawing retain four, and an open outline leaves the contact unresolved.
