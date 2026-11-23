@@ -72,6 +72,7 @@ HTTP_METHODS = ("GET", "POST", "DELETE", "PUT", "PATCH", "HEAD", "OPTIONS")
 MAX_FINAL_CHARS = 1_000_000
 # write_file sends a larger file in parts of this size, under MAX_WRITE_BYTES
 WRITE_CHUNK = 4 << 20
+PROCESS_DRAIN_SEC = 10  # maximum time to finish output after process-group cleanup
 MAX_LINE = 32 << 20  # run_process skips a longer line of subprocess output
 MAX_HEAD = 64 << 10  # the Relay's limit on a request line and headers
 # and on a body (a write_file body holds a whole file as base64 JSON)
@@ -1429,6 +1430,18 @@ def time_share(
   return left - min(reserve, left * fraction)
 
 
+class _AgentStreams(asyncio.subprocess.SubprocessStreamProtocol):
+  """Expose leader exit even while a descendant keeps an output pipe open."""
+
+  def __init__(self, loop: asyncio.AbstractEventLoop):
+    super().__init__(limit=64 << 10, loop=loop)
+    self.exited = asyncio.Event()
+
+  def process_exited(self):
+    super().process_exited()
+    self.exited.set()
+
+
 async def run_process(
     argv: list[str],
     session: Session,
@@ -1447,7 +1460,7 @@ async def run_process(
   `on_line` if provided.
 
   Args:
-    argv: Command and arguments list for `create_subprocess_exec`.
+    argv: Executable and its command-line arguments.
     session: Active task session.
     env: Optional subprocess environment variables.
     cwd: Optional working directory for the subprocess.
@@ -1461,7 +1474,9 @@ async def run_process(
     the process was stopped by the time budget.
   """
   pipe, devnull = asyncio.subprocess.PIPE, asyncio.subprocess.DEVNULL
-  proc = await asyncio.create_subprocess_exec(
+  loop = asyncio.get_running_loop()
+  transport, streams = await loop.subprocess_exec(
+      lambda: _AgentStreams(loop),
       *argv,
       env=env,
       cwd=cwd,
@@ -1470,6 +1485,7 @@ async def run_process(
       stdout=devnull if on_line is None else pipe,
       stderr=pipe,
   )
+  proc = asyncio.subprocess.Process(transport, streams, loop)
   err: list[str] = []
 
   async def feed():
@@ -1499,9 +1515,18 @@ async def run_process(
   )
   left = session.time_left()
   run_for = time_share(left, stop_before_sec)
+
+  async def cleanup():
+    try:
+      await _stop(proc.pid, streams.exited)
+      with contextlib.suppress(Exception):
+        await asyncio.wait_for(pumps, PROCESS_DRAIN_SEC)
+    finally:
+      transport.close()
+
   stopped = False
   try:
-    await asyncio.wait_for(asyncio.shield(proc.wait()), run_for)
+    await asyncio.wait_for(streams.exited.wait(), run_for)
   except asyncio.TimeoutError:
     stopped = True
     await session.log(
@@ -1509,26 +1534,18 @@ async def run_process(
         " limit"
     )
   finally:
-    await asyncio.shield(_stop(proc))
-    with contextlib.suppress(Exception):
-      await asyncio.wait_for(pumps, 10)
+    await asyncio.shield(cleanup())
   code = proc.returncode if proc.returncode is not None and not stopped else -1
   return Finished(code, "\n".join(err), stopped)
 
 
-async def _stop(proc: Any) -> None:
-  """Stops `proc`'s process group with `SIGTERM`, escalating to `SIGKILL`.
-
-  Waits up to 5 seconds for the group leader to exit after `SIGTERM`, then sends
-  `SIGKILL` to the process group so any surviving child processes are reaped.
-
-  Args:
-    proc: Subprocess object started with `start_new_session=True`.
-  """
+async def _stop(pgid: int, exited: asyncio.Event) -> None:
+  """Terminate the session's process group and await its leader independently of EOF."""
   with contextlib.suppress(ProcessLookupError):
-    os.killpg(proc.pid, signal.SIGTERM)
-  with contextlib.suppress(asyncio.TimeoutError):
-    await asyncio.wait_for(proc.wait(), 5)
+    os.killpg(pgid, signal.SIGTERM)
+  if not exited.is_set():
+    with contextlib.suppress(asyncio.TimeoutError):
+      await asyncio.wait_for(exited.wait(), 5)
   with contextlib.suppress(ProcessLookupError):
-    os.killpg(proc.pid, signal.SIGKILL)
-  await proc.wait()
+    os.killpg(pgid, signal.SIGKILL)
+  await exited.wait()
