@@ -66,7 +66,8 @@ class CopperWitnessTests(unittest.TestCase):
     def test_board_drill_cut_tangent_remote_and_detour(self):
         direct = wire(0, 0, 4, 0)
         detour = wire(0, 0, 0, 1) + wire(0, 1, 4, 1) + wire(4, 1, 4, 0)
-        for y, status in [(0, "unresolved"), (".30", "unresolved"),
+        # Tangency to the centerline still leaves half the trace conductive.
+        for y, status in [(0, "unresolved"), (".30", "witnessed"),
                           (".300001", "witnessed")]:
             with self.subTest(y=y):
                 hole = f'<hole x="2" y="{y}" drill=".6"/>'
@@ -112,8 +113,8 @@ class CopperWitnessTests(unittest.TestCase):
                           if s["source"][0] == "wire"], [2, 3, 4])
 
     def test_shortcut_inside_a_bore_does_not_hide_a_valid_landing(self):
-        # The through pad and both paths are on the same layer. Only the
-        # four-edge route demonstrates a landing outside the 1 mm bore.
+        # The old centerline proof needs the four-edge route. The SMD itself
+        # overlaps the surviving annulus to the left of x=-.05 mm.
         detour = (
             wire(0, 0, -1, 0) + wire(-1, 0, -1, 1)
             + wire(-1, 1, 1, 1) + wire(1, 1, ".45", 0)
@@ -121,7 +122,9 @@ class CopperWitnessTests(unittest.TestCase):
         shortcut = wire(0, 0, ".45", 0)
         pad = dict(end=(".45", 0), pad='pad drill="1" diameter="1.5"')
         self.assertEqual(self.routed(detour, **pad)["status"], "witnessed")
-        self.assertEqual(self.routed(shortcut, **pad)["status"], "unresolved")
+        material = self.routed(shortcut, **pad)
+        self.assertEqual(material["status"], "witnessed")
+        self.assertEqual(material["material"]["model"], "finite_outer_layer_regions")
         for artwork in (detour + shortcut, shortcut + detour, shortcut + detour + shortcut):
             with self.subTest(artwork=artwork):
                 result = self.routed(artwork, **pad)
@@ -130,6 +133,33 @@ class CopperWitnessTests(unittest.TestCase):
                 self.assertEqual(sum(s["source"][0] == "wire" for s in steps), 4)
                 nodes = [tuple(steps[0]["start"])] + [tuple(s["end"]) for s in steps]
                 self.assertEqual(len(nodes), len(set(nodes)))
+
+    def test_finite_width_bore_threshold_and_placed_cut(self):
+        direct = wire(0, 0, 4, 0).replace('width=".1"', 'width=".254"')
+        for diameter, expected in [(".127", "witnessed"), (".254", "unresolved"),
+                                   (".28", "unresolved"), (".6", "unresolved")]:
+            with self.subTest(diameter=diameter):
+                out = self.routed(direct, end=(4, 0),
+                                  plain=f'<hole x="2" y="0" drill="{diameter}"/>')
+                self.assertEqual(out["status"], expected)
+                if expected == "witnessed":
+                    self.assertTrue(any(len(s["material"]["path_nm"]) > 2
+                                        for s in out["witnesses"][0]["steps"]))
+        out = self.routed(direct, end=(4, 0), rotation="R90",
+                          package='<hole x="0" y="2" drill=".127"/>')
+        self.assertEqual(out["status"], "witnessed")
+
+    def test_rectangular_pad_edge_overlap_and_rotations(self):
+        direct = wire(0, 0, 1.7, 0)
+        for rotation, local in [("R0", "R0"), ("R90", "R90"), ("MR180", "R0")]:
+            with self.subTest(rotation=rotation):
+                pad = f'smd dx=".8" dy=".2" layer="{16 if rotation.startswith("M") else 1}" rot="{local}"'
+                out = self.routed(direct, end=(2, 0), rotation=rotation, pad=pad)
+                self.assertEqual(out["status"], "witnessed")
+        for endpoint, expected in [("1.84", "unresolved"), ("1.85", "unresolved"),
+                                   ("1.86", "witnessed")]:
+            out = self.routed(wire(0, 0, endpoint, 0), end=(2, 0))
+            self.assertEqual(out["status"], expected)
 
     def test_unsupported_artwork_does_not_prove_continuity(self):
         for item in (

@@ -1,0 +1,78 @@
+{
+  "due-bore-127": {
+    "board_sha256": "6b28aca451762d8d4f606fb7806dab4117980b500848bf7fe45b1862e8b24e27",
+    "expected": "witnessed"
+  },
+  "due-bore-204": {
+    "board_sha256": "96e3c6d9fe8075defe31133c30dab6d15828a5772730a381f70f7b34b3141de9",
+    "expected": "witnessed"
+  },
+  "due-bore-254": {
+    "board_sha256": "42a65dbeb359a609e27b5c59e2b5ac5aa570bcf65ac91cfd5163ee8bb02c92b7",
+    "expected": "unresolved"
+  },
+  "due-bore-280": {
+    "board_sha256": "938e444f0a846f63c1af46f86870367b3a5be38287c5e5ad5a09dad450a299e3",
+    "expected": "unresolved"
+  },
+  "due-caps-234": {
+    "board_sha256": "3356f6560c359421b3036d78c04ad8437c203d8e849b774a5d498f004ac1175a",
+    "expected": "witnessed"
+  },
+  "due-caps-254": {
+    "board_sha256": "9e97c820b5f90cf4132404b21d13a726a72967fb291a442d085492f7fd07a359",
+    "expected": "unresolved"
+  },
+  "due-caps-274": {
+    "board_sha256": "7f67553b68986f54c20b7052d5057b5585dfbe28ab4594e24cb72b4508d87b0d",
+    "expected": "unresolved"
+  },
+  "due-detour-cut": {
+    "board_sha256": "da5d0b6a54c2e2326f0b7167aa2d1d9d541fbbb3c46b53344dd295795d2a560b",
+    "expected": "unresolved"
+  },
+  "due-detour-open": {
+    "board_sha256": "6671cab173820c78331dda79d8091d5f9cc17d02dfb524eabb269c274d2ec70b",
+    "expected": "witnessed"
+  },
+  "due-footprint-127": {
+    "board_sha256": "ef37cdc639b5e98703af5df21c2db25a2e4696d08aa2a7f4bddc266e9e03e5a1",
+    "expected": "witnessed"
+  },
+  "due-footprint-600": {
+    "board_sha256": "9ca4e302b35ed61e7a7c984928fdb5d843609116a8255de49ed8af1c02a617d1",
+    "expected": "unresolved"
+  },
+  "due-original": {
+    "board_sha256": "fd7cc5f9a14623ff62a7555c826373fe8f842cca400f05ec4f7b4c5589e1780a",
+    "expected": "witnessed"
+  },
+  "due-pad--10": {
+    "board_sha256": "007448628d23d689d7b74497b00dd91299de035b04b441cb9d100a44f840af4a",
+    "expected": "unresolved"
+  },
+  "due-pad-0": {
+    "board_sha256": "1e452b5a4d0ea040f9df34cd9df11f83e7a6854ae0bfcd8f5f05203c9c393deb",
+    "expected": "unresolved"
+  },
+  "due-pad-30": {
+    "board_sha256": "f7c2419cde5b8db84187b1bdb248249af3bcea3fa7254d4bc8908ed75572b507",
+    "expected": "witnessed"
+  },
+  "feather-original": {
+    "board_sha256": "ed5eff88e1ab8f1cc5ae8db1a1188c1932a65c35a5df9f06b8910f73ff65b0d7",
+    "expected": "witnessed"
+  },
+  "feather-ring--25": {
+    "board_sha256": "98d44d7931ecd1a42cc5dbce2f67ab4d557985a459140e86f8c906b80618ba31",
+    "expected": "unresolved"
+  },
+  "feather-ring-0": {
+    "board_sha256": "3639f28ec955d401d3667bbd236f77ac1250f11bde53cabd76e453490f5af93d",
+    "expected": "unresolved"
+  },
+  "feather-ring-25": {
+    "board_sha256": "dba395daddb1e4071c2880ed84063031b8bb0ec406b8536ed236e80397f0f0ee",
+    "expected": "witnessed"
+  }
+}
