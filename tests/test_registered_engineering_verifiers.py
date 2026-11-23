@@ -1449,8 +1449,6 @@ def test_beam_antisymmetric_load_energy_and_profile_contract(routed):
 
 
 def test_registered_enriched_product_uses_whole_equilibrium_trays(routed):
-    from fractions import Fraction
-
     receipt = routed["enriched-product-two-tray"]
     assert receipt["completed"], receipt
     result = receipt["details"]

@@ -1,9 +1,10 @@
 """Independent equilibrium and section-balance counts for long binary columns."""
 import math
 import unittest
+from fractions import Fraction
 from decimal import Decimal as D, ROUND_CEILING, localcontext
 
-from hamon_wave7_engineering_verifiers import dispatch_wave7_verifier
+from hamon_wave7_engineering_verifiers import _fenske_contacts_suffice, dispatch_wave7_verifier
 
 
 def column(alpha, reflux, **changes):
@@ -63,6 +64,24 @@ def fixed_point_replay(alpha, reflux):
 
 
 class LongDistillationColumns(unittest.TestCase):
+    def test_whole_contact_bound_handles_equality_and_large_integer_neighbors(self):
+        alpha = Fraction(2)
+        bottom = Fraction(1, 2)
+        # Two ideal contacts give a top odds ratio of exactly four.
+        for top, feasible in ((Fraction(79, 100), True), (Fraction(4, 5), True),
+                              (Fraction(81, 100), False)):
+            self.assertIs(_fenske_contacts_suffice(2, alpha, top, bottom), feasible)
+
+        # Adjacent contact counts cannot both survive a float representation.
+        alpha = Fraction(5000000000000001, 5000000000000000)
+        with localcontext() as ctx:
+            ctx.prec = 90
+            limit = D(10).ln() / (D(alpha.numerator)/D(alpha.denominator)).ln()
+            required = int(limit.to_integral_value(rounding=ROUND_CEILING))
+        self.assertGreater(required, 2**53)
+        self.assertFalse(_fenske_contacts_suffice(required-1, alpha, Fraction(10, 11), bottom))
+        self.assertTrue(_fenske_contacts_suffice(required, alpha, Fraction(10, 11), bottom))
+
     def test_feed_and_fractional_tray_by_individual_material_balances(self):
         for alpha, reflux, count in ((1.02,150,316), (1.01,300,628),
                                      (1.006,1000,854), (1.0004,15000,12767)):
