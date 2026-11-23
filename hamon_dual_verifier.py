@@ -2121,18 +2121,80 @@ def solve_heat_exchanger_ntu_dual(spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _cooling_coil_inventory(spec, dry_air):
+    """Steady cooling/dehumidification, per kg dry air, with no water supply."""
+    values = [float(spec[key]) for key in ("T_in_C", "T_out_C", "w_in_kg_kg", "w_out_kg_kg")]
+    if not all(math.isfinite(v) for v in values) or min(values[:2]) <= -273.15 or min(values[2:]) < 0:
+        raise ValueError("Coil temperatures must exceed absolute zero and humidity ratios must be nonnegative")
+    ti, to, wi, wo = map(Fraction, values)
+    mass = Fraction(dry_air)
+    removed = mass * (wi-wo)
+
+    def emitted(value):
+        result = float(value)
+        if not math.isfinite(result) or (value and result == 0):
+            raise ValueError("Coil output outside the representable range")
+        return result
+
+    # Two readings of the air-side balance: subtract the moist enthalpy
+    # fluxes, then independently split the sensible and vapor contributions.
+    def air_enthalpy(t, w):
+        return 1006*t + w*(2501000 + 1860*t)
+
+    air_drop = mass * (air_enthalpy(ti, wi) - air_enthalpy(to, wo))
+    sensible = mass * (1006 + 930*(wi+wo)) * (ti-to)
+    vapor = removed * (2501000 + 930*(ti+to))
+    total, qs, qv = map(emitted, (air_drop, sensible, vapor))
+    condensate = emitted(max(0, removed))
+    water_error = abs(Fraction(condensate) - removed)
+    energy_error = abs(Fraction(total) - Fraction(qs) - Fraction(qv))
+
+    def relative(error, scale):
+        return float(error/scale) if scale else 0.0
+
+    water_discrepancy = relative(water_error, abs(removed))
+    energy_discrepancy = relative(energy_error, abs(sensible) + abs(vapor))
+    for wire, exact in ((total, air_drop), (qs, sensible), (qv, vapor)):
+        energy_discrepancy = max(energy_discrepancy, relative(abs(Fraction(wire) - exact), abs(exact)))
+    # Match the relative qualification used by the other dual physical solvers.
+    water_ok = removed >= 0 and water_discrepancy <= 1e-7
+    energy_ok = (air_drop == sensible + vapor and min(air_drop, sensible) >= 0
+                 and energy_discrepancy <= 1e-7)
+    discrepancy = max(water_discrepancy, energy_discrepancy)
+    result = {
+        "Q_total_cooling_W": total, "Q_sensible_W": qs, "Q_vapor_transfer_W": qv,
+        "sensible_heat_ratio": emitted(sensible/air_drop) if air_drop > 0 else 1.0,
+        "condensate_kg_s": condensate,
+        "coil_water_residual_kg_s": float(water_error),
+        "coil_air_energy_residual_W": float(energy_error),
+        "coil_water_balance_ok": water_ok, "coil_air_energy_balance_ok": energy_ok,
+    }
+    if "condensate_enthalpy_J_kg" in spec or not removed:
+        # Same reference as the moist-air law: liquid water at 0 C has h=0.
+        # A wet outlet's drain enthalpy cannot be inferred from its air state.
+        drain_h = float(spec.get("condensate_enthalpy_J_kg", 0.0))
+        if not math.isfinite(drain_h):
+            raise ValueError("Condensate enthalpy must be finite")
+        if water_ok:
+            drain = removed * Fraction(drain_h)
+            extraction = air_drop - drain
+            drain_wire, extraction_wire = emitted(drain), emitted(extraction)
+            residual = abs(Fraction(total) - Fraction(drain_wire) - Fraction(extraction_wire))
+            error = max(relative(residual, abs(drain) + abs(extraction)),
+                        relative(abs(Fraction(extraction_wire)-extraction), abs(extraction)),
+                        relative(abs(Fraction(drain_wire)-drain), abs(drain)))
+            result.update(condensate_enthalpy_flow_W=drain_wire,
+                          Q_coil_heat_removed_W=extraction_wire,
+                          coil_total_energy_residual_W=float(residual),
+                          coil_total_energy_balance_ok=extraction >= 0 and error <= 1e-7)
+            energy_ok = energy_ok and result["coil_total_energy_balance_ok"]
+            discrepancy = max(discrepancy, error)
+    return result, discrepancy, water_ok and energy_ok
+
+
 def solve_hvac_coil_and_duct_dual(spec: dict[str, Any]) -> dict[str, Any]:
     """Dual-solve HVAC moist-air cooling/dehumidification coil load + Huebscher rectangular duct loss."""
     ma = float(spec["m_dry_air_kg_s"])
-    t1, w1 = float(spec["T_in_C"]), float(spec["w_in_kg_kg"])
-    t2, w2 = float(spec["T_out_C"]), float(spec["w_out_kg_kg"])
-    # ASHRAE moist-air specific enthalpy h (J/kg_da) = 1006*T + w*(2501000 + 1860*T)
-    h1 = 1006.0 * t1 + w1 * (2_501_000.0 + 1860.0 * t1)
-    h2 = 1006.0 * t2 + w2 * (2_501_000.0 + 1860.0 * t2)
-    q_tot_w = ma * (h1 - h2)
-    q_sens_w = ma * (1006.0 + 1860.0 * 0.5 * (w1 + w2)) * (t1 - t2)
-    m_cond = ma * max(0.0, w1 - w2)
-
     a_m, b_m = float(spec["duct_width_m"]), float(spec["duct_height_m"])
     if not all(math.isfinite(side) and side > 0.0 for side in (a_m, b_m)):
         raise ValueError("duct dimensions must be finite and positive")
@@ -2141,6 +2203,7 @@ def solve_hvac_coil_and_duct_dual(spec: dict[str, Any]) -> dict[str, Any]:
     rho_a = float(spec.get("rho_air_kg_m3", 1.2))
     if not math.isfinite(rho_a) or rho_a <= 0.0 or not math.isfinite(ma) or ma < 0.0:
         raise ValueError("air density must be finite and positive and mass flow finite and nonnegative")
+    coil, coil_discrepancy, coil_ok = _cooling_coil_inventory(spec, ma)
     loss_k = float(spec.get("minor_loss_K", 0.0))
     if not math.isfinite(loss_k):
         raise ValueError("fitting loss coefficient must be finite")
@@ -2157,14 +2220,11 @@ def solve_hvac_coil_and_duct_dual(spec: dict[str, Any]) -> dict[str, Any]:
         "mu_Pa_s": float(spec.get("mu_air_Pa_s", 1.81e-5)),
     })
     return {
-        "Q_total_cooling_W": q_tot_w,
-        "Q_sensible_W": q_sens_w,
-        "sensible_heat_ratio": q_sens_w / q_tot_w if q_tot_w > 0 else 1.0,
-        "condensate_kg_s": m_cond,
+        **coil,
         "huebscher_D_eq_m": d_eq,
         "duct_pressure_drop_Pa": hyd["pressure_drop_Pa"] + fitting_drop,
-        "dual_rel_discrepancy": hyd["dual_rel_discrepancy"],
-        "dual_verified": True,
+        "dual_rel_discrepancy": max(hyd["dual_rel_discrepancy"], coil_discrepancy),
+        "dual_verified": coil_ok and hyd["dual_verified"],
     }
 
 
