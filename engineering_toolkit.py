@@ -959,6 +959,8 @@ def run(argv=None):
     dvf.add_argument("file")
     dxt=sub.add_parser("dxf-takeoff",help="SI-calibrated DXF LINE/LWPOLYLINE/CIRCLE/ARC/INSERT spatial takeoff")
     dxt.add_argument("file")
+    dxt.add_argument("--existing-layer",help="Existing triangular terrain surface layer; requires --proposed-layer")
+    dxt.add_argument("--proposed-layer",help="Proposed triangular terrain surface layer; requires --existing-layer")
     fmg=sub.add_parser("format-guard",help="Audit local deliverable JSON/CSV/XLSX/ZIP format and formula caches")
     fmg.add_argument("file")
     args=p.parse_args(argv)
@@ -1036,8 +1038,15 @@ def run(argv=None):
             import hamon_dual_verifier
             out=hamon_dual_verifier.run_dual_verify_file(args.file)
         elif args.cmd=="dxf-takeoff":
-            import hamon_cad_takeoff
-            out=hamon_cad_takeoff.scan_dxf_takeoff(args.file)
+            if (args.existing_layer is None) != (args.proposed_layer is None):
+                raise ValueError("terrain takeoff requires both --existing-layer and --proposed-layer")
+            if args.existing_layer is not None:
+                import hamon_terrain_volume
+                out=hamon_terrain_volume.scan_dxf_terrain_volume(
+                    args.file,args.existing_layer,args.proposed_layer)
+            else:
+                import hamon_cad_takeoff
+                out=hamon_cad_takeoff.scan_dxf_takeoff(args.file)
         elif args.cmd=="format-guard":
             out = audit_local_deliverable(args.file)
             if not out.get("ok", False):
@@ -1045,6 +1054,8 @@ def run(argv=None):
                 return 3
         else: raise ValueError("unsupported command")
         print(json.dumps({"ok":True,**out},ensure_ascii=True,default=str))
+        if args.cmd=="dxf-takeoff" and args.existing_layer is not None:
+            return 0 if out.get("qualified") is True else 3
         return 3 if args.cmd=="calc-pack" and not out["all_checks_pass"] else 0
     except (OSError,ValueError,InvalidOperation,RuntimeError,ImportError,ET.ParseError,zipfile.BadZipFile,
             subprocess.TimeoutExpired,ZeroDivisionError,OverflowError,SyntaxError) as exc:

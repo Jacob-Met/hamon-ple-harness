@@ -61,6 +61,13 @@ reported force relative to the exact equilibrium solution is outside this compar
 
 The [rigid strip contact solver](docs/rigid_strip_contact.md) computes full or partial compression-only base contact from a signed force and moment. It is distinct from soil bearing capacity.
 
+The [terrain cut/fill operation](docs/terrain_cut_fill.md) compares named existing
+and proposed triangular terrain layers in an ASCII DXF. Run `dxf-takeoff` with
+both `--existing-layer` and `--proposed-layer` to obtain separate cut and fill
+volumes, common plan area and uncovered areas. It integrates across different
+triangulations and withholds volumes when coverage or source geometry is
+unqualified.
+
 ## Complete inline engineering requests
 
 The live budget router can certify a complete inline calculation in an empty task workspace. Supply one existing `{"mode": ..., "spec": ...}` conservation-verifier request, or an ordered JSON list containing one or two such requests. JSON can be the whole instruction or the entire contents of a single Markdown code fence. The two supported delivery-only cover lines are `Run the calculation below and return its JSON result.` for an object and `Run the calculations below and return their JSON results in the same order.` for a list.
