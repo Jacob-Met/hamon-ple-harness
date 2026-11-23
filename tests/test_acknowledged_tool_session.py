@@ -11,7 +11,8 @@ import harness
 
 
 class AcknowledgedToolSession(unittest.IsolatedAsyncioTestCase):
-    async def exercise(self, mode, *, local=False, remaining=240):
+    async def exercise(self, mode, *, local=False, remaining=240,
+                       delivered=False, finish_followup=True):
         prompt = ("Write the report to output/report.pdf." if local
                   else "File the report in the team's document store.")
         session = SimpleNamespace(instruction=prompt, workdir="/filesystem", mcp_servers=[],
@@ -26,11 +27,14 @@ class AcknowledgedToolSession(unittest.IsolatedAsyncioTestCase):
                     "content": [{"type": "text", "text": "observed " + i}],
                     "isError": i == "b"} for i in ("b", "a")]
         calls = []
+        ready = False
         async def process(argv, s, *, on_line, **kwargs):
+            nonlocal ready
             calls.append((list(argv), kwargs["stdin"]))
             async def event(message):
                 await on_line(json.dumps({"type": "message_end", "message": message}).encode())
             if len(calls) == 1:
+                ready = delivered
                 directory = Path(argv[argv.index("--session-dir") + 1])
                 directory.mkdir()
                 header = {"type": "session", "id": "test", "version": 3, "cwd": "/work"}
@@ -59,13 +63,21 @@ class AcknowledgedToolSession(unittest.IsolatedAsyncioTestCase):
                 (directory / "single.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
             else:
                 self.assertEqual(len(calls), 2)
-                if not local:
+                if not local or delivered:
                     file = Path(argv[argv.index("--session") + 1])
                     self.assertEqual(file.name, "single.jsonl")
                     self.assertTrue(file.exists())
-                await event({"role": "assistant", "stopReason": "stop", "content": [
-                    {"type": "text", "text": "The requested status was recorded."}]})
+                if finish_followup:
+                    await event({"role": "assistant", "stopReason": "stop", "content": [
+                        {"type": "text", "text": "The requested status was recorded."}]})
+                else:
+                    await event({"role": "assistant", "stopReason": "toolUse", "content": [
+                        {"type": "toolCall", "id": "unresolved", "name": "read", "arguments": {}}]})
             return SimpleNamespace(code=0, stderr="")
+        async def snapshot(_, targets, *, deadline=None):
+            return {"/filesystem/output/report.pdf": {
+                "state": "ready" if ready else "missing", "fingerprint": "published",
+            }} if local else {}
         relay = mock.MagicMock()
         relay.__aenter__.return_value = SimpleNamespace(env=lambda: dict(os.environ))
         with contextlib.ExitStack() as stack:
@@ -76,8 +88,7 @@ class AcknowledgedToolSession(unittest.IsolatedAsyncioTestCase):
             replace(harness, "configure", lambda *a: ("model", "fixture"))
             replace(harness.engineering_intake, "intake_for_prompt", mock.AsyncMock(return_value=""))
             replace(harness.engineering_intake, "provision_engineering_cli", mock.AsyncMock(return_value=""))
-            replace(harness.delivery_guard, "snapshot", mock.AsyncMock(return_value={
-                "/filesystem/output/report.pdf": {"state": "missing"}} if local else {}))
+            replace(harness.delivery_guard, "snapshot", snapshot)
             result = await harness.solve(session)
         return calls, result
 
@@ -86,12 +97,30 @@ class AcknowledgedToolSession(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(result, "The requested status was recorded.")
 
+    async def test_complete_local_delivery_finalizes_the_verified_tool_session(self):
+        calls, result = await self.exercise("complete", local=True, delivered=True)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result, "The requested status was recorded.")
+
+    async def test_delivery_repair_does_not_reuse_the_previous_tool_proof(self):
+        for finish in (False, True):
+            with self.subTest(finish_followup=finish):
+                calls, result = await self.exercise("complete", local=True,
+                                                    finish_followup=finish)
+                self.assertEqual(len(calls), 2)
+                if finish:
+                    self.assertEqual(result, "The requested status was recorded.")
+                else:
+                    self.assertIn("before giving a final answer", result)
+
     async def test_pending_or_unverified_tool_results_never_continue(self):
         for mode in ("partial", "changed", "omitted", "ambiguous", "branch", "earlier"):
             with self.subTest(mode=mode):
                 calls, result = await self.exercise(mode)
                 self.assertEqual(len(calls), 1)
                 self.assertNotIn("I will check", result)
+                calls, _ = await self.exercise(mode, local=True, delivered=True)
+                self.assertEqual(len(calls), 1)
         calls, _ = await self.exercise("partial", local=True)
         self.assertEqual(len(calls), 1)
 
@@ -110,4 +139,6 @@ class AcknowledgedToolSession(unittest.IsolatedAsyncioTestCase):
 
     async def test_insufficient_budget_keeps_only_the_original(self):
         calls, _ = await self.exercise("complete", remaining=35)
+        self.assertEqual(len(calls), 1)
+        calls, _ = await self.exercise("complete", local=True, delivered=True, remaining=35)
         self.assertEqual(len(calls), 1)
