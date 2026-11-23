@@ -20,6 +20,17 @@ BASE = {"calculation": "rigid_strip_contact", "base_width_m": 3,
         "vertical_resultant_N_m": 100000, "moment_Nm_m": 144000}
 
 
+ACTION_BASE = {"calculation": "rigid_strip_contact", "base_width_m": 3}
+
+
+def horizontal_pair(sign=1, upper_height=3):
+    return {**ACTION_BASE, "applied_loads": [
+        {"x_m": 0, "vertical_N_m": 100000},
+        {"height_m": upper_height, "horizontal_N_m": sign*48000},
+        {"height_m": 0, "horizontal_N_m": -sign*48000},
+    ]}
+
+
 def simpson_loads(left, right, p_left, p_right):
     """Exact forward integration, not the solver's inverse contact equations."""
     middle = (left + right) / 2
@@ -58,6 +69,65 @@ class RigidStripContact(unittest.TestCase):
         self.assertEqual(out["q_left_Pa"], 0)
         self.assertFalse(verify_rigid_strip_contact({
             **BASE, "proposed_contact_width_m": 0.12})["conservation_verified"])
+
+    def test_balanced_horizontal_actions_reduce_to_the_signed_couple(self):
+        for sign in (-1, 1):
+            for height in (0, 1, 3):
+                with self.subTest(sign=sign, height=height):
+                    reduced = run_router_conservation_cad_verifier(horizontal_pair(sign, height))
+                    self.assertEqual(reduced.pop("horizontal_resultant_N_m"), 0)
+                    expected = verify_rigid_strip_contact({**BASE, "moment_Nm_m": sign*48000*height})
+                    self.assertEqual(reduced, expected)
+                    self.assertTrue(reduced["conservation_verified"])
+        dual = run_dual_verify_spec({"mode": "domain", "kind": "rigid_strip_contact",
+                                     "spec": horizontal_pair(-1)})
+        self.assertTrue(dual["dual_verified"], dual)
+        self.assertEqual(dual["contact_interval_m"], [-1.5, -1.32])
+
+    def test_force_components_origin_and_free_couple(self):
+        # V = 100 kN/m. Clockwise M = 80 + 75 + 50 - 80 = 125 kN m/m.
+        for dx, dz in ((0, 0), (-8, 100)):
+            actions = [
+                {"vertical_N_m": "80*kN/m", "x_m": 2+dx,
+                 "horizontal_N_m": "25*kN/m", "height_m": 5+dz},
+                {"vertical_N_m": "20*kN/m", "x_m": 1+dx},
+                {"horizontal_N_m": "-25*kN/m", "height_m": dz},
+                {"couple_Nm_m": "-80*kN*m/m"},
+            ]
+            for ordered in (actions, list(reversed(actions))):
+                out = verify_rigid_strip_contact({
+                    **ACTION_BASE, "base_center": {"x_m": 1+dx, "height_m": 2+dz},
+                    "applied_loads": ordered})
+                self.assertEqual(out.pop("horizontal_resultant_N_m"), 0)
+                self.assertEqual(out, verify_rigid_strip_contact({**BASE, "moment_Nm_m": 125000}))
+        # The large opposing horizontal contributions must not erase a smaller action.
+        tiny = verify_rigid_strip_contact({**ACTION_BASE, "applied_loads": [
+            {"horizontal_N_m": 2**60, "height_m": 1},
+            {"vertical_N_m": 10, "x_m": 0.125},
+            {"horizontal_N_m": -(2**60), "height_m": 1}]})
+        self.assertTrue(tiny["conservation_verified"], tiny)
+        self.assertEqual(tiny["moment_Nm_m"], 1.25)
+
+    def test_unbalanced_actions_and_malformed_inputs_are_uncertified(self):
+        for residual in (1, 2**-35):
+            spec = horizontal_pair()
+            spec["applied_loads"].append({"horizontal_N_m": residual, "height_m": 0})
+            out = verify_rigid_strip_contact(spec)
+            self.assertEqual(out["horizontal_resultant_N_m"], residual)
+            self.assertEqual(out["moment_Nm_m"], 144000)
+            self.assertFalse(out["conservation_verified"])
+            self.assertFalse(out["ok"])
+        for spec in (
+            {**BASE, "applied_loads": []}, {**BASE, "base_center": {"x_m": 0, "height_m": 0}},
+            {**horizontal_pair(), "moment_Nm_m": 0},
+            {**horizontal_pair(), "base_center": {"x_m": 0}},
+            *({**ACTION_BASE, "applied_loads": loads} for loads in (
+                [], {}, [None], [{}], [{"horizontal_N_m": 0}], [{"height_m": 2}],
+                [{"vertical_N_m": 1, "x_m": "2*Pa"}], [{"couple_Nm_m": True}],
+                [{"x_m": 0, "vertical_N_m": 100, "unknown": 9}])),
+        ):
+            with self.subTest(spec=spec):
+                self.assertFalse(verify_rigid_strip_contact(spec)["ok"])
 
     def test_independently_generated_pressure_fields_and_reflections(self):
         count = 0
@@ -278,7 +348,9 @@ print(json.dumps(run_router_conservation_cad_verifier(bundle['payload']),allow_n
     def test_real_registered_pi_tool(self):
         if not (ROOT/"node_modules/@earendil-works/pi-coding-agent").exists():
             self.skipTest("registered Pi runtime not installed")
-        cases = [BASE, {**BASE, "moment_Nm_m": -144000},
+        cases = [BASE, horizontal_pair(), horizontal_pair(-1),
+                 {**ACTION_BASE, "applied_loads": [{"height_m": 4, "horizontal_N_m": 1}]},
+                 {**BASE, "moment_Nm_m": -144000},
                  {**BASE, "moment_Nm_m": 0}, {**BASE, "moment_Nm_m": 150000},
                  {**BASE, "base_width_m": "3000*mm"},
                  {**BASE, "proposed_contact_width_m": .12},

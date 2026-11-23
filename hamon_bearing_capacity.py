@@ -360,6 +360,52 @@ def _strip_quantity(value, field, unit):
     return numeric(value, field)
 
 
+def _strip_resultants(spec):
+    """Reduce actions to H (right), N (down), and clockwise M about the base center."""
+    from fractions import Fraction
+
+    def quantity(obj, key, unit):
+        return Fraction(_strip_quantity(obj[key], key, unit))
+
+    if "applied_loads" not in spec:
+        if "base_center" in spec:
+            raise ValueError("base_center applies only to applied_loads")
+        return (Fraction(0), quantity(spec, "vertical_resultant_N_m", "N/m"),
+                quantity(spec, "moment_Nm_m", "N*m/m"))
+    if "vertical_resultant_N_m" in spec or "moment_Nm_m" in spec:
+        raise ValueError("Use either applied_loads or the aggregate vertical resultant and moment")
+    loads = spec["applied_loads"]
+    if not isinstance(loads, list) or not loads:
+        raise ValueError("applied_loads must be a nonempty list")
+    origin = spec.get("base_center", {"x_m": 0, "height_m": 0})
+    if not isinstance(origin, dict) or set(origin) != {"x_m", "height_m"}:
+        raise ValueError("base_center requires x_m and height_m")
+    center_x = quantity(origin, "x_m", "m")
+    center_height = quantity(origin, "height_m", "m")
+    horizontal = normal = moment = Fraction(0)
+    for index, action in enumerate(loads):
+        if not isinstance(action, dict) or not action:
+            raise ValueError(f"applied_loads[{index}] must describe a force or a couple")
+        if set(action) == {"couple_Nm_m"}:
+            moment += quantity(action, "couple_Nm_m", "N*m/m")
+            continue
+        keys = set(action)
+        if (keys - {"horizontal_N_m", "height_m", "vertical_N_m", "x_m"}
+                or ("horizontal_N_m" in keys) != ("height_m" in keys)
+                or ("vertical_N_m" in keys) != ("x_m" in keys)):
+            raise ValueError(f"applied_loads[{index}] requires horizontal_N_m with height_m "
+                             "or vertical_N_m with x_m, or both pairs")
+        if "horizontal_N_m" in keys:
+            force = quantity(action, "horizontal_N_m", "N/m")
+            horizontal += force
+            moment += force * (quantity(action, "height_m", "m") - center_height)
+        if "vertical_N_m" in keys:
+            force = quantity(action, "vertical_N_m", "N/m")
+            normal += force
+            moment += force * (quantity(action, "x_m", "m") - center_x)
+    return horizontal, normal, moment
+
+
 def verify_rigid_strip_contact(spec):
     """Rigid strip on a compression-only bed: p(x) = max(0, a + b*x).
 
@@ -384,7 +430,7 @@ def verify_rigid_strip_contact(spec):
     scalars = ("contact_width_m", "eccentricity_m", "q_min_Pa",
                "q_max_Pa", "q_left_Pa", "q_right_Pa")
     allowed = {"mode", "kind", "calculation", "pressure_model",
-               "base_width_m", "vertical_resultant_N_m", "moment_Nm_m",
+               "base_width_m", "vertical_resultant_N_m", "moment_Nm_m", "applied_loads", "base_center",
                "proposed_contact_interval_m", "proposed_contact_regime"}
     allowed.update("proposed_" + key for key in scalars)
 
@@ -412,12 +458,17 @@ def verify_rigid_strip_contact(spec):
             raise ValueError("Expected calculation=rigid_strip_contact")
         if spec.get("pressure_model", "positive_part_affine") != "positive_part_affine":
             raise ValueError("Only pressure_model=positive_part_affine is represented")
-        b, normal, moment = (
-            Fraction(_strip_quantity(spec[key], key, units[key]))
-            for key in ("base_width_m", "vertical_resultant_N_m", "moment_Nm_m")
-        )
+        b = Fraction(_strip_quantity(spec["base_width_m"], "base_width_m", "m"))
         if b <= 0:
             raise ValueError("base_width_m must be positive")
+        horizontal, normal, moment = _strip_resultants(spec)
+        if "applied_loads" in spec:
+            out.update(horizontal_resultant_N_m=rendered(horizontal, "horizontal_resultant_N_m"),
+                       vertical_resultant_N_m=rendered(normal, "vertical_resultant_N_m"),
+                       moment_Nm_m=rendered(moment, "moment_Nm_m"))
+        if horizontal:
+            return {**out, "equilibrium_status": "no_finite_equilibrium",
+                    "reason": "Normal pressure cannot balance a nonzero horizontal resultant"}
         if normal < 0 or (normal == 0 and moment != 0):
             return {**out, "equilibrium_status": "no_finite_equilibrium",
                     "reason": "Nonnegative contact pressure cannot supply this normal force and moment"}
