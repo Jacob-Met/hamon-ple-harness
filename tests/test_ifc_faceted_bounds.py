@@ -227,7 +227,7 @@ console.log(JSON.stringify(reports));
                 self.assertFalse(refused["ok"], refused)
                 self.assertEqual(refused["status"], "unresolved_solid_geometry")
                 self.assertIsNone(refused["total_solid_volume_m3"])
-                self.assertGreaterEqual(commands.count("exec"), 2)
+                self.assertEqual(commands, ["read_file", "read_file"])
             finally:
                 relay.shutdown()
                 relay.server_close()
