@@ -271,56 +271,62 @@ def parse_ifc_entities(ifc_text: str) -> Dict[int, Tuple[str, List[Any]]]:
 
 
 def _detect_length_unit_scale(entities: Dict[int, Tuple[str, List[Any]]]) -> float:
-    prefix_scales = {
-        "MILLI": 1e-3,
-        "CENTI": 1e-2,
-        "DECI": 1e-1,
-        "KILO": 1e3,
-        "MICRO": 1e-6,
+    """Return the metres per project length unit of this IFC model."""
+    prefixes = {
+        None: 1., "EXA": 1e18, "PETA": 1e15, "TERA": 1e12, "GIGA": 1e9,
+        "MEGA": 1e6, "KILO": 1e3, "HECTO": 1e2, "DECA": 1e1,
+        "DECI": 1e-1, "CENTI": 1e-2, "MILLI": 1e-3, "MICRO": 1e-6,
+        "NANO": 1e-9, "PICO": 1e-12, "FEMTO": 1e-15, "ATTO": 1e-18,
     }
-    conv_names = {
-        "INCH": 0.0254,
-        "FOOT": 0.3048,
-        "FEET": 0.3048,
-        "YARD": 0.9144,
-        "MM": 0.001,
-        "CM": 0.01,
-    }
-    candidate_ids: List[int] = []
-    for eid, (etype, args) in entities.items():
-        if etype == "IFCUNITASSIGNMENT" and args and isinstance(args[0], list):
-            for u in args[0]:
-                if isinstance(u, tuple) and u[0] == "ref":
-                    candidate_ids.append(u[1])
-    if not candidate_ids:
-        candidate_ids = list(entities.keys())
 
-    for cid in candidate_ids:
-        if cid not in entities:
-            continue
-        etype, args = entities[cid]
-        if etype == "IFCCONVERSIONBASEDUNIT" and len(args) >= 4 and args[1] == "LENGTHUNIT":
-            uname = str(args[2] or "").upper()
-            if uname in conv_names:
-                return conv_names[uname]
-            mref = args[3]
-            if isinstance(mref, tuple) and mref[0] == "ref" and mref[1] in entities:
-                _, margs = entities[mref[1]]
-                if margs:
-                    val = margs[0]
-                    if isinstance(val, tuple) and len(val) == 2 and val[1]:
-                        val = val[1][0]
-                    if isinstance(val, (int, float)):
-                        base_s = 1.0
-                        if len(margs) > 1 and isinstance(margs[1], tuple) and margs[1][0] == "ref":
-                            bu = entities.get(margs[1][1])
-                            if bu and bu[0] == "IFCSIUNIT" and len(bu[1]) >= 4:
-                                base_s = prefix_scales.get(str(bu[1][2] or "").upper(), 1.0)
-                        return float(val) * base_s
-        elif etype == "IFCSIUNIT" and len(args) >= 4 and args[1] == "LENGTHUNIT":
-            pref = str(args[2] or "").upper()
-            return prefix_scales.get(pref, 1.0)
-    return 1.0
+    def resolve(ref):
+        if isinstance(ref, tuple) and ref[0] == "ref" and ref[1] in entities:
+            return entities[ref[1]]
+        raise ValueError("Unresolved IFC project unit reference")
+
+    def metre_scale(kind, attrs):
+        if (kind != "IFCSIUNIT" or len(attrs) != 4 or attrs[1] != "LENGTHUNIT"
+                or attrs[3] != "METRE" or attrs[2] not in prefixes):
+            raise ValueError("Expected an IFC SI length unit based on metres")
+        return prefixes[attrs[2]]
+
+    def assignment_scale(ref):
+        kind, args = resolve(ref)
+        if kind != "IFCUNITASSIGNMENT" or len(args) != 1 or not isinstance(args[0], list):
+            raise ValueError("Expected an IFC project unit assignment")
+        units = [resolve(unit) for unit in args[0]]
+        lengths = [(kind, attrs) for kind, attrs in units if len(attrs) >= 2 and attrs[1] == "LENGTHUNIT"]
+        if len(lengths) != 1:
+            raise ValueError("An IFC unit assignment must contain one length unit")
+        kind, attrs = lengths[0]
+        if kind != "IFCCONVERSIONBASEDUNIT":
+            return metre_scale(kind, attrs)
+        if len(attrs) != 4:
+            raise ValueError("Invalid IFC length conversion")
+        measure, factor = resolve(attrs[3])
+        if measure not in ("IFCMEASUREWITHUNIT", "IFCLENGTHMEASUREWITHUNIT") or len(factor) != 2:
+            raise ValueError("Expected an IFC length conversion measure")
+        value = factor[0]
+        if (not isinstance(value, tuple) or value[0] not in ("IFCLENGTHMEASURE", "IFCPOSITIVELENGTHMEASURE")
+                or len(value[1]) != 1 or type(value[1][0]) not in (int, float)):
+            raise ValueError("Expected a typed IFC length conversion factor")
+        scale = value[1][0] * metre_scale(*resolve(factor[1]))
+        if not math.isfinite(scale) or scale <= 0:
+            raise ValueError("Invalid IFC length conversion factor")
+        return scale
+
+    projects = [args for kind, args in entities.values() if kind == "IFCPROJECT"]
+    if projects:
+        scales = {assignment_scale(args[8] if len(args) > 8 else None) for args in projects}
+        if len(scales) != 1:
+            raise ValueError("IFC projects declare different length scales")
+        return scales.pop()
+
+    # Geometry-only fixtures may omit IfcProject. A sole assignment is unambiguous.
+    assignments = [("ref", eid) for eid, (kind, _) in entities.items() if kind == "IFCUNITASSIGNMENT"]
+    if len(assignments) > 1:
+        raise ValueError("Ambiguous IFC unit assignments without a project")
+    return assignment_scale(assignments[0]) if assignments else 1.
 
 
 def _vec3_from_ref(entities: Dict[int, Tuple[str, List[Any]]], ref: Any, default: Sequence[float]) -> np.ndarray:
