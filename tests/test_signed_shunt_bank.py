@@ -81,3 +81,26 @@ class ShuntBankSelection(unittest.TestCase):
                        dict(initial_pf_direction="capacitor")):
             with self.assertRaises(ValueError):
                 correction(**change)
+
+    def test_component_rounding_must_reach_the_supply_target(self):
+        # The best delta C on the binary64 grid leaves >70,000 kvar for a
+        # 1 kW / unity PF target, although the bank's fractional error is tiny.
+        for direction in ("lagging","leading"):
+            with self.subTest(direction=direction):
+                with self.assertRaisesRegex(ValueError, "target"):
+                    correction(P_kW=1.,V_ll_V=1.,freq_Hz=1.,pf_initial=2.**-70,
+                               pf_target=1.,initial_pf_direction=direction)
+
+    def test_achieved_signed_load_and_near_unity_control(self):
+        import math
+        near = math.nextafter(1.,0.)
+        # A moderate initial load can hit unity within the published-C limit;
+        # a smaller adjustment can also resolve a nonzero near-unity target.
+        for source,target,direction in ((.01,1.,"lagging"),(.9999995,near,"leading")):
+            out = correction(P_kW=1.,V_ll_V=1.,freq_Hz=1.,pf_initial=source,
+                             pf_target=target,target_pf_direction=direction)
+            self.assertTrue(out["dual_verified"])
+            expected = (1 if direction=="lagging" else -1)*math.sqrt((1-target)*(1+target))/target
+            scale = abs(expected) or 1.
+            self.assertLessEqual(abs(out["Q_net_replay_kvar"]-expected)/scale,1e-10)
+            self.assertLessEqual(out["target_relative_replay_error"],1e-10)
