@@ -256,6 +256,32 @@ def _cylinder_mesh(origin: np.ndarray, x_ax: np.ndarray, y_ax: np.ndarray, z_ax:
     return np.array(verts, dtype=np.float64), np.array(faces, dtype=np.int32)
 
 
+def _position_ifc_profile(poly, entities, reference, scale):
+    """Place profile vertices in the swept solid's XY plane."""
+    if reference == "$":
+        return poly
+    kind, args = entities.get(_ref_id(reference), (None, []))
+    if kind != "IFCAXIS2PLACEMENT2D" or len(args) != 2:
+        raise ValueError("IFC rectangle requires a two-dimensional profile placement")
+    kind, loc = entities.get(_ref_id(args[0]), (None, []))
+    if kind != "IFCCARTESIANPOINT" or not loc:
+        raise ValueError("IFC profile placement requires a two-dimensional location")
+    offset = np.array(_num_list(loc[0]), dtype=float) * scale
+    if offset.shape != (2,) or not np.isfinite(offset).all():
+        raise ValueError("IFC profile location must have two finite coordinates")
+    if args[1] == "$":
+        return poly + offset
+    kind, ref = entities.get(_ref_id(args[1]), (None, []))
+    if kind != "IFCDIRECTION" or not ref:
+        raise ValueError("IFC profile reference direction must be defined")
+    ratios = np.array(_num_list(ref[0]), dtype=float)
+    if ratios.shape != (2,) or not np.isfinite(ratios).all() or not np.any(ratios):
+        raise ValueError("IFC profile reference direction must be finite and nonzero")
+    ratios /= np.max(np.abs(ratios))
+    x, y = ratios / np.linalg.norm(ratios)
+    return poly @ np.array([[x, y], [-y, x]]) + offset
+
+
 def _ifc_extrusion_direction(entities, reference):
     kind, args = entities.get(_ref_id(reference), (None, []))
     if kind != "IFCDIRECTION" or not args:
@@ -488,6 +514,7 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
                     if et == "IFCEXTRUDEDAREASOLID":
                         if min(lx, ly, depth) <= 0 or not all(map(math.isfinite, (lx, ly, depth))):
                             raise ValueError("Rectangular IFC extrusion dimensions must be finite and positive")
+                        poly = _position_ifc_profile(poly, entities, pargs[2], unit_scale)
                         local = _ifc_extrusion_direction(entities, args[2])
                         direction = local[0] * x_ax + local[1] * y_ax + local[2] * z_ax
                         normal = local[2]
