@@ -12,6 +12,7 @@ export class DeliveryBudget {
     this.expected = new Set();
     this.decided = false;
     this.reason = null;
+    this.blocked = new Set();
   }
 
   assistant(message) {
@@ -20,6 +21,7 @@ export class DeliveryBudget {
     this.expected = new Set();
     this.decided = false;
     this.reason = null;
+    this.blocked.clear();
     const calls = (message.content ?? []).filter(item => item.type === "toolCall");
     const ids = calls.map(call => call.id);
     if (message.stopReason === "toolUse" && ids.every(id => typeof id === "string" && id) &&
@@ -54,13 +56,15 @@ export class DeliveryBudget {
     const observed = new Set(results.map(result => result.toolCallId));
     if (!this.expected.size || observed.size !== results.length ||
         results.length !== this.expected.size || !results.every(result => result.role === "toolResult") ||
-        ![...this.expected].every(id => observed.has(id))) return;
+        ![...this.expected].every(id => observed.has(id))) return false;
+    if (!this.decided) this.beforeTool(this.expected.values().next().value);
     const now = this.clock(), elapsed = now - this.lastBoundary;
     this.lastBoundary = now;
     if (elapsed > 0 && Number.isFinite(elapsed)) {
       this.durations.push(elapsed);
       if (this.durations.length > 4) this.durations.shift();
     }
+    return true;
   }
 }
 
@@ -74,11 +78,23 @@ export default function registerDeliveryBudget(pi) {
   pi.on("message_end", event => { budget.assistant(event.message); });
   pi.on("tool_call", event => {
     const reason = budget.beforeTool(event.toolCallId);
-    if (reason) return {block: true, terminate: true,
-      reason: "The " + reason + " was reached. This operation was deferred; continue in the delivery pass."};
+    if (reason) {
+      budget.blocked.add(event.toolCallId);
+      return {block: true, terminate: true,
+        reason: "The " + reason + " was reached. This operation was deferred; continue in the delivery pass."};
+    }
   });
-  pi.on("turn_end", event => {
-    budget.finish(event);
-    if (budget.reason) process.stderr.write("delivery_budget: " + budget.reason + "\n");
+  pi.on("turn_end", (event, context) => {
+    const complete = budget.finish(event);
+    if (!complete || !budget.reason) return;
+    process.stderr.write("delivery_budget: " + budget.reason + "\n");
+    // Pi validates unknown tools and malformed arguments before tool_call.
+    // Their results cannot carry our termination vote. Stop only after every
+    // declared result is recorded, and mark the exact private-session boundary.
+    if (budget.blocked.size !== budget.expected.size && typeof config.budget_id === "string") {
+      pi.appendEntry("ple_delivery_boundary", {budget_id: config.budget_id,
+        tool_call_ids: [...budget.expected].sort(), phase: config.phase, steps: budget.steps});
+      context.abort();
+    }
   });
 }

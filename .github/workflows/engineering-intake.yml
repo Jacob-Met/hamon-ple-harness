@@ -26,7 +26,11 @@ jobs:
         run: |
           python ship/verify_eagle_stadium_hole.py --repo . --out "$RUNNER_TEMP/eagle-stadium"
           python ship/verify_eagle_provisioned.py --repo . --stadium
+      - name: Isolated filesystem for real Pi delivery recovery
+        run: sudo install -d -m 755 -o "$(id -un)" /filesystem
       - run: python -m unittest discover -s tests -v
+      - name: All public delivery schemas over real loopback Pi SSE (not scored)
+        run: python tests/replay_empty_worlds.py
       - name: Registered thin polygon pressure and support-distance controls
         run: python ship/verify_polygon_contact_slacks.py --repo . --out "$RUNNER_TEMP/polygon-contact-slacks" --require-all
       - name: Registered regional stiffness and common-displacement controls
@@ -108,3 +112,4 @@ jobs:
           if [[ "$rc" == 3 ]]; then
             echo "::warning::Artifact provenance differs from this checkout or dev set. A new score requires a genuine authorized run."
           fi
+

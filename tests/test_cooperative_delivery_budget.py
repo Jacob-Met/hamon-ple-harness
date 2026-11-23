@@ -13,6 +13,7 @@ from unittest import mock
 
 import harness
 import taskbridge
+import test_final_materialize_stream as materialize_stream
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -54,6 +55,26 @@ console.log('budget policy controls passed');
                                 cwd=ROOT, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_abort_tail_requires_the_complete_zero_usage_record(self):
+        import copy
+        zero = {"role":"assistant","content":[],"stopReason":"error",
+                "usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,
+                         "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}}
+        self.assertTrue(harness.empty_budget_abort(zero))
+        for usage in (None, {}, {"totalTokens":17}, {"input":0,"output":0,"cacheRead":0,"cacheWrite":0}):
+            self.assertFalse(harness.empty_budget_abort(dict(zero, usage=usage)))
+        for key in ("input","output","cacheRead","cacheWrite","totalTokens"):
+            changed = copy.deepcopy(zero)
+            changed["usage"][key] = 1
+            self.assertFalse(harness.empty_budget_abort(changed))
+        for key in ("input","output","cacheRead","cacheWrite","total"):
+            changed = copy.deepcopy(zero)
+            changed["usage"]["cost"][key] = 1
+            self.assertFalse(harness.empty_budget_abort(changed))
+        changed = copy.deepcopy(zero)
+        changed["usage"]["input"] = False
+        self.assertFalse(harness.empty_budget_abort(changed))
+
     def test_environment_preserves_total_steps_and_shared_deadline(self):
         session = SimpleNamespace(limits={"max_steps": 9}, time_left=lambda: 1000)
         with mock.patch.object(harness, "time", return_value=10):
@@ -67,9 +88,24 @@ console.log('budget policy controls passed');
 
 
 class FiniteTools:
-    def __init__(self):
+    def __init__(self, mode="valid"):
+        self.mode = mode
         self.requests = []
         self.errors = []
+        self.tools = set()
+
+    def plan(self, request, index):
+        delivery = "DELIVERY_PHASE" in json.dumps(request["messages"])
+        already = any("delivery.json" in json.dumps(row) for row in request["messages"]
+                      if row.get("role") == "assistant")
+        final = (delivery and already) or index >= 10
+        path = "delivery.json" if delivery else f"progress-{index}.json"
+        calls = [("write", {"path":path,"content":json.dumps({"completed":index})})]
+        if index == 3 and self.mode == "mixed":
+            calls.append(("unknown_fixture_tool", {}))
+        elif index == 3 and self.mode == "invalid":
+            calls = [("unknown_fixture_tool", {}), ("write", {"path":path})]
+        return final, calls, "Delivered."
 
     async def respond(self, reader, writer):
         try:
@@ -80,30 +116,29 @@ class FiniteTools:
             if [method, target.split("?", 1)[0]] != ["POST", "/v1/messages"]:
                 raise AssertionError("unexpected provider route")
             self.requests.append(request)
-            delivery = "DELIVERY_PHASE" in json.dumps(request["messages"])
-            already = any("delivery.json" in json.dumps(row) for row in request["messages"]
-                          if row.get("role") == "assistant")
-            final = (delivery and already) or len(self.requests) >= 10
+            self.tools.update(tool["name"] for tool in request.get("tools", []))
             index = len(self.requests)
+            final, calls, final_text = self.plan(request, index)
             events = [("message_start", {"message":{"id":f"local-{index}","type":"message",
                 "role":"assistant","model":request["model"],"content":[],
                 "usage":{"input_tokens":1,"output_tokens":0}}})]
             if final:
                 events += [
                     ("content_block_start",{"index":0,"content_block":{"type":"text","text":""}}),
-                    ("content_block_delta",{"index":0,"delta":{"type":"text_delta","text":"Delivered."}}),
+                    ("content_block_delta",{"index":0,"delta":{"type":"text_delta","text":final_text}}),
                 ]
             else:
-                path = "delivery.json" if delivery else f"progress-{index}.json"
-                args = {"path":path,"content":json.dumps({"completed":index})}
-                events += [
-                    ("content_block_start",{"index":0,"content_block":{
-                        "type":"tool_use","id":f"call-{index}","name":"write","input":{}}}),
-                    ("content_block_delta",{"index":0,"delta":{
-                        "type":"input_json_delta","partial_json":json.dumps(args)}}),
-                ]
+                for block, (name, arguments) in enumerate(calls):
+                    events += [
+                        ("content_block_start",{"index":block,"content_block":{
+                            "type":"tool_use","id":f"call-{index}-{block}","name":name,"input":{}}}),
+                        ("content_block_delta",{"index":block,"delta":{
+                            "type":"input_json_delta","partial_json":json.dumps(arguments)}}),
+                        ("content_block_stop",{"index":block}),
+                    ]
+            if final:
+                events.append(("content_block_stop",{"index":0}))
             events += [
-                ("content_block_stop",{"index":0}),
                 ("message_delta",{"delta":{"stop_reason":"end_turn" if final else "tool_use",
                     "stop_sequence":None},"usage":{"output_tokens":1}}),
                 ("message_stop",{}),
@@ -123,10 +158,19 @@ class FiniteTools:
 @unittest.skipUnless(Path(harness.PI).is_file(), "install the submitted Pi via npm ci")
 class CooperativePi(unittest.IsolatedAsyncioTestCase):
     async def test_complete_batch_stops_and_resumes_without_an_extra_request(self):
+        await self.exercise("valid")
+
+    async def test_malformed_sibling_does_not_consume_the_reserved_turns(self):
+        await self.exercise("mixed")
+
+    async def test_all_invalid_batch_still_reaches_delivery(self):
+        await self.exercise("invalid")
+
+    async def exercise(self, mode):
         from websockets.asyncio.client import connect
         from websockets.asyncio.server import serve
 
-        stream = FiniteTools()
+        stream = FiniteTools(mode)
         with tempfile.TemporaryDirectory(prefix="ple-cooperative-") as tmp:
             root = Path(tmp)
             task_dir, agent_dir, session_dir, work = [root/name for name in ("task","agent","session","work")]
@@ -149,22 +193,29 @@ class CooperativePi(unittest.IsolatedAsyncioTestCase):
                                 "-nc","-ns","-np","-na","-e",str(ROOT/"task-tools.ts"),
                                 "-e",str(ROOT/"delivery-budget.ts"),"--provider",name,
                                 "--model",model,"--thinking","off"]
-                        run = harness.Run(session,model)
+                        run = harness.Run(session,model,budgeted=True)
                         first = await taskbridge.run_process(argv,session,
-                            env=harness.delivery_process_env(env,session,run.replies,300),
+                            env=harness.delivery_process_env(env,session,run.budget_steps,300,budget_id=run.budget_id),
                             cwd=str(work),stdin=b"Perform the next preparation step.",
                             on_line=run.on_line,stop_before_sec=300)
                         observed["requests_before_resume"] = len(stream.requests)
                         observed["first_status"] = first.code
                         observed["first_replies"] = run.replies
+                        observed["budget_steps"] = run.budget_steps
                         matched = harness.acknowledged_tool_session(
-                            session_dir,run.tool_turn,run.observed_results,run.expected_calls,run.history)
+                            session_dir,run.tool_turn,run.observed_results,run.expected_calls,run.history,budget_id=run.budget_id)
                         observed["matched"] = matched is not None
+                        if mode != "valid":
+                            observed["missing_marker_id_refused"] = harness.acknowledged_tool_session(
+                                session_dir,run.tool_turn,run.observed_results,run.expected_calls,run.history) is None
+                            observed["wrong_marker_id_refused"] = harness.acknowledged_tool_session(
+                                session_dir,run.tool_turn,run.observed_results,run.expected_calls,run.history,
+                                budget_id="not-this-run") is None
                         if matched is None:
                             observed["tail_roles"] = [[(r.get("message",{}).get("role"),r.get("message",{}).get("stopReason")) for r in list(map(json.loads,p.read_text().splitlines()))[-6:]] for p in session_dir.glob("*.jsonl")]
                         else:
                             await taskbridge.run_process([*argv,"--session",str(matched)],session,
-                                env=harness.delivery_process_env(env,session,run.replies,90,delivery=True),
+                                env=harness.delivery_process_env(env,session,run.budget_steps,90,delivery=True,budget_id=run.budget_id),
                                 cwd=str(work),stdin=b"DELIVERY_PHASE: write the calculated result now.",
                                 on_line=run.on_line,stop_before_sec=90)
                         observed["last"] = session.final_message
@@ -206,12 +257,46 @@ class CooperativePi(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stream.errors,[])
             self.assertNotIn("handler_error", observed, (observed,stream.errors,len(stream.requests)))
             self.assertEqual(observed["requests_before_resume"],3,observed)
-            self.assertEqual(observed["first_replies"],3,observed)
+            self.assertEqual(observed["first_replies"],3 if mode == "valid" else 4,observed)
+            self.assertEqual(observed["budget_steps"],3,observed)
+            if mode != "valid":
+                self.assertTrue(observed["missing_marker_id_refused"])
+                self.assertTrue(observed["wrong_marker_id_refused"])
             self.assertTrue(observed["matched"],observed)
             self.assertEqual(len(stream.requests),5)
             self.assertFalse((task_dir/"progress-3.json").exists())
             self.assertEqual(json.loads((task_dir/"delivery.json").read_text()),{"completed":4})
             self.assertEqual(observed["last"],"Delivered.")
+
+
+class BudgetRepairStream(FiniteTools):
+    def __init__(self, script):
+        super().__init__()
+        self.script = str(script)
+        self.input = str(Path(script).with_name("input.json"))
+
+    def plan(self, request, index):
+        users = [row for row in request["messages"] if row.get("role") == "user"]
+        content = users[-1].get("content", []) if users else []
+        delivery = index > 1 and (isinstance(content, str) or any(
+            isinstance(block, dict) and block.get("type") == "text" for block in content))
+        wrote = any(self.script in json.dumps(row) and '"write"' in json.dumps(row)
+                    for row in request["messages"] if row.get("role") == "assistant")
+        final = wrote or index >= 12
+        calls = [("write", {"path":self.script,"content":materialize_stream.GENERATOR})] if delivery else [
+            ("read", {"path":self.input})]
+        return final, calls, "Calculation prepared."
+
+
+@unittest.skipUnless(Path(harness.PI).is_file(), "install the submitted Pi via npm ci")
+class CooperativeSolve(unittest.IsolatedAsyncioTestCase):
+    course = materialize_stream.FinalMaterializationStream.course
+
+    async def test_ordinary_solve_delivers_docx_after_step_reserve(self):
+        await self.course(".docx", stream_factory=BudgetRepairStream, max_steps=7, expected_requests=5)
+
+    async def test_ordinary_solve_delivers_six_archive_members_after_step_reserve(self):
+        await self.course(".zip", stream_factory=BudgetRepairStream, max_steps=7, expected_requests=5)
 
 
 if __name__ == "__main__":
