@@ -693,15 +693,35 @@ def verify_pump_duty(spec):
         return {**result, "reason": str(exc)}
 
 
-def _isolate_pump_root(residual, low, high):
-    """Opposite signs on one monotone piece. Stop at adjacent binary64 flows."""
+def _isolate_pump_root(residual, low, high, a, slope, constant, coordinates):
+    """Enclose one crossing until each reported quantity rounds unambiguously."""
+    if not a:
+        return constant / slope
+
+    # A rational root can coincide with a rounding midpoint in any coordinate.
+    # Compute it exactly so that ties round to even without indefinite bisection.
+    discriminant = slope**2 - 4*a*constant
+    num = math.isqrt(discriminant.numerator)
+    den = math.isqrt(discriminant.denominator)
+    if num*num == discriminant.numerator and den*den == discriminant.denominator:
+        radical = Fraction(num, den)
+        smaller = (slope - radical) / (2*a)
+        return smaller if low < smaller < high else (slope + radical) / (2*a)
+
+    def rounded(point):
+        values = []
+        for value in coordinates(point):
+            try:
+                values.append(float(value))
+            except OverflowError:
+                # A wide initial bracket may extend beyond the output range.
+                values.append(math.inf)
+        return values
+
     low_positive = residual(low) > 0
-    while math.nextafter(float(low), math.inf) < float(high):
+    while rounded(low) != rounded(high):
         mid = (low + high) / 2
-        value = residual(mid)
-        if value == 0:
-            return mid
-        if (value > 0) == low_positive:
+        if (residual(mid) > 0) == low_positive:
             low = mid
         else:
             high = mid
@@ -745,6 +765,9 @@ def verify_pump_operating_point(spec):
                 else:
                     intervals.append((left, right))
                 continue
+            def coordinates(q):
+                return q, count*q, h0 + slope*(q-left)
+
             boundaries = [left, right]
             if a and left < slope/(2*a) < right:
                 boundaries.insert(1, slope/(2*a))
@@ -755,7 +778,7 @@ def verify_pump_operating_point(spec):
                 if fhi == 0:
                     roots.add(hi)
                 if flo * fhi < 0:
-                    roots.add(_isolate_pump_root(residual, lo, hi))
+                    roots.add(_isolate_pump_root(residual, lo, hi, a, slope, constant, coordinates))
 
         def rendered(value):
             as_float = float(value)

@@ -59,6 +59,42 @@ class PumpOperatingPointTests(unittest.TestCase):
             self.assertAlmostEqual(q/scale, math.sqrt(3))
             self.assertEqual(out["operating_points"][0]["head_m"], 2)
 
+    def test_adjacent_flow_knots_round_each_quantity_independently(self):
+        from fractions import Fraction
+
+        left = 1.0
+        right = math.nextafter(left, math.inf)
+        for endpoints in ((0, 1), (1, 0)):
+            for head in (.25, .5, .75):
+                with self.subTest(endpoints=endpoints, head=head):
+                    h0, h1 = endpoints
+                    q = Fraction(left) + (Fraction(right)-Fraction(left))*(Fraction(head)-h0)/(h1-h0)
+                    result = solve([(left, h0), (right, h1)], head, 0, identical_pumps=3)
+                    point, = result["operating_points"]
+                    self.assertEqual(point, {"flow_per_pump_m3_s": float(q),
+                                             "total_flow_m3_s": float(3*q), "head_m": head})
+
+    def test_irrational_crossing_on_steep_segment(self):
+        from decimal import Decimal, localcontext
+
+        left, right = 1., math.nextafter(1., math.inf)
+        for endpoints in ((0, 3), (3, 0)):
+            with self.subTest(endpoints=endpoints), localcontext() as ctx:
+                ctx.prec = 100
+                h0, h1 = endpoints
+                slope = Decimal(h1-h0)/(Decimal(right)-Decimal(left))
+                # H = (3q)^2/8 + 1/8. Solve the table/system intersection
+                # independently with the quadratic formula at 100 decimal digits.
+                a = Decimal(9)/8
+                c = Decimal(1)/8-h0+slope
+                disc = (slope*slope-4*a*c).sqrt()
+                q = next(x for x in ((slope-disc)/(2*a), (slope+disc)/(2*a))
+                         if Decimal(left) < x < Decimal(right))
+                head = a*q*q + Decimal(1)/8
+                point, = solve([(left,h0),(right,h1)], .125, .125, identical_pumps=3)["operating_points"]
+                self.assertEqual(point, {"flow_per_pump_m3_s": float(q),
+                                         "total_flow_m3_s": float(3*q), "head_m": float(head)})
+
     def test_invalid_physics_and_mixed_duty_inputs(self):
         for options in ({"identical_pumps": True}, {"per_pump_input_W": 100}, {"total_flow_m3_s": .1}):
             self.assertFalse(solve([(0,2),(1,1)], 1, 1, **options)["ok"])
