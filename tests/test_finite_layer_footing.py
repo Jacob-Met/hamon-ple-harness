@@ -22,11 +22,29 @@ def check(spec):
     return route({"mode":"civil_geotech", "spec":spec})
 
 
+def cartesian_reference(top, bottom, e0=.8, cc=.32, initial=75000., pc=None, cr=0.):
+    """Direct triple integration in Cartesian coordinates and physical depth."""
+    from scipy.integrate import quad
+    pc = initial if pc is None else pc
+
+    def strain(z):
+        def row(x):
+            def kernel(y):
+                return 3*z**3 / (2*math.pi*(x*x+y*y+z*z)**2.5)
+            return quad(kernel, 0, 1, epsabs=2e-12)[0]
+        stress = 800000 * quad(row, 0, 1, epsabs=2e-11)[0]
+        below = min(stress, pc-initial)
+        loss = cr*math.log10(1+below/initial) + cc*math.log10(1+(stress-below)/(initial+below))
+        return loss/(1+e0)
+    return quad(strain, top, bottom, epsabs=2e-12, epsrel=2e-10, limit=100)[0]
+
+
 class FiniteDepthFootingTests(unittest.TestCase):
     def test_midpoint_reverses_actual_limit_and_paired_routes(self):
         # Independent Cartesian integration: first integrate 3*q*z^3/(2*pi*r^5)
         # in x and y over [-1,1]^2, then integrate log strain from .1 to 6.1 m.
         reference = .2406348714868344
+        self.assertAlmostEqual(cartesian_reference(.1, 6.1), reference, places=11)
         midpoint = .1725689762142289
         spec = footing(layer(.1, 6.1))
         out = check(spec)
@@ -54,6 +72,9 @@ class FiniteDepthFootingTests(unittest.TestCase):
         self.assertTrue(mixed["conservation_verified"], mixed)
         standalone = [check(footing(l))["primary_consolidation_settlement_m"] for l in (top,bottom)]
         self.assertAlmostEqual(sum(standalone), mixed["primary_consolidation_settlement_m"], places=12)
+        reference = cartesian_reference(.1, 1.1) + cartesian_reference(1.1, 6.1, .65, .22,
+                                                                        80000, 110000, .04)
+        self.assertAlmostEqual(mixed["primary_consolidation_settlement_m"], reference, places=10)
         solid = 1/1.8+5/1.65
         initial_void = 6-solid
         self.assertAlmostEqual((initial_void-sum(standalone))/solid, mixed["final_void_ratio"], places=12)
@@ -77,9 +98,19 @@ class FiniteDepthFootingTests(unittest.TestCase):
         self.assertAlmostEqual(vals[2]["primary_consolidation_settlement_m"]/
                                vals[1]["primary_consolidation_settlement_m"],2.,places=12)
 
+    def test_thin_yielded_zone_at_surface(self):
+        # The central surface stress exceeds preconsolidation by 0.01 Pa.
+        # Independent bisection puts the yield boundary at depth 0.004054355 m.
+        # A midpoint or a quadrature confined to the deep elastic zone gives zero.
+        out = check(footing(layer(0, 1, Cr=0., sigma_preconsolidation_Pa=274999.99)))
+        self.assertTrue(out["conservation_verified"], out)
+        self.assertAlmostEqual(out["primary_consolidation_settlement_m"]/8.53711478665e-12, 1., places=5)
+
     def test_finite_inputs_cannot_be_silently_scalarized(self):
         good = footing(layer(.1,1.1))
-        for case in (footing(layer(.1,1),layer(1.2,2)), footing(layer(.1,1),layer(.8,2)),
+        for case in (footing(layer(.1,1,delta_sigma_v_Pa=999)), footing(layer(.1,1,time_s=2)),
+                     footing(layer(.1,1,stress_point={"depth_m":.5})),
+                     footing(layer(.1,1),layer(1.2,2)), footing(layer(.1,1),layer(.8,2)),
                      {**good,"stress_point":{"x_m":0,"y_m":0,"depth_m":.6}},
                      {**good,"time_s":10}, {**good,"calculation":"consolidation_1d"},
                      {**good,"calculation":"consolidation_history_1d"}):

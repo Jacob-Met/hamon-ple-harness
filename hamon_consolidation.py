@@ -105,6 +105,22 @@ def _area_integral(x0, x1, y0, y1, z):
     """Independently integrate the point-load kernel over the actual footprint."""
     from scipy.integrate import quad
 
+    if x0 <= 0 <= x1 and y0 <= 0 <= y1:
+        quadrants = [(x, y) for x in (-x0, x1) for y in (-y0, y1) if x and y]
+        if z <= .5*min(min(x, y) for x, y in quadrants):
+            # Radial integration of the positive point-load kernel leaves the
+            # small uncovered angular tail of each incident quadrant.
+            tails = []
+            for width, height in quadrants:
+                def tail(theta, edge):
+                    projected = z*math.cos(theta)
+                    return (projected/math.hypot(edge, projected))**3
+                tails.append(quad(tail, 0., math.atan2(height, width), args=(width,),
+                                  epsabs=1e-300, epsrel=1e-12)[0])
+                tails.append(quad(tail, 0., math.atan2(width, height), args=(height,),
+                                  epsabs=1e-300, epsrel=1e-12)[0])
+            return len(quadrants)/4 - math.fsum(tails)/(2*math.pi)
+
     # Far from a small footprint, taking differences of near-identical
     # angles loses significant digits. Integrate on a unit square there.
     width, length = x1 - x0, y1 - y0

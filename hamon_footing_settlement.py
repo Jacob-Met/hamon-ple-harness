@@ -28,6 +28,13 @@ def _precise_corner(x0, x1, y0, y1, z):
 
 
 def _depth_stress(rectangles, z, influence):
+    if z == 0:
+        def surface_fraction(lo, hi):
+            if lo < 0 < hi:
+                return 1.
+            return .5 if lo == 0 or hi == 0 else 0.
+        return math.fsum(q*surface_fraction(x0, x1)*surface_fraction(y0, y1)
+                         for x0, x1, y0, y1, q in rectangles)
     values = []
     for x0, x1, y0, y1, depth, pressure in _scaled_footprints(rectangles, z):
         if pressure:
@@ -53,6 +60,28 @@ def _depth_intervals(top, bottom, rectangles):
         scale *= 2
     edges = sorted(cuts)
     return zip(edges, edges[1:])
+
+
+def _yield_intervals(top, bottom, rectangles, yield_increment):
+    """Split at bracketed changes of compression law, including near the surface."""
+    from scipy.optimize import brentq
+    for start, end in _depth_intervals(top, bottom, rectangles):
+        if yield_increment <= 0:
+            yield start, end
+            continue
+        probes = [start, start+(end-start)/2, end]
+        offsets = [_depth_stress(rectangles, z, _precise_corner)-yield_increment for z in probes]
+        cuts = [start, end]
+        for a, b, fa, fb in zip(probes, probes[1:], offsets, offsets[1:]):
+            if fa == 0:
+                cuts.append(a)
+            if (fa < 0 < fb) or (fb < 0 < fa):
+                def residual(t):
+                    return _depth_stress(rectangles, a+(b-a)*t, _precise_corner)-yield_increment
+                root = brentq(residual, 0., 1., xtol=1e-14)
+                cuts.append(a+(b-a)*root)
+        cuts = sorted(set(cuts))
+        yield from zip(cuts, cuts[1:])
 
 
 def _gauss_integral(function, nodes, lo=0., hi=1.):
@@ -92,8 +121,10 @@ def finite_layer_settlement(spec):
     nodes = [((float(t)+1)/2, float(w)/2) for t, w in zip(roots, weights)]
     rows = []
     for layer in layers:
-        if not isinstance(layer, dict):
-            raise ValueError("Each settlement layer must be an object")
+        material_keys = {"top_depth_m", "bottom_depth_m", "e0", "Cc", "Cr",
+                         "sigma_v0_eff_Pa", "sigma_preconsolidation_Pa"}
+        if not isinstance(layer, dict) or set(layer) - material_keys:
+            raise ValueError("Each layer accepts only its depth interval and compression properties")
         top, bottom, e0, cc, initial = (_number(layer, k) for k in (
             "top_depth_m", "bottom_depth_m", "e0", "Cc", "sigma_v0_eff_Pa"))
         if not 0 <= top < bottom or (rows and top != rows[-1]["bottom_depth_m"]):
@@ -103,7 +134,7 @@ def finite_layer_settlement(spec):
         primary_settlement(1., e0, cc, initial, 0., pc, cr)
         h = bottom - top
         area_parts, corner_parts = [], []
-        for a, b in _depth_intervals(top, bottom, rectangles):
+        for a, b in _yield_intervals(top, bottom, rectangles, pc-initial if cr != cc else 0.):
             def strain(t, influence):
                 z = a + (b-a)*t
                 if z <= 0:
