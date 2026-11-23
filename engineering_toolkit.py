@@ -791,6 +791,8 @@ def run(argv=None):
     native=sub.add_parser("eagle-netlist",help="Read native EAGLE XML schematic pins and physical pad nets")
     native.add_argument("file")
     native.add_argument("--board",help="Compare predicted pad nets with an EAGLE XML PCB")
+    native.add_argument("--contact-nets",nargs=2,metavar=("FIRST","SECOND"),
+                        help="Check two board signals for explicit same-layer wire overlap")
     native.add_argument("--routed-net",help="Check a named signal for copper paths between schematic terminals")
     native.add_argument("--routed-pads",nargs=4,metavar=("PART1","PAD1","PART2","PAD2"),
                         help="Check only this pair of schematic pads on the selected net")
@@ -859,6 +861,11 @@ def run(argv=None):
             out=schematic_netlist(args.file)
             if args.board:
                 out["board_comparison"]=compare_board(out,args.board)
+            if args.contact_nets is not None:
+                if not args.board:
+                    raise ValueError("--contact-nets requires --board")
+                from hamon_eagle_copper import inter_net_contact
+                out["inter_net_contact"]=inter_net_contact(args.board,args.contact_nets)
             if args.routed_pads is not None and args.routed_net is None:
                 raise ValueError("--routed-pads requires --routed-net")
             if args.routed_net is not None:

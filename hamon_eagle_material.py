@@ -136,10 +136,10 @@ class _Drills:
                 "clear_collar_outer_radius_nm": limit}
 
 
-def _overlap_disk(a, b):
+def _overlap_disk(overlap):
     """Return a strictly interior disk in a common positive-area component."""
     best = None
-    for patch in _polygons(a.intersection(b)):
+    for patch in _polygons(overlap):
         center = patch.representative_point()
         radius = center.distance(patch.boundary) / 2
         if radius > 0 and (best is None or radius > best[1]):
@@ -261,7 +261,7 @@ def _piece_graph(primitives, bores):
                 neighbor = layer_nodes[j]
                 if labels[node][0] == labels[neighbor][0]:
                     continue
-                disk = _overlap_disk(pieces[node], pieces[neighbor])
+                disk = _overlap_disk(pieces[node].intersection(pieces[neighbor]))
                 if disk is None:
                     continue
                 point, radius = disk
@@ -353,3 +353,41 @@ def material_continuity(terminals, primitives, bores):
             result.update(witnesses=walks, unreachable=[])
             break
     return result
+
+
+
+def wire_contact_witnesses(groups, bores, names, unsupported):
+    """Find a strictly interior disk in both drilled wire regions on one layer."""
+    drills = _Drills(bores)
+    layers = []
+    for name, group in zip(names, groups):
+        pieces = defaultdict(list)
+        for wire in group:
+            inner = _inner_copper(wire)
+            if inner is None:
+                unsupported.append(dict(signal=name, source=wire["source"],
+                                        reason="wire material outside geometric proof limits"))
+                continue
+            clipped, _ = drills.clip(inner)
+            if not clipped.is_empty:
+                pieces[wire["layers"][0]].append((wire["source"], clipped))
+        layers.append(pieces)
+    contacts = []
+    left, right = layers
+    for layer in sorted(left.keys() & right.keys()):
+        counterparts = right[layer]
+        tree = STRtree([geom for _, geom in counterparts])
+        for source, geom in left[layer]:
+            for j in sorted(tree.query(geom, predicate="intersects")):
+                other, target = counterparts[int(j)]
+                overlap = geom.intersection(target)
+                disk = _overlap_disk(overlap)
+                if disk is None:
+                    continue
+                center, radius = disk
+                contacts.append(dict(
+                    layer=layer, center_nm=list(center), disk_radius_nm=radius,
+                    sources=[dict(signal=name, primitive=ref)
+                             for name, ref in zip(names, (source, other))],
+                    overlap_lower_bound_mm2=overlap.area / 1e12))
+    return contacts

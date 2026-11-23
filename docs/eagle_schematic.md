@@ -165,3 +165,11 @@ For a round via spanning layers 1 through 16, the finite-width pass can derive n
 On the original Arduino Due both 0.4064 mm drills use a 0.25 ratio with an 8–20 mil ring. The 8 mil minimum gives a 0.2032 mm ring and a 0.8128 mm outer diameter. Each full-net query returns four pad-to-pad paths covering five terminals. The plated path enters an intact annular collar on one face, traverses the physical barrel wall, and exits on the other. The output records the source rules, drill and conservative diameter.
 
 Run `python ship/verify_eagle_via_rules.py --repo . --raw RAW --out OUT` on the same pinned files. Its controls remove or interrupt the collar, shift a drill away, substitute a blind or nonplated hole, and remove, duplicate or corrupt a required rule. A damaged collar can make a path unresolved even when other copper survives.
+
+### Contact between two named board signals
+
+Run `python engineering_toolkit.py eagle-netlist FILE.sch --board FILE.brd --contact-nets 'D+' 'D-'`. The independent `inter_net_contact` result records the board digest, signal names, per-signal XML wire ordinals (zero-based), layer, and a strictly interior witness disk in nanometres. The area in mm² is the intersection of two conservatively inset wire regions after removing known circular drill voids. The query covers explicit continuous wires on layers 1 and 16. It can be combined with `--routed-net` to inspect within-signal terminal paths independently.
+
+A missing witness leaves clearance unresolved. Pads, via copper, pours, internal layers, milling, board outlines, manufactured tolerances, and electrical tests fall outside this wire-artwork check. The physical PCB and short-circuit impact are unverified.
+
+Replay the original Arduino Due board, the registered 0.1 mm bridge on D−, and the same bridge translated 10 mm in both coordinates with `python ship/verify_eagle_inter_net.py --raw RAW --repo . --out OUT`. Supply the manufacturer files named above. The receiver also checks four terminal paths for each signal on each board.
