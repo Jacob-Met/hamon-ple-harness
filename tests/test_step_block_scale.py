@@ -53,4 +53,46 @@ class ExactBlockScaleTests(unittest.TestCase):
         self.assertTrue(result["conservation_verified"],result)
         self.assertEqual(result["centroid_m"][0],1e-60)
 
+    def test_irrational_frame_terms_cancel_exactly(self):
+        result=self.verify(("2.","3.","2."),axis=("1.","1.","0."),reference=("1.","-1.","0."))
+        self.assertTrue(result["conservation_verified"],result)
+        self.assertEqual(result["centroid_m"][1],0.)
+        np.testing.assert_allclose(result["centroid_m"],[math.sqrt(2),0.,-1.5],rtol=3e-15,atol=0)
+        np.testing.assert_allclose(result["aabb_extents_m"],[2*math.sqrt(2),2*math.sqrt(2),3.],rtol=3e-15)
+        np.testing.assert_array_equal(result["inertia_tensor_centroid_kg_m2"],np.diag([13.,13.,8.]))
+
+    def test_rotated_slender_material_retains_weak_inertia(self):
+        result=self.verify(("1e60","1e-30","1e-30"),
+                           axis=("3.","4.","12."),reference=("10.","5.","24."))
+        self.assertTrue(result["conservation_verified"],result)
+        weak,strong=1e-60/6,1e120/12
+        np.testing.assert_allclose(result["principal_moments_kg_m2"],[weak,strong,strong],rtol=3e-15,atol=0)
+        unit=np.array([.8,-.6,0.])
+        expected=strong*(np.eye(3)-np.outer(unit,unit))+weak*np.outer(unit,unit)
+        np.testing.assert_allclose(result["inertia_tensor_centroid_kg_m2"],expected,rtol=3e-15,atol=0)
+
+    def test_rational_centroid_midpoint_uses_nearest_even(self):
+        from decimal import Decimal, localcontext
+        with localcontext() as context:
+            context.prec=100
+            for k in (1,3):
+                middle=Decimal(1)+Decimal(k)/(Decimal(2)**53)
+                length=2*(middle-Decimal(".1"))
+                result=self.verify((str(length),"1.","1."),origin=(".1","0.","0."))
+                self.assertEqual(result["centroid_m"][0],float(middle))
+
+    def test_nonrepresentable_local_properties_and_multiple_material_withhold(self):
+        length="20000000000000000."+"0"*399+"2"
+        cases=[block_text((length,"1.","1."),origin=("-10000000000000000.","0.","0.")),
+               block_text(("1e-400","1e100","1e100")),
+               block_text(("1.","1.","1.")).replace("ENDSEC;","#6=BLOCK('',#4,1.,1.,1.);ENDSEC;"),
+               block_text(("1.","1.","1.")).replace("ENDSEC;","#6=EXTRUDED_AREA_SOLID('',#10,#4,#2,1.);ENDSEC;")]
+        for text in cases:
+            with self.subTest(text=text):
+                try:
+                    result=verify_step_cad_geometry({"step_text":text,"density_kg_m3":1.})
+                except ValueError:
+                    continue
+                self.assertFalse(result["conservation_verified"],result)
+
 if __name__=="__main__":unittest.main()
