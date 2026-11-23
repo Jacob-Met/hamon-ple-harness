@@ -102,6 +102,12 @@ python3 ship/verify_eagle_uno.py UNO-TH_Rev3e_sch.pdf UNO-TH_Rev3e-reference.zip
 
 These are measured visible-wire connectivity results on the named drawings. They do not establish device-pin connectivity, support for another export profile, or a PLE competition score.
 
+## Offset labels at numbered connector pins
+
+For the supported vector profile, a wire label can start at a free endpoint while its text baseline is offset from the wire. The reader recognizes a parallel wire entering a closed connector outline when a row of equally spaced pin stubs has consecutive printed numbers. The other end must be free of wire and symbol ink. At least two other physical wire islands must have independently anchored copies of the same name in one uninterrupted run of native PDF glyphs. Another supply glyph or repeated competing name prevents the join. The output records the pin row, supporting islands, text spans and incidental singleton labels.
+
+On the Mega drawing, sheet 1's POWER connector pin 8 satisfies these conditions for VIN. Its three printed copies link one previously separated wire to eight sections. The independent native schematic comparison recovers 110 of 111 complete nets and 5,837 of 5,846 section pairs, with zero false joins. All nine remaining separated pairs belong to +3V3. The six cross-sheet anchors remain the same. The Uno control still recovers all 61 nets across 447 sections. Each receiver also checks the original PDF rotated through three quarter turns.
+
 ## Native EAGLE schematic and PCB
 
 When a flat EAGLE XML schematic is available, the toolkit can read its logical pins and package pads directly.
