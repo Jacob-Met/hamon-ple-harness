@@ -92,7 +92,7 @@ class DirectArchive(unittest.IsolatedAsyncioTestCase):
                   "1. `one.md`\n2. `two.md`")
         self.instruction = prompt
         with tempfile.TemporaryDirectory() as tmp:
-            graded = Path(tmp) / "submission.zip"
+            graded = Path(tmp).resolve() / "submission.zip"
 
             async def task_exec(command, timeout_sec):
                 _, _, program, argument = shlex.split(command)
@@ -109,6 +109,7 @@ class DirectArchive(unittest.IsolatedAsyncioTestCase):
 
             self.exec = task_exec
             before = await guard.snapshot(self, targets)
+            self.assertEqual(before, {path: {"state": "missing"}})
             complete = [("one.md", b"one"), ("two.md", b"two")]
             for entries, reason in [
                 (complete[::-1], None),
