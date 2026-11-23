@@ -5,7 +5,6 @@ from bisect import bisect_left
 from fractions import Fraction
 
 import numpy as np
-from scipy.linalg import null_space
 from scipy.sparse import coo_matrix
 
 
@@ -336,8 +335,14 @@ def network(spec):
         # The second formulation begins with continuity satisfied, and may change
         # only circulations and flows between reservoirs. Their prescribed head
         # differences supply the energy term on those boundary-to-boundary paths.
-        feasible = np.linalg.lstsq(A, -d, rcond=None)[0]
-        cycles = null_space(A)
+        # Chord flows are physical unknowns. A high-resistance bypass then
+        # starts at zero instead of subtracting two large SVD components.
+        chords = np.setdiff1d(np.arange(len(pipes)), basis)
+        feasible = np.zeros(len(pipes))
+        feasible[basis] = np.linalg.solve(basis_incidence, -d)
+        cycles = np.zeros((len(pipes), len(chords)))
+        cycles[basis, :] = -paths[chords, :].T
+        cycles[chords, np.arange(len(chords))] = 1.0
 
         def loop_equations(amount):
             drop, slope = law(feasible + cycles @ amount)
@@ -374,7 +379,9 @@ def network(spec):
         flows = proposed("proposed_flows_m3_s", pipe_ids)
         # Check every pipe and junction. A large main cannot conceal a missing
         # demand or a reversed flow on a much smaller branch.
-        pipe_scale = np.abs(qloop) if radial else scale
+        pipe_scale = np.abs(qloop) if radial else np.full(len(qloop), scale)
+        if not radial:
+            pipe_scale[chords] = np.abs(qloop[chords])
         pipe_tolerance = np.minimum(1e-6, 1e-7 * np.abs(qloop) + 32 * eps * pipe_scale)
         registered["flows_match"] = bool(
             np.all(np.abs(flows - qloop) <= pipe_tolerance)
