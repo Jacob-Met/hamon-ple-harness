@@ -67,3 +67,35 @@ def test_open_inconsistent_or_area_unbalanced_prism_withholds_mass_properties(is
     else:assert not got['watertight_manifold']
     for prop in ['volume_m3','mass_kg','centroid_m','inertia_tensor_centroid_kg_m2','principal_moments_kg_m2']:
         assert prop not in got
+
+
+@pytest.mark.parametrize("origin", [(0., 0., 0.), (500000., 4500000., 80.)])
+@pytest.mark.parametrize("scale", [1., 0.001])
+def test_rectangular_ifc_sweep_uses_its_body_placement(origin, scale):
+    # The 2 × 6 mm centered profile sweeps 10 mm along local Z. Local X
+    # points north and local Z has a 3:4 east/up tilt in the survey frame.
+    dims = np.array([0.002, 0.006, 0.010])
+    dx, dy, dz = dims / scale
+    point = ",".join(str(v / scale) for v in origin)
+    data = f"""ISO-10303-21;
+HEADER;FILE_SCHEMA(('IFC4'));ENDSEC;
+DATA;
+#1=IFCCARTESIANPOINT(({point}));
+#2=IFCDIRECTION((3.,0.,4.));
+#3=IFCDIRECTION((0.,1.,0.));
+#4=IFCAXIS2PLACEMENT3D(#1,#2,#3);
+#5=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,{dx},{dy});
+#6=IFCDIRECTION((0.,0.,1.));
+#7=IFCEXTRUDEDAREASOLID(#5,#4,#6,{dz});
+ENDSEC;END-ISO-10303-21;"""
+    result = verify_step_cad_geometry({"step_text": data, "unit_scale_m": scale, "density_kg_m3": 7800})
+    assert result["conservation_verified"]
+    rotation = np.array([[0., -0.8, 0.6], [1., 0., 0.], [0., 0.6, 0.8]])
+    volume = np.prod(dims)
+    mass = 7800 * volume
+    moments = mass * (sum(dims**2) - dims**2) / 12
+    assert result["volume_m3"] == pytest.approx(volume, rel=2e-6, abs=0)
+    np.testing.assert_allclose(result["centroid_m"], origin + rotation[:, 2] * dims[2] / 2,
+                               atol=2e-9, rtol=0)
+    np.testing.assert_allclose(result["inertia_tensor_centroid_kg_m2"],
+                               rotation @ np.diag(moments) @ rotation.T, atol=1e-16, rtol=2e-6)

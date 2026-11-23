@@ -277,16 +277,19 @@ def _axis2_frame(entities: Dict[int, Tuple[str, List[str]]], aid: Optional[int],
     x_ax = np.array([1.0, 0.0, 0.0], dtype=np.float64)
     if aid is not None and aid in entities:
         et, args = entities[aid]
-        if et in ("AXIS2_PLACEMENT_3D", "IFCAXIS2PLACEMENT3D") and len(args) >= 2:
-            pid = _ref_id(args[1])
+        if et in ("AXIS2_PLACEMENT_3D", "IFCAXIS2PLACEMENT3D"):
+            # STEP representation items start with a name; IFC placements
+            # start with Location. Both then carry Axis and RefDirection.
+            placement = args[1:] if et == "AXIS2_PLACEMENT_3D" else args
+            pid = _ref_id(placement[0]) if placement else None
             if pid and pid in entities:
                 origin = np.array(_num_list(entities[pid][1][-1])[:3], dtype=np.float64) * scale
-            if len(args) >= 3 and _ref_id(args[2]) in entities:
-                zv = np.array(_num_list(entities[_ref_id(args[2])][1][-1])[:3], dtype=np.float64)  # type: ignore[index]
+            if len(placement) >= 2 and _ref_id(placement[1]) in entities:
+                zv = np.array(_num_list(entities[_ref_id(placement[1])][1][-1])[:3], dtype=np.float64)  # type: ignore[index]
                 if np.linalg.norm(zv) > 1e-12:
                     z_ax = zv / np.linalg.norm(zv)
-            if len(args) >= 4 and _ref_id(args[3]) in entities:
-                xv = np.array(_num_list(entities[_ref_id(args[3])][1][-1])[:3], dtype=np.float64)  # type: ignore[index]
+            if len(placement) >= 3 and _ref_id(placement[2]) in entities:
+                xv = np.array(_num_list(entities[_ref_id(placement[2])][1][-1])[:3], dtype=np.float64)  # type: ignore[index]
                 xv = xv - np.dot(xv, z_ax) * z_ax
                 if np.linalg.norm(xv) > 1e-12:
                     x_ax = xv / np.linalg.norm(xv)
