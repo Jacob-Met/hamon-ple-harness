@@ -20,6 +20,8 @@ class CandidateContracts(unittest.TestCase):
         self.assertEqual(items[0], {
             "script": "/app/files/hall/output/solution.py",
             "target": "/app/files/hall/output/model.ifc",
+            "outputs": ["/app/files/hall/output/model.ifc",
+                        "/app/files/hall/output/reconciliation.json"],
         })
         self.assertEqual(items[1]["script"], "/app/files/hall/output/generate.py")
         self.assertEqual(len(m.snapshot_targets(items)), 3)
@@ -92,6 +94,36 @@ class CandidateContracts(unittest.TestCase):
             {"path": t["path"], "reason": "missing"} for t in targets
         ], before, after)
         self.assertEqual(len(chosen), 1)
+
+    def test_missing_sibling_keeps_the_original_generator_invocation(self):
+        primary = "/app/files/task/output/model.ifc"
+        sibling = "/app/files/task/output/reconciliation.json"
+        items = m.candidates([
+            {"path": primary, "kind": "file"},
+            {"path": sibling, "kind": "file"},
+        ])
+        before = {i["script"]: {"state": "missing"} for i in items}
+        after = {items[0]["script"]: {"state": "ready", "fingerprint": "new"}}
+        chosen = m.plan(items, [{"path": sibling, "reason": "missing"}], before, after)
+        self.assertEqual(chosen, [items[0]])
+        self.assertEqual(chosen[0]["target"], primary)
+
+    def test_unrelated_or_unsupported_sibling_does_not_trigger_a_generator(self):
+        primary = "/app/files/task/output/model.ifc"
+        unrelated = "/app/files/other/output/model.ifc"
+        directory = "/app/files/task/output/nested"
+        script = "/app/files/task/output/report.py"
+        items = m.candidates([
+            {"path": primary, "kind": "file"},
+            {"path": directory, "kind": "dir"},
+            {"path": script, "kind": "file"},
+        ])
+        before = {i["script"]: {"state": "missing"} for i in items}
+        after = {items[0]["script"]: {"state": "ready", "fingerprint": "new"}}
+        for missing in (unrelated, directory, script):
+            with self.subTest(missing=missing):
+                self.assertEqual(m.plan(items, [{"path": missing, "reason": "missing"}],
+                                        before, after), [])
 
 
 class RemoteProtocol(unittest.IsolatedAsyncioTestCase):
