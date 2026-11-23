@@ -188,6 +188,21 @@ def publish_loose(stage: Path, target: Path, names: list[str]) -> None:
     _hydrate_stage_from_output_dir(stage, target.parent, names)
 
 
+def publish_after_empty(stage: Path, target: Path, names: list[str]) -> None:
+    """Recover a task-created empty target using a single complete source set."""
+    if target.is_symlink() or target.parent.is_symlink():
+        raise ValueError("refusing linked archive destination")
+    if target.exists() and not target.is_file():
+        raise ValueError("archive destination is not a regular file")
+    if target.exists() and target.stat().st_size != 0:
+        verify(target, names)
+        return
+    if not stage.is_symlink() and all(_valid_regular_file(stage / name) for name in names):
+        publish(stage, target, names)
+    else:
+        publish_loose(stage, target, names)
+
+
 if __name__ == "__main__":
     import sys
     stage, target, members = json.loads(sys.argv[1])
@@ -197,6 +212,8 @@ if __name__ == "__main__":
         checkpoint(Path(stage), Path(target), members)
     elif sys.argv[2:] == ["--recover"]:
         print(json.dumps({"action": recover(Path(stage), Path(target), members)}))
+    elif sys.argv[2:] == ["--after-empty"]:
+        publish_after_empty(Path(stage), Path(target), members)
     elif sys.argv[2:] == ["--from-output"]:
         publish_loose(Path(stage), Path(target), members)
         print("PLE_ARCHIVE_PUBLISHED", end="")

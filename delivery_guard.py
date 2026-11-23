@@ -248,7 +248,20 @@ def regular(path):
 def scan_file(p, root_members):
     try:
         if not p.is_file():
-            return {"state":"missing"}
+            row = {"state":"missing"}
+            if root_members:
+                try:
+                    p.lstat()
+                except FileNotFoundError:
+                    for name in root_members:
+                        try:
+                            (p.parent / name).lstat()
+                        except FileNotFoundError:
+                            continue
+                        break
+                    else:
+                        row["loose_members_initially_absent"] = True
+            return row
         st = p.stat()
         if st.st_size == 0:
             return {"state":"empty"}

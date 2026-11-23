@@ -482,7 +482,9 @@ async def solve(session: taskbridge.Session) -> str:
           # A completed staging directory can be committed even if Pi ended after
           # an unacknowledged tool request. Independently re-read the graded path.
           terminal.invalidate()
-          if await archive_contract.run_command(session, archive_plan[1]):
+          recovery = archive_contract.recovery_command(
+              archive_plan[1], delivery_targets[0]["path"], before_delivery, after_delivery)
+          if await archive_contract.run_command(session, recovery):
             published = await delivery_guard.snapshot(session, delivery_targets)
             if published:
               terminal.observe(published)
@@ -591,7 +593,9 @@ async def solve(session: taskbridge.Session) -> str:
             if still_missing and archive_plan:
               # The final repair can finish the staged members just before its cutoff.
               # The participant's last turn is not responsible for committing them.
-              if await archive_contract.run_command(session, archive_plan[1]):
+              recovery = archive_contract.recovery_command(
+                  archive_plan[1], delivery_targets[0]["path"], before_delivery, after_repair)
+              if await archive_contract.run_command(session, recovery):
                 after_repair = await delivery_guard.snapshot(session, delivery_targets)
                 terminal.observe(after_repair)
                 still_missing = delivery_guard.compare(before_delivery, after_repair)
@@ -670,4 +674,3 @@ async def solve(session: taskbridge.Session) -> str:
 def resolve_wired_domain_tools(prompt: str = "", file_paths=()) -> list[str]:
     from hamon_pareto import select_domain_tools
     return list(select_domain_tools(prompt=prompt, file_paths=file_paths))
-
