@@ -266,7 +266,7 @@ async def provision_engineering_cli(session: Any) -> str:
         for filename in (
             "hamon_geometry.py", "hamon_drawing.py", "hamon_eagle_schematic.py",
             "hamon_scale.py", "hamon_affine_metric.py", "hamon_callout.py",
-            "hamon_dxf.py", "office_package.py", "hamon_eagle_netlist.py",
+            "hamon_dxf.py", "office_package.py", "hamon_eagle_netlist.py", "hamon_eagle_copper.py",
             "hamon_consolidation.py", "hamon_pipe_network.py", "hamon_diaphragm.py",
             "hamon_diaphragm_modes.py", "hamon_diaphragm_compensated.py",
             "hamon_turbomachinery.py", "hamon_ac_power_flow.py",
@@ -291,7 +291,7 @@ async def provision_engineering_cli(session: Any) -> str:
         "\n  python3 /tmp/hamon-engineering-toolkit.py xlsx-audit FILE.xlsx"
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-words DRAWING.pdf --page 1"
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-vector DRAWING.pdf --from-page 1 --to-page 3"
-        "\n  python3 /tmp/hamon-engineering-toolkit.py eagle-netlist SCHEMATIC.sch [--board LAYOUT.brd]"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py eagle-netlist SCHEMATIC.sch [--board LAYOUT.brd [--routed-net NET]]"
         "\nRead exact native EAGLE pin, package pad and net mappings. Inspect board_comparison.agreement and mismatches when a layout is supplied."
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-eagle-connectivity SCHEMATIC.pdf --page 1"
         "\nRead page-local wire-group and supply-glyph evidence. Device pins and cross-sheet connectivity require independent evidence."
