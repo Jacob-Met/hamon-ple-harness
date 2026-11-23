@@ -16,15 +16,19 @@ The outlined profile looks for a single stroke ink with consistently sized, fill
 
 The Arduino Due PDF contains two electrical sheets followed by a Creative Commons notice. The notice has native text, a white background and no schematic geometry. A recognized text-only notice contributes an empty wire list. A graphical or unrecognized sheet still leaves document membership unresolved.
 
-| Due V02g | Visible wires matched to native CAD | Exact native nets | Fragmented nets | False joined pairs | Separated native pairs |
+The voltage reader uses the crossing of the two strokes of a printed plus sign to locate and scale the full word. It requires both wings of the voltage arrow, its stem on the wire, every stroke in `+5V` or `+3V3`, the expected front or side placement, and clear adjacent letter cells. The ordinary signal reader checks the neutral pen width, letter lattice, registered baseline and whole word. It requires at least 60% of the word to overlap one wire and a registered word end inside that wire. It reads the underscore below the wire in `JTAG_TMS` and `JTAG_TCK`. Ambiguous word ownership or conflicting names on the same electrical island withdraw that evidence.
+
+| Due V02g | Wire sections | Exact native nets | Incomplete nets | Falsely joined pairs | Falsely separated pairs |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Sheet 1 | 468 | 128/138 | 10 | 0 | 1,317 |
-| Sheet 2 | 407 | 108/125 | 17 | 0 | 3,821 |
-| Whole drawing | 875 | 77/176 | 99 | 0 | 9,518 |
+| Sheet 1 | 468 | 129/138 | 9 | 0 | 651 |
+| Sheet 2 | 407 | 117/125 | 8 | 0 | 1,829 |
+| Whole drawing | 875 | 122/176 | 54 | 0 | 6,144 |
 
-The flat-document CLI recovers 23,343 of 32,861 native same-net wire pairs. The ground word and bar connect 29 islands on the first sheet and 16 on the second, adding 20,356 correct pairs over the junction-only receiver. Together those islands contain 210 of the 235 ground sections. The partition of all 640 sections on other nets is identical to the junction-only result. The comparison measures visible wire connectivity.
+Four forecasts were frozen on the public drawing before opening its paired CAD. The ground-only reader recovered 77 complete nets and left 9,518 pairs separated. Adding voltage arrows kept 77 complete nets and reduced the separated pairs to 6,401. Requiring complete signal words to fit entirely on the wire recovered 120 nets with 6,155 separated pairs. Allowing registered overhang recovered 122 nets and 26,717 of the 32,861 native same-net wire pairs. All four forecasts had zero false joins. This is a measurement on one manufacturer drawing.
 
-Run `python ship/verify_eagle_outlined.py DUE.pdf DUE.zip --controls` with Poppler and pypdf. The receiver runs the maintained CLI and freezes every prediction before opening the paired native schematic. It checks each wire section against the manufacturer's schematic geometry and tests recoloring the wire layer, deleting a three-arm junction, deleting a terminal mark, deleting all junctions, and adding graphical ink to the legal notice. On the first sheet, removing the bar or a stroke of the G, or moving the complete word one grid step toward the neighboring MOSI wire, isolates just the single affected ground section. The receiver checks the complete document partition for each edit. [Arduino Due schematic PDF](https://docs.arduino.cc/resources/schematics/A000056-schematics.pdf) and [CAD archive](https://docs.arduino.cc/static/f051671bbed80ddf7352991d62cb0d5c/A000056-cad-files.zip).
+Ground still accounts for 5,318 of the separated pairs. Its 235 wire sections are split into groups of 210, 22, 2 and 1. On the PDF, the 22-section capacitor return has an offset ground word, the two-section debug connection ends in a triangular ground symbol, and the single header wire has a printed ground name alone. The next largest deficit is the 3.3 V supply, where 82 sections form groups of 76, 5 and 1.
+
+Run `python ship/verify_eagle_outlined.py DUE.pdf DUE.zip --controls` with Poppler and pypdf. The receiver runs the maintained CLI, freezes predictions for the original and edited PDFs, then independently aligns every visible section to the paired schematic. Controls recolor the wire layer, remove junctions and add graphical ink to the license page. Removing a ground bar, breaking a G stroke or moving the ground word toward MOSI isolates only the affected ground section. Deleting the three-arm junction separates the three-wire and two-wire branches from the 5 V rail and removes 176 pairs. Erasing a stroke of the side-facing 3.3 V word disconnects its seven-wire island and removes 483 pairs. Erasing the underscore in JTAG_TMS separates its two sheet occurrences. The JTAG_TCK witness must survive, and a partial JTAG prefix must never acquire a wire. [Arduino Due schematic PDF](https://docs.arduino.cc/resources/schematics/A000056-schematics.pdf) and [CAD archive](https://docs.arduino.cc/static/f051671bbed80ddf7352991d62cb0d5c/A000056-cad-files.zip).
 
 ## External comparison
 

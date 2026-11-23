@@ -122,7 +122,7 @@ class OfficialProtocolRoundtrip(unittest.TestCase):
                                  (Path(engineering_toolkit.__file__).parent/"hamon_geometry.py").read_bytes())
                 self.assertEqual(record["writes"]["/tmp/hamon_callout.py"],
                                  (Path(engineering_toolkit.__file__).parent/"hamon_callout.py").read_bytes())
-                for module in ("office_package.py", "hamon_eagle_netlist.py", "hamon_eagle_copper.py", "hamon_eagle_material.py", "hamon_consolidation.py", "hamon_pipe_network.py", "hamon_diaphragm.py", "hamon_diaphragm_modes.py", "hamon_diaphragm_compensated.py", "hamon_turbomachinery.py", "hamon_ac_power_flow.py", "hamon_bearing_capacity.py", "hamon_rectangle_contact.py", "hamon_triangle_contact.py", "hamon_polygon_contact.py"):
+                for module in ("office_package.py", "hamon_eagle_outlined.py", "hamon_eagle_netlist.py", "hamon_eagle_copper.py", "hamon_eagle_material.py", "hamon_consolidation.py", "hamon_pipe_network.py", "hamon_diaphragm.py", "hamon_diaphragm_modes.py", "hamon_diaphragm_compensated.py", "hamon_turbomachinery.py", "hamon_ac_power_flow.py", "hamon_bearing_capacity.py", "hamon_rectangle_contact.py", "hamon_triangle_contact.py", "hamon_polygon_contact.py"):
                     self.assertEqual(record["writes"]["/tmp/" + module],
                                      (Path(engineering_toolkit.__file__).parent / module).read_bytes())
                 self.assertEqual(record["writes"]["/tmp/hamon_dxf.py"],
