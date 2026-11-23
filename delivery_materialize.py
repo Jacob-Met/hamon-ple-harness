@@ -15,6 +15,8 @@ import posixpath
 import shlex
 from typing import Any
 
+from taskbridge import Cancelled
+
 # Output scripts are conventions, not task-specific answer keys.
 GENERATOR_NAMES = ("solution.py", "generate.py", "build.py")
 # These may be built from scripts; an explicit user-named target is mandatory.
@@ -219,7 +221,7 @@ async def materialize(session: Any, selected: list[dict[str, Any]]) -> list[dict
     """Bounded task-native executions. Never assert engineering validity.
 
     session.exec is the competition action protocol, not host subprocesses.
-    asyncio.CancelledError propagates so task cancellation remains reliable.
+    Evaluator and asyncio cancellation propagate to the caller.
     """
     observations: list[dict] = []
     for item in selected[:MAX_GENERATORS]:
@@ -247,10 +249,12 @@ async def materialize(session: Any, selected: list[dict[str, Any]]) -> list[dict
             observations.append({
                 "target": item["target"], "state": state
             })
+        except Cancelled:
+            raise
         except Exception:
             # The official protocol raises its own TaskError, which is not
             # an OSError or RuntimeError. Unavailable observation must never
-            # abort the user's original deliverable task. Cancellation still
-            # propagates (asyncio.CancelledError derives from BaseException).
+            # abort the user's original deliverable task. Both evaluator
+            # cancellation and asyncio cancellation still propagate.
             observations.append({"target": item["target"], "state": "unknown"})
     return observations

@@ -19,6 +19,7 @@ from typing import Any
 import archive_contract
 import office_package
 from archive_checkpoint import verify_typed_members
+from taskbridge import Cancelled
 
 FILE = re.compile(
     r"(?<![A-Za-z0-9_.])(?P<path>(?:/(?:filesystem|app)/)?"
@@ -252,9 +253,11 @@ async def snapshot(session: Any, targets: list[dict[str, str]]) -> dict | None:
         if not isinstance(data, dict):
             return None
         return data
+    except Cancelled:
+        raise
     except Exception:
         # Any task-protocol observation failure is unknown, never model failure.
-        # asyncio.CancelledError remains uncaught so harness cancellation propagates.
+        # Both evaluator cancellation and asyncio cancellation propagate.
         return None
 
 
