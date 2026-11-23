@@ -29,9 +29,9 @@ numerical cross-verification suite for Physical Engineering's Last Exam (PLE):
      - Arbitrary 2D pin-jointed determinate & statically indeterminate truss direct-stiffness
        solver with thermal strain support, kinematic mechanism detection, nodal reaction
        equilibrium, and Clapeyron work-strain-energy theorem verification.
-     - 1D multi-element Euler-Bernoulli cubic Hermite beam solver with consistent distributed
-       load vectors, shear/moment recovery, and Clapeyron strain-energy gate. Each element
-       accepts a uniform q_N_m or a linear profile given by q_start_N_m and q_end_N_m.
+     - 1D Euler-Bernoulli beam with exact span compliance, moment/shear equilibrium,
+       affine distributed loading and prescribed support motions.
+       Each element accepts a uniform q_N_m or a linear profile given by q_start_N_m and q_end_N_m.
 """
 
 from __future__ import annotations
@@ -64,55 +64,6 @@ def _mat_mul(a: Sequence[Sequence[float]], b: Sequence[Sequence[float]]) -> List
             for j in range(m):
                 out_i[j] += aik * row_b[j]
     return out
-
-
-def _solve_linear(a_in: Sequence[Sequence[float]], b_in: Sequence[float], tol: float = 1e-12) -> Optional[List[float]]:
-    n = len(a_in)
-    if n == 0:
-        return []
-    aug = [list(map(float, a_in[i])) + [float(b_in[i])] for i in range(n)]
-    scale = max((abs(aug[i][j]) for i in range(n) for j in range(n)), default=0.0)
-    if scale <= 0.0:
-        return None
-    piv_tol = tol * scale
-    for col in range(n):
-        piv = max(range(col, n), key=lambda r: abs(aug[r][col]))
-        if abs(aug[piv][col]) <= piv_tol:
-            return None
-        if piv != col:
-            aug[col], aug[piv] = aug[piv], aug[col]
-        diag = aug[col][col]
-        for r in range(col + 1, n):
-            factor = aug[r][col] / diag
-            if factor == 0.0:
-                continue
-            for c in range(col, n + 1):
-                aug[r][c] -= factor * aug[col][c]
-    x = [0.0] * n
-    for i in range(n - 1, -1, -1):
-        s = aug[i][n]
-        for j in range(i + 1, n):
-            s -= aug[i][j] * x[j]
-        x[i] = s / aug[i][i]
-    return x
-
-
-def _solve_free_stiffness(stiffness: List[List[float]], force: List[float]) -> Optional[List[float]]:
-    """Solve K u = f in unit-diagonal elastic-energy coordinates."""
-    diagonal = [row[i] for i, row in enumerate(stiffness)]
-    if any(k <= 0.0 or not math.isfinite(k) for k in diagonal):
-        return None
-    # K = D A D with D_ii = sqrt(K_ii). A compares how strongly coordinates
-    # couple, independent of their units and the magnitudes of their own springs.
-    scale = [math.sqrt(k) for k in diagonal]
-    matrix = [[value / scale[i] / scale[j] for j, value in enumerate(row)]
-              for i, row in enumerate(stiffness)]
-    rhs = [value / d for value, d in zip(force, scale)]
-    scaled = _solve_linear(matrix, rhs, tol=1e-11)
-    if scaled is None:
-        return None
-    motion = [value / d for value, d in zip(scaled, scale)]
-    return motion if all(math.isfinite(value) for value in motion) else None
 
 
 def _primitive_integer_vector(values: Sequence[int]) -> List[int]:
@@ -2349,6 +2300,195 @@ def _truss_response(spec):
     return result
 
 
+def _beam_system(rows, size):
+    """Eliminate local compatibility and equilibrium equations in node order."""
+    pivots = {}
+    for row, rhs in rows:
+        row = {index: Fraction(coef) for index, coef in row.items() if coef}
+        while row:
+            column = min(row)
+            coefficient = row.pop(column)
+            if column not in pivots:
+                pivots[column] = ({j: value / coefficient for j, value in row.items()}, rhs / coefficient)
+                break
+            other, value = pivots[column]
+            rhs -= coefficient * value
+            for j, multiplier in other.items():
+                term = row.get(j, 0) - coefficient * multiplier
+                if term:
+                    row[j] = term
+                else:
+                    row.pop(j, None)
+        else:
+            if rhs:
+                return None
+    if len(pivots) != size:
+        return None
+    states = [Fraction(0)] * size
+    for i in reversed(range(size)):
+        row, value = pivots[i]
+        states[i] = value - sum(coefficient * states[j] for j, coefficient in row.items())
+    return states
+
+
+def _beam_response(spec):
+    identity = {"domain": "fem", "mode": "euler_bernoulli_beam_1d"}
+    try:
+        # The exact equations operate on the represented finite input values.
+        def number(value):
+            return Fraction(float(value))
+
+        positions = [number(x) for x in spec["x_nodes_m"]]
+        n = len(positions)
+        if n < 2 or any(right <= left for left, right in zip(positions, positions[1:])):
+            raise ValueError("x_nodes_m must be strictly increasing with >= 2 nodes")
+        default_ei = spec.get("EI_Nm2", 1.0)
+        default_load = spec.get("q_uniform_N_m", 0.0)
+        records = spec.get("elements") or [{} for _ in range(n - 1)]
+        if len(records) != n - 1:
+            raise ValueError("Provide one element record per beam span")
+        loads = [[Fraction(0), Fraction(0)] for _ in positions]
+        fixed = {}
+
+        def node(record):
+            value = record["node"]
+            index = int(value)
+            if (
+                isinstance(value, bool)
+                or (not isinstance(value, str) and index != value)
+                or not 0 <= index < n
+            ):
+                raise ValueError("Invalid beam node index")
+            return index
+
+        for load in spec.get("nodal_loads", []):
+            at = node(load)
+            loads[at][0] += number(load.get("fy_N", 0))
+            loads[at][1] += number(load.get("mz_Nm", 0))
+        for support in spec.get("supports", []):
+            at = node(support)
+            for axis, (flag, key) in enumerate((("fix_w", "w_m"), ("fix_theta", "theta_rad"))):
+                if support.get(flag):
+                    value = number(support.get(key, 0))
+                    if (at, axis) in fixed and fixed[at, axis] != value:
+                        raise ValueError("Conflicting beam support values")
+                    fixed[at, axis] = value
+
+        # Each span owns its left moment M = EI*w'' and shear V = M'.
+        # Its adjacent nodes share deflection and slope, even across an EI jump.
+        rows, spans = [], []
+        end_force = ({}, Fraction(0))
+        end_moment = ({}, Fraction(0))
+        for i in range(n):
+            k = 4 * i
+            force, force_offset = end_force
+            moment, moment_offset = end_moment
+            if i < n - 1:
+                force[k + 3] = 1
+                moment[k + 2] = -1
+            for axis, (terms, offset) in enumerate(((force, force_offset), (moment, moment_offset))):
+                if (i, axis) in fixed:
+                    rows.append(({k + axis: 1}, fixed[i, axis]))
+                else:
+                    rows.append((terms, loads[i][axis] - offset))
+            if i == n - 1:
+                break
+
+            length = positions[i + 1] - positions[i]
+            record = records[i]
+            ei = number(record.get("EI_Nm2", default_ei))
+            if ei <= 0:
+                raise ValueError("Non-positive flexural rigidity EI_Nm2")
+            if "q_start_N_m" in record or "q_end_N_m" in record:
+                if not {"q_start_N_m", "q_end_N_m"} <= record.keys() or "q_N_m" in record:
+                    raise ValueError("Give both endpoint loads or one uniform element load")
+                q0, q1 = number(record["q_start_N_m"]), number(record["q_end_N_m"])
+            else:
+                q0 = q1 = number(record.get("q_N_m", default_load))
+            spans.append((length, ei, q0, q1))
+            # Integrate EI*w'''' = q0 + (q1-q0)*x/L once through the span.
+            rows.append(
+                (
+                    {
+                        k + 4: 1,
+                        k: -1,
+                        k + 1: -length,
+                        k + 2: -(length**2) / (2 * ei),
+                        k + 3: -(length**3) / (6 * ei),
+                    },
+                    length**4 * (4 * q0 + q1) / (120 * ei),
+                )
+            )
+            rows.append(
+                (
+                    {k + 5: 1, k + 1: -1, k + 2: -length / ei, k + 3: -(length**2) / (2 * ei)},
+                    length**3 * (3 * q0 + q1) / (24 * ei),
+                )
+            )
+            end_force = ({k + 3: -1}, -length * (q0 + q1) / 2)
+            end_moment = ({k + 2: 1, k + 3: length}, length**2 * (2 * q0 + q1) / 6)
+
+        u = _beam_system(rows, 4 * n - 2)
+        if u is None:
+            raise ValueError("Free beam has an unrestrained rigid motion or incompatible constraints")
+
+        reactions = [[-force, -moment] for force, moment in loads]
+        midspans = []
+        strain = external = Fraction(0)
+        for i, (length, ei, q0, q1) in enumerate(spans):
+            w, theta, m, v = u[4 * i : 4 * i + 4]
+            # Coefficients in t = x/L. Integrate curvature energy independently
+            # of external work, including distributed loads between nodes.
+            bending = [m, v * length, q0 * length**2 / 2, (q1 - q0) * length**2 / 6]
+            displacement = [w, theta * length] + [
+                value * length**2 / (ei * (j + 1) * (j + 2)) for j, value in enumerate(bending)
+            ]
+            midspans.append(sum(value / 2**j for j, value in enumerate(displacement)))
+            strain += (
+                length
+                / (2 * ei)
+                * sum(a * b / (j + k + 1) for j, a in enumerate(bending) for k, b in enumerate(bending))
+            )
+            external += (
+                length
+                / 2
+                * sum(value * (q0 / (j + 1) + (q1 - q0) / (j + 2)) for j, value in enumerate(displacement))
+            )
+            reactions[i][0] += v
+            reactions[i][1] -= m
+            reactions[i + 1][0] -= v + length * (q0 + q1) / 2
+            reactions[i + 1][1] += sum(bending)
+        for i, (force, moment) in enumerate(loads):
+            external += (force * u[4 * i] + moment * u[4 * i + 1]) / 2
+        restraint = sum((reactions[i][axis] * value / 2 for (i, axis), value in fixed.items()), Fraction(0))
+
+        free_equilibrium = all(value == 0 for i, pair in enumerate(reactions)
+                               for axis, value in enumerate(pair) if (i, axis) not in fixed)
+
+        def render(value):
+            result = float(value)
+            if value and result == 0:
+                raise OverflowError("Nonzero beam result underflows binary64")
+            return result
+
+        result = {
+            **identity,
+            "passed": free_equilibrium and strain == external + restraint,
+            "deflections_m": [render(u[4 * i]) for i in range(n)],
+            "rotations_rad": [render(u[4 * i + 1]) for i in range(n)],
+            "element_midspan_deflections_m": list(map(render, midspans)),
+            "tip_deflection_m": render(u[-2]),
+            "reactions_V_M": [[render(f), render(m)] for f, m in reactions],
+            "strain_energy_J": render(strain),
+            "external_work_J": render(external),
+            "support_work_J": render(restraint),
+        }
+        _check_claimed(result, spec)
+        return result
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        return {**identity, "passed": False, "reason": str(exc)}
+
+
 def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "truss_2d")).strip().lower()
 
@@ -2356,141 +2496,7 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
         return _truss_response(spec)
 
     if mode == "euler_bernoulli_beam_1d":
-        x_nodes = [float(x) for x in spec["x_nodes_m"]]
-        n_nodes = len(x_nodes)
-        if n_nodes < 2 or any(x_nodes[i + 1] <= x_nodes[i] for i in range(n_nodes - 1)):
-            return {"passed": False, "domain": "fem", "mode": mode, "reason": "x_nodes_m must be strictly increasing with >= 2 nodes"}
-        ndof = 2 * n_nodes
-        k_glob = [[0.0] * ndof for _ in range(ndof)]
-        f_eq = [0.0] * ndof
-
-        default_ei = float(spec.get("EI_Nm2", 1.0))
-        default_q = float(spec.get("q_uniform_N_m", 0.0))
-        el_specs = spec.get("elements") or [
-            {"EI_Nm2": default_ei, "q_N_m": default_q} for _ in range(n_nodes - 1)
-        ]
-
-        if len(el_specs) != n_nodes - 1:
-            return {"passed": False, "domain": "fem", "mode": mode,
-                    "reason": "Provide one element record per beam span"}
-        beam_elements = []
-        for e_idx in range(n_nodes - 1):
-            le = x_nodes[e_idx + 1] - x_nodes[e_idx]
-            ei = float(el_specs[e_idx].get("EI_Nm2", default_ei))
-            element = el_specs[e_idx]
-            left, right = "q_start_N_m", "q_end_N_m"
-            if left in element or right in element:
-                if left not in element or right not in element or "q_N_m" in element:
-                    return {"passed": False, "domain": "fem", "mode": mode,
-                            "reason": "Give both endpoint loads or one uniform element load"}
-                q0, q1 = float(element[left]), float(element[right])
-            else:
-                q0 = q1 = float(element.get("q_N_m", default_q))
-            if not (math.isfinite(q0) and math.isfinite(q1)):
-                return {"passed": False, "domain": "fem", "mode": mode,
-                        "reason": "Beam distributed loads must be finite"}
-            if ei <= 0.0:
-                return {"passed": False, "domain": "fem", "mode": mode, "reason": "Non-positive flexural rigidity EI_Nm2"}
-            average = 0.5 * q0 + 0.5 * q1
-            half_difference = 0.5 * q1 - 0.5 * q0
-            c_fac = ei / (le ** 3)
-            ke = [
-                [12.0 * c_fac, 6.0 * le * c_fac, -12.0 * c_fac, 6.0 * le * c_fac],
-                [6.0 * le * c_fac, 4.0 * le * le * c_fac, -6.0 * le * c_fac, 2.0 * le * le * c_fac],
-                [-12.0 * c_fac, -6.0 * le * c_fac, 12.0 * c_fac, -6.0 * le * c_fac],
-                [6.0 * le * c_fac, 2.0 * le * le * c_fac, -6.0 * le * c_fac, 4.0 * le * le * c_fac],
-            ]
-            # Integrate each cubic Hermite shape against q(t) = average + half_difference*(2t-1).
-            fe = [le * (average / 2.0 - half_difference / 5.0),
-                  le ** 2 * (average / 12.0 - half_difference / 60.0),
-                  le * (average / 2.0 + half_difference / 5.0),
-                  -le ** 2 * (average / 12.0 + half_difference / 60.0)]
-            beam_elements.append((le, ei, average, half_difference, fe))
-            dofs = [2 * e_idx, 2 * e_idx + 1, 2 * (e_idx + 1), 2 * (e_idx + 1) + 1]
-            for a_i in range(4):
-                f_eq[dofs[a_i]] += fe[a_i]
-                for b_i in range(4):
-                    k_glob[dofs[a_i]][dofs[b_i]] += ke[a_i][b_i]
-
-        nodal_loads = [0.0] * ndof
-        for ld in spec.get("nodal_loads", []):
-            nd = int(ld["node"])
-            nodal_loads[2 * nd] += float(ld.get("fy_N", 0.0))
-            nodal_loads[2 * nd + 1] += float(ld.get("mz_Nm", 0.0))
-        for d, value in enumerate(nodal_loads):
-            f_eq[d] += value
-
-        prescribed = {}
-        for sup in spec.get("supports", []):
-            nd = int(sup["node"])
-            if sup.get("fix_w", False):
-                prescribed[2 * nd] = float(sup.get("w_m", 0.0))
-            if sup.get("fix_theta", False):
-                prescribed[2 * nd + 1] = float(sup.get("theta_rad", 0.0))
-
-        free_dofs = [d for d in range(ndof) if d not in prescribed]
-        k_ff = [[k_glob[r][c] for c in free_dofs] for r in free_dofs]
-        rhs_f = [
-            f_eq[r] - sum(k_glob[r][p] * u_p for p, u_p in prescribed.items())
-            for r in free_dofs
-        ]
-        u_free = _solve_free_stiffness(k_ff, rhs_f)
-        if u_free is None:
-            return {"passed": False, "domain": "fem", "mode": mode, "reason": "Free beam stiffness is singular or numerically unresolved (check beam supports)"}
-
-        u_full = [prescribed.get(d, 0.0) for d in range(ndof)]
-        for idx, d in enumerate(free_dofs):
-            u_full[d] = u_free[idx]
-
-        reactions = [
-            sum(k_glob[i][j] * u_full[j] for j in range(ndof)) - f_eq[i]
-            for i in range(ndof)
-        ]
-        # The particular displacement has zero nodal values and slopes. Its even
-        # and odd modes are t²(1-t)² and (2t-1)t²(1-t)², where t is local x/L.
-        # Their curvatures are orthogonal to each other and to the Hermite field.
-        energy_terms = []
-        distributed_work = []
-        midspans = []
-        for index, (length, rigidity, average, half_difference, fe) in enumerate(beam_elements):
-            nodal = u_full[2 * index:2 * index + 4]
-            w0, theta0, w1, theta1 = nodal
-            even = average * length ** 4 / (24.0 * rigidity)
-            odd = half_difference * length ** 4 / (120.0 * rigidity)
-            constant = length * (theta1 - theta0)
-            linear = length * (theta0 + theta1) - 2.0 * (w1 - w0)
-            energy_terms.append(0.5 * rigidity / length ** 3 *
-                                (constant ** 2 + 3.0 * linear ** 2 +
-                                 0.8 * even ** 2 + (4.0 / 7.0) * odd ** 2))
-            hermite_work = math.fsum(f * u for f, u in zip(fe, nodal))
-            interior_work = length * (average * even / 30.0 + half_difference * odd / 210.0)
-            distributed_work.append(0.5 * (hermite_work + interior_work))
-            midspans.append(0.5 * (w0 + w1) + length * (theta0 - theta1) / 8.0 + even / 16.0)
-
-        point_work = [0.5 * force * displacement for force, displacement in zip(nodal_loads, u_full)]
-        support_terms = [0.5 * reactions[d] * value for d, value in prescribed.items()]
-        u_strain = math.fsum(energy_terms)
-        w_ext = math.fsum(distributed_work + point_work)
-        support_work = math.fsum(support_terms)
-        work_terms = distributed_work + point_work + support_terms
-        work_scale = max(u_strain, math.fsum(abs(term) for term in work_terms), 1e-12)
-        clapeyron_ok = abs(u_strain - math.fsum(work_terms)) <= 1e-7 * work_scale
-
-        res = {
-            "passed": clapeyron_ok,
-            "domain": "fem",
-            "mode": mode,
-            "deflections_m": [u_full[2 * i] for i in range(n_nodes)],
-            "rotations_rad": [u_full[2 * i + 1] for i in range(n_nodes)],
-            "element_midspan_deflections_m": midspans,
-            "support_work_J": support_work,
-            "tip_deflection_m": u_full[2 * (n_nodes - 1)],
-            "reactions_V_M": [[reactions[2 * i], reactions[2 * i + 1]] for i in range(n_nodes)],
-            "strain_energy_J": u_strain,
-            "external_work_J": w_ext,
-        }
-        _check_claimed(res, spec)
-        return res
+        return _beam_response(spec)
 
     return {"passed": False, "domain": "fem", "mode": mode, "reason": f"Unknown FEM mode: {mode}"}
 
