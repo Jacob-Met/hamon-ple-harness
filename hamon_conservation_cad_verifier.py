@@ -1516,6 +1516,14 @@ _LINEAR_GAIN = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?(?:meg|mil
 _BEHAVIORAL_E = re.compile(r"^(?:poly(?:\(|$)|(?:value|vol|table|laplace|freq)(?:=|$))", re.I)
 
 
+def _spice_node_key(name: str) -> str:
+    """Use ngspice batch spelling for an unquoted terminal in a UTF-8 deck."""
+    # inp_casefix replaces each nonprintable *byte* in the C locale. Folding
+    # Unicode characters instead would incorrectly merge e.g. Straße and STRASSE.
+    key = re.sub(rb"[^ -~]", b"_", name.encode("utf-8")).lower().decode("ascii")
+    return "0" if key == "gnd" else key
+
+
 def _parse_spice_netlist(netlist: str, frequency_override: Optional[float] = None) -> Tuple[List[Dict[str, Any]], float]:
     if _SPICE_HIERARCHY.search(netlist):
         from hamon_spice_hierarchy import elaborate_subcircuits
@@ -1591,6 +1599,14 @@ def _parse_spice_netlist(netlist: str, frequency_override: Optional[float] = Non
                              "nc_pos": toks[3], "nc_neg": toks[4], "value": _parse_spice_num(toks[5])})
         elif kind == "G" and len(toks) >= 6:
             branches.append({"name": toks[0], "type": "G", "n_pos": toks[1], "n_neg": toks[2], "nc_pos": toks[3], "nc_neg": toks[4], "value": _parse_spice_num(toks[5])})
+    # Keep the first spelling on display while stamping every occurrence of a
+    # terminal or voltage-control reference at the same electrical node.
+    node_names = {"0": "0"}
+    for branch in branches:
+        for field in ("n_pos", "n_neg", "nc_pos", "nc_neg"):
+            if field in branch:
+                name = branch[field]
+                branch[field] = node_names.setdefault(_spice_node_key(name), name)
     if frequency_override is not None:
         freq_hz = float(frequency_override)
     has_diodes = any(br["type"] == "D" for br in branches)
@@ -1932,12 +1948,9 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
     cand_ok = True
     if isinstance(spec.get("proposed_node_voltages"), dict):
         rtol = float(spec.get("rtol", 1e-4))
-        if diode_states or _SPICE_HIERARCHY.search(netlist):
-            claimed_nodes = {name.casefold(): voltage for name, voltage in v_node.items()}
-        else:
-            claimed_nodes = v_node
+        claimed_nodes = {_spice_node_key(name): voltage for name, voltage in v_node.items()} if netlist else v_node
         for k_nm, cv_raw in spec["proposed_node_voltages"].items():
-            key = str(k_nm) if claimed_nodes is v_node else str(k_nm).casefold()
+            key = _spice_node_key(str(k_nm)) if netlist else str(k_nm)
             ref_v = claimed_nodes[key]
             cv = complex(cv_raw[0], cv_raw[1]) if isinstance(cv_raw, (list, tuple)) else complex(cv_raw)
             if abs(cv - ref_v) / max(abs(ref_v), 1e-12) > rtol:
