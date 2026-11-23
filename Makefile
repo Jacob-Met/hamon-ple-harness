@@ -1,5 +1,9 @@
 PYTHON ?= python3
 
+.PHONY: verify-provider-wire
+verify-provider-wire:
+	$(PYTHON) ship/replay_engineering_provider_wire.py --reference
+
 .PHONY: verify-wave8-history
 verify-wave8-history:
 	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m pytest -q tests/test_drained_layer_history.py tests/test_wave8_certified_budget.py tests/test_wave8_certified_envelopes.py tests/test_wave8_participant_handoff.py

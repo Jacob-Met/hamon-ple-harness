@@ -37,9 +37,10 @@ import hashlib
 import json
 import os
 import pathlib
+import secrets
 import subprocess
 import tempfile
-from time import monotonic
+from time import monotonic, time
 from typing import Any
 
 import taskbridge
@@ -183,9 +184,26 @@ def message_digest(message: dict[str, Any]) -> bytes:
   return hashlib.sha256(encoded.encode("ascii")).digest()
 
 
+def empty_budget_abort(message):
+  """Recognize the pinned SDK's empty abort, including its complete zero usage."""
+  if (message.get("role") != "assistant" or message.get("content") != []
+      or message.get("stopReason") not in {"error", "aborted"}):
+    return False
+  usage = message.get("usage")
+  counts = {"input", "output", "cacheRead", "cacheWrite", "totalTokens"}
+  costs = {"input", "output", "cacheRead", "cacheWrite", "total"}
+  if not isinstance(usage, dict) or set(usage) != counts | {"cost"}:
+    return False
+  cost = usage["cost"]
+  if not isinstance(cost, dict) or set(cost) != costs:
+    return False
+  return all(type(value) in (int, float) and value == 0
+             for value in [*(usage[key] for key in counts), *cost.values()])
+
+
 def acknowledged_tool_session(
     directory: pathlib.Path, assistant: bytes, observed: dict[str, bytes],
-    expected: set[str], history: bytes | None,
+    expected: set[str], history: bytes | None, *, budget_id: str | None = None,
 ) -> pathlib.Path | None:
   """Find the one linear private session with this exact assistant and all results."""
   if history is None or not expected or observed.keys() != expected:
@@ -196,6 +214,8 @@ def acknowledged_tool_session(
   parent = None
   seen: set[str] = set()
   matched = False
+  cutoff = False
+  aborted_tail = False
   results: dict[str, bytes] = {}
   try:
     with files[0].open(encoding="utf-8") as stream:
@@ -211,14 +231,24 @@ def acknowledged_tool_session(
         seen.add(entry_id)
         parent = entry_id
         if entry.get("type") != "message":
-          # Compaction/rewind can change what will actually reach the model.
           if matched:
-            return None
+            data = entry.get("data") or {}
+            if (cutoff or not budget_id or entry.get("type") != "custom"
+                or entry.get("customType") != "ple_delivery_boundary"
+                or data.get("budget_id") != budget_id
+                or data.get("tool_call_ids") != sorted(expected)
+                or results != observed):
+              return None
+            cutoff = True
           continue
         message = entry["message"]
         digest = message_digest(message)
         replay = hashlib.sha256(replay + digest).digest()
-        if message.get("role") == "assistant":
+        if cutoff:
+          if aborted_tail or not empty_budget_abort(message):
+            return None
+          aborted_tail = True
+        elif message.get("role") == "assistant":
           matched = digest == assistant
           results.clear()
         elif matched:
@@ -230,14 +260,16 @@ def acknowledged_tool_session(
           results[call_id] = digest
   except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, StopIteration):
     return None
-  return files[0] if matched and replay == history and results == observed else None
+  return files[0] if matched and replay == history and results == observed and (not cutoff or aborted_tail) else None
 
 
 class Run:
   """Tracks JSON stream events from a single Pi subprocess run."""
 
-  def __init__(self, session: taskbridge.Session, model: str):
+  def __init__(self, session: taskbridge.Session, model: str, *, budgeted=False):
     self.session, self.model, self.replies = session, model, 0
+    self.budget_steps = 0
+    self.budget_id = secrets.token_hex(16) if budgeted else None
     self.tool_turn: bytes | None = None
     self.expected_calls: set[str] = set()
     self.observed_results: dict[str, bytes] = {}
@@ -268,6 +300,13 @@ class Run:
           self.observed_results[call_id] = message_digest(message)
     elif kind == "message_end" and message.get("role") == "assistant":
       self.replies += 1
+      if (self.budget_id and self.tool_turn is not None and not self.invalid_tail
+          and self.expected_calls and self.observed_results.keys() == self.expected_calls
+          and empty_budget_abort(message)):
+        # Preserve the completed batch only as a candidate. The private session
+        # must still prove the matching cutoff marker and exact full history.
+        return
+      self.budget_steps += 1
       calls = [b for b in message.get("content", []) if b.get("type") == "toolCall"]
       self.tool_turn = message_digest(message) if calls else None
       self.expected_calls = {b["id"] for b in calls if isinstance(b.get("id"), str) and b["id"]}
@@ -316,6 +355,30 @@ class Run:
       return
     if isinstance(event, dict):
       await self.on_event(event)
+
+
+def delivery_step_cap(session):
+  value = getattr(session, "limits", {}).get("max_steps")
+  return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def delivery_budget_exhausted(session, steps):
+  cap = delivery_step_cap(session)
+  return cap is not None and steps >= cap
+
+
+def delivery_process_env(env, session, steps, reserve, *, delivery=False, budget_id=None):
+  """Configure the cooperative Pi boundary using this pass's actual budget."""
+  remaining = session.time_left()
+  work = taskbridge.time_share(remaining, reserve)
+  now = time()
+  config = {"phase": "delivery" if delivery else "work",
+            "completed_steps": steps, "max_steps": delivery_step_cap(session),
+            "phase_deadline_ms": None if work is None else (now + work) * 1000,
+            "task_deadline_ms": None if remaining is None else (now + remaining) * 1000}
+  if budget_id is not None:
+    config["budget_id"] = budget_id
+  return {**env, "PLE_DELIVERY_BUDGET": json.dumps(config, separators=(",", ":"))}
 
 
 async def solve(session: taskbridge.Session) -> str:
@@ -417,7 +480,7 @@ async def solve(session: taskbridge.Session) -> str:
       )
       if pareto_plan and "presolve_result_json" in pareto_plan:
         if "presolve_source_sha256" in pareto_plan:
-          first_request += ("\n\nPassive-fin analytic and finite-volume check for instruction SHA-256 "
+          first_request += ("\n\nDeterministic presolve for instruction SHA-256 "
                             + pareto_plan["presolve_source_sha256"])
         first_request += ("\n\nDeterministic engineering calculation for the inline request (JSON tool output):\n"
                           + pareto_plan["presolve_result_json"])
@@ -450,7 +513,9 @@ async def solve(session: taskbridge.Session) -> str:
           "--append-system-prompt",
           NOTE.format(workdir=session.workdir) + engineering_inventory + engineering_cli_note + delivery_note,
       ]
-      run = Run(session, model)
+      if checked_delivery:
+        argv.extend(["-e", str(HERE / "delivery-budget.ts")])
+      run = Run(session, model, budgeted=checked_delivery)
       if archive_plan:
         run.archive_watch = archive_contract.FirstPublication(
             archive_plan, target=delivery_targets[0]["path"],
@@ -459,7 +524,8 @@ async def solve(session: taskbridge.Session) -> str:
       done = await taskbridge.run_process(
           argv,
           session,
-          env=env,
+          env=(delivery_process_env(env, session, run.budget_steps, reserve_window, budget_id=run.budget_id)
+               if checked_delivery else env),
           cwd=str(work),
           on_line=run.on_line,
           stdin=first_request.encode(),
@@ -471,8 +537,9 @@ async def solve(session: taskbridge.Session) -> str:
       tool_session = None
       if run.tool_turn is not None and not run.invalid_tail:
         tool_session = acknowledged_tool_session(
-            session_dir, run.tool_turn, run.observed_results, run.expected_calls, run.history)
-      can_continue = run.tool_turn is None or tool_session is not None
+            session_dir, run.tool_turn, run.observed_results, run.expected_calls, run.history,
+            budget_id=run.budget_id)
+      can_continue = (run.tool_turn is None or tool_session is not None) and not delivery_budget_exhausted(session, run.budget_steps)
       participant_followup = False
       if delivery_targets and before_delivery is not None:
         after_delivery = await delivery_guard.snapshot(session, delivery_targets)
@@ -510,7 +577,8 @@ async def solve(session: taskbridge.Session) -> str:
           terminal.invalidate()
           try:
             await taskbridge.run_process(
-                [*argv, "--continue"] if resume else argv, session, env=env, cwd=str(work),
+                [*argv, "--continue"] if resume else argv, session,
+                env=delivery_process_env(env, session, run.budget_steps, STOP_BEFORE_SEC, delivery=True, budget_id=run.budget_id), cwd=str(work),
                 on_line=run.on_line, stdin=refine.encode(), stop_before_sec=STOP_BEFORE_SEC,
                 log_prefix="pi-archive-refine: ")
           except taskbridge.Cancelled:
@@ -560,7 +628,7 @@ async def solve(session: taskbridge.Session) -> str:
               issues = delivery_guard.compare(before_delivery, after_delivery)
               await session.log("delivery_gate: post_materialize=" + str(len(issues)))
           delivery_time = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC)
-          if (issues or (working_copy and terminal.filing)) and can_continue and (delivery_time is None or delivery_time >= MIN_DELIVERY_RUN_SEC):
+          if (issues or (working_copy and terminal.filing)) and can_continue and not delivery_budget_exhausted(session, run.budget_steps) and (delivery_time is None or delivery_time >= MIN_DELIVERY_RUN_SEC):
             # Each task has its own temporary session directory. Continue the
             # actual calculation history if Pi persisted it before the cutoff.
             resume = any(session_dir.glob("*.jsonl"))
@@ -577,7 +645,7 @@ async def solve(session: taskbridge.Session) -> str:
             await taskbridge.run_process(
                 [*argv, "--continue"] if resume else argv,
                 session,
-                env=env,
+                env=delivery_process_env(env, session, run.budget_steps, STOP_BEFORE_SEC, delivery=True, budget_id=run.budget_id),
                 cwd=str(work),
                 on_line=run.on_line,
                 stdin=instruction.encode(),
@@ -600,13 +668,14 @@ async def solve(session: taskbridge.Session) -> str:
             )
       # A complete deliverable still needs a final reply after an acknowledged
       # tool turn. Its history proof cannot be reused after another model run.
-      if tool_session is not None and not participant_followup:
+      if tool_session is not None and not participant_followup and not delivery_budget_exhausted(session, run.budget_steps):
         remaining = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC)
         if remaining is None or remaining >= MIN_DELIVERY_RUN_SEC:
           terminal.invalidate()
           await session.log("delivery_gate: continuing acknowledged tool results")
           await taskbridge.run_process(
-              [*argv, "--session", str(tool_session)], session, env=env, cwd=str(work),
+              [*argv, "--session", str(tool_session)], session,
+              env=delivery_process_env(env, session, run.budget_steps, STOP_BEFORE_SEC, delivery=True, budget_id=run.budget_id), cwd=str(work),
               on_line=run.on_line, stop_before_sec=STOP_BEFORE_SEC, log_prefix="pi-finalize: ",
               stdin=(b"Continue from the recorded tool results. Check what was actually delivered, "
                      b"finish the requested work within the remaining time, and report its status."))
@@ -670,4 +739,3 @@ async def solve(session: taskbridge.Session) -> str:
 def resolve_wired_domain_tools(prompt: str = "", file_paths=()) -> list[str]:
     from hamon_pareto import select_domain_tools
     return list(select_domain_tools(prompt=prompt, file_paths=file_paths))
-

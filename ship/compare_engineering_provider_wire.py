@@ -1,0 +1,103 @@
+"""Compare received loopback requests from the 29 public examples against the pinned full-guide baseline."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+
+BASE = "33296ae11c2ac136f85cfc04c0ce7d5b8e2ba6eb"
+FULL = "b5be49394186d48bf9640fade7ac0d3ecefc433bcbc66e1b6a1ccde33aac27e1"
+POSITIVE = "synthetic-zinc-cell"
+INCOMPLETE = "synthetic-zinc-incomplete"
+REFERENCE = "synthetic-reference"
+
+
+def original_manual(source):
+    # The TypeScript registration stores its manual in one JSON string literal.
+    pieces = source.read_text().split('name: "hamon_conservation_cad_verifier",')
+    check(len(pieces) == 2, "unique conservation tool definition")
+    manual, _ = json.JSONDecoder().raw_decode(pieces[1].split("description: ", 1)[1])
+    check(isinstance(manual, str) and len(manual) > 1000, "complete tool manual")
+    return manual.encode()
+
+
+def receive(path, labels):
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    if [row["label"] for row in rows] != labels:
+        raise ValueError(f"{path}: missing, duplicated or out-of-order cases")
+    for row in rows:
+        if len(row["requests"]) != (2 if row["label"] == REFERENCE else 1):
+            raise ValueError(f"{row['label']}: request count changed")
+    return {row["label"]: row for row in rows}
+
+
+def check(condition, label):
+    if not condition:
+        raise ValueError(label)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("stock", type=Path)
+    parser.add_argument("candidate", type=Path)
+    parser.add_argument("--archive", type=Path, default=Path(__file__).resolve().parents[1] / "artifacts")
+    parser.add_argument("--candidate-source", type=Path,
+                        default=Path(__file__).resolve().parents[1] / "task-tools.ts")
+    parser.add_argument("--model", choices=("claude-opus-5-5", "claude-sonnet-4-5"), default="claude-opus-5-5")
+    args = parser.parse_args()
+    tasks = list(json.loads((args.archive / "manifest.json").read_bytes())["tasks"])
+    check(len(tasks) == len(set(tasks)) == 29, "public task roster")
+    both = tasks + [POSITIVE, INCOMPLETE]
+    stock = receive(args.stock, both)
+    candidate = receive(args.candidate, both + [REFERENCE])
+    differences = []
+    stock_names = stock[tasks[0]]["requests"][0]["tool_names"]
+    check(len(stock_names) == len(set(stock_names)) and "hamon_conservation_cad_verifier" in stock_names, "stock tools")
+    for key in both:
+        a, b = stock[key], candidate[key]
+        check(a["instruction_sha256"] == b["instruction_sha256"], f"{key}: instruction drift")
+        x, y = a["requests"][0], b["requests"][0]
+        check(x["tool_names"] == y["tool_names"] == stock_names, f"{key}: tools")
+        check(x["guide_sha256"] == FULL and x["guide_bytes"] == 12071, f"{key}: stock guide")
+        check(x["max_tokens"] == y["max_tokens"], f"{key}: output limit")
+        check(x["model"] == y["model"] == args.model, f"{key}: model identity")
+        if args.model == "claude-opus-5-5":
+            for row in (x, y):
+                check(row["thinking"]["type"] == "adaptive" and "budget_tokens" not in row["thinking"],
+                      f"{key}: registered Opus adaptive thinking")
+            observed_settings = [row["output_config"]["effort"] for row in (x, y)]
+            positive_settings = ["medium", "low"]
+        else:
+            check(x["thinking"]["type"] == y["thinking"]["type"] == "enabled", f"{key}: finite budget")
+            observed_settings = [row["thinking"]["budget_tokens"] for row in (x, y)]
+            positive_settings = [8192, 2048]
+        if key == POSITIVE:
+            check(x["presolved"] is False and y["presolved"] is True
+                  and observed_settings == positive_settings, f"{key}: positive control")
+        else:
+            check(x["presolved"] is False and y["presolved"] is False and x["thinking"] == y["thinking"] and x["output_config"] == y["output_config"],
+                  f"{key}: historical or incomplete request")
+        if key in tasks:
+            history = json.loads((args.archive / key / "trajectory.json").read_bytes())
+            original = next(step["message"] for step in history["steps"] if step["source"] == "user")
+            check(hashlib.sha256(original.encode()).hexdigest() == a["instruction_sha256"], f"{key}: original prompt")
+            delta = {unit: x[unit] - y[unit] for unit in ("request_bytes", "request_bpe")}
+            check(min(delta.values()) > 0, f"{key}: no measured first-request reduction")
+            differences.append(delta)
+    first, second = candidate[REFERENCE]["requests"]
+    check(first["tool_names"] == second["tool_names"] == stock_names
+          and first["guide_sha256"] == second["guide_sha256"] == candidate[tasks[0]]["requests"][0]["guide_sha256"],
+          "reference route")
+    manual = original_manual(args.candidate_source)
+    check(second["returned_reference_sha256"] == hashlib.sha256(manual).hexdigest()
+          and second["returned_reference_bytes"] == len(manual),
+          "reference payload differs from the full manual in this checkout")
+    summary = {unit: {"min": min(d[unit] for d in differences), "max": max(d[unit] for d in differences),
+                      "sum": sum(d[unit] for d in differences)} for unit in differences[0]}
+    print(json.dumps(dict(stock_commit=BASE, historical_requests=len(tasks), initial_request_savings=summary,
+                          model=args.model, positive_thinking_settings=positive_settings, reference_round_trip_requests=candidate[REFERENCE]["requests"],
+                          measurement="Captured localhost Pi HTTP body sizes and cl100k_base token proxy; "
+                                      "responses are fixtures. No model billing or task-solution scores."), sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

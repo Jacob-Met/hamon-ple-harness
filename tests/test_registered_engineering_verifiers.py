@@ -377,6 +377,8 @@ def routed(tmp_path_factory):
                       "spec": {**refrigerator, **data}})
     cstr = {"reactor_type":"cstr","order":1,"C_A0":1,"v0":1,"T0":300,"delta_T_adiabatic":200,"k_ref":1,"T_ref":350,"E_a":80000,"gas_phase":False,"volume":1}
     calls.extend([
+        {"id": "jacketed-cstr", "mode": "reactor_kinetics", "spec": {
+            **cstr, "jacket_to_feed_heat_capacity_ratio": 2, "coolant_T_K": 300}},
         {"id": "cstr-all-branches", "mode": "reactor_kinetics", "spec": {**cstr, "steady_state_branch": "all"}},
         {"id": "cstr-cold-branch", "mode": "reactor_kinetics", "spec": {**cstr, "steady_state_branch": 0}},
         {"id": "cstr-implicit-branch", "mode": "reactor_kinetics", "spec": cstr},
@@ -1279,6 +1281,12 @@ def test_registered_heat_modal_amplitude(routed, case, system, claim, passed):
 
 
 def test_registered_cstr_preserves_all_branches_and_refuses_implicit_choice(routed):
+    jacket = routed["jacketed-cstr"]
+    assert jacket["completed"] and jacket["details"]["verified"], jacket
+    cooled = jacket["details"]
+    assert cooled["steady_state_count"] == 1
+    assert math.isclose(cooled["conversion_X"], 0.010943612920831146, rel_tol=1e-12)
+    assert max(cooled["mass_balance_residual"], cooled["energy_balance_residual"]) < 1e-12
     complete = routed["cstr-all-branches"]
     assert complete["completed"], complete
     states = complete["details"]["steady_states"]
