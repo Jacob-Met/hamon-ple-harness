@@ -131,6 +131,31 @@ def _close(value, target):
     return abs(value-target) <= abs(target)/10**9
 
 
+def _preserves_eccentricity(force, moments, normal, demands, center):
+    # Global equilibrium tolerances scale with the full base. A resolvable
+    # small tilt can fit those tolerances even when the diagram leans backwards.
+    for moment, demand, origin in zip(moments, demands, center):
+        target = demand - normal * origin
+        actual = moment - force * origin
+        if target and (not actual or (actual > 0) != (target > 0)):
+            return False
+    return True
+
+
+def _preserves_corner_slopes(corners, normal, demands, center):
+    # Traverse both parallel edges of the clipped affine field, in increasing
+    # x or y. At least one edge rises for any nonzero eccentricity.
+    corners = list(map(Fraction, corners))
+    axes = (((0, 1), (3, 2)), ((0, 3), (1, 2)))
+    for demand, origin, edges in zip(demands, center, axes):
+        target = demand - normal * origin
+        if target:
+            changes = [(corners[b] - corners[a]) * target for a, b in edges]
+            if min(changes) < 0 or max(changes) == 0:
+                return False
+    return True
+
+
 def verify_rigid_rectangle_contact(spec):
     """Solve integral(p)=N, integral(x*p)=Mx, integral(y*p)=My on a rectangle."""
     calculation = 'rigid_rectangle_contact'
@@ -167,7 +192,7 @@ def verify_rigid_rectangle_contact(spec):
                    base_center_m=[float(cx),float(cy)],
                    moment_x_Nm=float(mx),moment_y_Nm=float(my),
                    moment_convention='Mx=integral(x*p); My=integral(y*p)')
-        checks = _claim_checks(spec,out,exact,(b,l),n,(mx,my))
+        checks = _claim_checks(spec,out,exact,(b,l),n,(mx,my),center=(cx,cy))
         out['claim_checks'] = checks
         out['conservation_verified'] = out['output_geometry_verified'] and all(checks.values())
         return out
@@ -211,7 +236,9 @@ def _solve_rectangle(b,l,n,mx,my,cx,cy):
                for x,y in [(-1,-1),(1,-1),(1,1),(-1,1)]]
     exact = dict(contact_area_m2=expected_area,q_min_Pa=Fraction(min(corners)),q_max_Pa=peak)
     geometry = (_close(area,expected_area) and abs(f-n)<=n/10**9
-                and abs(fx-mx)<=n*b/10**9 and abs(fy-my)<=n*l/10**9)
+                and abs(fx-mx)<=n*b/10**9 and abs(fy-my)<=n*l/10**9
+                and _preserves_eccentricity(f,(fx,fy),n,(mx,my),(cx,cy))
+                and _preserves_corner_slopes(corners,n,(mx,my),(cx,cy)))
     for point,p in zip(points,pressures):
         affine = Fraction(plane['pressure_at_reference_Pa'])+sum(
             Fraction(g)*(Fraction(x)-Fraction(x0)) for g,x,x0 in
@@ -231,7 +258,7 @@ def _solve_rectangle(b,l,n,mx,my,cx,cy):
     return out,exact
 
 
-def _claim_checks(spec,out,exact,dimensions,normal,moments):
+def _claim_checks(spec,out,exact,dimensions,normal,moments,center=None):
     checks = {}
     for field,unit in [('contact_area_m2','m**2'),('q_min_Pa','Pa'),('q_max_Pa','Pa')]:
         key = 'proposed_'+field
@@ -248,18 +275,21 @@ def _claim_checks(spec,out,exact,dimensions,normal,moments):
             checks[key] = (isinstance(value,(list,tuple)) and len(value)==len(target)
                            and all(_close(_quantity(v,key,unit),Fraction(t))
                                    for v,t in zip(value,target)))
+            if checks[key] and field == 'corner_pressure_Pa' and center is not None:
+                corners = [_quantity(v,key,unit) for v in value]
+                checks[key] = _preserves_corner_slopes(corners,normal,moments,center)
     key = 'proposed_contact_polygon_m'
     if key in spec:
         if out['contact_polygon_m'] is None:
             checks[key] = spec[key] is None and spec.get('proposed_contact_vertex_pressure_Pa') in (None,[])
         else:
-            checks[key] = _polygon_claim(spec,out,exact,dimensions,normal,moments)
+            checks[key] = _polygon_claim(spec,out,exact,dimensions,normal,moments,center)
     if 'proposed_contact_regime' in spec:
         checks['proposed_contact_regime'] = spec['proposed_contact_regime']==out['contact_regime']
     return checks
 
 
-def _polygon_claim(spec,out,exact,dimensions,normal,moments):
+def _polygon_claim(spec,out,exact,dimensions,normal,moments,center):
     key = 'proposed_contact_polygon_m'
     proposed = spec[key]
     if not isinstance(proposed,(list,tuple)) or not 3<=len(proposed)<=6: return False
@@ -295,4 +325,5 @@ def _polygon_claim(spec,out,exact,dimensions,normal,moments):
     if not all(p>=0 and (p==0 if q==0 else _close(p,q)) for p,q in zip(pressures,defaults)): return False
     area,f,mx,my = _integrate_displayed(points,pressures)
     return (_close(area,exact['contact_area_m2']) and abs(f-normal)<=abs(normal)/10**9
+            and (center is None or _preserves_eccentricity(f,(mx,my),normal,moments,center))
             and all(abs(a-b)<=abs(normal*d)/10**9 for a,b,d in zip((mx,my),moments,dimensions)))

@@ -51,6 +51,40 @@ class RigidRectangleContact(unittest.TestCase):
                             ('base_width_m','2*s'),('base_center_m',['1*Pa',0])]:
             self.assertFalse(solve({**BASE,field:value})['ok'])
 
+    def test_resolved_minor_moment_keeps_its_direction_after_translation(self):
+        # The wrong pressure field is an equally valid solution for an opposite
+        # minor moment. After translation both GLOBAL moments have the same sign.
+        small = 2. ** -33
+        for center in [(0, 0), (7, -3)]:
+            for axis in (0, 1):
+                for sign in (-1, 1):
+                    for major in (1, 2):
+                        moments = [4 * c for c in center]
+                        moments[axis] += sign * small
+                        moments[1-axis] += major
+                        spec = {**BASE, 'base_center_m': center,
+                                'moment_x_Nm': moments[0], 'moment_y_Nm': moments[1]}
+                        weak_key = ('moment_x_Nm', 'moment_y_Nm')[axis]
+                        with self.subTest(center=center, axis=axis, sign=sign, major=major):
+                            for factor, accepted in [(1, True), (0, False), (-1, False)]:
+                                other = solve({**spec, weak_key: 4*center[axis] + factor*sign*small})
+                                self.assertTrue(other['conservation_verified'], other)
+                                for claim in [
+                                    {'proposed_corner_pressure_Pa': other['corner_pressure_Pa']},
+                                    {'proposed_contact_polygon_m': other['contact_polygon_m'],
+                                     'proposed_contact_vertex_pressure_Pa': other['contact_vertex_pressure_Pa']},
+                                ]:
+                                    self.assertEqual(solve({**spec, **claim})['conservation_verified'],
+                                                     accepted, (spec, claim))
+
+    def test_displayed_field_cannot_erase_a_requested_moment(self):
+        weak = {**BASE, 'moment_x_Nm': 2. ** -62, 'moment_y_Nm': 1}
+        out = solve(weak)
+        self.assertEqual(out['integrated_moment_x_Nm'], 0)
+        self.assertFalse(out['output_geometry_verified'])
+        self.assertFalse(out['conservation_verified'])
+        self.assertTrue(solve({**weak, 'moment_x_Nm': 0})['conservation_verified'])
+
     def test_product_of_strips_is_not_the_joint_contact(self):
         for claim in [{'proposed_contact_area_m2':2.25},{'proposed_q_max_Pa':64/9},
                       {'proposed_contact_polygon_m':[[-.5,-.5],[1,-.5],[1,1],[-.5,1]]}]:
