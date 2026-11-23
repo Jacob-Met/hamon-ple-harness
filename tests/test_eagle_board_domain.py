@@ -134,6 +134,65 @@ class BoardDomainTests(unittest.TestCase):
         self.assertEqual(info["quarter_count"],4)
         self.assertFalse(domain.covers(Point(1500000,1500000)))
 
+    def test_one_rounded_hole_preserves_the_whole_removed_disk(self):
+        rows = outline([(-.30,-.18),(.30,-.18),(.30,.06),(.18,.18),(-.30,.18)])
+        rows[2].set("curve","90")
+        for mirror in (False,True):
+            inner = copy.deepcopy(rows)
+            for row in inner:
+                for end in ("1","2"):
+                    x, y = F(row.get("x"+end)), F(row.get("y"+end))
+                    if mirror:
+                        row.set("x"+end, str(float((-3*x-4*y)/5)))
+                        row.set("y"+end, str(float((-4*x+3*y)/5)))
+                if mirror:
+                    row.set("curve",str(-F(row.get("curve"))))
+            center = (-156000,-108000) if mirror else (180000,60000)
+            for version in (inner, reverse_rows(inner), inner[::2]+inner[1::2]):
+                _, doc = board(rectangle()+version)
+                domain, info = nominal_board_domain(dimension_records(doc))
+                self.assertEqual(info["hole_quarter_count"],1)
+                index = info["hole_quarter_source"][2]
+                self.assertNotEqual(F(doc.find("plain")[index].get("curve")),0)
+                points = [(F(x)-center[0],F(y)-center[1]) for x,y in domain.interiors[0].coords]
+                self.assertFalse(domain.covers(Point(center)))
+                for (x,y),(u,v) in zip(points,points[1:]):
+                    dx,dy = u-x,v-y
+                    if dx or dy:
+                        t = max(0,min(1,-(x*dx+y*dy)/(dx*dx+dy*dy)))
+                        self.assertGreaterEqual((x+t*dx)**2+(y+t*dy)**2,120000**2)
+
+    def test_reflex_hole_includes_its_true_arc_and_preserves_the_open_recess(self):
+        corners = [(0,0),(8,0),(8,8),(5,8),(5,5),(4,4),(0,4),(-1,2)]
+        inner = outline(corners)
+        inner[4].set("curve","-90")
+        _, doc = board(rectangle(-2,10,-2,10)+inner)
+        domain, info = nominal_board_domain(dimension_records(doc))
+        self.assertEqual(info["hole_quarter_count"],1)
+        self.assertTrue(domain.covers(Point(4600000,4400000).buffer(5000)))
+        self.assertFalse(domain.intersects(Point(4850000,4150000).buffer(5000)))
+        for i in range(101):
+            t = F(i,100)
+            x = 4000000+1000000*(1-t*t)/(1+t*t)
+            y = 5000000-1000000*2*t/(1+t*t)
+            self.assertFalse(domain.covers(Point(float(x),float(y))))
+
+    def test_rounded_hole_rejects_broken_tangent_foreign_side_and_touching_outer(self):
+        good = outline([(-.30,-.18),(.30,-.18),(.30,.06),(.18,.18),(-.30,.18)])
+        good[2].set("curve","90")
+        broken = copy.deepcopy(good)
+        broken[0].set("x2",".29")
+        broken[1].set("x1",".29")
+        # A thin re-entrant peninsula touches the quarter's local isolation square.
+        foreign = outline([(-.30,-.18),(.30,-.18),(.30,.06),(.18,.18),(-.30,.18),
+                           (-.30,.10),(.18,.10),(.18,.09),(-.30,.09)])
+        foreign[2].set("curve","90")
+        for outer,inner in ((rectangle(),broken),(rectangle(),foreign),
+                            (rectangle(right=.30),good)):
+            result = self.query(outer+inner)
+            self.assertEqual(result["board_domain"]["status"],"unresolved")
+            self.assertEqual(result["contacts"],[])
+
     def test_inner_boundary_ambiguity_fails_closed(self):
         for inner in (rectangle(2,3,0,1),rectangle(1,3,0,1),
                       rectangle(1,1.999999999,0,1),
