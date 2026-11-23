@@ -12,6 +12,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 import hamon_drawing as drawing
+import hamon_eagle_outlined as outlined
 
 
 class Groups:
@@ -806,14 +807,47 @@ def _outlined_supplies(paths, wire_ink, pitch, wires, membership):
                 and _outlined_ground_word(strokes, foot, tip)):
             marks.append({"wire_index": min(endpoints.near(foot)), "name": "GND", "shape": "ground_bar",
                           "foot": foot, "tip": tip, "label_source": "outlined_GND_strokes"})
-    indices = sorted({m["wire_index"] for m in marks})
-    if not indices:
-        return membership, [], {}
-    grounded = {membership[i] for i in indices}
-    target = min(grounded)
+    letters, signal_strokes = outlined.letter_strokes(paths, wire_ink, pitch)
+    grounded = {m["wire_index"] for m in marks}
+    evidence = []
+    for glyph in candidates:
+        if glyph["shape"] != "supply_arrow" or not .9*pitch < math.dist(glyph["foot"], glyph["tip"]) < 1.1*pitch:
+            continue
+        word = outlined.supply_word(glyph, letters)
+        if word:
+            name, occurrence = word
+            index = min(endpoints.near(glyph["foot"]))
+            mark = {"wire_index": index, "name": name, "shape": "supply_arrow", "foot": glyph["foot"],
+                    "tip": glyph["tip"], "label_source": "outlined_supply_strokes"}
+            evidence.append((index, name, occurrence, mark))
+
+    for index, name, occurrence, registered in outlined.wire_words(wires, signal_strokes, pitch):
+        if (registered and not _GROUND_NAME.fullmatch(name) and not _POWER_NAME.fullmatch(name)
+                and not re.fullmatch(r"(?:R|C|L|Q|U|J)[0-9]+", name)):
+            evidence.append((index, name, occurrence, None))
+
+    occurrence_roots, names = defaultdict(set), defaultdict(set)
+    for index in grounded:
+        names[membership[index]].add("GND")
+    for index, name, occurrence, mark in evidence:
+        occurrence_roots[occurrence].add(membership[index])
+        names[membership[index]].add(name)
+    anchors = defaultdict(set)
+    if grounded:
+        anchors["GND"].update(grounded)
+    for index, name, occurrence, mark in evidence:
+        if len(occurrence_roots[occurrence]) == 1 and names[membership[index]] == {name}:
+            anchors[name].add(index)
+            if mark:
+                marks.append(mark)
+    groups = Groups(len(wires))
+    for indices in anchors.values():
+        first = membership[min(indices)]
+        for index in indices:
+            groups.join(first, membership[index])
     ids = {}
-    merged = [ids.setdefault(target if g in grounded else g, len(ids)) for g in membership]
-    return merged, marks, {"GND": indices}
+    merged = [ids.setdefault(groups.root(g), len(ids)) for g in membership]
+    return merged, marks, {k: sorted(v) for k, v in anchors.items()}
 
 
 def _geometry_wires(svg):
