@@ -126,7 +126,9 @@ def _render(value, name):
 
 
 def _close(value, target):
-    return abs(value-target) <= abs(target)/10**9+8*Fraction(math.ulp(float(target)))
+    # An absolute ULP floor can approve zero or negative subnormal pressure
+    # against a positive load. Rational comparisons need no such floor.
+    return abs(value-target) <= abs(target)/10**9
 
 
 def verify_rigid_rectangle_contact(spec):

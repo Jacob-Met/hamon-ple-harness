@@ -120,6 +120,17 @@ class RigidRectangleContact(unittest.TestCase):
                       'moment_x_Nm':4*2.**60,'moment_y_Nm':4*2.**60}]:
             self.assertFalse(solve(spec)['conservation_verified'])
 
+    def test_subnormal_pressure_cannot_be_replaced_by_zero(self):
+        tiny = math.ulp(0.)
+        spec = {**BASE,'base_width_m':1,'base_length_m':1,
+                'vertical_resultant_N':tiny,'moment_x_Nm':0,'moment_y_Nm':0}
+        out = solve(spec)
+        self.assertTrue(out['conservation_verified'],out)
+        self.assertEqual(out['q_max_Pa'],tiny)
+        for claim in ({'proposed_q_max_Pa':0},{'proposed_q_max_Pa':2*tiny},
+                      {'proposed_q_min_Pa':-tiny}):
+            self.assertFalse(solve({**spec,**claim})['conservation_verified'])
+
     def test_router_and_domain(self):
         for payload in (BASE,{'mode':'civil_geotech','spec':BASE}):
             self.assertEqual(route(payload),solve(BASE))
