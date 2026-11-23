@@ -57,6 +57,20 @@ class PowerLawPfr(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "depletion"):
                         solve(order=n, volume=math.nextafter(limit,math.inf))
 
+    def test_near_zero_order_retains_which_side_of_depletion_applies(self):
+        # At dimensionless exposure one, the original integrated equation is
+        # U**(1-n)=n. A tiny positive n therefore leaves a nonzero fraction.
+        for n in (2.**-500, math.ulp(0.)):
+            with self.subTest(order=n), localcontext() as c:
+                c.prec = 440
+                d = Decimal(n)
+                expected = (d.ln()/(1-d)).exp()
+                result = solve(volume=1., order=n)
+                self.assertTrue(result["verified"], result)
+                self.assertEqual(result["unreacted_fraction"], float(expected))
+                with self.assertRaisesRegex(ValueError, "depletion"):
+                    solve(volume=1., order=-n)
+
     def test_invalid_or_unrepresentable_states_do_not_certify(self):
         for params in (dict(order=0.,conversion=1.2), dict(conversion=-.1),
                        dict(volume=-1.), dict(volume=1.,epsilon_A=-1.),

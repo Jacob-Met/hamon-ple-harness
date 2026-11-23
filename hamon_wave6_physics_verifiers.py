@@ -1441,7 +1441,9 @@ def _constant_rate_pfr(params, concentration, feed, flow, order, rate, inlet_t, 
     from mpmath import mp
 
     ctx = mp.clone()
-    ctx.dps = 120
+    # At one unit of exposure, the positive remaining fraction can be of
+    # order n itself. Preserve n in the exponent n-1 on both sides of zero.
+    ctx.dps = 120 + (max(0, -math.floor(math.log10(abs(order)))) if order else 0)
     if not math.isfinite(rate) or rate <= 0:
         raise ValueError("PFR kinetic rate must be positive and representable")
     effective_c = ctx.mpf(concentration.numerator)/concentration.denominator
