@@ -453,11 +453,9 @@ def _triangulate_simple_polygon_2d(pts: np.ndarray) -> List[Tuple[int, int, int]
     return tris
 
 
-def _extrude_polygon_2d(outer_pts: np.ndarray, dir_vec: np.ndarray, depth: float, inner_pts: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
+def _extrude_polygon_2d(outer_pts: np.ndarray, sweep: np.ndarray, inner_pts: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
     if _signed_area_2d(outer_pts) < 0:
         outer_pts = outer_pts[::-1].copy()
-    dn = np.linalg.norm(dir_vec)
-    d = (dir_vec / dn if dn > 1e-12 else np.array([0.0, 0.0, 1.0])) * depth
 
     if inner_pts is not None and len(inner_pts) >= 3:
         if _signed_area_2d(inner_pts) < 0:
@@ -466,8 +464,8 @@ def _extrude_polygon_2d(outer_pts: np.ndarray, dir_vec: np.ndarray, depth: float
             k = len(outer_pts)
             b_out = np.column_stack([outer_pts, np.zeros(k)])
             b_in = np.column_stack([inner_pts, np.zeros(k)])
-            t_out = b_out + d
-            t_in = b_in + d
+            t_out = b_out + sweep
+            t_in = b_in + sweep
             verts = np.vstack([b_out, b_in, t_out, t_in])
             faces: List[Tuple[int, int, int]] = []
             for i in range(k):
@@ -484,14 +482,14 @@ def _extrude_polygon_2d(outer_pts: np.ndarray, dir_vec: np.ndarray, depth: float
                 faces.append((bo0, to1, to0))
                 faces.append((bi0, ti1, bi1))
                 faces.append((bi0, ti0, ti1))
-            if d[2] < 0:
+            if sweep[2] < 0:
                 faces = [(a, c, b) for (a, b, c) in faces]
             return verts, np.array(faces, dtype=np.int32)
 
     k = len(outer_pts)
     cap_tris = _triangulate_simple_polygon_2d(outer_pts)
     bottom = np.column_stack([outer_pts, np.zeros(k)])
-    top = bottom + d
+    top = bottom + sweep
     verts = np.vstack([bottom, top])
     faces = []
     for (a, b, c) in cap_tris:
@@ -501,7 +499,7 @@ def _extrude_polygon_2d(outer_pts: np.ndarray, dir_vec: np.ndarray, depth: float
         nxt = (i + 1) % k
         faces.append((i, nxt, k + nxt))
         faces.append((i, k + nxt, k + i))
-    if d[2] < 0:
+    if sweep[2] < 0:
         faces = [(a, c, b) for (a, b, c) in faces]
     return verts, np.array(faces, dtype=np.int32)
 
@@ -752,9 +750,24 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
         if outer is None:
             return []
         solid_mat = _axis2placement3d_matrix(entities, args[1], unit_scale)
-        ext_dir = _vec3_from_ref(entities, args[2], (0.0, 0.0, 1.0))
-        depth = float(args[3]) * unit_scale
-        verts, faces = _extrude_polygon_2d(outer, ext_dir, depth, inner_pts=inner)
+        try:
+            (direction_values,) = _required_ifc_entity(entities, args[2], "IFCDIRECTION")
+            ratios = np.asarray(direction_values, dtype=float)
+            depth = float(args[3]) * unit_scale
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise UnresolvedSolidGeometry("Invalid IFC extrusion direction or depth") from exc
+        if (ratios.shape != (3,) or not np.isfinite(ratios).all() or ratios[2] == 0
+                or not 0 < depth < math.inf):
+            raise UnresolvedSolidGeometry("Expected a positive depth and a finite direction crossing the profile plane")
+        # Normalize in the solid's coordinate system. Direction ratios can
+        # have arbitrary scale; the profile's placement rotates the section
+        # but must not rotate the extrusion a second time.
+        ratios = ratios / np.max(np.abs(ratios))
+        direction = ratios / np.linalg.norm(ratios)
+        sweep = (prof_mat[:3, :3].T @ direction) * depth
+        if not np.isfinite(sweep).all() or sweep[2] == 0:
+            raise UnresolvedSolidGeometry("IFC sweep is not representable as a finite solid")
+        verts, faces = _extrude_polygon_2d(outer, sweep, inner_pts=inner)
         verts = _apply_transform(verts, solid_mat @ prof_mat)
         return [(verts, faces)]
 
