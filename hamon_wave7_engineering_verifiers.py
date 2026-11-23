@@ -895,6 +895,89 @@ def _modal_spectrum_certificate(mass, stiffness, vectors, estimates):
     return nullity, bounds
 
 
+def _binary_modal_solution(m, k):
+    try:
+        chol = np.linalg.cholesky(m)
+    except np.linalg.LinAlgError:
+        # A floating failure alone does not establish invalid mass.
+        if _inertia_counts(_dyadic_matrix(m)[0]) != (0, 0):
+            raise ValueError("non_spd_mass_matrix")
+        raise ArithmeticError("unresolved_mass_factorization")
+
+    values, vectors = linalg.eigh(k, m)
+    if not (np.isfinite(values).all() and np.isfinite(vectors).all()):
+        raise ArithmeticError("unresolved_modal_eigensystem")
+    nullity, bounds = _modal_spectrum_certificate(m, k, vectors, values)
+    values[:nullity] = 0.0
+    left = np.linalg.solve(chol, k)
+    whitened = np.linalg.solve(chol, left.T).T
+    dual = np.linalg.eigvalsh(0.5 * (whitened + whitened.T))
+    positive, dual_positive = values[nullity:], dual[nullity:]
+    if np.any(dual_positive <= 0) or not np.isfinite(dual).all():
+        raise ArithmeticError("unresolved_dual_modal_frequency")
+    dual_error = float(np.max(np.abs(positive-dual_positive) /
+                              np.maximum(positive, dual_positive), initial=0.0))
+    denominator = (np.linalg.norm(k, np.inf) + np.abs(values)*np.linalg.norm(m, np.inf)) * np.max(np.abs(vectors), axis=0)
+    error = np.max(np.abs(k @ vectors - (m @ vectors)*values), axis=0)
+    eigen_error = float(np.max(np.divide(error, denominator, out=np.zeros_like(error), where=denominator > 0)))
+    if len(positive):
+        # Mass-normalized residual against each physical mode's own scale.
+        weighted = np.linalg.solve(chol, k @ vectors - (m @ vectors)*values)
+        mode_scale = np.where(values > 0, values, positive[0])
+        eigen_error = max(eigen_error, float(np.max(np.linalg.norm(weighted / mode_scale, axis=0))))
+    orth_error = float(np.linalg.norm(vectors.T @ m @ vectors - np.eye(len(m)), ord=np.inf))
+    residual = max(eigen_error, orth_error, dual_error)
+    if not math.isfinite(residual) or residual >= 1e-10:
+        raise ArithmeticError("unresolved_modal_solver_residual")
+
+    return values, nullity, bounds, residual
+
+
+def _refined_modal_solution(m, k):
+    """Recover weak positive modes and retain the exact shifted-pencil certificate."""
+    from mpmath import mp
+
+    if _inertia_counts(_dyadic_matrix(m)[0]) != (0, 0):
+        raise ValueError("non_spd_mass_matrix")
+    negative, nullity = _inertia_counts(_dyadic_matrix(k)[0])
+    if negative:
+        raise ValueError("unstable_negative_stiffness_eigenvalue")
+    ctx = mp.clone()
+    n = len(m)
+    previous = None
+    for bits in (128, 256, 512, 1024, 2048, 4096):
+        ctx.prec = bits
+        mass, stiffness = ctx.matrix(m.tolist()), ctx.matrix(k.tolist())
+        try:
+            inv_l = ctx.cholesky(mass)**-1
+        except ValueError:
+            continue
+        c = inv_l * stiffness * inv_l.T
+        eigen, orth = ctx.eigsy((c+c.T)/2)
+        gap = eigen[nullity] if nullity < n else ctx.one
+        if gap <= 0:
+            continue
+        condition = ctx.mnorm(mass) * ctx.mnorm(inv_l)**2
+        if ctx.eps * n**2 * condition * ctx.mnorm(inv_l)**2 * ctx.mnorm(stiffness) >= gap * ctx.mpf('1e-18'):
+            continue
+        values = [0.]*nullity + [float(eigen[i]) for i in range(nullity, n)]
+        if not all(math.isfinite(v) and v > 0 for v in values[nullity:]):
+            raise ArithmeticError("unrepresentable_modal_frequency")
+        vectors = inv_l.T * orth
+        residual = ctx.mnorm(vectors.T * mass * vectors - ctx.eye(n))
+        for i, value in enumerate(values):
+            mode = vectors[:, i]
+            error = inv_l * (stiffness * mode - ctx.mpf(value) * (mass * mode))
+            residual = max(residual, ctx.norm(error) / (value if value else gap))
+        if previous == values and residual < ctx.mpf('1e-10'):
+            values = np.asarray(values)
+            basis = np.array(vectors.tolist(), dtype=float)
+            count, bounds = _modal_spectrum_certificate(m, k, basis, values)
+            return values, count, bounds, float(residual)
+        previous = values
+    raise ArithmeticError("unresolved_modal_solver_residual")
+
+
 def _lagrangian_modes(params):
     result = {"domain": "lagrangian_orbital", "subkind": "lagrangian_modes", "verified": False}
     try:
@@ -919,33 +1002,9 @@ def _lagrangian_modes(params):
         m, me = scaled(m)
         k, ke = scaled(k)
         try:
-            chol = np.linalg.cholesky(m)
-        except np.linalg.LinAlgError:
-            # A floating failure alone does not establish invalid mass.
-            if _inertia_counts(_dyadic_matrix(m)[0]) != (0, 0):
-                raise ValueError("non_spd_mass_matrix")
-            raise ArithmeticError("unresolved_mass_factorization")
-
-        values, vectors = linalg.eigh(k, m)
-        if not (np.isfinite(values).all() and np.isfinite(vectors).all()):
-            raise ArithmeticError("unresolved_modal_eigensystem")
-        nullity, bounds = _modal_spectrum_certificate(m, k, vectors, values)
-        values[:nullity] = 0.0
-        left = np.linalg.solve(chol, k)
-        whitened = np.linalg.solve(chol, left.T).T
-        dual = np.linalg.eigvalsh(0.5 * (whitened + whitened.T))
-        positive, dual_positive = values[nullity:], dual[nullity:]
-        if np.any(dual_positive <= 0) or not np.isfinite(dual).all():
-            raise ArithmeticError("unresolved_dual_modal_frequency")
-        dual_error = float(np.max(np.abs(positive-dual_positive) /
-                                  np.maximum(positive, dual_positive), initial=0.0))
-        denominator = (np.linalg.norm(k, np.inf) + np.abs(values)*np.linalg.norm(m, np.inf)) * np.max(np.abs(vectors), axis=0)
-        error = np.max(np.abs(k @ vectors - (m @ vectors)*values), axis=0)
-        eigen_error = float(np.max(np.divide(error, denominator, out=np.zeros_like(error), where=denominator > 0)))
-        orth_error = float(np.linalg.norm(vectors.T @ m @ vectors - np.eye(len(m)), ord=np.inf))
-        residual = max(eigen_error, orth_error, dual_error)
-        if not math.isfinite(residual) or residual >= 1e-10:
-            raise ArithmeticError("unresolved_modal_solver_residual")
+            values, nullity, bounds, residual = _binary_modal_solution(m, k)
+        except (ArithmeticError, np.linalg.LinAlgError):
+            values, nullity, bounds, residual = _refined_modal_solution(m, k)
 
         unit = Fraction(2) ** (ke-me)
         def outward(q, upward):
@@ -961,6 +1020,26 @@ def _lagrangian_modes(params):
 
         physical = [float(Fraction(float(v))*unit) for v in values]
         intervals = [[outward(lo*unit, False), outward(hi*unit, True)] for lo, hi in bounds]
+        # Restoring physical units can consume most of a subnormal
+        # eigenvalue's significant bits after the normalized solve passed.
+        for i in range(nullity, len(physical)):
+            value = physical[i]
+            if value >= np.finfo(float).tiny:
+                continue
+            if value <= 0:
+                raise ArithmeticError("unrepresentable_modal_frequency")
+            published = Fraction(value)
+            target = published / unit
+            k_int, kd = _dyadic_matrix(k)
+            m_int, md = _dyadic_matrix(m)
+            below, equal = _inertia_counts(k_int*(md*target.denominator) - m_int*(kd*target.numerator))
+            if below <= i < below+equal:
+                intervals[i] = [value, value]
+                continue
+            relative = max(abs(bound*unit-published)/published for bound in bounds[i])
+            if relative >= Fraction(1, 10**10):
+                raise ArithmeticError("unrepresentable_modal_frequency")
+            residual = max(residual, float(relative))
         if any(low <= 0.0 or val <= 0.0 for (low, _), val in zip(intervals[nullity:], physical[nullity:])):
             raise ArithmeticError("unrepresentable_modal_frequency")
         omega = [math.sqrt(val) for val in physical]
