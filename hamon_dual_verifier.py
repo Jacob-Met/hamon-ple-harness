@@ -2348,6 +2348,68 @@ def _column_quantity(spec: dict[str, Any], field: str, unit: str) -> float:
     raise ValueError(f"{field} must have units compatible with {unit}, got {quantity.dim_list()}")
 
 
+def _column_force(spec: dict[str, Any], field: str) -> Fraction:
+    """Keep rational load arithmetic exact for the H1 equation boundary."""
+    _column_quantity(spec, field, "N")
+    expression = str(spec[field])
+
+    def amount(node: ast.AST) -> Fraction:
+        if isinstance(node, ast.Constant):
+            if type(node.value) is int:
+                return Fraction(node.value)
+            literal = Decimal(ast.get_source_segment(expression, node).replace("_", ""))
+            if literal and literal.adjusted() < -8192:
+                raise ValueError(f"{field} exceeds the supported exact force precision")
+            return Fraction(literal)
+        if isinstance(node, ast.Name):
+            # Pressure times area is also a force. Preserve the exact customary
+            # definitions when converting between pressure and load units.
+            if node.id in ("psi", "ksi", "psf", "ksf"):
+                force = "kip" if node.id.startswith("k") else "lbf"
+                length = "ft" if node.id.endswith("f") else "inch"
+                return Fraction(_EXACT_SI_SCALES[force][0]) / Fraction(_EXACT_SI_SCALES[length][0])**2
+            if node.id == "tonf":
+                return 2000 * Fraction(_EXACT_SI_SCALES["lbf"][0])
+            if node.id in _EXACT_SI_SCALES:
+                return Fraction(_EXACT_SI_SCALES[node.id][0])
+            return Fraction(str(SI_UNITS[node.id].val))
+        if isinstance(node, ast.UnaryOp):
+            value = amount(node.operand)
+            return -value if isinstance(node.op, ast.USub) else value
+        if isinstance(node, ast.BinOp):
+            left, right = amount(node.left), amount(node.right)
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, ast.Div):
+                return left / right
+            if right.denominator == 1:
+                exponent = int(right)
+                if max(left.numerator.bit_length(), left.denominator.bit_length()) * abs(exponent) > 65536:
+                    raise ValueError(f"{field} exceeds the supported exact force precision")
+                return left ** exponent
+        if isinstance(node, ast.Call) and node.func.id in ("abs", "min", "max"):
+            values = [amount(arg) for arg in node.args]
+            if node.func.id == "abs":
+                return abs(values[0])
+            return min(values) if node.func.id == "min" else max(values)
+        # Roots, powers and scalar functions retain the quantity language's
+        # numerical semantics; surrounding arithmetic still uses exact ratios.
+        term = ast.get_source_segment(expression, node)
+        try:
+            value, _ = eval_quantity_decimal(term)
+        except (ValueError, ArithmeticError):
+            value = Decimal(str(eval_quantity(term).val))
+        if value and abs(value.adjusted()) > 8192:
+            raise ValueError(f"{field} exceeds the supported exact force precision")
+        return Fraction(value)
+
+    return amount(ast.parse(expression, mode="eval").body)
+
+
 def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
     """Unified dispatcher for general multi-discipline engineering checks (zero task ID branching)."""
     if kind in ("beam_design_check", "beam_fixed_fixed"):
@@ -2371,24 +2433,26 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
             res[f"wall_{wid}_shear_N"] = v
         return res
     if kind == "column_interaction_aisc":
-        pu = _column_quantity(spec, "Pu", "N")
-        pc = _column_quantity(spec, "Pc", "N")
+        pu = _column_force(spec, "Pu")
+        pc = _column_force(spec, "Pc")
         mux = _column_quantity(spec, "Mux", "N_m")
         mcx = _column_quantity(spec, "Mcx", "N_m")
         muy = _column_quantity(spec, "Muy", "N_m")
         mcy = _column_quantity(spec, "Mcy", "N_m")
         # Symbolic vs float cross-check
-        r_p = pu / pc
-        if r_p >= 0.2:
+        axial = pu / pc
+        r_p = float(axial)
+        symbolic_axial = Decimal(axial.numerator) / Decimal(axial.denominator)
+        if axial >= Fraction(1, 5):
             eq = "H1-1a"
             u_num = r_p + (8.0 / 9.0) * (mux / mcx + muy / mcy)
-            u_sym = float(Decimal(str(pu)) / Decimal(str(pc)) + (Decimal(8) / Decimal(9)) * (
+            u_sym = float(symbolic_axial + (Decimal(8) / Decimal(9)) * (
                 Decimal(str(mux)) / Decimal(str(mcx)) + Decimal(str(muy)) / Decimal(str(mcy))
             ))
         else:
             eq = "H1-1b"
             u_num = 0.5 * r_p + (mux / mcx + muy / mcy)
-            u_sym = float(Decimal("0.5") * (Decimal(str(pu)) / Decimal(str(pc))) + (
+            u_sym = float(Decimal("0.5") * symbolic_axial + (
                 Decimal(str(mux)) / Decimal(str(mcx)) + Decimal(str(muy)) / Decimal(str(mcy))
             ))
         return {
