@@ -1,4 +1,4 @@
-"""Level supports on a continuous prismatic Euler–Bernoulli beam.
+"""Level supports on a continuous Euler–Bernoulli beam, prismatic on each span.
 
 Positive distributed load is downward. Reactions and vertical displacements
 are positive upward, and bending moments are positive in sagging.
@@ -28,13 +28,14 @@ def _reported(value):
     return shown
 
 
-def _reactions(x, loads, active):
+def _reactions(x, loads, rigidities, active):
     l1, l2 = x[1], x[2] - x[1]
     q1, q2 = loads
     total = q1 * l1 + q2 * l2
     if len(active) == 3:
-        # Clapeyron's three-moment equation with zero outer moments.
-        middle = -(q1 * l1**3 + q2 * l2**3) / (8 * (l1 + l2))
+        # The rotations at B must match, with each span weighted by its flexibility.
+        e1, e2 = rigidities
+        middle = -(q1 * l1**3 / e1 + q2 * l2**3 / e2) / (8 * (l1 / e1 + l2 / e2))
         left = q1 * l1 / 2 + middle / l1
         right = q2 * l2 / 2 + middle / l2
         return (left, total - left - right, right)
@@ -47,32 +48,35 @@ def _reactions(x, loads, active):
     return tuple(reactions)
 
 
-def _station_motion(x, loads, ei, active, reactions):
-    # Integrate EI v'' = M on successive spans. The single pair of integration
-    # constants preserves displacement and rotation at the middle station.
-    q1, q2 = loads
-    primitives, slopes = [], []
-    for station in x:
-        tail = max(ZERO, station - x[1])
-        arms = [max(ZERO, station - support) for support in x]
-        primitives.append(sum(r * d**3 / 6 for r, d in zip(reactions, arms))
-                          - (q1 * station**4 + (q2 - q1) * tail**4) / 24)
-        slopes.append(sum(r * d**2 / 2 for r, d in zip(reactions, arms))
-                      - (q1 * station**3 + (q2 - q1) * tail**3) / 6)
+def _station_motion(x, loads, rigidities, active, reactions):
+    # Integrate v'' = M/EI from the left. Carry the previous span's end
+    # displacement and rotation across B, including when its rigidity jumps.
+    offsets, slopes = [ZERO], [ZERO]
+    moment = shear = ZERO
+    for i, (q, rigidity) in enumerate(zip(loads, rigidities)):
+        length = x[i + 1] - x[i]
+        shear += reactions[i]
+        offsets.append(offsets[-1] + slopes[-1] * length + (
+            moment * length**2 / 2 + shear * length**3 / 6 - q * length**4 / 24
+        ) / rigidity)
+        slopes.append(slopes[-1] + (
+            moment * length + shear * length**2 / 2 - q * length**3 / 6
+        ) / rigidity)
+        moment += shear * length - q * length**2 / 2
+        shear -= q * length
     i, j = active[0], active[-1]
-    slope = (primitives[i] - primitives[j]) / (x[j] - x[i])
-    constant = -primitives[i] - slope * x[i]
-    displacements = [(v + slope * s + constant) / ei for v, s in zip(primitives, x)]
-    rotations = [(v + slope) / ei for v in slopes]
-    return displacements, rotations
+    tilt = (offsets[i] - offsets[j]) / (x[j] - x[i])
+    shift = -offsets[i] - tilt * x[i]
+    return ([v + tilt * s + shift for v, s in zip(offsets, x)],
+            [slope + tilt for slope in slopes])
 
 
-def _verify_elements(x, loads, ei, displacements, rotations, reactions):
+def _verify_elements(x, loads, rigidities, displacements, rotations, reactions):
     # Independently assemble cubic Hermite endpoint forces and moments from
     # the original nodal motion, EI and consistent distributed loads.
     nodal_forces = [ZERO] * 3
     nodal_moments = [ZERO] * 3
-    for i, q in enumerate(loads):
+    for i, (q, ei) in enumerate(zip(loads, rigidities)):
         length = x[i + 1] - x[i]
         secant = (displacements[i + 1] - displacements[i]) / length
         left, right = rotations[i], rotations[i + 1]
@@ -116,23 +120,24 @@ def two_span_beam(l1, l2, q1, q2, ei, conditions):
         raise ValueError("support_conditions maps A, B, C to bilateral or compression_only")
     bilateral = tuple(i for i, name in enumerate(NAMES) if conditions.get(name, "bilateral") == "bilateral")
     bearings = tuple(i for i in range(3) if i not in bilateral)
+    rigidities = ei if isinstance(ei, (tuple, list)) else (ei, ei)
     x, loads = (ZERO, l1, l1 + l2), (q1, q2)
     for count in range(len(bearings), -1, -1):
         for contacts in combinations(bearings, count):
             active = sorted((*bilateral, *contacts))
             if len(active) < 2:
                 continue
-            reactions = _reactions(x, loads, active)
+            reactions = _reactions(x, loads, rigidities, active)
             if any(reactions[i] < 0 for i in bearings):
                 continue
-            gaps, rotations = _station_motion(x, loads, ei, active, reactions)
+            gaps, rotations = _station_motion(x, loads, rigidities, active, reactions)
             if any(gaps[i] != 0 for i in active):
                 raise ValueError("two-span contact support compatibility mismatch")
             if any(gaps[i] < 0 for i in bearings):
                 continue
             if not _unique_motion(x, bilateral, reactions, gaps):
                 raise ValueError("two-span bearing equilibrium has nonunique rigid motion")
-            _verify_elements(x, loads, ei, gaps, rotations, reactions)
+            _verify_elements(x, loads, rigidities, gaps, rotations, reactions)
             middle, sagging, hogging = _signed_moments(x, loads, reactions)
             states = {}
             for i, name in enumerate(NAMES):
