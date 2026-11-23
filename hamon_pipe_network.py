@@ -2,6 +2,7 @@
 
 import math
 from bisect import bisect_left
+from fractions import Fraction
 
 import numpy as np
 from scipy.linalg import null_space
@@ -396,6 +397,21 @@ def equipped_branch_head(branch, flow_per_pump):
             "strainer_head_loss_m": strainer, "required_head_m": required}
 
 
+def pump_curve(curve):
+    if not isinstance(curve, list) or len(curve) < 2:
+        raise ValueError("The pump curve needs at least two tabulated points")
+    flows, heads = [], []
+    for point in curve:
+        if not isinstance(point, dict) or point.keys() != {"flow_m3_s", "head_m"}:
+            raise ValueError("Each curve point must specify flow_m3_s and head_m")
+        q, h = number(point["flow_m3_s"]), number(point["head_m"])
+        if q < 0 or h < 0 or (flows and q <= flows[-1]):
+            raise ValueError("Curve points require increasing nonnegative flow and nonnegative head")
+        flows.append(q)
+        heads.append(h)
+    return flows, heads
+
+
 def verify_pump_duty(spec):
     """Check fixed-speed duty for identical parallel pumps at their tabulated head.
 
@@ -428,18 +444,7 @@ def verify_pump_duty(spec):
             required = number(spec["required_head_m"])
             if required < 0:
                 raise ValueError("Expected nonnegative required head")
-        curve = spec["curve"]
-        if not isinstance(curve, list) or len(curve) < 2:
-            raise ValueError("The pump curve needs at least two tabulated points")
-        flows, heads = [], []
-        for point in curve:
-            if not isinstance(point, dict) or point.keys() != {"flow_m3_s", "head_m"}:
-                raise ValueError("Each curve point must specify flow_m3_s and head_m")
-            q, h = number(point["flow_m3_s"]), number(point["head_m"])
-            if q < 0 or h < 0 or (flows and q <= flows[-1]):
-                raise ValueError("Curve points require increasing nonnegative flow and nonnegative head")
-            flows.append(q)
-            heads.append(h)
+        flows, heads = pump_curve(spec["curve"])
         checks = {}
         if "per_pump_input_W" in spec or "available_panel_W" in spec:
             draw = number(spec["per_pump_input_W"])
@@ -466,5 +471,96 @@ def verify_pump_duty(spec):
             )
         return {**result, "ok": True, "checks": checks,
                 "available_head_m": head, "head_margin_m": margin, "duty_verified": all(checks.values())}
+    except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+        return {**result, "reason": str(exc)}
+
+
+def _isolate_pump_root(residual, low, high):
+    """Opposite signs on one monotone piece. Stop at adjacent binary64 flows."""
+    low_positive = residual(low) > 0
+    while math.nextafter(float(low), math.inf) < float(high):
+        mid = (low + high) / 2
+        value = residual(mid)
+        if value == 0:
+            return mid
+        if (value > 0) == low_positive:
+            low = mid
+        else:
+            high = mid
+    return (low + high) / 2
+
+
+def verify_pump_operating_point(spec):
+    """All rated intersections of a fixed-speed pump bank with Hstatic + K Q².
+
+    Q is total flow; each identical parallel pump carries Q/count. Curve
+    segments may rise. A flat coincident segment is reported as an interval.
+    """
+    result = {"calculation": "pump_operating_point", "mode": "thermal_fluid",
+              "tool": "hamon_conservation_cad_verifier", "ok": False}
+    try:
+        allowed = {"mode", "calculation", "curve", "identical_pumps", "static_head_m",
+                   "system_resistance_s2_m5"}
+        if spec.keys() - allowed:
+            raise ValueError("Unsupported inputs for a quadratic pump-system operating point")
+        count = spec.get("identical_pumps", 1)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise ValueError("identical_pumps must be a positive integer")
+        static = Fraction(number(spec["static_head_m"]))
+        resistance = Fraction(number(spec["system_resistance_s2_m5"]))
+        if resistance < 0:
+            raise ValueError("System curve resistance must be nonnegative")
+        flows, heads = pump_curve(spec["curve"])
+        points = list(zip(map(Fraction, flows), map(Fraction, heads)))
+        roots, intervals = set(), []
+        a = resistance * count**2
+        for (left, h0), (right, h1) in zip(points, points[1:]):
+            slope = (h1 - h0) / (right - left)
+            constant = static - h0 + slope * left
+
+            def residual(q):
+                return (a*q - slope)*q + constant
+
+            if a == 0 and slope == 0 and constant == 0:
+                if intervals and intervals[-1][1] == left:
+                    intervals[-1] = (intervals[-1][0], right)
+                else:
+                    intervals.append((left, right))
+                continue
+            boundaries = [left, right]
+            if a and left < slope/(2*a) < right:
+                boundaries.insert(1, slope/(2*a))
+            for lo, hi in zip(boundaries, boundaries[1:]):
+                flo, fhi = residual(lo), residual(hi)
+                if flo == 0:
+                    roots.add(lo)
+                if fhi == 0:
+                    roots.add(hi)
+                if flo * fhi < 0:
+                    roots.add(_isolate_pump_root(residual, lo, hi))
+
+        def rendered(value):
+            as_float = float(value)
+            if as_float == 0 and value:
+                raise ValueError("A nonzero operating point value is below the output range")
+            return as_float
+
+        # Only shared table knots can occur in two adjacent segments.
+        for lo, hi in intervals:
+            roots.discard(lo)
+            roots.discard(hi)
+        operating_points = []
+        for q in sorted(roots):
+            total = count*q
+            j = min(bisect_left(flows, q, lo=1), len(flows)-1)
+            (q0, h0), (q1, h1) = points[j-1:j+1]
+            head = h0 + (h1-h0)*(q-q0)/(q1-q0)
+            operating_points.append({"flow_per_pump_m3_s": rendered(q),
+                                     "total_flow_m3_s": rendered(total),
+                                     "head_m": rendered(head)})
+        ranges = [[rendered(count*lo), rendered(count*hi)] for lo, hi in intervals]
+        return {**result, "ok": True, "has_rated_intersection": bool(operating_points or ranges),
+                "operating_points": operating_points,
+                "continuous_total_flow_intervals_m3_s": ranges}
     except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
         return {**result, "reason": str(exc)}
