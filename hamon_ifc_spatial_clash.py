@@ -931,7 +931,6 @@ def _bounded_face_triangles(rings):
 
 def _polygonal_solid_mesh(entities, args, unit_scale):
     """Tessellate bounded planar regions; preserve all holes and oriented shell edges."""
-    from collections import Counter
     def fail(reason):
         raise UnresolvedSolidGeometry("polygonal Body: " + reason)
 
@@ -964,7 +963,6 @@ def _polygonal_solid_mesh(entities, args, unit_scale):
         return [index_map[i - 1] - 1 for i in source]
 
     face_rings = []
-    boundary = Counter()
     for ref in args[2]:
         kind, bounds = reference(ref, {"IFCINDEXEDPOLYGONALFACE", "IFCINDEXEDPOLYGONALFACEWITHVOIDS"})
         if not bounds:
@@ -976,6 +974,18 @@ def _polygonal_solid_mesh(entities, args, unit_scale):
             rings.extend(indices(loop) for loop in bounds[1])
 
         face_rings.append(rings)
+    return _bounded_solid_mesh(vertices, face_rings)
+
+
+def _bounded_solid_mesh(vertices, face_rings, label="polygonal Body"):
+    """Tessellate complete planar face domains for both IFC mesh encodings."""
+    from collections import Counter
+
+    def fail(reason):
+        raise UnresolvedSolidGeometry(label + ": " + reason)
+
+    boundary = Counter()
+    for rings in face_rings:
         for ring in rings:
             for a, b in zip(ring, ring[1:] + ring[:1]):
                 boundary[(tuple(vertices[a]), tuple(vertices[b]))] += 1
@@ -1026,6 +1036,70 @@ def _polygonal_solid_mesh(entities, args, unit_scale):
     used, inverse = np.unique(np.asarray(triangles, dtype=np.int32), return_inverse=True)
     return [(vertices[used], inverse.reshape(-1, 3).astype(np.int32))]
 
+
+
+def _faceted_solid_mesh(entities, args, unit_scale):
+    """Resolve oriented PolyLoops into one outer ring and all holes per face."""
+    def fail(reason):
+        raise UnresolvedSolidGeometry("faceted BREP: " + reason)
+
+    def reference(ref, accepted):
+        if not isinstance(ref, tuple) or len(ref) != 2 or ref[0] != "ref" or ref[1] not in entities:
+            fail("missing referenced IFC entity")
+        kind, values = entities[ref[1]]
+        if kind not in accepted:
+            fail("unexpected referenced " + kind)
+        return kind, values
+
+    if len(args) != 1:
+        fail("expected one closed outer shell")
+    _, shell = reference(args[0], {"IFCCLOSEDSHELL"})
+    if len(shell) != 1 or not isinstance(shell[0], list) or not shell[0]:
+        fail("empty or malformed closed shell")
+    vertices = []
+    vertex_for = {}
+    face_rings = []
+    for face_ref in shell[0]:
+        _, face = reference(face_ref, {"IFCFACE"})
+        if len(face) != 1 or not isinstance(face[0], list) or not face[0]:
+            fail("face has no boundary loops")
+        outer = None
+        inner = []
+        for bound_ref in face[0]:
+            kind, bound = reference(bound_ref, {"IFCFACEOUTERBOUND", "IFCFACEBOUND"})
+            if len(bound) != 2 or type(bound[1]) is not bool:
+                fail("face bound lacks an explicit Boolean orientation")
+            _, loop = reference(bound[0], {"IFCPOLYLOOP"})
+            if len(loop) != 1 or not isinstance(loop[0], list) or len(loop[0]) < 3:
+                fail("face bound needs at least three polygon vertices")
+            ring = []
+            for point_ref in loop[0]:
+                _, point = reference(point_ref, {"IFCCARTESIANPOINT"})
+                if point_ref not in vertex_for:
+                    if (len(point) != 1 or not isinstance(point[0], list) or len(point[0]) != 3
+                            or any(type(value) not in (int, float) for value in point[0])):
+                        fail("expected three numeric Cartesian coordinates")
+                    try:
+                        coordinates = np.asarray(point[0], dtype=np.float64) * unit_scale
+                    except (IndexError, TypeError, ValueError, OverflowError) as exc:
+                        raise UnresolvedSolidGeometry("faceted BREP: malformed point") from exc
+                    if not np.isfinite(coordinates).all():
+                        fail("non-finite or non-3D point")
+                    vertex_for[point_ref] = len(vertices)
+                    vertices.append(coordinates)
+                ring.append(vertex_for[point_ref])
+            if not bound[1]:
+                ring.reverse()
+            if kind == "IFCFACEOUTERBOUND":
+                if outer is not None:
+                    fail("face has more than one outer bound")
+                outer = ring
+            else:
+                inner.append(ring)
+        if outer is None:
+            fail("face has no explicit outer bound")
+        face_rings.append([outer, *inner])
+    return _bounded_solid_mesh(np.asarray(vertices, dtype=np.float64), face_rings, "faceted BREP")
 
 
 def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, unit_scale: float,
@@ -1127,47 +1201,8 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
     if itype == "IFCPOLYGONALFACESET":
         return _polygonal_solid_mesh(entities, args, unit_scale)
 
-    if itype == "IFCFACETEDBREP" and len(args) >= 1:
-        sref = args[0]
-        if isinstance(sref, tuple) and sref[0] == "ref" and sref[1] in entities:
-            _, sargs = entities[sref[1]]
-            if sargs and isinstance(sargs[0], list):
-                vert_map: Dict[int, int] = {}
-                verts_list: List[np.ndarray] = []
-                faces_list: List[Tuple[int, int, int]] = []
-                for fref in sargs[0]:
-                    if not (isinstance(fref, tuple) and fref[0] == "ref" and fref[1] in entities):
-                        continue
-                    _, fargs = entities[fref[1]]
-                    if not (fargs and isinstance(fargs[0], list)):
-                        continue
-                    for bref in fargs[0]:
-                        if not (isinstance(bref, tuple) and bref[0] == "ref" and bref[1] in entities):
-                            continue
-                        _, bargs = entities[bref[1]]
-                        if not bargs:
-                            continue
-                        lref = bargs[0]
-                        ori = bool(bargs[1]) if len(bargs) > 1 and bargs[1] is not None else True
-                        if not (isinstance(lref, tuple) and lref[0] == "ref" and lref[1] in entities):
-                            continue
-                        _, largs = entities[lref[1]]
-                        if not (largs and isinstance(largs[0], list)):
-                            continue
-                        loop_idxs: List[int] = []
-                        for p_ref in largs[0]:
-                            if isinstance(p_ref, tuple) and p_ref[0] == "ref":
-                                pid = p_ref[1]
-                                if pid not in vert_map:
-                                    vert_map[pid] = len(verts_list)
-                                    verts_list.append(_vec3_from_ref(entities, p_ref, (0.0, 0.0, 0.0)) * unit_scale)
-                                loop_idxs.append(vert_map[pid])
-                        if not ori:
-                            loop_idxs.reverse()
-                        for k in range(1, len(loop_idxs) - 1):
-                            faces_list.append((loop_idxs[0], loop_idxs[k], loop_idxs[k + 1]))
-                if verts_list and faces_list:
-                    return [(np.array(verts_list, dtype=np.float64), np.array(faces_list, dtype=np.int32))]
+    if itype == "IFCFACETEDBREP":
+        return _faceted_solid_mesh(entities, args, unit_scale)
     return []
 
 
@@ -2124,4 +2159,5 @@ if __name__ == "__main__" and "--json-stdin" in __import__("sys").argv:
         _resp = run_router_ifc_clash(_req)
     print(_cli_json.dumps(_wave3_to_jsonable(_resp)))
     raise SystemExit(0)
+
 
