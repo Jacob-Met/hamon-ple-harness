@@ -4,7 +4,8 @@ import cmath
 import math
 
 import numpy as np
-from scipy.optimize import root
+from scipy.optimize import least_squares, root
+from scipy.special import expit
 
 
 def number(value):
@@ -227,12 +228,12 @@ def network(spec):
         slope = np.maximum(np.abs(np.diag(ybus)) * vset, 1e-12)
         pq_original = bus_types == "PQ"
 
-        def terms(v, derivative=False):
+        def terms(v, derivative=False, smoothing=0.0):
             current = ybus @ v
             injection = v * np.conj(current)
             magnitude = np.abs(v)
             second = injection.imag - q
-            fixed_q = pq_original.copy()
+            voltage_weight = np.zeros(nb)
             bounds = {}
             for idx in nonslack:
                 if pq_original[idx]:
@@ -240,12 +241,24 @@ def network(spec):
                 if idx in limits:
                     lower, upper = limits[idx]
                     trial = injection[idx].imag + slope[idx] * (vset[idx] - magnitude[idx])
+                    width = smoothing * (0.5 * upper - 0.5 * lower) if smoothing else 0.0
+                    if width > 0:
+                        # Softplus differences smooth the box projection. Splitting
+                        # off the exact clip avoids subtracting two large values.
+                        a = (trial - lower) / width
+                        b = (trial - upper) / width
+                        target = np.clip(trial, lower, upper) + width * (
+                            np.logaddexp(0, -abs(a)) - np.logaddexp(0, -abs(b))
+                        )
+                        second[idx] = injection[idx].imag - target
+                        voltage_weight[idx] = expit(a) - expit(b)
+                        continue
                     if trial <= lower or trial >= upper:
                         bound = lower if trial <= lower else upper
                         bounds[idx] = bound
-                        fixed_q[idx] = True
                         second[idx] = injection[idx].imag - bound
                         continue
+                voltage_weight[idx] = 1.0
                 second[idx] = slope[idx] * (magnitude[idx] - vset[idx])
             residual = np.r_[injection.real[nonslack] - p[nonslack], second[nonslack]]
             rounding = power_roundoff(v)
@@ -262,12 +275,9 @@ def network(spec):
             da = 1j * vd @ np.conj(np.diag(current) - ybus @ vd)
             unit = np.diag(v / magnitude)
             dm = vd @ np.conj(ybus @ unit) + np.conj(np.diag(current)) @ unit
-            qa, qm = da.imag.copy(), dm.imag.copy()
-            for idx in nonslack:
-                if not fixed_q[idx]:
-                    qa[idx] = 0
-                    qm[idx] = 0
-                    qm[idx, idx] = slope[idx]
+            qa = (1.0 - voltage_weight[:, None]) * da.imag
+            qm = (1.0 - voltage_weight[:, None]) * dm.imag
+            qm[np.diag_indices(nb)] += voltage_weight * slope
             jacobian = np.block([
                 [da.real[np.ix_(nonslack, nonslack)], dm.real[np.ix_(nonslack, nonslack)]],
                 [qa[np.ix_(nonslack, nonslack)], qm[np.ix_(nonslack, nonslack)]],
@@ -333,36 +343,33 @@ def network(spec):
             except ValueError:
                 pass
 
-        # Complementarity Newton is local: a small ill-conditioned network may
-        # need another equilibrium branch. Exhaust only <=4 regulator states,
-        # never a truncated exponential search of the full coupled network.
-        if len(limits) <= 4:
-            from itertools import product
-            ordered = sorted(limits, key=lambda idx: ids[idx])
-            choices = [(None, *dict.fromkeys(limits[idx])) for idx in ordered]
-            for values in product(*choices):
-                bounds = {idx: value for idx, value in zip(ordered, values)
-                          if value is not None}
-                try:
-                    q[:] = saved_q
-                    for idx, bound in bounds.items():
-                        q[idx] = bound
-                    pq_trial = np.asarray([idx for idx in nonslack
-                                           if pq_original[idx] or idx in bounds], dtype=int)
-                    voltage = polar(pq_trial, flat.copy())
-                    power = voltage * np.conj(ybus @ voltage)
-                    rounding = power_roundoff(voltage)
-                    if any(
-                        reactive_violation(power[idx].imag, *limit, rounding[idx]) is not None
-                        or (idx in bounds and voltage_violation(idx, bounds[idx], abs(voltage[idx])))
-                        for idx, limit in limits.items()
-                    ):
-                        continue
-                    return voltage * np.exp(1j * reference), bounds, iterations
-                except (ValueError, np.linalg.LinAlgError):
-                    continue
-                finally:
-                    q[:] = saved_q
+        # Continue through a differentiable family of regulator projections.
+        # Intermediate states only select a basin for the exact physical solve.
+        n = len(nonslack)
+
+        def from_polar(x):
+            v = flat.copy()
+            v[nonslack] = x[n:] * np.exp(1j * x[:n])
+            return v
+
+        x = np.r_[np.zeros(n), vset[nonslack]]
+        positive_voltage = (np.r_[np.full(n, -np.inf), np.zeros(n)], np.inf)
+        try:
+            for exponent in range(13):
+                smoothing = 2.0 ** -exponent
+                stage = least_squares(
+                    lambda x: terms(from_polar(x), smoothing=smoothing)[0],
+                    x, jac=lambda x: terms(from_polar(x), True, smoothing)[3],
+                    bounds=positive_voltage, max_nfev=80,
+                    ftol=1e-12, xtol=1e-12, gtol=1e-12,
+                )
+                x = stage.x
+                iterations += stage.nfev
+            voltage, bounds = solve(from_polar(x))
+            return voltage * np.exp(1j * reference), bounds, iterations
+        except (ValueError, np.linalg.LinAlgError):
+            pass
+
         raise ValueError("Coupled AC regulation did not converge; feasibility undetermined")
 
     regulation_iterations = 0
