@@ -9,9 +9,11 @@ import sympy
 
 def _input(spec, name, default=None):
     value = spec.get(name, default)
-    if type(value) not in (float, int) or not math.isfinite(value):
+    if type(value) is int:
+        return Fraction(value)
+    if type(value) is not float or not math.isfinite(value):
         raise ValueError(f"{name} must be a finite number")
-    return Fraction(float(value))
+    return Fraction(value)
 
 
 def _wire(value):
