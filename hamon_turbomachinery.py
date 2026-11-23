@@ -101,6 +101,19 @@ def npsh_at_suction_flange(data):
         raise ValueError(
             "Vapor pressure, suction speed and required NPSH must be nonnegative"
         )
+    elevation = finite(data.get("gauge_elevation_above_npsh_datum_m", 0), "gauge_elevation_above_npsh_datum_m")
+    loss = finite(data.get("loss_to_npsh_datum_m", 0), "loss_to_npsh_datum_m")
+    if loss < 0:
+        raise ValueError("Loss between the measurement point and NPSH datum must be nonnegative")
+    if elevation or loss:
+        # Refer the measured absolute total head to the manufacturer's comparison
+        # plane. Only subtract a loss between those points, once.
+        g = Fraction(980665, 100000)
+        head = ((Fraction(pressure) - Fraction(vapor)) / (Fraction(density) * g)
+                + Fraction(velocity) ** 2 / (2 * g) + Fraction(elevation) - Fraction(loss))
+        margin = head - Fraction(required)
+        return {"available_npsh_m": float(head), "npsh_margin_m": float(margin),
+                "meets_required_npsh": margin >= 0}
     available = (pressure - vapor) / (density * 9.80665) + velocity**2 / (2 * 9.80665)
     return {
         "available_npsh_m": available,

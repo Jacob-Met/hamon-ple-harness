@@ -204,7 +204,7 @@ _WAVE8_RECORD_KEYS = {
     "inlet": _STATION_KEYS,
     "outlet": _STATION_KEYS,
     "stage_boundary_speeds_m_s": "inlet outlet",
-    "suction_flange": "density_kg_m3 suction_absolute_pressure_Pa vapor_pressure_Pa suction_velocity_m_s required_npsh_m",
+    "suction_flange": "density_kg_m3 suction_absolute_pressure_Pa vapor_pressure_Pa suction_velocity_m_s required_npsh_m gauge_elevation_above_npsh_datum_m loss_to_npsh_datum_m",
     "fault_impedance_pu": "real imag",
     "prefault_positive_voltage_pu": "real imag",
 }

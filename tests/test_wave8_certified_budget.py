@@ -214,3 +214,15 @@ def test_opposed_earth_pure_couple_reaches_inline_certificate():
     assert result["resultant_above_base_m"] is None
     assert not route(dict(spec, front_layers=[dict(front, unidentified_input=1)]))["presolve_verified"]
     assert not route(dict(spec, front_surface_depth_m=0))["presolve_verified"]
+
+
+def test_pump_datum_correction_controls_certified_budget():
+    gauge = {"density_kg_m3": 1000, "suction_absolute_pressure_Pa": 100000,
+             "vapor_pressure_Pa": 2500, "suction_velocity_m_s": 2, "required_npsh_m": 8,
+             "gauge_elevation_above_npsh_datum_m": 1, "loss_to_npsh_datum_m": 2}
+    pump = dict(SPECS[3], suction_flange=gauge)
+    qualified = route(pump)
+    assert qualified["thinking_tier"] == "low"
+    assert json.loads(qualified["presolve_result_json"])["meets_required_npsh"]
+    gauge["loss_to_npsh_datum_m"] = 4
+    assert not route(pump)["presolve_verified"]
