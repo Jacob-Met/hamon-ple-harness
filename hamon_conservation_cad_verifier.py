@@ -346,14 +346,17 @@ def _axis2_frame(entities: Dict[int, Tuple[str, List[str]]], aid: Optional[int],
 
 
 def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, density_kg_m3: float,
-                                  *, require_connected: bool = False) -> Dict[str, Any]:
+                                  *, require_connected: bool = False,
+                                  surface_face_ids: Optional[List[int]] = None) -> Dict[str, Any]:
     # Form edge differences and signed tetrahedra in the body's coordinate scale.
     low, high = vertices.min(axis=0), vertices.max(axis=0)
     reference = low + 0.5 * (high - low)
     local = vertices - reference
     v0, v1, v2 = local[faces[:, 0]], local[faces[:, 1]], local[faces[:, 2]]
-    qverts = np.round(local, 9)
-    _, inv = np.unique(qverts, axis=0, return_inverse=True)
+    # Selected STEP BReps must close at their actual boundary coordinates.
+    # Rounded welding can hide a real parallel cap gap with zero net area.
+    qverts = vertices if require_connected else np.round(local, 9)
+    unique, inv = np.unique(qverts, axis=0, return_inverse=True)
     qfaces = inv.reshape(-1)[faces]
     edge_counts: Dict[Tuple[int, int], int] = {}
     directed = set()
@@ -385,10 +388,10 @@ def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, densi
     watertight = manifold and bool(edge_counts) and all(cnt == 2 for cnt in edge_counts.values())
     edge1, edge2 = v1 - v0, v2 - v0
     area_vectors = 0.5 * np.cross(edge1, edge2)
-    surface_area = float(np.linalg.norm(area_vectors, axis=1).sum())
+    surface_area = float(np.hypot.reduce(area_vectors, axis=1).sum())
     net_area = np.array([math.fsum(area_vectors[:, i]) for i in range(3)])
-    area_residual = float(np.linalg.norm(net_area))
-    cross_scale = 0.5 * np.sum(np.linalg.norm(edge1, axis=1) * np.linalg.norm(edge2, axis=1))
+    area_residual = math.hypot(*net_area)
+    cross_scale = 0.5 * np.sum(np.hypot.reduce(edge1, axis=1) * np.hypot.reduce(edge2, axis=1))
     area_tolerance = float(64 * np.finfo(np.float64).eps * cross_scale)
     diagnostics = {
         "watertight_manifold": bool(watertight),
@@ -396,6 +399,8 @@ def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, densi
         "net_oriented_area_tolerance_m2": area_tolerance,
         "triangle_count": int(len(faces)),
     }
+    if require_connected:
+        diagnostics["embedded_surface_verified"] = False
     if not watertight or not area_residual <= area_tolerance:
         return {**diagnostics, "reason": "Mesh lacks consistently paired edges or balanced oriented surface area"}
 
@@ -404,6 +409,16 @@ def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, densi
         diagnostics["connected_component_count"] = components
         if components != 1:
             return {**diagnostics, "reason": "Declared STEP shell has disconnected surface components"}
+        from hamon_step_surface import integrate_closed_surface, verify_surface_embedding
+        diagnostics.update(verify_surface_embedding(unique, qfaces, surface_face_ids))
+        if "reason" in diagnostics:
+            return diagnostics
+        if not math.isfinite(surface_area) or surface_area <= 0:
+            return {**diagnostics, "reason": "STEP surface area is outside finite binary64 range"}
+        moments = integrate_closed_surface(unique, qfaces, density_kg_m3)
+        if "reason" in moments:
+            return {**diagnostics, **moments}
+        return {**diagnostics, **moments, "surface_area_m2": surface_area}
 
     dets = np.einsum("ij,ij->i", np.cross(v0, v1), v2)
     signed_vol = float(np.sum(dets) / 6.0)
@@ -881,6 +896,7 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
 
     all_verts: List[np.ndarray] = []
     all_faces: List[np.ndarray] = []
+    surface_face_ids: List[int] = []
     analytic_vol: Optional[float] = None
 
     def _append(v: np.ndarray, f: np.ndarray) -> None:
@@ -1016,6 +1032,7 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
             if not forward:
                 face_triangles = face_triangles[:, [0, 2, 1]]
             _append(face_vertices, face_triangles)
+            surface_face_ids.extend([eid] * len(face_triangles))
 
     analytic_entities = entities.items() if face_occurrences is None else ()
     for eid, (et, args) in analytic_entities:
@@ -1038,7 +1055,8 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
     if not all_verts:
         raise ValueError("No supported 3D solid entities found in STEP input")
     props = _compute_mesh_mass_properties(np.vstack(all_verts), np.vstack(all_faces), density,
-                                          require_connected=face_occurrences is not None)
+                                          require_connected=face_occurrences is not None,
+                                          surface_face_ids=surface_face_ids)
     report = _cad_report(props, analytic_vol, unit_scale, len(entities))
     if selected_solid is not None:
         report["selected_solid_entity_id"] = selected_solid
