@@ -2386,7 +2386,7 @@ def run_router_conservation_cad_verifier(payload: Dict[str, Any]) -> Dict[str, A
                 "length_wavelengths", "beta_rad_m"
             },
             ("solid_mohr_vessel_buckling", "mohr_stress"): {
-                "sigma_x", "sigma_y", "sigma_z", "tau_xy", "tau_xz", "tau_yz"
+                "sigma_x", "sigma_y", "sigma_z", "tau_xy", "tau_xz", "tau_yz", "stress_tensor"
             },
         }
         physical_inputs = default_capable_inputs.get((family, spec[selector].strip().lower()))
