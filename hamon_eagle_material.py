@@ -6,6 +6,7 @@ inside the guarded polygons has at least 1 nm nominal in-plane clearance.
 """
 
 from collections import Counter, defaultdict, deque
+from fractions import Fraction
 from math import floor, ceil, cos, hypot, pi, radians, sin, sqrt
 
 from shapely import constrained_delaunay_triangles
@@ -19,6 +20,7 @@ from shapely.strtree import STRtree
 _GUARD = 2.0
 _CLEARANCE = 1.0
 _QUADS = 32
+_MITRE_LIMIT = 5
 
 
 def _polygons(geometry):
@@ -267,7 +269,8 @@ def _contour_domain(ordered, *, removed=False):
             raise ValueError("unresolved enclosed layer 20 polygon")
     elif not envelope.covers(polygon):
         raise ValueError("unresolved inner layer 20 polygon")
-    domain = polygon.buffer(_GUARD if removed else -_GUARD, join_style="mitre")
+    domain = polygon.buffer(_GUARD if removed else -_GUARD, join_style="mitre",
+                            mitre_limit=_MITRE_LIMIT)
     if removed and not domain.covers(polygon):
         raise ValueError("unresolved outward layer 20 guard")
     if domain.is_empty or not domain.is_valid:
@@ -283,6 +286,113 @@ def _contour_domain(ordered, *, removed=False):
         ("removed_area_upper_bound_mm2" if removed else "interior_area_lower_bound_mm2"): domain.area/1e12,
     }
 
+
+
+def _hole_clearance_features(rows):
+    """Exact source boundary pieces, enclosing each validated quarter in its local square."""
+    features = []
+    for row in rows:
+        a, b = row["a"], row["b"]
+        if row["curve"]:
+            sign = 1 if row["curve"] > 0 else -1
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            center = (Fraction(a[0] + b[0] - sign * dy) / 2,
+                      Fraction(a[1] + b[1] + sign * dx) / 2)
+            vertex = (a[0] + b[0] - center[0], a[1] + b[1] - center[1])
+            points = (a, center, b, vertex)
+        else:
+            points = (a, b)
+        xs, ys = zip(*points)
+        features.append((points, (min(xs), min(ys), max(xs), max(ys))))
+    return features
+
+
+def _convex_supports(rows):
+    """Map outward straight-edge normals to one supporting point on a convex loop."""
+    if any(row["curve"] for row in rows):
+        return {}
+    vertices = [row["a"] for row in rows]
+    edges = [(row["b"][0] - row["a"][0], row["b"][1] - row["a"][1]) for row in rows]
+    turns = [dx * ey - dy * ex for (dx, dy), (ex, ey) in zip(edges, edges[1:] + edges[:1])]
+    if min(turns) < 0 < max(turns) or not any(turns):
+        return {}
+    winding = 1 if max(turns) > 0 else -1
+    supports = {}
+    for (dx, dy), p in zip(edges, vertices):
+        nx, ny = winding * dy, -winding * dx
+        scale = abs(nx or ny)
+        supports[(Fraction(nx) / scale, Fraction(ny) / scale)] = p
+    return supports
+
+
+def _segments_far(a, b, c, d, distance):
+    """Verify disjoint finite segments and all four exact point-to-segment distances."""
+    def side(p, q, r):
+        return (q[0]-p[0]) * (r[1]-p[1]) - (q[1]-p[1]) * (r[0]-p[0])
+
+    def point_far(p, q, r):
+        dx, dy = r[0] - q[0], r[1] - q[1]
+        ux, uy = p[0] - q[0], p[1] - q[1]
+        projection = ux * dx + uy * dy
+        length2 = dx * dx + dy * dy
+        if projection >= length2:
+            ux, uy = p[0] - r[0], p[1] - r[1]
+        elif projection > 0:
+            return (ux * dy - uy * dx) ** 2 > distance ** 2 * length2
+        return ux * ux + uy * uy > distance ** 2
+
+    # For collinear disjoint segments the bounding boxes or endpoint tests suffice.
+    s1, s2, s3, s4 = side(a, b, c), side(a, b, d), side(c, d, a), side(c, d, b)
+    if s1 * s2 <= 0 and s3 * s4 <= 0 and any((s1, s2, s3, s4)):
+        return False
+    return all((point_far(a, c, d), point_far(b, c, d),
+                point_far(c, a, b), point_far(d, a, b)))
+
+
+def _inside_chord_loop(point, rows):
+    """Exact parity for a point already separated from all quarter-corner squares."""
+    x, y = point
+    inside = False
+    for row in rows:
+        (ax, ay), (bx, by) = row["a"], row["b"]
+        if (ay > y) != (by > y):
+            cross = (bx - ax) * (y - ay) - (by - ay) * (x - ax)
+            if (cross > 0) == (by > ay):
+                inside = not inside
+    return inside
+
+
+def _certified_hole_separation(left, right):
+    """Prove the strict post-guard clearance using authored coordinates."""
+    guard = Fraction(_GUARD)
+    required = 2 * guard
+    # Convex mitred offsets remain inside every outward-shifted source half-plane.
+    # For opposing faces this is sharp, including at the strict 4 nm threshold.
+    left_faces, right_faces = _convex_supports(left), _convex_supports(right)
+    for (nx, ny), a in left_faces.items():
+        b = right_faces.get((-nx, -ny))
+        if b is not None:
+            projection = nx * (b[0] - a[0]) + ny * (b[1] - a[1])
+            if projection > 0 and projection ** 2 > (required + 2 * guard) ** 2 * (nx ** 2 + ny ** 2):
+                return True
+
+    # Every tangent/chord of a validated quarter stays inside its exact local
+    # square. A mitre moves a boundary by at most (limit + 1) * guard: uncut
+    # tips stop at limit * guard; each clipped end is at most one further
+    # guard from the bisector clip point. Compare both boundary envelopes.
+    distance = required + 2 * (_MITRE_LIMIT + 1) * guard
+    first, second = _hole_clearance_features(left), _hole_clearance_features(right)
+    for p, (x0, y0, x1, y1) in first:
+        for q, (u0, v0, u1, v1) in second:
+            dx, dy = max(0, u0-x1, x0-u1), max(0, v0-y1, y0-v1)
+            if dx * dx + dy * dy > distance ** 2:
+                continue
+            if len(p) == 2 and len(q) == 2 and _segments_far(*p, *q, distance):
+                continue
+            return False
+    # Disjoint boundaries can still nest. Replacing a quarter by its chord
+    # preserves parity at points outside its enclosing square.
+    return not (_inside_chord_loop(left[0]["a"], right) or _inside_chord_loop(right[0]["a"], left))
 
 
 def nominal_board_domain(records):
@@ -303,12 +413,13 @@ def nominal_board_domain(records):
     (domain, info), _ = candidates[0]
     cutouts = []
     # Order by physical position so swapping loops of equal area preserves their roles.
-    for rows in sorted((candidate[1] for candidate in candidates[1:]), key=lambda rows: rows[0]["a"]):
+    inner_rows = sorted((candidate[1] for candidate in candidates[1:]), key=lambda rows: rows[0]["a"])
+    for rows in inner_rows:
         removed, cut_info = _contour_domain(rows, removed=True)
         if not domain.contains_properly(removed):
             raise ValueError("layer 20 hole crosses, touches, or lies outside the guarded board")
         for other, _ in cutouts:
-            if removed.distance(other) <= 2 * _GUARD:
+            if removed.distance(other) <= 2 * _GUARD or not _certified_hole_separation(inner_rows[0], rows):
                 raise ValueError("layer 20 holes intersect, nest, touch, or have unresolved separation")
         if cut_info["quarter_count"]:
             curve = next(row for row in rows if row["curve"])
