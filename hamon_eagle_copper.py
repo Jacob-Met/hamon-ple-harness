@@ -316,14 +316,17 @@ def material_fallback(result, board, signal, terminals, elements, footprints, bo
                 layer, width = int(row.attrib["layer"]), nm(row.get("width"))
                 cap = row.get("cap", "round")
                 if (layer not in FACES or width <= 0 or cap not in ("round", "flat")
-                        or row.get("style", "continuous") != "continuous"
-                        or Decimal(row.get("curve", "0")) != 0):
-                    raise ValueError("requires a straight positive-width outer-layer trace")
-                a, b = position(layer, row, "1")[2:], position(layer, row, "2")[2:]
+                        or row.get("style", "continuous") != "continuous"):
+                    raise ValueError("requires a continuous positive-width outer-layer trace")
+                curve = Decimal(row.get("curve", "0"))
+                if not curve.is_finite() or abs(curve) >= 360 or (curve and cap != "round"):
+                    raise ValueError("unsupported curved-wire sweep or cap")
+                a, b = [tuple(float(nm(row.get(axis + suffix), subgrid=True))
+                              for axis in ("x", "y")) for suffix in ("1", "2")]
                 if a == b:
                     raise ValueError("zero-length trace")
-                primitives.append(dict(source=ref, layers=(layer,), shape="segment",
-                                       a=a, b=b, width=width, cap=cap))
+                primitives.append(dict(source=ref, layers=(layer,), shape="arc" if curve else "segment",
+                                       a=a, b=b, width=width, cap=cap, curve=float(curve)))
             elif kind == "via":
                 plating(row)
                 diameter = nm(row.get("diameter", "0"))
@@ -336,7 +339,7 @@ def material_fallback(result, board, signal, terminals, elements, footprints, bo
         except (KeyError, ValueError, InvalidOperation) as exc:
             omitted(ref, exc)
     try:
-        proof = material_continuity(terminals, primitives, bores)
+        proof = material_continuity(result["terminals"], primitives, bores)
     except (ShapelyError, ValueError, OverflowError) as exc:
         result["material"] = {"reason": "finite_width_geometry_unresolved", "detail": str(exc)}
         return result
@@ -351,7 +354,7 @@ def material_fallback(result, board, signal, terminals, elements, footprints, bo
     return result
 
 
-def routed_continuity(prediction, board_path, signal_name):
+def routed_continuity(prediction, board_path, signal_name, *, pad_pair=None):
     """Find source-addressed walks without using any board contactref as evidence."""
     board, digest = _read(board_path, "board")
     signal = _named(board.findall("signals/signal")).get(signal_name)
@@ -362,18 +365,27 @@ def routed_continuity(prediction, board_path, signal_name):
             if p["net"] == signal_name
         }
     )
+    targets = terminals
+    if pad_pair is not None:
+        if len(pad_pair) != 4:
+            raise ValueError("a pad pair requires two part and pad names")
+        targets = sorted([("pad", *pad_pair[:2]), ("pad", *pad_pair[2:])])
+        if targets[0] == targets[1] or any(t not in terminals for t in targets):
+            raise ValueError("choose two distinct schematic pads on the selected net")
     result = dict(
         status="unresolved",
         signal=signal_name,
         board_sha256=digest,
         schematic_sha256=prediction["schematic_sha256"],
         coordinate_unit="nm",
-        terminals=[list(t) for t in terminals],
+        terminals=[list(t) for t in targets],
         witnesses=[],
         unsupported=[],
         scope="Straight outer-layer centerlines with drill clearance and supported plated approaches",
     )
-    if signal is None or len(terminals) < 2:
+    if pad_pair is not None:
+        result.update(query="pad_pair", net_terminal_count=len(terminals))
+    if signal is None or len(targets) < 2:
         result["reason"] = "missing_signal_or_fewer_than_two_schematic_terminals"
         return result
     edges = defaultdict(list)
@@ -477,15 +489,15 @@ def routed_continuity(prediction, board_path, signal_name):
                     local[a].append((b, ref))
                     local[b].append((a, ref))
     connect_landings(interior, edges, surface)
-    root = terminals[0]
+    root = targets[0]
     previous = rooted_tree(edges, root)
-    missing = [list(t) for t in terminals if t not in previous]
+    missing = [list(t) for t in targets if t not in previous]
     if missing:
         reason = "trace_does_not_demonstrably_reach_plating" if blocked_terminal else "no_supported_copper_path"
         result.update(reason=reason, unreachable=missing)
         return material_fallback(result, board, signal, terminals, elements, footprints, bores)
     witnesses = []
-    for destination in terminals[1:]:
+    for destination in targets[1:]:
         current = destination
         steps = []
         while current != root:
