@@ -57,3 +57,37 @@ class SpillwayStage(unittest.TestCase):
                 result = spillway(1, crest=datum, top=top, minimum=0)
                 self.assertEqual(result["passes_freeboard"], ok, result)
                 self.assertEqual(result["freeboard_m"], top-datum-1)
+
+    def test_zero_flow_stage_observation_selects_one_family_member(self):
+        for stage, expected in ((1000, False), (999, True), (998, True)):
+            result = spillway(0, top=1001, minimum=2, water_surface_el_m=stage)
+            self.assertTrue(result["dual_verified"])
+            self.assertEqual(result["water_surface_el_m"], stage)
+            self.assertEqual(result["freeboard_m"], 1001-stage)
+            self.assertIs(result["passes_freeboard"], expected)
+        with self.assertRaises(ValueError):
+            spillway(0, water_surface_el_m=1001)
+
+    def test_positive_stage_constraints_and_signed_elevation(self):
+        flow = math.nextafter(1., math.inf)
+        self.assertFalse(spillway(flow, water_surface_el_m=1001.)["passes_freeboard"])
+        with self.assertRaises(ValueError):
+            spillway(flow, water_surface_el_m=1001)
+        result = spillway(1, crest=-1, top=0, minimum=0, water_surface_el_m=0)
+        self.assertEqual(result["water_surface_el_m"], 0)
+        self.assertTrue(result["passes_freeboard"])
+
+    def test_resolved_scalar_ranges_and_constitutive_domain(self):
+        for changes in (dict(Q_design_m3_s=-1), dict(Cd_si=0), dict(weir_length_m=-1),
+                        dict(min_freeboard_m=-1), dict(crest_el_m=math.inf),
+                        dict(tailwater_el_m=1001)):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                spillway(1, **changes)
+        # A finite positive head is preserved even if the coefficient and width
+        # have a product outside the finite binary64 range.
+        result = spillway(2.**900, crest=0, top=2.**-200, minimum=0,
+                          Cd_si=2.**600, weir_length_m=2.**600)
+        self.assertEqual(result["head_required_m"], 2.**-200)
+        with self.assertRaises(ValueError):
+            spillway(2.**-1074, crest=0, top=1, minimum=0,
+                     Cd_si=2.**1023, weir_length_m=2.**1023)
