@@ -118,7 +118,17 @@ def _signal_word(edges, baseline, pitch):
     columns = round((right - left) / step_y)
     if not 4 <= columns <= 120:
         return None
-    step_x = (right - left) / columns
+    # Horizontal stroke pitch can differ slightly from vertical pitch. A long
+    # word can drift by a full grid cell when using the vertical estimate.
+    names = set()
+    for width in range(max(4, columns-3), min(120, columns+3)+1):
+        name = _decode_signal_grid(edges, left, baseline, (right-left)/width, step_y)
+        if name is not None:
+            names.add(name)
+    return names.pop() if len(names) == 1 else None
+
+
+def _decode_signal_grid(edges, left, baseline, step_x, step_y):
     if not .975 < step_x / step_y < 1.025:
         return None
     quantized = []
@@ -163,44 +173,46 @@ def wire_words(wires, segments, pitch):
             if abs(y-y1) > .10:
                 continue
             left, right = sorted((x0, x1))
-            # Collect past the wire ends before testing whole-word containment.
-            # Cutting at a wire end could make different longer names identical.
-            near = []
-            for k in range(math.floor(y/pitch)-1, math.floor(y/pitch)+2):
-                for edge in buckets[k]:
-                    xmin, xmax = sorted(p[0] for p in edge)
-                    ymin, ymax = sorted(p[1] for p in edge)
-                    if (ymin < y+.13*pitch and ymax > y-.76*pitch
-                            and xmax >= left-16*pitch and xmin <= right+16*pitch):
-                        near.append((xmin, xmax, edge))
-            groups = []
-            for xmin, xmax, edge in sorted(near):
-                if groups and xmin-groups[-1][1] < .44*pitch:
-                    groups[-1][1] = max(groups[-1][1], xmax)
-                    groups[-1][2].append(edge)
-                else:
-                    groups.append([xmin, xmax, [edge]])
-            for group_index, (start, end, edges) in enumerate(groups):
-                # An erased letter (particularly an underscore below the line)
-                # can leave two otherwise valid shorter words one cell apart.
-                before = group_index and start-groups[group_index-1][1] < .96*pitch
-                after = group_index+1 < len(groups) and groups[group_index+1][0]-end < .96*pitch
-                if before or after:
-                    continue
-                overlap = min(end, right) - max(start, left)
-                if overlap < .60*(end-start) or not 4 <= len(edges) <= 140:
-                    continue
-                name = _signal_word(edges, y-.03*pitch, pitch)
-                if name:
-                    occurrence = tuple(sorted(tuple(sorted(line)) for line in edges))
-                    # A horizontal label origin can be left- or right-aligned.
-                    offsets = []
-                    if left-.08*pitch < start < right+.08*pitch:
-                        offsets.append((start-left)/pitch-.03)
-                    if left-.08*pitch < end < right+.08*pitch:
-                        offsets.append((right-end)/pitch-.03)
-                    registered = any(abs(v-round(v)) < .025 for v in offsets)
-                    yield index, name, (vertical, occurrence), registered
+            # Upright lettering can register either its baseline or its cap line to the wire.
+            for scan_y in (y, y + .70*pitch):
+                # Collect past the wire ends before testing whole-word containment.
+                # Cutting at a wire end could make different longer names identical.
+                near = []
+                for k in range(math.floor(scan_y/pitch)-1, math.floor(scan_y/pitch)+2):
+                    for edge in buckets[k]:
+                        xmin, xmax = sorted(p[0] for p in edge)
+                        ymin, ymax = sorted(p[1] for p in edge)
+                        if (ymin >= scan_y-.76*pitch and ymax <= scan_y+.13*pitch
+                                and xmax >= left-16*pitch and xmin <= right+16*pitch):
+                            near.append((xmin, xmax, edge))
+                groups = []
+                for xmin, xmax, edge in sorted(near):
+                    if groups and xmin-groups[-1][1] < .44*pitch:
+                        groups[-1][1] = max(groups[-1][1], xmax)
+                        groups[-1][2].append(edge)
+                    else:
+                        groups.append([xmin, xmax, [edge]])
+                for group_index, (start, end, edges) in enumerate(groups):
+                    # An erased letter (particularly an underscore below the line)
+                    # can leave two otherwise valid shorter words one cell apart.
+                    before = group_index and start-groups[group_index-1][1] < .96*pitch
+                    after = group_index+1 < len(groups) and groups[group_index+1][0]-end < .96*pitch
+                    if before or after:
+                        continue
+                    overlap = min(end, right) - max(start, left)
+                    if overlap < .60*(end-start) or not 4 <= len(edges) <= 140:
+                        continue
+                    name = _signal_word(edges, scan_y-.03*pitch, pitch)
+                    if name:
+                        occurrence = tuple(sorted(tuple(sorted(line)) for line in edges))
+                        # A horizontal label origin can be left- or right-aligned.
+                        offsets = []
+                        if left-.08*pitch < start < right+.08*pitch:
+                            offsets.append((start-left)/pitch-.03)
+                        if left-.08*pitch < end < right+.08*pitch:
+                            offsets.append((right-end)/pitch-.03)
+                        registered = any(abs(v-round(v)) < .025 for v in offsets)
+                        yield index, name, (vertical, occurrence), registered
 
 def _fit_voltage(nearby, center, direction, units, name):
     """Compare the entire word and both adjacent-cell margins to the exact font."""
@@ -264,3 +276,4 @@ def anchored_voltage(mark, lettering):
                         if occurrence:
                             matches.add((name, occurrence))
     return matches.pop() if len(matches) == 1 else None
+
