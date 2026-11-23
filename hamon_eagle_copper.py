@@ -245,6 +245,42 @@ def rooted_tree(edges, root):
     return previous
 
 
+def rule_via_annulus(board, drill):
+    """Return the outer diameter and its source rules for an automatic through via."""
+    decks = board.findall("designrules")
+    if len(decks) != 1:
+        raise ValueError("expected a single active board design-rule set")
+    values = {}
+    for name in ("rvViaOuter", "rlMinViaOuter", "rlMaxViaOuter"):
+        entries = decks[0].findall(f"param[@name='{name}']")
+        if len(entries) != 1:
+            raise ValueError(f"expected one board design rule for {name}")
+        values[name] = entries[0].get("value", "").strip()
+
+    def number(text, name):
+        if len(text) > 32 or not re.fullmatch(r"(?:\d+(?:\.\d*)?|\.\d+)", text):
+            raise ValueError(f"unsupported nonnegative design rule {name}")
+        return Fraction(text)
+
+    def length(name):
+        text = values[name]
+        match = re.fullmatch(r"(.+?)\s*(mm|mil)", text)
+        if not match:
+            raise ValueError(f"expected an explicit mm or mil dimension for {name}")
+        return number(match[1], name) * {"mm": 1_000_000, "mil": 25_400}[match[2]]
+
+    ratio = number(values["rvViaOuter"], "rvViaOuter")
+    lower, upper = length("rlMinViaOuter"), length("rlMaxViaOuter")
+    if upper <= 0 or lower > upper:
+        raise ValueError("inconsistent outer annulus rule bounds")
+    ring = min(upper, max(lower, ratio * drill))
+    if ring <= 0:
+        raise ValueError("no positive outer annulus established")
+    # Round inward if a legal dimension contains a fraction of a nanometre.
+    diameter = int(drill + 2 * ring)
+    return diameter, dict(rules=values, drill_nm=drill, outer_diameter_lower_bound_nm=diameter)
+
+
 def material_fallback(result, board, signal, terminals, elements, footprints, bores):
     """Prove additional routes using a conservative subset of finite copper."""
     try:
@@ -253,7 +289,7 @@ def material_fallback(result, board, signal, terminals, elements, footprints, bo
     except ImportError:
         result["material"] = {"reason": "finite_width_geometry_dependency_unavailable"}
         return result
-    primitives, approximations = [], []
+    primitives, approximations, derived_vias = [], [], []
     rules = {p.get("name"): p.get("value") for p in board.findall("designrules/param")}
 
     def omitted(ref, why):
@@ -328,10 +364,13 @@ def material_fallback(result, board, signal, terminals, elements, footprints, bo
                 primitives.append(dict(source=ref, layers=(layer,), shape="arc" if curve else "segment",
                                        a=a, b=b, width=width, cap=cap, curve=float(curve)))
             elif kind == "via":
-                plating(row)
+                drill = plating(row)
+                if row.get("extent") != "1-16" or row.get("shape", "round") != "round":
+                    raise ValueError("material proof requires a round full-span via")
                 diameter = nm(row.get("diameter", "0"))
-                if row.get("extent") != "1-16" or row.get("shape", "round") != "round" or diameter <= 0:
-                    raise ValueError("material proof requires an explicit round full-span via annulus")
+                if diameter == 0:
+                    diameter, evidence = rule_via_annulus(board, drill)
+                    derived_vias.append(dict(source=ref, **evidence))
                 primitives.append(dict(source=ref, layers=FACES, shape="disk",
                                        center=position(1, row)[2:], diameter=diameter, plated=True))
             else:
@@ -344,6 +383,8 @@ def material_fallback(result, board, signal, terminals, elements, footprints, bo
         result["material"] = {"reason": "finite_width_geometry_unresolved", "detail": str(exc)}
         return result
     result["material"] = proof["material"]
+    if derived_vias:
+        result["material"]["rule_derived_vias"] = derived_vias
     if approximations:
         result["material"]["conservative_shapes"] = approximations
     if proof["witnesses"] and not proof["unreachable"]:

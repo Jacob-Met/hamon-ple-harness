@@ -69,7 +69,7 @@ def main():
         wires=next(s for s in dom.findall(".//board/signals/signal") if s.get("name")==net).findall("wire")
         row=route(board)
         assert row["status"]=="witnessed" and row["net_terminal_count"]==5 and row["query"]=="pad_pair"
-        assert route(board,False)["status"]=="unresolved"
+        assert route(board,False)["status"]=="witnessed"
         bad = subprocess.run([sys.executable,str(args.repo/"engineering_toolkit.py"),"eagle-netlist",
                               str(sch),"--board",str(board),"--routed-net",net,"--routed-pads",
                               "U1",pin,"not-a-schematic-part","1"],capture_output=True,text=True)
