@@ -91,3 +91,17 @@ class ThreePhaseFeederVoltage(unittest.TestCase):
                      dict(voltage_reference="receiving",receiving_voltage_branch="low")):
             with self.assertRaises(ValueError):
                 feeder(**spec)
+
+    def test_each_reported_voltage_has_resolved_precision(self):
+        # sqrt(3) times the minimum subnormal rounds to two minsubs, a 15%
+        # error. A one-volt KVL residual cannot validate this subnormal
+        # observable independently.
+        with self.assertRaisesRegex(ValueError, "resolution"):
+            feeder(voltage_reference="receiving",V_ll_V=1.,I_A=1.,
+                   R_ohm_per_km=math.ulp(0.),X_ohm_per_km=0.)
+        # A nearly pure six-minsub drop is representable to the usual relative
+        # precision even though its terminal voltages round to the same number.
+        for ref in ("sending","receiving"):
+            r = feeder(voltage_reference=ref,V_ll_V=1.,I_A=1.,X_ohm_per_km=2.**-536)
+            self.assertTrue(r["dual_verified"])
+            self.assertEqual(r["vdrop_ll_V"],6*math.ulp(0.))
