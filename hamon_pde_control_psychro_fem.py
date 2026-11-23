@@ -23,6 +23,8 @@ numerical cross-verification suite for Physical Engineering's Last Exam (PLE):
        moist-air state inversion (from RH, wet-bulb, dew-point, or humidity ratio),
        2-stream adiabatic moist-air mixing conservation, and cooling/dehumidification coil
        mass & energy balance (condensate rate, total kW load, sensible heat ratio SHR).
+     - Cooling coils support load_split="ashrae_dew_point" for latent heat at the inlet
+       dew point; liquid drain subcooling then contributes to sensible heat.
      - Adiabatic mixing accepts condensate_model="equilibrium_ice" to resolve ice down
        to -60 C and coexisting ice and liquid at 0 C. The default is liquid condensate.
   4. Structural FEM (`verify_fem_structure`):
@@ -2084,20 +2086,51 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
         s_out = _psychro_state(spec["outlet"], p_atm)
         if not s_in.get("passed") or not s_out.get("passed"):
             return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": s_in.get("reason") or s_out.get("reason")}
-        m_da = float(spec.get("m_da_kg_s") or (float(spec["v_dot_in_m3_s"]) / s_in["v_m3_per_kgda"]))
-        if m_da <= 0.0:
-            return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": "Non-positive dry-air mass flow"}
+        split = spec.get("load_split", "moist_air_midpoint")
+        if split not in ("moist_air_midpoint", "ashrae_dew_point"):
+            return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": "Unknown cooling-coil load_split"}
+        m_da = (float(spec["m_da_kg_s"]) if "m_da_kg_s" in spec
+                else float(spec["v_dot_in_m3_s"]) / s_in["v_m3_per_kgda"])
+        if not math.isfinite(m_da) or m_da <= 0.0:
+            return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": "Dry-air mass flow must be finite and positive"}
         if s_out["w_kg_per_kgda"] > s_in["w_kg_per_kgda"] + 1e-7 or s_out["t_db_c"] > s_in["t_db_c"] + 1e-7:
             return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": "Cooling coil cannot increase humidity ratio or dry-bulb"}
 
         m_cond_kg_s = m_da * max(0.0, s_in["w_kg_per_kgda"] - s_out["w_kg_per_kgda"])
         t_cond = float(spec.get("t_condensate_c", s_out["t_db_c"]))
-        h_f_kj_kg = 4.186 * t_cond
-        q_total_kw = m_da * (s_in["h_kj_per_kgda"] - s_out["h_kj_per_kgda"]) - m_cond_kg_s * h_f_kj_kg
-        cp_moist = 1.006 + 1.86 * 0.5 * (s_in["w_kg_per_kgda"] + s_out["w_kg_per_kgda"])
-        q_sens_kw = m_da * cp_moist * (s_in["t_db_c"] - s_out["t_db_c"])
-        q_lat_kw = q_total_kw - q_sens_kw
-        shr = q_sens_kw / q_total_kw if q_total_kw > 1e-12 else 1.0
+        split_fields = {}
+        if split == "ashrae_dew_point":
+            # ASHRAE HVAC Systems and Equipment (2024), ch. 23, Eq. 38:
+            # condensation occurs at the entering-air dew point. Liquid cooling
+            # from that point to the drain belongs to the sensible load.
+            wi, wo = s_in["w_kg_per_kgda"], s_out["w_kg_per_kgda"]
+            ti, to = s_in["t_db_c"], s_out["t_db_c"]
+            if not all(map(math.isfinite, (wi, wo, ti, to, t_cond))) or wo > wi or to > ti:
+                return {"passed": False, "domain": "psychrometrics", "mode": mode,
+                        "reason": "Dew-point split requires finite cooling and nonincreasing humidity"}
+            dew = s_in["t_dp_c"] if wi > wo else None
+            if wi > wo and (dew is None or dew < 0.0 or t_cond < 0.0):
+                return {"passed": False, "domain": "psychrometrics", "mode": mode,
+                        "reason": "Condensing dew-point split requires a liquid dew point and liquid drain"}
+            # Evaluate per kg dry air first so that the intensive SHR does not
+            # change when the dry-air flow is rescaled.
+            latent = (wi - wo) * (2501.0 + (1.86 - 4.186) * dew) if dew is not None else 0.0
+            drain = (wi - wo) * 4.186 * (dew - t_cond) if dew is not None else 0.0
+            removed_vapor = (wi - wo) * 1.86 * (ti - dew) if dew is not None else 0.0
+            sensible = math.fsum(((1.006 + 1.86 * wo) * (ti - to), removed_vapor, drain))
+            total = sensible + latent
+            q_sens_kw, q_lat_kw, q_total_kw = m_da * sensible, m_da * latent, m_da * total
+            if not all(map(math.isfinite, (q_sens_kw, q_lat_kw, q_total_kw, m_cond_kg_s * 3600.0))):
+                return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": "Unrepresentable cooling-coil rate"}
+            shr = sensible / total if total > 0.0 else 1.0
+            split_fields = {"load_split": split, "condensation_t_dp_c": dew, "condensate_sensible_kw": m_da * drain}
+        else:
+            h_f_kj_kg = 4.186 * t_cond
+            q_total_kw = m_da * (s_in["h_kj_per_kgda"] - s_out["h_kj_per_kgda"]) - m_cond_kg_s * h_f_kj_kg
+            cp_moist = 1.006 + 1.86 * 0.5 * (s_in["w_kg_per_kgda"] + s_out["w_kg_per_kgda"])
+            q_sens_kw = m_da * cp_moist * (s_in["t_db_c"] - s_out["t_db_c"])
+            q_lat_kw = q_total_kw - q_sens_kw
+            shr = q_sens_kw / q_total_kw if q_total_kw > 1e-12 else 1.0
 
         res = {
             "passed": q_total_kw >= -1e-9,
@@ -2110,6 +2143,7 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
             "q_sensible_kw": q_sens_kw,
             "q_latent_kw": q_lat_kw,
             "sensible_heat_ratio": shr,
+            **split_fields,
             "inlet_h_kj_per_kgda": s_in["h_kj_per_kgda"],
             "outlet_h_kj_per_kgda": s_out["h_kj_per_kgda"],
         }
