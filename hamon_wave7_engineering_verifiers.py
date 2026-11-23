@@ -1669,6 +1669,73 @@ def solve_lagrangian_orbital(params: Mapping[str, Any]) -> Dict[str, Any]:
     return {"domain": "lagrangian_orbital", "subkind": subkind, "verified": False, "error": f"unsupported_lagrangian_orbital:{subkind}"}
 
 
+def _butler_volmer(params, current, electrons, temperature, mode):
+    """Infer a single electrode's signed kinetic overpotential at imposed current."""
+    keys = {"exchange_current_A", "transfer_coefficient", "kinetic_n_electrons"}
+    if not keys.intersection(params):
+        return {}
+    if "eta_activation_V" in params:
+        raise ValueError("Supply either measured activation or Butler-Volmer inputs")
+    if not {"exchange_current_A", "transfer_coefficient"} <= params.keys():
+        raise ValueError("Butler-Volmer needs exchange_current_A and transfer_coefficient")
+
+    def scalar(raw):
+        if isinstance(raw, bool) or not math.isfinite(float(raw)):
+            raise ValueError("Butler-Volmer inputs must be finite numbers")
+        return float(raw)
+
+    exchange = scalar(params["exchange_current_A"])
+    alpha = scalar(params["transfer_coefficient"])
+    n = scalar(params.get("kinetic_n_electrons", electrons))
+    if not (0 < alpha < 1 and exchange > 0 and n > 0 and temperature > 0 and current >= 0
+            and math.isfinite(current) and math.isfinite(temperature)
+            and mode in ("galvanic", "electrolytic")):
+        raise ValueError("Invalid Butler-Volmer parameters or electrode direction")
+
+    sign = 1 if mode == "electrolytic" else -1
+    overpotential = residual = 0.0
+    if current:
+        from mpmath import mp
+
+        ctx = mp.clone()
+        ctx.dps = 64
+        ratio = ctx.mpf(current) / exchange
+        exponent = ctx.mpf(alpha) if sign > 0 else 1 - ctx.mpf(alpha)
+        log_ratio = ctx.log(ratio)
+        thermal_voltage = ctx.mpf(R_GAS_UNIV) * temperature / (ctx.mpf(n) * FARADAY_C_MOL)
+
+        def log_current(u):
+            # log(exp(k*u) * (1-exp(-u))) retains both small currents and the
+            # weak reverse reaction, even when the two exponentials nearly cancel.
+            reverse = ctx.log(-ctx.expm1(-u)) if u < 1 else ctx.log1p(-ctx.exp(-u))
+            return exponent * u + reverse
+
+        # For u=|nF eta/(RT)|, exp(k*u)-1 <= I/I0 <= exp(u)-1.
+        # Bisection in log(u) spans small-signal and asymmetric Tafel regimes.
+        low = ctx.log(ctx.log1p(ratio))
+        high = low - ctx.log(exponent)
+        if ratio < 1:
+            high = min(high, ctx.log(-ctx.log1p(-ratio)))
+        for _ in range(128):
+            middle = (low + high) / 2
+            if log_current(ctx.exp(middle)) < log_ratio:
+                low = middle
+            else:
+                high = middle
+        overpotential = float(sign * thermal_voltage * ctx.exp((low + high) / 2))
+        if not math.isfinite(overpotential) or overpotential == 0:
+            raise ArithmeticError("Butler-Volmer overpotential outside binary64 range")
+        returned_u = abs(ctx.mpf(overpotential)) / thermal_voltage
+        residual = float(abs(ctx.expm1(log_current(returned_u) - log_ratio)))
+        if not math.isfinite(residual):
+            raise ArithmeticError("Butler-Volmer replay outside numerical range")
+
+    return {"activation_model": "butler_volmer", "kinetic_n_electrons": n,
+            "kinetic_current_A": sign * current if current else 0.0,
+            "kinetic_overpotential_V": overpotential, "eta_activation_V": abs(overpotential),
+            "kinetic_current_relative_residual": residual}
+
+
 def _electrochemistry(params: Mapping[str, Any]) -> Dict[str, Any]:
     """One written reaction and one identified product, at constant current."""
     result = {"domain": "electrochem_separations", "subkind": "electrochemistry"}
@@ -1713,6 +1780,10 @@ def _electrochemistry(params: Mapping[str, Any]) -> Dict[str, Any]:
                 or mode not in ("galvanic", "electrolytic")):
             raise ValueError("invalid_electrochem_parameters")
 
+        kinetics = _butler_volmer(params, current, electrons, temperature, mode)
+        activation = kinetics.get("eta_activation_V", activation)
+        result.update(kinetics)
+
         # Charge and yield refer to the complete written reaction. Scaling its equation
         # changes extent inversely, leaving the amount of the selected species invariant.
         faraday = rational(FARADAY_C_MOL)
@@ -1754,6 +1825,7 @@ def _electrochemistry(params: Mapping[str, Any]) -> Dict[str, Any]:
             abs(gibbs - (standard_gibbs + rt * log_q)) / max(abs(gibbs), abs(standard_gibbs), rt, 1),
             balance(rational(result["reaction_extent_mol"]) * n * faraday),
             balance(rational(result["product_moles"]) * n * faraday / nu),
+            kinetics.get("kinetic_current_relative_residual", 0.0),
         )
         if not math.isfinite(residual):
             raise ArithmeticError("electrochem_result_outside_numeric_range")
