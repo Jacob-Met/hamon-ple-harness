@@ -1,14 +1,13 @@
 """Independent hydraulic balance for two parallel feeders and a nearly idle outlet."""
 
-import pytest
+import math
+import unittest
 from mpmath import mp
 
 from hamon_pipe_network import verify_pipe_network
 
 
-@pytest.mark.parametrize("bias", [1e-3, -1e-3, 1e-11, -1e-11, 0.0])
-@pytest.mark.parametrize("direction,datum", [(1, 0.0), (-1, 12.0)])
-def test_signed_minor_loss_exchange(bias, direction, datum):
+def check_exchange(bias, direction, datum):
     ctx = mp.clone()
     ctx.dps = 80
     diameter = ctx.mpf(0.02)
@@ -60,9 +59,17 @@ def test_signed_minor_loss_exchange(bias, direction, datum):
     flows = {"a": float(feed), "b": float(feed), "out": float(out)}
     result = verify_pipe_network({**case, "proposed_flows_m3_s": flows})
     assert result["conservation_verified"], result
-    assert result["flows_m3_s"]["out"] == pytest.approx(float(out), abs=0, rel=1e-9)
-    assert result["reservoir_supplies_m3_s"]["L"] == pytest.approx(float(-out), abs=0, rel=1e-9)
+    assert math.isclose(result["flows_m3_s"]["out"], float(out), rel_tol=1e-9)
+    assert math.isclose(result["reservoir_supplies_m3_s"]["L"], float(-out), rel_tol=1e-9)
     for wrong_outlet in [0.0, -float(out)]:
         rejected = verify_pipe_network({**case, "proposed_flows_m3_s": {**flows, "out": wrong_outlet}})
         assert not rejected["proposed_checks"]["flows_match"]
         assert not rejected["conservation_verified"]
+
+
+class MinorExchangeTest(unittest.TestCase):
+    def test_signed_minor_loss_exchange(self):
+        for bias in (1e-3, -1e-3, 1e-11, -1e-11, 0.0):
+            for direction, datum in ((1, 0.0), (-1, 12.0)):
+                with self.subTest(bias=bias, direction=direction, datum=datum):
+                    check_exchange(bias, direction, datum)
