@@ -108,6 +108,12 @@ For the supported vector profile, a wire label can start at a free endpoint whil
 
 On the Mega drawing, sheet 1's POWER connector pin 8 satisfies these conditions for VIN. Its three printed copies link one previously separated wire to eight sections. The independent native schematic comparison recovers 110 of 111 complete nets and 5,837 of 5,846 section pairs, with zero false joins. All nine remaining separated pairs belong to +3V3. The six cross-sheet anchors remain the same. The Uno control still recovers all 61 nets across 447 sections. Each receiver also checks the original PDF rotated through three quarter turns.
 
+## Two printed supply labels at a wire junction
+
+A three-arm junction can carry a supply name twice. The reader checks for one native label starting at the end of a red component lead and a second, perpendicular copy beside the open green branch. The two runs must be consecutive in the PDF paint order, with a third consecutive copy independently anchored on another wire island and a same-name supply glyph on the sheet. A crossing, an occupied open endpoint or an ambiguous occurrence withholds the join.
+
+On the Mega, the regulator output and capacitor branch supply this evidence for +3V3. Joining the two three-wire islands recovers the final nine pairs. The flat-document result is 111 of 111 complete nets and 5,846 of 5,846 true pairs across 483 visible wire sections, with zero false joins. Erasing either printed value or moving the capacitor branch endpoint off the junction withdraws the join. The UNO remains at 61 of 61 nets and the Due remains unresolved. Replay the physical edits by adding `--junction-controls` to the Mega verification command above.
+
 ## Native EAGLE schematic and PCB
 
 When a flat EAGLE XML schematic is available, the toolkit can read its logical pins and package pads directly.
