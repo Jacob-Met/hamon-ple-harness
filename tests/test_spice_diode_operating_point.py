@@ -1,6 +1,7 @@
 """Registered SPICE operating-point and incremental-admittance checks."""
 import cmath
 import math
+from itertools import permutations
 import unittest
 
 from hamon_conservation_cad_verifier import run_router_conservation_cad_verifier
@@ -85,6 +86,35 @@ class DiodeOperatingPoint(unittest.TestCase):
         for i in (-IS, -2*IS):
             with self.assertRaises(ValueError):
                 route(common(f"I1 0 out DC {i}\nD1 out 0 silicon"))
+
+    def test_opposing_sources_preserve_the_remainder_in_dc_and_ac(self):
+        currents = ("Ibig 0 a DC 1 AC 1", "Ires 0 a DC 1a AC 2a 90",
+                    "Ineg 0 a DC -1 AC 1 180")
+        for order in permutations(currents):
+            deck = ("Opposing injections\n" + "\n".join(order) +
+                    "\nD1 a 0 m\n.model m D(IS=1a TNOM=26.85)\n.temp 26.85")
+            dc, ac = route(deck), route(deck, freq_hz=1)
+            voltage = THERMAL * math.log(2)
+            slope = 2e-18 / THERMAL
+            self.assertTrue(dc["conservation_verified"] and ac["conservation_verified"])
+            self.assertAlmostEqual(dc["node_voltages"]["a"], voltage, places=12)
+            self.assertLessEqual(abs(ac["diode_operating_point"]["D1"]["conductance_S"]/slope-1),1e-11)
+            self.assertAlmostEqual(complex(*ac["node_voltages"]["a"]), 2e-18j/slope, places=12)
+
+    def test_finite_opposed_series_path_survives_weak_incremental_conductance(self):
+        for bias in (math.nextafter(.0625, 0.), math.nextafter(-.125, 0.)):
+            signal = 2**-65
+            deck = (f"Series junctions\nI1 0 p DC {bias} AC {signal}\nDa p m A\nDb 0 m B\n"
+                    ".model A D(IS=.125 TNOM=26.85)\n.model B D(IS=.0625 TNOM=26.85)\n.temp 26.85")
+            ga, gb = (.125+bias)/THERMAL, (.0625-bias)/THERMAL
+            expected = THERMAL * (math.log((.125+bias)/.125)-math.log((.0625-bias)/.0625))
+            dc, ac = route(deck), route(deck, freq_hz=998)
+            self.assertTrue(dc["conservation_verified"] and ac["conservation_verified"])
+            self.assertAlmostEqual(dc["node_voltages"]["p"], expected, places=10)
+            self.assertAlmostEqual(complex(*ac["node_voltages"]["p"]), signal*(1/ga+1/gb), places=12)
+            currents = {br["name"]: complex(*br["current_A"]) for br in ac["branch_currents"]}
+            self.assertLess(abs(currents["Da"]/signal-1), 1e-10)
+            self.assertLess(abs(currents["Db"]/signal+1), 1e-10)
 
     def test_unknown_nonlinear_parameters_and_ambiguous_active_networks_refuse(self):
         for changes in [

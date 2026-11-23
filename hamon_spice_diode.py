@@ -191,6 +191,37 @@ def junction_law(br, voltage):
     return current, conductance
 
 
+def precise_linear(matrix, inputs, corrections=None):
+    """Solve original branch stamps without aggregating away weak conductance."""
+    import sympy as sp
+    from mpmath import mp
+
+    a, b, _, _ = matrix(*inputs, exact=True)
+    if corrections is not None:
+        b = sp.Matrix([sp.Rational(float(v)) for v in corrections])
+    reduced, pivots = a.row_join(b).to_DM().rref()
+    if tuple(pivots) != tuple(range(a.rows)):
+        raise ValueError("Undetermined junction circuit")
+    exact = list(reduced.to_Matrix()[:, -1])
+    rounded = np.array([complex(v.evalf(40)) for v in exact])
+    if not np.all(np.isfinite(rounded)):
+        raise ValueError("Unrepresentable junction circuit solution")
+    # Keep enough bits to distinguish the individual rational coefficients
+    # already combined in an entry. An independent LU checks the solution.
+    ctx = mp.clone()
+    parts = [sp.Rational(v) for x in a for v in x.as_real_imag() if v]
+    ctx.prec = 100 + max((max(abs(int(v.p)).bit_length(), int(v.q).bit_length())
+                          for v in parts), default=1)
+    def convert(x):
+        a, b = map(sp.Rational, x.as_real_imag())
+        return ctx.mpc(ctx.mpf(int(a.p))/int(a.q), ctx.mpf(int(b.p))/int(b.q))
+    numeric = ctx.matrix([[convert(a[i,j]) for j in range(a.cols)] for i in range(a.rows)])
+    checked = ctx.lu_solve(numeric, ctx.matrix([convert(v) for v in b]))
+    again = np.array([complex(v) for v in checked])
+    discrepancy = float(np.linalg.norm(again-rounded) / max(np.linalg.norm(rounded), 1e-30))
+    return rounded, exact, discrepancy
+
+
 def solve_bias(branches, n_idx, matrix, second_solve):
     """Damped nodal Newton solve, replayed with original currents and source constraints."""
     dc = [dict(br) for br in branches]
@@ -209,6 +240,12 @@ def solve_bias(branches, n_idx, matrix, second_solve):
             if br[key] in n_idx:
                 ports[n_idx[br[key]], i] += sign
     thermal = np.array([br["thermal"] for br in devices])
+    fixed_currents = [[] for _ in n_idx]
+    for br in dc:
+        if br["type"] == "I":
+            for key, sign in (("n_pos", 1), ("n_neg", -1)):
+                if br[key] in n_idx:
+                    fixed_currents[n_idx[br[key]]].append(sign * br["value"])
     state = np.zeros(len(rhs))
     for _ in range(256):
         volts = ports.T @ state
@@ -217,8 +254,9 @@ def solve_bias(branches, n_idx, matrix, second_solve):
         # Keep the reverse leakage and the smaller exponential contribution
         # separate in KCL. A current one ULP above -Is determines a unique
         # voltage even though rounding the total diode current erases its slope.
-        terms = [[-float(b), *(float(a)*float(x) for a, x in zip(row, state) if a)]
-                 for row, b in zip(base, rhs)]
+        terms = [[*(fixed_currents[j] if j < len(n_idx) else [-float(rhs[j])]),
+                  *(float(a)*float(x) for a, x in zip(row, state) if a)]
+                 for j, row in enumerate(base)]
         for k, (br, v) in enumerate(zip(devices, volts)):
             ratio = v / br["thermal"]
             parts = (-br["value"], br["value"] * math.exp(ratio)) if ratio < -1 else (current[k],)
@@ -231,18 +269,24 @@ def solve_bias(branches, n_idx, matrix, second_solve):
             raise ValueError("Diode bias has an undetermined DC equation")
         scaled = jacobian / row_scale[:, None]
         correction_rhs = -residual / row_scale
-        try:
+        precise_discrepancy = None
+        if np.linalg.cond(scaled) > 1e10:
+            for br, g in zip(devices, slope):
+                br["incremental_S"] = float(g)
+            solved, _, precise_discrepancy = precise_linear(matrix, (dc, 0., n_idx, rows, {}, {}), -residual)
+            step = solved.real
+        else:
             step = np.linalg.solve(scaled, correction_rhs)
-        except np.linalg.LinAlgError as exc:
-            raise ValueError("Diode bias has an undetermined DC potential or branch current") from exc
         if not np.all(np.isfinite(step)):
             raise ValueError("Nonfinite diode bias step")
         delta_v = ports.T @ step
         scale = np.abs(base) @ np.abs(state) + np.abs(rhs) + np.abs(ports) @ np.abs(current)
         if (np.all(np.abs(residual) <= 1e-12 * scale) and
                 np.all(np.abs(delta_v) <= 1e-12 * thermal)):
-            second = second_solve(scaled, correction_rhs)
-            discrepancy = float(np.linalg.norm(second-step) / max(np.linalg.norm(state), 1e-30))
+            discrepancy = precise_discrepancy
+            if discrepancy is None:
+                second = second_solve(scaled, correction_rhs)
+                discrepancy = float(np.linalg.norm(second-step) / max(np.linalg.norm(state), 1e-30))
             reported = {br["name"]: {"voltage_V": float(v), "current_A": float(i), "conductance_S": float(g)}
                         for br, v, i, g in zip(devices, volts, current, slope)}
             return reported, state.astype(np.complex128), discrepancy

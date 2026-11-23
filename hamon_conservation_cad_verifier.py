@@ -1613,10 +1613,14 @@ def _complex_gauss_solve(a_mat: np.ndarray, b_vec: np.ndarray) -> np.ndarray:
     return aug[:, n]
 
 
-def _circuit_source(br, coupled):
+def _sum_phasors(values):
+    return complex(math.fsum(v.real for v in values), math.fsum(v.imag for v in values))
+
+
+def _circuit_source(br, cardinal_phases):
     magnitude = float(br["value"])
     angle = float(br.get("phase_deg", 0.0))
-    if coupled:
+    if cardinal_phases:
         quadrant = {0: 1, 90: 1j, -90: -1j, 180: -1, -180: -1}.get(math.remainder(angle, 360))
         if quadrant is not None:
             return complex(magnitude * quadrant)
@@ -1655,8 +1659,11 @@ def _circuit_matrix(branches, omega, n_idx, current_row, coupling, controls, exa
         rhs = np.zeros(dim, dtype=np.complex128)
         number, jomega = float, 1j * omega
 
+    cardinal_phases = bool(coupling) or any(br["type"] == "D" for br in branches)
+    injections = [[] for _ in n_idx]
+
     def source(br):
-        v = _circuit_source(br, coupling)
+        v = _circuit_source(br, cardinal_phases)
         return number(v.real) + sp.I * number(v.imag) if exact else v
 
     mutual = {}
@@ -1700,7 +1707,7 @@ def _circuit_matrix(branches, omega, n_idx, current_row, coupling, controls, exa
                     mna[row, current_row[other]] -= inductance
         elif bt in ("R", "L", "C", "D"):
             if bt == "D":
-                y = br.get("incremental_S", 0.)
+                y = number(br.get("incremental_S", 0.))
             else:
                 y = 1/val if bt == "R" else (1/(jomega*val) if bt == "L" else jomega*val)
             admittances[index] = y
@@ -1709,8 +1716,8 @@ def _circuit_matrix(branches, omega, n_idx, current_row, coupling, controls, exa
             if ip is not None and im is not None: mna[ip, im] -= y; mna[im, ip] -= y
         elif bt == "I":
             current = source(br)
-            if ip is not None: rhs[ip] -= current
-            if im is not None: rhs[im] += current
+            if ip is not None: injections[ip].append(-current)
+            if im is not None: injections[im].append(current)
         elif bt == "F":
             sense = controls[index]
             if ip is not None: mna[ip, sense] += val
@@ -1721,6 +1728,8 @@ def _circuit_matrix(branches, omega, n_idx, current_row, coupling, controls, exa
                 if row is not None:
                     if cp is not None: mna[row, cp] += sign * val
                     if cm is not None: mna[row, cm] -= sign * val
+    for node, currents in enumerate(injections):
+        rhs[node] = sum(currents) if exact else _sum_phasors(currents)
     return mna, rhs, admittances, mutual
 
 
@@ -1766,6 +1775,7 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
                 br["incremental_S"] = state["conductance_S"]
     inputs = (branches, omega, n_idx, current_row, coupling, controls)
     mna, rhs, admittances, mutual = _circuit_matrix(*inputs)
+    exact_ports = {}
     if diode_states and freq_hz == 0:
         # Publish the nonlinear fixed point. Re-solving its Norton tangent
         # can lose the current difference that established the junction bias.
@@ -1776,9 +1786,17 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
             if np.any(scales == 0):
                 raise ValueError("Undetermined small-signal diode circuit")
             mna, rhs = mna/scales[:, None], rhs/scales
-        sol_g = _complex_gauss_solve(mna, rhs)
-        sol_lu = np.linalg.solve(mna, rhs)
-        dual_err = float(np.linalg.norm(sol_g - sol_lu) / max(float(np.linalg.norm(sol_lu)), 1e-30))
+        if diode_states and np.linalg.cond(mna) > 1e10:
+            from hamon_spice_diode import precise_linear
+            sol_lu, exact_state, dual_err = precise_linear(_circuit_matrix, inputs)
+            for index, br in enumerate(branches):
+                vp = exact_state[n_idx[br["n_pos"]]] if br["n_pos"] in n_idx else 0
+                vm = exact_state[n_idx[br["n_neg"]]] if br["n_neg"] in n_idx else 0
+                exact_ports[index] = complex(vp - vm)
+        else:
+            sol_g = _complex_gauss_solve(mna, rhs)
+            sol_lu = np.linalg.solve(mna, rhs)
+            dual_err = float(np.linalg.norm(sol_g - sol_lu) / max(float(np.linalg.norm(sol_lu)), 1e-30))
     # A small winding voltage may be a genuine residual or an exact magnetic
     # null. Recover the original complete network before rounding either one.
     for index, neighbors in mutual.items():
@@ -1798,21 +1816,22 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
             break
     v_node: Dict[str, complex] = {"0": 0j, "GND": 0j, **{nm: complex(sol_lu[i]) for nm, i in n_idx.items()}}
 
-    kcl_sum: Dict[str, complex] = {nm: 0j for nm in nodes}
+    terminal_currents = {nm: [] for nm in nodes}
+    cardinal_phases = bool(coupling or diode_states)
     kvl_max = 0.0
-    s_tot = 0j
-    s_deliv = 0j
+    powers = []
+    delivered = []
     branch_currents = []
     for index, br in enumerate(branches):
         nm, bt = str(br["name"]), str(br["type"]).upper()
         if bt == "K":
             continue  # K relates existing windings; it has no additional terminal current.
-        vd = v_node.get(str(br["n_pos"]), 0j) - v_node.get(str(br["n_neg"]), 0j)
+        vd = exact_ports.get(index, v_node.get(str(br["n_pos"]), 0j) - v_node.get(str(br["n_neg"]), 0j))
         if index in current_row:
             ibr = complex(sol_lu[current_row[index]])
             expected_voltage = 0j
             if bt == "V":
-                expected_voltage = _circuit_source(br, coupling)
+                expected_voltage = _circuit_source(br, cardinal_phases)
             elif bt == "E":
                 control = v_node.get(str(br["nc_pos"]), 0j) - v_node.get(str(br["nc_neg"]), 0j)
                 expected_voltage = float(br["value"]) * control
@@ -1825,7 +1844,7 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
                 expected_voltage = 1j * omega * flux
             kvl_max = max(kvl_max, abs(vd - expected_voltage))
         elif bt == "I":
-            ibr = _circuit_source(br, coupling)
+            ibr = _circuit_source(br, cardinal_phases)
         elif bt == "F":
             ibr = float(br["value"]) * sol_lu[controls[index]]
         elif bt == "G":
@@ -1840,17 +1859,18 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
             "current_A": [float(ibr.real), float(ibr.imag)] if omega > 0 else float(ibr.real),
         })
         absorbed = vd * ibr.conjugate()
-        s_tot += absorbed
+        powers.append(absorbed)
         if bt in {"V", "I", "E", "F", "G", "H"}:
-            s_deliv -= absorbed
-        if str(br["n_pos"]) in kcl_sum: kcl_sum[str(br["n_pos"])] += ibr
-        if str(br["n_neg"]) in kcl_sum: kcl_sum[str(br["n_neg"])] -= ibr
+            delivered.append(-absorbed)
+        if str(br["n_pos"]) in terminal_currents: terminal_currents[str(br["n_pos"])].append(ibr)
+        if str(br["n_neg"]) in terminal_currents: terminal_currents[str(br["n_neg"])].append(-ibr)
 
-    kcl_max = max((abs(v) for v in kcl_sum.values()), default=0.0)
+    s_tot, s_deliv = _sum_phasors(powers), _sum_phasors(delivered)
+    kcl_max = max((abs(_sum_phasors(v)) for v in terminal_currents.values()), default=0.0)
     cand_ok = True
     if isinstance(spec.get("proposed_node_voltages"), dict):
         rtol = float(spec.get("rtol", 1e-4))
-        if _SPICE_HIERARCHY.search(netlist):
+        if diode_states or _SPICE_HIERARCHY.search(netlist):
             claimed_nodes = {name.casefold(): voltage for name, voltage in v_node.items()}
         else:
             claimed_nodes = v_node
