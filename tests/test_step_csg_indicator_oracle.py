@@ -157,3 +157,15 @@ class StepCsgIndicatorOracle(unittest.TestCase):
                      ("DIFFERENCE","A","A"), ("DIFFERENCE","A",("DIFFERENCE","B","island"))]:
             with self.subTest(expr=expr), self.assertRaises(ValueError):
                 verify_step_cad_geometry(dict(step_text=document(self.boxes,expr)[0], density_kg_m3=7))
+
+    def test_positive_volume_cannot_have_zero_reported_extent(self):
+        wall = {"wall": box((0,0,0), ("1e-400","1e100","1e100"))}
+        text, _ = document(wall, "wall")
+        # The volume, exposed area, mass, and all three principal moments fit
+        # binary64, but the exact x extent rounds to zero. The finite result
+        # cannot certify this positive-volume box with a degenerate AABB.
+        try:
+            result = verify_step_cad_geometry(dict(step_text=text, density_kg_m3=1.))
+        except ValueError:
+            return
+        self.assertFalse(result["conservation_verified"], result)
