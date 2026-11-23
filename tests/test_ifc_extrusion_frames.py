@@ -1,8 +1,9 @@
 """World-space clash and clearance witnesses for positioned IFC extrusions."""
 import math
+from decimal import Decimal, localcontext
 import unittest
 
-from hamon_ifc_spatial_clash import run_router_ifc_clash
+from hamon_ifc_spatial_clash import _axis2placement3d_matrix, run_router_ifc_clash
 
 
 def scene(probe, *, sign=1, hollow=False, rotated=True, scale=1.0):
@@ -62,10 +63,12 @@ def solid_coordinates(point):
 
 
 class ExtrusionFrames(unittest.TestCase):
-    def physical_pair(self, probe, sign, *, hollow=False, rotated=True, scale=1.0):
-        out = run_router_ifc_clash({"ifc_text": scene(probe, sign=sign, hollow=hollow,
-                                                      rotated=rotated, scale=scale),
-                                   "required_clearance_m": 0.1})
+    def physical_pair(self, probe, sign, *, hollow=False, rotated=True, scale=1.0, axes=()):
+        model = scene(probe, sign=sign, hollow=hollow, rotated=rotated, scale=scale)
+        for old, new in axes:
+            self.assertIn(old, model)
+            model = model.replace(old, new)
+        out = run_router_ifc_clash({"ifc_text": model, "required_clearance_m": 0.1})
         self.assertTrue(out["ok"])
         self.assertEqual((out["solid_count"], out["pair_count"]), (2, 1))
         (pair,) = out["all_pairs"]
@@ -126,3 +129,57 @@ class ExtrusionFrames(unittest.TestCase):
                 })
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["status"], "unresolved_solid_geometry")
+
+    def test_equivalent_placement_directions_preserve_contact_and_clearance(self):
+        changes = [
+            ("#19=IFCDIRECTION((0.,1.))", "#19=IFCDIRECTION((0.,1.E-250))"),  # profile
+            ("#19=IFCDIRECTION((0.,1.))", "#19=IFCDIRECTION((0.,1.E250))"),
+            ("#6=IFCDIRECTION((0.,1.,0.))", "#6=IFCDIRECTION((0.,1.E-250,0.))"),  # parent X
+            ("#10=IFCDIRECTION((0.,-1.,0.))", "#10=IFCDIRECTION((0.,-1.E250,0.))"),  # child Z
+            ("#15=IFCDIRECTION((0.,0.,-1.))", "#15=IFCDIRECTION((0.,0.,-1.E-250))"),  # solid X
+            # Axis2Placement3D projects RefDirection onto the plane normal to Axis.
+            # The same positive Y reference survives even when its projection
+            # would underflow after normalizing the two raw components together.
+            ("#6=IFCDIRECTION((0.,1.,0.))", "#6=IFCDIRECTION((0.,1.E-250,1.E250))"),
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                embedded = self.physical_pair((2.8, -0.125, 3), 1, axes=[change])
+                self.assertEqual(embedded["status"], "hard_clash")
+                separated = self.physical_pair((0.25, 2.125, -3), -1, axes=[change])
+                self.assertAlmostEqual(separated["min_distance_m"], math.hypot(2., 1.41), places=10)
+
+    def test_invalid_explicit_placement_axes_withhold_geometry(self):
+        base = scene((2.8, -0.125, 3))
+        for replacement in ("(0.,0.,1.)", "(0.,0.,0.)", "(0.,1.)"):
+            with self.subTest(replacement=replacement):
+                model = base.replace("#6=IFCDIRECTION((0.,1.,0.))", f"#6=IFCDIRECTION({replacement})")
+                result = run_router_ifc_clash({"ifc_text": model})
+                self.assertEqual(result["status"], "unresolved_solid_geometry")
+                self.assertFalse(result["ok"])
+
+    def test_nonaxial_projected_reference_matches_decimal_projection(self):
+        z = (3., 4., 12.)
+        for gap in (1e-5, 1e-6, 1e-7, 1e-8):
+            with self.subTest(gap=gap):
+                x = (3. - 4. * gap, 4. + 3. * gap, 12.)
+                def ref(i):
+                    return ("ref", i)
+                entities = {
+                    1: ("IFCAXIS2PLACEMENT3D", [ref(2), ref(3), ref(4)]),
+                    2: ("IFCCARTESIANPOINT", [[0., 0., 0.]]),
+                    3: ("IFCDIRECTION", [list(z)]),
+                    4: ("IFCDIRECTION", [list(x)]),
+                }
+                frame = _axis2placement3d_matrix(entities, ref(1), 1.)
+                # Independently project the actual submitted binary64 reference
+                # onto the plane before reducing the result to a unit vector.
+                with localcontext() as ctx:
+                    ctx.prec = 120
+                    raw, normal = list(map(Decimal.from_float, x)), list(map(Decimal.from_float, z))
+                    along = sum(i * j for i, j in zip(raw, normal)) / sum(j * j for j in normal)
+                    projected = [i - along * j for i, j in zip(raw, normal)]
+                    length = sum(v * v for v in projected).sqrt()
+                    expected_x = [float(v / length) for v in projected]
+                for got, expected in zip(frame[:3, 0], expected_x):
+                    self.assertAlmostEqual(got, expected, delta=4e-16)

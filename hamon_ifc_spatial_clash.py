@@ -341,6 +341,50 @@ def _vec3_from_ref(entities: Dict[int, Tuple[str, List[Any]]], ref: Any, default
     return np.array(default, dtype=np.float64)
 
 
+def _placement_ratios(entities, ref, default):
+    """Resolve one placement axis before its scale-independent normalization."""
+    if ref is None:
+        return np.array(default, dtype=float)
+    try:
+        (coords,) = _required_ifc_entity(entities, ref, "IFCDIRECTION")
+        ratios = np.asarray(coords, dtype=float)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise UnresolvedSolidGeometry("Invalid IFC placement direction") from exc
+    if ratios.shape != (len(default),) or not np.isfinite(ratios).all():
+        raise UnresolvedSolidGeometry("Invalid IFC placement direction dimension or ratios")
+    if not np.any(ratios):
+        raise UnresolvedSolidGeometry("IFC placement direction must be nonzero")
+    return ratios
+
+
+def _unit_ratios(ratios):
+    scaled = ratios / np.max(np.abs(ratios))
+    return scaled / np.linalg.norm(scaled)
+
+
+def _placement_normal(z, x):
+    """Return the positive local Y axis or None for exactly parallel directions."""
+    # Every binary64 denominator is a power of two. A common denominator
+    # per direction gives integer coordinates for the same two directions.
+    def integer_ratios(ratios):
+        parts = [float(value).as_integer_ratio() for value in ratios]
+        common = max(denominator for _, denominator in parts)
+        return [numerator * (common // denominator) for numerator, denominator in parts]
+
+    a = integer_ratios(z)
+    b = integer_ratios(x)
+    cross = [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+    size = max(map(abs, cross))
+    if size == 0:
+        return None
+    scaled = np.array([v / size for v in cross])
+    return scaled / math.hypot(*scaled)
+
+
 def _axis2placement3d_matrix(entities: Dict[int, Tuple[str, List[Any]]], ref: Any, unit_scale: float) -> np.ndarray:
     mat = np.eye(4, dtype=np.float64)
     if not (isinstance(ref, tuple) and ref[0] == "ref" and ref[1] in entities):
@@ -348,27 +392,27 @@ def _axis2placement3d_matrix(entities: Dict[int, Tuple[str, List[Any]]], ref: An
     etype, args = entities[ref[1]]
     if etype == "IFCAXIS2PLACEMENT3D":
         loc = _vec3_from_ref(entities, args[0] if len(args) > 0 else None, (0.0, 0.0, 0.0)) * unit_scale
-        z_axis = _vec3_from_ref(entities, args[1] if len(args) > 1 else None, (0.0, 0.0, 1.0))
-        x_ref = _vec3_from_ref(entities, args[2] if len(args) > 2 else None, (1.0, 0.0, 0.0))
-        zn = np.linalg.norm(z_axis)
-        z_axis = z_axis / zn if zn > 1e-12 else np.array([0.0, 0.0, 1.0])
-        x_proj = x_ref - np.dot(x_ref, z_axis) * z_axis
-        xn = np.linalg.norm(x_proj)
-        if xn < 1e-12:
-            fallback = np.array([1.0, 0.0, 0.0]) if abs(z_axis[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-            x_proj = fallback - np.dot(fallback, z_axis) * z_axis
-            xn = np.linalg.norm(x_proj)
-        x_axis = x_proj / xn
-        y_axis = np.cross(z_axis, x_axis)
+        z_ref = args[1] if len(args) > 1 else None
+        x_ref = args[2] if len(args) > 2 else None
+        z = _placement_ratios(entities, z_ref, (0., 0., 1.))
+        x = _placement_ratios(entities, x_ref, (1., 0., 0.))
+        z_axis = _unit_ratios(z)
+        y_axis = _placement_normal(z, x)
+        if y_axis is None:
+            if x_ref is not None and z_ref is not None:
+                raise UnresolvedSolidGeometry("Parallel IFC placement axes")
+            # Preserve the implicit perpendicular axis when one axis is omitted.
+            fallback = [1., 0., 0.] if abs(z_axis[0]) < 0.9 else [0., 1., 0.]
+            y_axis = _unit_ratios(np.cross(z_axis, fallback))
+        x_axis = np.cross(y_axis, z_axis)
         mat[:3, 0] = x_axis
         mat[:3, 1] = y_axis
         mat[:3, 2] = z_axis
         mat[:3, 3] = loc
     elif etype == "IFCAXIS2PLACEMENT2D":
         loc = _vec3_from_ref(entities, args[0] if len(args) > 0 else None, (0.0, 0.0, 0.0)) * unit_scale
-        x_ref = _vec3_from_ref(entities, args[1] if len(args) > 1 else None, (1.0, 0.0, 0.0))
-        xn = np.linalg.norm(x_ref[:2])
-        x2 = x_ref[:2] / xn if xn > 1e-12 else np.array([1.0, 0.0])
+        x_ref = args[1] if len(args) > 1 else None
+        x2 = _unit_ratios(_placement_ratios(entities, x_ref, (1., 0.)))
         y2 = np.array([-x2[1], x2[0]])
         mat[:2, 0] = x2
         mat[:2, 1] = y2
@@ -762,8 +806,7 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
         # Normalize in the solid's coordinate system. Direction ratios can
         # have arbitrary scale; the profile's placement rotates the section
         # but must not rotate the extrusion a second time.
-        ratios = ratios / np.max(np.abs(ratios))
-        direction = ratios / np.linalg.norm(ratios)
+        direction = _unit_ratios(ratios)
         sweep = (prof_mat[:3, :3].T @ direction) * depth
         if not np.isfinite(sweep).all() or sweep[2] == 0:
             raise UnresolvedSolidGeometry("IFC sweep is not representable as a finite solid")
