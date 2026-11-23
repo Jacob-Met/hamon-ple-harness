@@ -33,7 +33,8 @@ class EmptyArchiveRecovery(unittest.TestCase):
 
             session.exec = execute
             def snapshot():
-                return asyncio.run(delivery_guard.snapshot(session, [{'path': str(target), 'kind': 'file'}]))
+                return asyncio.run(delivery_guard.snapshot(
+                    session, [{'path': str(target), 'kind': 'file'}], observe_loose_baseline=True))
 
             before = snapshot()
             self.assertTrue(before[str(target)]['loose_members_initially_absent'])

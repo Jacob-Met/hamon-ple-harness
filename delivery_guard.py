@@ -245,11 +245,11 @@ def regular(path):
             return False
     return True
 
-def scan_file(p, root_members):
+def scan_file(p, root_members, observe_loose_baseline=False):
     try:
         if not p.is_file():
             row = {"state":"missing"}
-            if root_members:
+            if observe_loose_baseline and root_members:
                 try:
                     p.lstat()
                 except FileNotFoundError:
@@ -357,18 +357,20 @@ for item in targets[:24]:
     elif kind == "dir":
         result[path] = scan_dir(p)
     else:
-        result[path] = scan_file(p, item.get("root_members"))
+        result[path] = scan_file(p, item.get("root_members"), item.get("observe_loose_baseline", False))
 print(json.dumps(result,separators=(",",":")))
 '''
 
 
 async def snapshot(session: Any, targets: list[dict[str, str]], *,
-                   deadline: float | None = None) -> dict | None:
+                   deadline: float | None = None, observe_loose_baseline: bool = False) -> dict | None:
     """One bounded, read-only remote observation; None means unavailable."""
     if not targets:
         return {}
     members = archive_contract.declared_members(getattr(session, "instruction", ""), targets)
     probe_targets = [{**targets[0], "root_members": members}] if members else targets
+    if members and observe_loose_baseline:
+        probe_targets[0]["observe_loose_baseline"] = True
     argv = shlex.quote(json.dumps(probe_targets, separators=(",",":")))
     cmd = "python3 -c " + shlex.quote(REMOTE_PROBE) + " " + argv
     try:
