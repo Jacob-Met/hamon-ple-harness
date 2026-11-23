@@ -11,6 +11,8 @@ task-ID or filename shortcuts:
    with explicit per-node KCL, per-branch KVL, and Tellegen complex power checks.
    Linear SPICE K cards couple ideal constant inductors through their dotted
    first terminals. Structured K records use name, inductors (names), and value.
+   Linear F/H sources sense current flowing into the positive terminal of their
+   named independent voltage source (control_source in structured branches).
 3. Civil / Geotechnical Equilibrium & Conservation: cut/fill earthwork mass
    balance with shrink/swell factors, effective-stress Terzaghi/Vesic bearing
    capacity, consolidation settlement, and open-channel energy continuity.
@@ -1451,7 +1453,11 @@ def _parse_spice_netlist(netlist: str, frequency_override: Optional[float] = Non
             )
             is_k_card = (first[0][0].upper() == "K" and len(first) >= 3
                          and all(name.upper().startswith("L") for name in first[1:3]))
-            if not (is_e_card or is_k_card):
+            is_current_control = first[0][0].upper() in ("F", "H") and (
+                (len(first) == 5 and _LINEAR_GAIN.fullmatch(first[4]))
+                or (len(first) >= 4 and first[3].lower().startswith("poly("))
+            )
+            if not (is_e_card or is_k_card or is_current_control):
                 continue
         if line.lower().startswith(".end"):
             break
@@ -1479,6 +1485,11 @@ def _parse_spice_netlist(netlist: str, frequency_override: Optional[float] = Non
                 raise ValueError("Expected K name, winding names, and a coupling coefficient")
             branches.append({"name": toks[0], "type": "K", "inductors": toks[1:-1],
                              "value": _parse_spice_num(toks[-1])})
+        elif kind in ("F", "H"):
+            if len(toks) != 5 or not _LINEAR_GAIN.fullmatch(toks[4]):
+                raise ValueError(f"Expected a linear {kind} source: name out+ out- sense_source gain")
+            branches.append({"name": toks[0], "type": kind, "n_pos": toks[1], "n_neg": toks[2],
+                             "control_source": toks[3], "value": _parse_spice_num(toks[4])})
         elif kind == "E":
             if len(toks) != 6 or _BEHAVIORAL_E.match(toks[3]) or not _LINEAR_GAIN.fullmatch(toks[5]):
                 raise ValueError("Expected a linear E source: name out+ out- ctrl+ ctrl- gain")
@@ -1574,7 +1585,27 @@ def _circuit_source(br, coupled):
     return cmath.rect(magnitude, math.radians(angle))
 
 
-def _circuit_matrix(branches, omega, n_idx, current_row, coupling, exact=False):
+def _current_control_rows(branches, current_row):
+    controlled = [i for i, br in enumerate(branches) if str(br["type"]).upper() in ("F", "H")]
+    if not controlled:
+        return {}
+    names = {}
+    for index, br in enumerate(branches):
+        names.setdefault(str(br["name"]).casefold(), []).append(index)
+    controls = {}
+    for index in controlled:
+        br = branches[index]
+        sense = br.get("control_source")
+        hits = names.get(sense.casefold(), []) if isinstance(sense, str) and sense else []
+        if len(hits) != 1 or str(branches[hits[0]]["type"]).upper() != "V":
+            raise ValueError(f"Expected one independent voltage source for current control {sense!r}")
+        if not math.isfinite(float(br["value"])):
+            raise ValueError("Current-controlled source gain must be finite")
+        controls[index] = current_row[hits[0]]
+    return controls
+
+
+def _circuit_matrix(branches, omega, n_idx, current_row, coupling, controls, exact=False):
     """Stamp the same circuit topology in floating or exact coefficient arithmetic."""
     dim = len(n_idx) + len(current_row)
     if exact:
@@ -1612,6 +1643,8 @@ def _circuit_matrix(branches, omega, n_idx, current_row, coupling, exact=False):
                 cp, cm = (n_idx.get(str(br[key])) for key in ("nc_pos", "nc_neg"))
                 if cp is not None: mna[row, cp] -= val
                 if cm is not None: mna[row, cm] += val
+            elif bt == "H":
+                mna[row, controls[index]] -= val
             elif index in coupling and omega:
                 mna[row, row] -= val
                 mutual[index] = {}
@@ -1637,6 +1670,10 @@ def _circuit_matrix(branches, omega, n_idx, current_row, coupling, exact=False):
             current = source(br)
             if ip is not None: rhs[ip] -= current
             if im is not None: rhs[im] += current
+        elif bt == "F":
+            sense = controls[index]
+            if ip is not None: mna[ip, sense] += val
+            if im is not None: mna[im, sense] -= val
         elif bt == "G":
             cp, cm = (n_idx.get(str(br[key])) for key in ("nc_pos", "nc_neg"))
             for row, sign in ((ip, 1), (im, -1)):
@@ -1668,12 +1705,13 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
     n_idx = {nm: i for i, nm in enumerate(nodes)}
     # An ideal inductor has zero terminal voltage at DC. Its current, like
     # the current of a voltage source, is an independent MNA unknown.
-    constraint_types = {"V", "E", "L"} if freq_hz == 0 else {"V", "E"}
+    constraint_types = {"V", "E", "H", "L"} if freq_hz == 0 else {"V", "E", "H"}
     coupling = _mutual_inductances(branches)
     constraints = [i for i, br in enumerate(branches)
                    if str(br["type"]).upper() in constraint_types or i in coupling]
     current_row = {i: len(nodes) + offset for offset, i in enumerate(constraints)}
-    inputs = (branches, omega, n_idx, current_row, coupling)
+    controls = _current_control_rows(branches, current_row)
+    inputs = (branches, omega, n_idx, current_row, coupling, controls)
     mna, rhs, admittances, mutual = _circuit_matrix(*inputs)
     sol_g = _complex_gauss_solve(mna, rhs)
     sol_lu = np.linalg.solve(mna, rhs)
@@ -1715,17 +1753,18 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
             elif bt == "E":
                 control = v_node.get(str(br["nc_pos"]), 0j) - v_node.get(str(br["nc_neg"]), 0j)
                 expected_voltage = float(br["value"]) * control
+            elif bt == "H":
+                expected_voltage = float(br["value"]) * sol_lu[controls[index]]
             elif index in mutual and freq_hz > 0:
                 flux = float(br["value"]) * ibr
                 for winding, inductance in mutual[index].items():
                     flux += inductance * sol_lu[current_row[winding]]
                 expected_voltage = 1j * omega * flux
-            if bt in {"V", "E"}:
-                s_deliv += vd * (-ibr).conjugate()
             kvl_max = max(kvl_max, abs(vd - expected_voltage))
         elif bt == "I":
             ibr = _circuit_source(br, coupling)
-            s_deliv += vd * (-ibr).conjugate()
+        elif bt == "F":
+            ibr = float(br["value"]) * sol_lu[controls[index]]
         elif bt == "G":
             ibr = float(br["value"]) * (v_node.get(str(br["nc_pos"]), 0j) - v_node.get(str(br["nc_neg"]), 0j))
         else:
@@ -1735,7 +1774,10 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
             "n1": str(br["n_pos"]), "n2": str(br["n_neg"]),
             "current_A": [float(ibr.real), float(ibr.imag)] if omega > 0 else float(ibr.real),
         })
-        s_tot += vd * ibr.conjugate()
+        absorbed = vd * ibr.conjugate()
+        s_tot += absorbed
+        if bt in {"V", "I", "E", "F", "G", "H"}:
+            s_deliv -= absorbed
         if str(br["n_pos"]) in kcl_sum: kcl_sum[str(br["n_pos"])] += ibr
         if str(br["n_neg"]) in kcl_sum: kcl_sum[str(br["n_neg"])] -= ibr
 
