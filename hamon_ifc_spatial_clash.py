@@ -1,8 +1,9 @@
 """3D IFC4/IFC2x3 STEP-P21, STL & OBJ solid geometry + exact spatial clash solver.
 
-Provides zero-dependency 3D solid extraction (extruded rectangular, hollow,
+Provides built-in 3D solid extraction (extruded rectangular, hollow,
 circular, pipe, I-beam/wide-flange, arbitrary closed polyline profiles, and
-explicit B-Rep/triangulated face sets), hierarchical SE(3) IFCLOCALPLACEMENT
+explicit B-Rep/triangulated face sets), optional polyhedral set operations,
+hierarchical SE(3) IFCLOCALPLACEMENT
 transforms, divergence-theorem volume/area takeoff, and exact 3D triangle-mesh
 intersection + minimum surface-to-surface clearance for Physical-Engineering's
 Last Exam (PLE).
@@ -724,6 +725,75 @@ class UnresolvedSolidGeometry(ValueError):
     """A physical Body was present but could not supply verified solid geometry."""
 
 
+def _boolean_meshes(meshes, operator="UNION"):
+    """Combine closed polyhedral material with double-precision mesh Booleans.
+
+    Input triangles are the geometry being combined. A polygonal approximation
+    of a curved profile does not become an analytic curved solid. The shared
+    local frame avoids cancellation at survey coordinates. Exact-position
+    welding preserves distinct walls and gaps; no approximate repair is used.
+    """
+    try:
+        import manifold3d
+    except ImportError as exc:
+        raise UnresolvedSolidGeometry("polyhedral Boolean requires manifold3d") from exc
+    operations = {"UNION": manifold3d.OpType.Add,
+                  "INTERSECTION": manifold3d.OpType.Intersect,
+                  "DIFFERENCE": manifold3d.OpType.Subtract}
+    if operator not in operations or len(meshes) < 2:
+        raise UnresolvedSolidGeometry("invalid polyhedral Boolean operands")
+    if sum(len(f) for _, f in meshes) > 50000:
+        raise UnresolvedSolidGeometry("polyhedral Boolean exceeds 50000 source triangles")
+    for vertices, faces in meshes:
+        if (vertices.ndim != 2 or vertices.shape[1] != 3 or not len(vertices)
+                or faces.ndim != 2 or faces.shape[1] != 3 or not len(faces)
+                or not np.isfinite(vertices).all() or faces.min() < 0
+                or faces.max() >= len(vertices)):
+            raise UnresolvedSolidGeometry("invalid polyhedral Boolean mesh")
+        _, closed, coherent = _closed_surface_components(vertices, faces)
+        if len(closed) != len(faces) or not coherent:
+            raise UnresolvedSolidGeometry("Boolean operand is not closed and consistently oriented")
+    low = np.min([v.min(axis=0) for v, _ in meshes], axis=0)
+    high = np.max([v.max(axis=0) for v, _ in meshes], axis=0)
+    scale = float(np.max(high - low))
+    if not 0 < scale < math.inf:
+        raise UnresolvedSolidGeometry("Boolean extent is not finite and positive")
+    try:
+        operands = []
+        for vertices, faces in meshes:
+            vertices, inverse = np.unique((vertices - low) / scale, axis=0, return_inverse=True)
+            faces = inverse[faces]
+            origin = vertices[faces[0, 0]]
+            a, b, c = (vertices[faces[:, k]] - origin for k in range(3))
+            signed = float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum())
+            if not math.isfinite(signed) or signed == 0:
+                raise UnresolvedSolidGeometry("Boolean operand has no finite enclosed volume")
+            # Reverse the whole solid, including cavity shells, when a source
+            # winding or mapped reflection has reversed its orientation.
+            if signed < 0:
+                faces = faces[:, ::-1]
+            source = manifold3d.Mesh64(np.ascontiguousarray(vertices, dtype=np.float64),
+                                       np.ascontiguousarray(faces, dtype=np.uint64))
+            solid = manifold3d.Manifold(source)
+            if solid.status() != manifold3d.Error.NoError or solid.is_empty():
+                raise UnresolvedSolidGeometry("Boolean operand is not a valid oriented manifold")
+            operands.append(solid)
+        result = manifold3d.Manifold.batch_boolean(operands, operations[operator])
+        if result.status() != manifold3d.Error.NoError or result.is_empty():
+            raise UnresolvedSolidGeometry("Boolean produced no qualified bounded solid")
+        output = result.to_mesh64()
+        vertices = np.asarray(output.vert_properties, dtype=np.float64)[:, :3]
+        faces = np.asarray(output.tri_verts, dtype=np.int32)
+        _, closed, coherent = _closed_surface_components(vertices, faces)
+        if not np.isfinite(vertices).all() or len(closed) != len(faces) or not coherent:
+            raise UnresolvedSolidGeometry("Boolean result lacks a closed, consistently oriented boundary")
+        return vertices * scale + low, faces
+    except UnresolvedSolidGeometry:
+        raise
+    except (RuntimeError, ValueError, TypeError, AttributeError, IndexError, OverflowError) as exc:
+        raise UnresolvedSolidGeometry("polyhedral Boolean kernel failed") from exc
+
+
 def _polygonal_solid_mesh(entities, args, unit_scale):
     """Tessellate bounded planar regions; preserve all holes and oriented shell edges."""
     from collections import Counter
@@ -833,10 +903,38 @@ def _polygonal_solid_mesh(entities, args, unit_scale):
 
 
 def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, unit_scale: float,
-                        mass_issues: Optional[List[str]] = None) -> List[Tuple[np.ndarray, np.ndarray]]:
+                        mass_issues: Optional[List[str]] = None,
+                        active_items: frozenset = frozenset()) -> List[Tuple[np.ndarray, np.ndarray]]:
     if not (isinstance(iref, tuple) and iref[0] == "ref" and iref[1] in entities):
         return []
+    if iref[1] in active_items or len(active_items) >= 128:
+        raise UnresolvedSolidGeometry("cyclic or excessively nested physical representation")
+    active_items = active_items | {iref[1]}
     itype, args = entities[iref[1]]
+    if itype == "IFCCSGSOLID" and len(args) == 1:
+        return _extract_solid_item(entities, args[0], unit_scale, mass_issues, active_items)
+    if itype == "IFCBLOCK" and len(args) == 4:
+        try:
+            x, y, z = (float(value) * unit_scale for value in args[1:])
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise UnresolvedSolidGeometry("invalid IFC block dimensions") from exc
+        if not all(0 < value < math.inf for value in (x, y, z)):
+            raise UnresolvedSolidGeometry("IFC block dimensions must be finite and positive")
+        vertices, faces = _extrude_polygon_2d(np.array([(0., 0.), (x, 0.), (x, y), (0., y)]),
+                                             np.array([0., 0., z]))
+        return [(_apply_transform(vertices, _axis2placement3d_matrix(entities, args[0], unit_scale)), faces)]
+    if itype in ("IFCBOOLEANRESULT", "IFCBOOLEANCLIPPINGRESULT") and len(args) == 3:
+        operator = str(args[0]).strip(".").upper()
+        if itype == "IFCBOOLEANCLIPPINGRESULT" and operator != "DIFFERENCE":
+            raise UnresolvedSolidGeometry("IFC clipping result must use DIFFERENCE")
+        operands = []
+        issues = []
+        for reference in args[1:]:
+            pieces = _extract_solid_item(entities, reference, unit_scale, issues, active_items)
+            if not pieces or issues:
+                raise UnresolvedSolidGeometry("unresolved physical Boolean operand")
+            operands.append(_boolean_meshes(pieces) if len(pieces) > 1 else pieces[0])
+        return [_boolean_meshes(operands, operator)]
     if itype == "IFCEXTRUDEDAREASOLID" and len(args) >= 4:
         outer, inner, prof_mat = _profile_polygons_2d(entities, args[0], unit_scale)
         if outer is None:
@@ -877,7 +975,7 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
                     _, rargs = entities[rep_ref[1]]
                     if len(rargs) >= 4 and isinstance(rargs[3], list):
                         for sub in rargs[3]:
-                            sub_meshes = _extract_solid_item(entities, sub, unit_scale, mass_issues)
+                            sub_meshes = _extract_solid_item(entities, sub, unit_scale, mass_issues, active_items)
                             if not sub_meshes:
                                 raise UnresolvedSolidGeometry("unresolved physical item in mapped representation")
                             for (vv, ff) in sub_meshes:
@@ -1230,6 +1328,22 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
                     all_faces.append(f_local + v_offset)
                     v_offset += len(v_world)
 
+        if len(all_verts) > 1 and not mass_issues:
+            bounds = [(v.min(axis=0), v.max(axis=0)) for v in all_verts]
+            if any(np.all(np.minimum(a1, b1) > np.maximum(a0, b0))
+                   for i, (a0, a1) in enumerate(bounds) for b0, b1 in bounds[i + 1:]):
+                pieces = []
+                offset = 0
+                for vertices, faces in zip(all_verts, all_faces):
+                    pieces.append((vertices, faces - offset))
+                    offset += len(vertices)
+                try:
+                    vertices, faces = _boolean_meshes(pieces)
+                    all_verts, all_faces = [vertices], [faces]
+                except UnresolvedSolidGeometry as exc:
+                    # Existing surface/containment queries remain useful. No
+                    # additive mass is reported for an unqualified union.
+                    mass_issues.append(str(exc))
         if all_verts and all_faces:
             solids.append(SolidMesh3D(
                 element_id=global_id,

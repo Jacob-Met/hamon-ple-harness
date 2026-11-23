@@ -106,6 +106,7 @@ def test_select_and_dispatch_ple_bim():
 
 
 def test_task_tools_ts_live_relay_roundtrip():
+    from test_ifc_boolean import material_course
     from test_ifc_compound_mass import course
 
     here = Path(__file__).resolve().parent.parent
@@ -115,6 +116,12 @@ def test_task_tools_ts_live_relay_roundtrip():
         (wdir / "site.ifc").write_text(SAMPLE_IFC, encoding="utf-8")
         (wdir / "reflected.ifc").write_text(course(reverse=False, reflect=True, right_scale=1.))
         (wdir / "open.ifc").write_text(course(declared_open=True, reflect=True, probe=True))
+        boolean_expected = {}
+        for operator in ("UNION", "INTERSECTION", "DIFFERENCE"):
+            text, volume, _ = material_course(operator, millimetres=True, mapped=True,
+                                              oblique=True, primitive=True)
+            (wdir / (operator + ".ifc")).write_text(text)
+            boolean_expected[operator] = volume
         pdf_bytes = hamon_drawing_reader.build_minimal_vector_pdf([
             {
                 "width_pt": 612.0,
@@ -141,6 +148,11 @@ const ifcOut = await tools.get('hamon_ifc_spatial_clash').execute('1', { path: '
 const ifc = tools.get('hamon_ifc_spatial_clash');
 const reflected = await ifc.execute('reflection', { path: 'reflected.ifc' }, null, () => {}, {});
 const open = await ifc.execute('open', { path: 'open.ifc' }, null, () => {}, {});
+const boolean = {};
+for (const operator of ['UNION', 'INTERSECTION', 'DIFFERENCE']) {
+  const result = await ifc.execute(operator, { path: operator + '.ifc' }, null, () => {}, {});
+  boolean[operator] = result.details;
+}
 const pdfOut = await tools.get('hamon_drawing_reader').execute('2', { path: 'sheet.pdf' }, null, () => {}, {});
 const preOut = await tools.get('check_deliverable_preflight').execute('3', { path: 'predictions.json', expected_task_ids: ['task_a', 'task_b'] }, null, () => {}, {});
 console.log(JSON.stringify({
@@ -149,6 +161,7 @@ console.log(JSON.stringify({
   reflected_volume: reflected.details.total_solid_volume_m3,
   open_volume: open.details.total_solid_volume_m3,
   open_witness: open.details.all_pairs[0].closest_points_m,
+  boolean,
   pdf_ok: pdfOut.details.ok,
   pre_ok: preOut.details.ok,
 }));
@@ -175,6 +188,9 @@ console.log(JSON.stringify({
             assert abs(out["reflected_volume"] - 1/3) < 1e-12
             assert out["open_volume"] is None
             assert len(out["open_witness"]) == 2
+            for operator, expected in boolean_expected.items():
+                assert out["boolean"][operator]["ok"] is True
+                assert abs(out["boolean"][operator]["total_solid_volume_m3"] / expected - 1) < 1e-9
             assert out["pdf_ok"] is True
             assert out["pre_ok"] is True
             assert len(relay_ops) >= 2
