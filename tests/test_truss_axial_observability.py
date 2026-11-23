@@ -45,3 +45,12 @@ class AxialObservableTests(unittest.TestCase):
                 solve(nodes, [bar("a", "A", "B", stiffness)])
         with self.assertRaisesRegex(ValueError, "IDs"):
             solve(nodes, [bar("a", "A", "B"), bar("a", "A", "B")])
+
+    def test_individual_force_rounding_can_hide_a_one_newton_joint_load(self):
+        nodes = {"A": {"x": 0, "y": 0, "fix_x": True, "fix_y": True},
+                 "B": {"x": 1, "y": 0, "Fx": 1},
+                 "C": {"x": 2, "y": 0, "Fx": 2**53, "fix_y": True}}
+        result = solve(nodes, [bar("a", "A", "B", 2**61), bar("b", "B", "C", 2**61)])
+        self.assertEqual(result["N_a_N"], result["N_b_N"])
+        self.assertEqual(result["displayed_free_joint_residual_upper_N"], 1.)
+        self.assertEqual(result["equilibrium_basis"], "represented_member_factors_before_force_rounding")

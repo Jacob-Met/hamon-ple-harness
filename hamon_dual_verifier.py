@@ -1118,7 +1118,24 @@ def solve_truss_2d(spec: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("Independent truss force calculation disagrees")
 
     nullity = len(free) - len(pivots)
-    return {**{key: _diagnostic_float(value) for key, value in forces.items()},
+    reported = {key: _diagnostic_float(value) for key, value in forces.items()}
+    # Quantify the equilibrium error visible to a consumer reconstructing
+    # joint forces from the individually rounded scalar member outputs.
+    rounding_load = dict.fromkeys(free, Fraction(0))
+    for label, member in members.items():
+        correction = Fraction(reported[label]) - forces[label]
+        for dof, direction in member.row:
+            if dof in free_set:
+                rounding_load[dof] += correction * direction / member.length
+    residual = max(map(abs, rounding_load.values()), default=Fraction(0))
+    upper = float(residual)
+    if Fraction(upper) < residual:
+        upper = math.nextafter(upper, math.inf)
+    if not math.isfinite(upper):
+        raise ValueError("Displayed joint-force residual exceeds binary64 range")
+    return {**reported,
+            "equilibrium_basis": "represented_member_factors_before_force_rounding",
+            "displayed_free_joint_residual_upper_N": upper,
             "force_solution": "compatible_mechanism" if nullity else "unique_displacement",
             "displacement_unique": nullity == 0, "free_mechanism_count": nullity,
             "dual_rel_discrepancy": discrepancy, "dual_verified": True}
