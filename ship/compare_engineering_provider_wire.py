@@ -4,8 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
-BASE = "3efe0f4b626d15fe4dc01a4ad36d3429fd534327"
-FULL = "d0a5d7315453152c60f50948df11c9215354cd1443aae83fc4bd65d6a292dd8f"
+BASE = "87b07b563b0297043fbb43e6fe013575454d9644"
+FULL = "b5be49394186d48bf9640fade7ac0d3ecefc433bcbc66e1b6a1ccde33aac27e1"
 POSITIVE = "synthetic-zinc-cell"
 INCOMPLETE = "synthetic-zinc-incomplete"
 REFERENCE = "synthetic-reference"
@@ -57,7 +57,7 @@ def main():
         check(a["instruction_sha256"] == b["instruction_sha256"], f"{key}: instruction drift")
         x, y = a["requests"][0], b["requests"][0]
         check(x["tool_names"] == y["tool_names"] == stock_names, f"{key}: tools")
-        check(x["guide_sha256"] == FULL and x["guide_bytes"] == 11872, f"{key}: stock guide")
+        check(x["guide_sha256"] == FULL and x["guide_bytes"] == 12071, f"{key}: stock guide")
         check(x["max_tokens"] == y["max_tokens"], f"{key}: output limit")
         check(x["model"] == y["model"] == args.model, f"{key}: model identity")
         if args.model == "claude-opus-5-5":
