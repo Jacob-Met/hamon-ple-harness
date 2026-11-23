@@ -456,13 +456,13 @@ def nominal_board_domain(records):
         hole_model = "outer_outline_with_one_straight_dimension_hole"
         if hole_info["quarter_count"]:
             hole_model = "outer_outline_with_one_tangent_quarter_dimension_hole"
+            info = dict(info, hole_quarter_count=hole_info["quarter_count"])
             if hole_info["quarter_count"] == 1:
                 info = dict(info, hole_quarter_source=hole_info["quarter_source"])
             else:
                 hole_model = "outer_outline_with_rounded_rectangle_dimension_hole"
                 info = dict(info, hole_quarter_sources=hole_info["quarter_sources"])
-            info = dict(info, hole_quarter_count=hole_info["quarter_count"],
-                        hole_arc_error_upper_bound_nm=hole_info["arc_sagitta_upper_bound_nm"],
+            info = dict(info, hole_arc_error_upper_bound_nm=hole_info["arc_sagitta_upper_bound_nm"],
                         removed_area_upper_bound_mm2=hole_info["removed_area_upper_bound_mm2"])
     else:
         hole_model = "outer_outline_with_two_disjoint_dimension_holes"
