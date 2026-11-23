@@ -29,7 +29,7 @@ def matches(observed, expected):
 def station(data, omega):
     radius = positive(data, "radius_m")
     meridional = positive(data, "meridional_velocity_m_s")
-    speed = omega * radius
+    speed = float(omega * Fraction(radius))
     alternatives = []
     if "absolute_tangential_velocity_m_s" in data:
         direct = finite(
@@ -113,7 +113,7 @@ def rotor(spec):
     kind = spec["machine_kind"]
     if kind not in ("pump", "compressor", "turbine"):
         raise ValueError("machine_kind must be pump, compressor, or turbine")
-    omega = positive(spec, "rotation_rpm") * 2 * math.pi / 60
+    omega = Fraction(positive(spec, "rotation_rpm")) * Fraction(math.tau) / 60
     inlet, outlet = (station(spec[k], omega) for k in ("inlet", "outlet"))
     cm1, cm2 = (Fraction(s["meridional_velocity_m_s"]) for s in (inlet, outlet))
     vt1, vt2 = (Fraction(s["absolute_tangential_velocity_m_s"]) for s in (inlet, outlet))
@@ -121,11 +121,11 @@ def rotor(spec):
     # Rounding each r*Vtheta product before subtraction can turn a loaded
     # rotor into a zero-torque rotor. Round the signed change only at output.
     angular_momentum_change = r2 * vt2 - r1 * vt1
-    specific_work = Fraction(omega) * angular_momentum_change
+    specific_work = omega * angular_momentum_change
     work = float(specific_work)
     # Reconstruct energy independently from rothalpy using the components.
     # A rounded speed norm can conceal changes smaller than its own ulp.
-    u1, u2 = Fraction(omega) * r1, Fraction(omega) * r2
+    u1, u2 = omega * r1, omega * r2
     wt1, wt2 = vt1 - u1, vt2 - u2
     meridional_term = (cm2 - cm1) * (cm2 + cm1)
     relative_term = (wt2 - wt1) * (wt2 + wt1)

@@ -1,6 +1,7 @@
 """Reference velocity triangles and independent shaft/enthalpy observations."""
 
 import math
+from fractions import Fraction
 
 import pytest
 
@@ -219,3 +220,28 @@ def test_direction_and_power_survive_underflow_of_reported_specific_work():
     assert result["fluid_specific_work_J_kg"] == 0
     assert result["fluid_power_W"] == pytest.approx(1e-30 * math.tau / 60, abs=0)
     assert not verify_turbomachinery(dict(spec, machine_kind="turbine"))["conservation_verified"]
+
+
+def test_minimum_positive_rpm_retains_representable_power_and_blade_speed():
+    rpm = math.ulp(0.0)
+    mass = 1e300
+    # The rad/s conversion underflows on its own, while torque * omega is representable.
+    omega = Fraction(rpm) * Fraction(math.tau) / 60
+    spec = {
+        "machine_kind": "pump", "rotation_rpm": rpm, "mass_flow_kg_s": mass,
+        "inlet": {"radius_m": 1, "meridional_velocity_m_s": 1,
+                  "absolute_tangential_velocity_m_s": 0},
+        "outlet": {"radius_m": 1, "meridional_velocity_m_s": 1,
+                   "absolute_tangential_velocity_m_s": 1},
+        "measured_fluid_torque_N_m": mass,
+    }
+    result = verify_turbomachinery(spec)
+    assert result["conservation_verified"]
+    assert result["fluid_power_W"] == float(omega * Fraction(mass)) > 0
+    assert not verify_turbomachinery(dict(spec, machine_kind="turbine"))["conservation_verified"]
+    for station in ("inlet", "outlet"):
+        spec[station]["radius_m"] = mass
+    spec["mass_flow_kg_s"] = 1
+    result = verify_turbomachinery(spec)
+    assert result["conservation_verified"]
+    assert result["outlet"]["blade_speed_m_s"] == float(omega * Fraction(mass)) > 0
