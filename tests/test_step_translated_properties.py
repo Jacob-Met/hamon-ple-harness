@@ -142,3 +142,81 @@ def test_ifc_profile_placement_is_independent_of_sweep_direction(profile_axis, s
     assert result["volume_m3"] == pytest.approx(volume, rel=1e-10, abs=0)
     np.testing.assert_allclose(result["centroid_m"], centroid, rtol=0, atol=2e-13)
     np.testing.assert_allclose(result["inertia_tensor_centroid_kg_m2"], inertia, rtol=1e-10, atol=1e-18)
+
+
+def product_scene(mode):
+    # A reusable rectangle, its unowned sibling, and an auxiliary Axis.
+    rows = [
+        "#1=IFCCARTESIANPOINT((0.,0.,0.));",
+        "#2=IFCAXIS2PLACEMENT3D(#1,$,$);",
+        "#3=IFCDIRECTION((0.,0.,1.));",
+        "#4=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,.020,.040);",
+        "#5=IFCEXTRUDEDAREASOLID(#4,#2,#3,.060);",
+        "#6=IFCEXTRUDEDAREASOLID(#4,#2,#3,1.);",
+        "#7=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-8,#2,$);",
+        "#8=IFCSHAPEREPRESENTATION(#7,'Body','SweptSolid',(#5));",
+        "#9=IFCSHAPEREPRESENTATION(#7,'Axis','Curve3D',(#6));",
+        "#10=IFCPRODUCTDEFINITIONSHAPE($,$,(#9,#8));",
+        "#11=IFCCARTESIANPOINT((2.,0.,0.));",
+        "#12=IFCAXIS2PLACEMENT3D(#11,$,$);",
+        "#13=IFCLOCALPLACEMENT($,#2);",
+        "#14=IFCLOCALPLACEMENT(#13,#12);",
+        "#15=IFCBUILDINGELEMENTPROXY('first',$,$,$,$,#14,#10,$,$);",
+    ]
+    if mode == "parent":
+        rows += ["#16=IFCCARTESIANPOINT((4.,5.,0.));", "#17=IFCDIRECTION((0.,1.,0.));",
+                 "#18=IFCAXIS2PLACEMENT3D(#16,#3,#17);"]
+        rows[12] = "#13=IFCLOCALPLACEMENT($,#18);"
+    if mode == "shared":
+        rows.append("#19=IFCBEAM('second',$,$,$,$,#13,#10,$,$);")
+    return {"step_text": "DATA;\n" + "\n".join(rows) + "\nENDSEC;", "density_kg_m3": 1000}
+
+
+@pytest.mark.parametrize("mode,center,inertia,extents,count", [
+    ("one", [2.,0.,.03], [2.08e-5,1.60e-5,8.e-6], [.02,.04,.06], 1),
+    ("parent", [4.,7.,.03], [1.60e-5,2.08e-5,8.e-6], [.04,.02,.06], 1),
+    ("shared", [1.,0.,.03], [4.16e-5,.096032,.096016], [2.02,.04,.06], 2),
+])
+def test_ifc_mass_counts_each_placed_product(mode, center, inertia, extents, count):
+    got = verify_step_cad_geometry(product_scene(mode))
+    assert got["conservation_verified"] and got["watertight_manifold"]
+    assert got["geometry_basis"] == "additive_ifc_product_occurrences"
+    assert got["ifc_product_count"] == count and got["triangle_count"] == 12 * count
+    assert got["volume_m3"] == pytest.approx(count * .000048)
+    assert got["mass_kg"] == pytest.approx(count * .048)
+    assert got["surface_area_m2"] == pytest.approx(count * .0088)
+    np.testing.assert_allclose(got["centroid_m"], center, atol=1e-15)
+    np.testing.assert_allclose(got["inertia_tensor_centroid_kg_m2"], np.diag(inertia), atol=1e-15)
+    np.testing.assert_allclose(got["aabb_extents_m"], extents, atol=1e-15)
+
+
+@pytest.mark.parametrize("before,after", [
+    ("#14,#10", "#99,#10"), ("#14,#10", "#14,#99"), ("#14,#10", "#98,#99"),
+    ("#14,#10", "#14,$"), ("IFCBUILDINGELEMENTPROXY", "IFCSPACE"),
+    ("#13=IFCLOCALPLACEMENT($,#2)", "#13=IFCLOCALPLACEMENT(#14,#2)"),
+    ("#13,#12", "#13,#11"), ("#11,$,$", "#11,#3,#3"),
+    ("'SweptSolid',(#5)", "'SweptSolid',(#5,#6)"),
+    ("'SweptSolid',(#5)", "'MappedRepresentation',(#99)"),
+    ("#5=IFCEXTRUDEDAREASOLID(#4,#2,#3,.060)", "#5=IFCMAPPEDITEM(#4,#2)"),
+    ("#4,#2,#3,.060", "#4,#99,#3,.060"),
+    ("#2,$);\n#8=", "#12,$);\n#8="),
+    ("ENDSEC;", "#22=IFCRELVOIDSELEMENT('void',$,$,$,#15,#99);\nENDSEC;"),
+])
+def test_ifc_mass_rejects_partial_or_unsupported_product(before, after):
+    spec = product_scene("shared")
+    assert before in spec["step_text"]
+    spec["step_text"] = spec["step_text"].replace(before, after)
+    with pytest.raises(ValueError):
+        verify_step_cad_geometry(spec)
+
+
+@pytest.mark.parametrize("spec", [product_scene("one"), rectangular_ifc_sweep((0.,0.,0.), 1., (0.,0.,1.))])
+def test_ifc_mass_refuses_short_physical_owner_even_without_product_shapes(spec):
+    from hamon_ifc_spatial_clash import _product_shapes, parse_ifc_entities
+
+    body, trailer = spec["step_text"].rsplit("ENDSEC;", 1)
+    text = body + "#99=IFCCOLUMN('short');\nENDSEC;" + trailer
+    with pytest.raises(ValueError, match="Incomplete IFC product"):
+        verify_step_cad_geometry(dict(spec, step_text=text))
+    # The spatial consumer retains its historical permissive product enumeration.
+    assert all(eid != 99 for eid, *_ in _product_shapes(parse_ifc_entities(text)))
