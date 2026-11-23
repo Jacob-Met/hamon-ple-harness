@@ -270,7 +270,7 @@ async def provision_engineering_cli(session: Any) -> str:
             "hamon_consolidation.py", "hamon_pipe_network.py", "hamon_diaphragm.py",
             "hamon_diaphragm_modes.py", "hamon_diaphragm_compensated.py",
             "hamon_turbomachinery.py", "hamon_ac_power_flow.py",
-            "hamon_bearing_capacity.py", "hamon_dual_verifier.py",
+            "hamon_bearing_capacity.py", "hamon_rectangle_contact.py", "hamon_dual_verifier.py",
             "hamon_cad_takeoff.py", "hamon_pareto.py", "engineering_toolkit.py",
         ):
             module = pathlib.Path(__file__).with_name(filename).read_bytes()
