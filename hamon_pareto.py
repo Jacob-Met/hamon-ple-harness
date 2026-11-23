@@ -147,7 +147,7 @@ _WAVE8_INPUTS = {
     ),
     "rankine_layers": (
         "civil_geotech",
-        "pressure_state layers water_table_depth_m gamma_water_N_m3 surcharge_Pa",
+        "pressure_state layers water_table_depth_m front_water_table_depth_m gamma_water_N_m3 surcharge_Pa",
         "dual_solver_rel_residual",
     ),
     "bearing_capacity": (

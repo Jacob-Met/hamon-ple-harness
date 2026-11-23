@@ -161,3 +161,16 @@ def test_submerged_rankine_budget_requires_consistent_weights():
     assert route(spec)["thinking_tier"] == "low"
     conflict = dict(row, gamma_submerged_N_m3=14000)
     assert not route(dict(spec, layers=[conflict]))["presolve_verified"]
+
+
+def test_opposing_front_water_reaches_the_verified_inline_route():
+    spec = {"calculation": "rankine_layers", "pressure_state": "active",
+            "water_table_depth_m": 0, "front_water_table_depth_m": 0,
+            "gamma_water_N_m3": 10000,
+            "layers": [{"thickness_m": 6, "phi_deg": 30, "gamma_saturated_N_m3": 20000}]}
+    plan = route(spec)
+    assert plan["presolve_verified"]
+    result = json.loads(plan["presolve_result_json"])
+    assert result["thrust_N_m"] == pytest.approx(60000)
+    assert result["moment_Nm_m"] == pytest.approx(120000)
+    assert not route(dict(spec, front_water_table_depth_m=-1))["presolve_verified"]
