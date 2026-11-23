@@ -366,6 +366,10 @@ def routed(tmp_path_factory):
         calls.append({"id": case, "mode": "electrochem_separations", "spec": {
             "subkind": "distillation", "x_B": .05, "z_F": .5, "x_D": .95, "q": .5, "R": reflux,
             "equilibrium_table": [[0,0],[.25,.46],[.5,.63],[.7,.72],[.85,.94],[1,1]]}})
+    for name, product_c in (("specified-frost-product",-12),("positive-temperature-frost",1)):
+        calls.append({"id": name, "mode":"psychrometrics", "spec":{
+            "mode":"cooling_coil", "inlet":{"t_db_c":-2,"rh":.9}, "outlet":{"t_db_c":-12,"rh":1},
+            "m_da_kg_s":1, "condensate_phase":"ice", "t_condensate_c":product_c}})
     calls.append({"id": "enriched-product-two-tray", "mode": "electrochem_separations",
                   "spec": {"subkind": "distillation", "z_F": .8, "x_D": .9, "x_B": .7,
                            "alpha": 2., "q": 1., "R": 1000., "F_mol_s": 100.}})
@@ -1511,3 +1515,15 @@ def test_registered_tabulated_equilibrium(routed):
     result = accepted["details"]
     assert result["verified"] and result["N_stages_integer"] == 23
     assert math.isclose(result["N_theoretical"],22.620005,abs_tol=.00001)
+
+
+def test_registered_frost_load_and_contradictory_product(routed):
+    valid = routed["specified-frost-product"]
+    assert valid["completed"], valid
+    frost = valid["details"]
+    assert frost["passed"] and frost["phase_source"] == "supplied"
+    assert frost["drained_liquid_kg_s"] == 0
+    assert math.isclose(frost["deposited_ice_kg_s"], .0015364207159459689)
+    assert math.isclose(frost["q_total_kw"], 14.47198881207644)
+    refused = routed["positive-temperature-frost"]
+    assert refused["completed"] and not refused["details"]["passed"]

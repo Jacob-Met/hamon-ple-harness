@@ -1727,29 +1727,29 @@ def _pws_ashrae_pa(t_c, *, ice_below_c=0.0):
     return ln_pws.exp() if precise else math.exp(ln_pws)
 
 
-def _bisect_dew_point(pw_pa: float, lo: float, hi: float) -> float:
+def _bisect_dew_point(pw_pa: float, lo: float, hi: float, *, ice_below_c=0.) -> float:
     for _ in range(70):
         mid = 0.5 * (lo + hi)
-        if _pws_ashrae_pa(mid) < pw_pa:
+        if _pws_ashrae_pa(mid, ice_below_c=ice_below_c) < pw_pa:
             lo = mid
         else:
             hi = mid
     return 0.5 * (lo + hi)
 
 
-def _dew_point_from_pw(pw_pa: float) -> Tuple[Optional[float], Optional[str]]:
-    """Invert the supported ice or liquid branch of the default 0 C diagnostic."""
+def _dew_point_from_pw(pw_pa: float, *, ice_below_c=0.) -> Tuple[Optional[float], Optional[str]]:
+    """Invert the supported ice or liquid branch of the selected saturation correlation."""
     if not math.isfinite(pw_pa) or pw_pa < 0:
         return None, "invalid_vapor_pressure"
     if pw_pa == 0:
         return None, "dry_no_finite_point"
 
     # ASHRAE 2017 SI eqs. 5 and 6 have finite, separate temperature ranges.
-    # The forward routine uses water at zero, so ice ends at the preceding float.
-    ice_lo, ice_hi = -100.0, math.nextafter(0.0, -math.inf)
-    water_lo, water_hi = 0.0, 200.0
-    p_ice_lo, p_ice_hi = _pws_ashrae_pa(ice_lo), _pws_ashrae_pa(ice_hi)
-    p_water_lo, p_water_hi = _pws_ashrae_pa(water_lo), _pws_ashrae_pa(water_hi)
+    # The ice branch ends immediately below the selected switch.
+    ice_lo, ice_hi = -100.0, math.nextafter(ice_below_c, -math.inf)
+    water_lo, water_hi = ice_below_c, 200.0
+    p_ice_lo, p_ice_hi = _pws_ashrae_pa(ice_lo, ice_below_c=ice_below_c), _pws_ashrae_pa(ice_hi, ice_below_c=ice_below_c)
+    p_water_lo, p_water_hi = _pws_ashrae_pa(water_lo, ice_below_c=ice_below_c), _pws_ashrae_pa(water_hi, ice_below_c=ice_below_c)
     if pw_pa < p_ice_lo:
         return None, "below_correlation_range"
     if pw_pa > p_water_hi:
@@ -1769,13 +1769,13 @@ def _dew_point_from_pw(pw_pa: float) -> Tuple[Optional[float], Optional[str]]:
         return water_hi, None
 
     lo, hi = (ice_lo, ice_hi) if in_ice else (water_lo, water_hi)
-    if _pws_ashrae_pa(-80.0) <= pw_pa <= _pws_ashrae_pa(150.0):
-        ordinary = _bisect_dew_point(pw_pa, -80.0, 150.0)
+    if _pws_ashrae_pa(-80.0, ice_below_c=ice_below_c) <= pw_pa <= _pws_ashrae_pa(150.0, ice_below_c=ice_below_c):
+        ordinary = _bisect_dew_point(pw_pa, -80.0, 150.0, ice_below_c=ice_below_c)
         if lo <= ordinary <= hi:
             return ordinary, None
     if in_ice and pw_pa == p_ice_hi:
         return ice_hi, None
-    return _bisect_dew_point(pw_pa, lo, hi), None
+    return _bisect_dew_point(pw_pa, lo, hi, ice_below_c=ice_below_c), None
 
 
 def _signed_w_from_twb(t_db_c: float, t_wb_c: float, p_atm_pa: float, *,
@@ -1816,12 +1816,12 @@ def _w_from_twb(t_db_c: float, t_wb_c: float, p_atm_pa: float, *, ice_below_c: f
     raise ValueError("Wet-bulb temperature requires a negative humidity ratio")
 
 
-def _wet_bulb_from_state(t_db_c: float, w: float, p_atm_pa: float) -> float:
+def _wet_bulb_from_state(t_db_c: float, w: float, p_atm_pa: float, *, ice_below_c=0.) -> float:
     lo, hi = -60.0, t_db_c
     for _ in range(70):
         mid = 0.5 * (lo + hi)
         # Clipping negative trial ratios would erase the crossing at exactly dry air.
-        if _signed_w_from_twb(t_db_c, mid, p_atm_pa) < w:
+        if _signed_w_from_twb(t_db_c, mid, p_atm_pa, ice_below_c=ice_below_c) < w:
             lo = mid
         else:
             hi = mid
@@ -1874,8 +1874,8 @@ def _psychro_state(spec: Dict[str, Any], p_atm_pa: float = 101325.0,
 
     h_kj_kgda = 1.006 * t_db + w * (2501.0 + 1.86 * t_db)
     v_m3_kgda = 287.042 * (t_db + 273.15) * (1.0 + 1.607858 * w) / p_atm_pa
-    t_dp_calc, t_dp_status = _dew_point_from_pw(pw)
-    t_wb_calc = _wet_bulb_from_state(t_db, w, p_atm_pa)
+    t_dp_calc, t_dp_status = _dew_point_from_pw(pw, ice_below_c=ice_below_c)
+    t_wb_calc = _wet_bulb_from_state(t_db, w, p_atm_pa, ice_below_c=ice_below_c)
     ws = 0.621945 * pws / (p_atm_pa - pws)
     deg_sat = w / ws if ws > 0 else 0.0
 
@@ -2038,8 +2038,61 @@ def _mix_air_streams(spec, pressure, model, states):
     return res
 
 
+def _explicit_coil_water(spec):
+    """Resolve a declared water product and the state measurements determining its flow."""
+    def number(v, name):
+        if type(v) not in (int, float) or not math.isfinite(v):
+            raise ValueError(f"{name} requires a finite number")
+        return v
+
+    phase = spec.get("condensate_phase")
+    if phase not in ("ice", "liquid", "mixed") or "condensate_model" in spec:
+        raise ValueError("supply one condensate_phase: ice, liquid or mixed")
+    if ("m_da_kg_s" in spec) == ("v_dot_in_m3_s" in spec):
+        raise ValueError("supply exactly one air mass flow or inlet volume flow")
+    flow_key = "m_da_kg_s" if "m_da_kg_s" in spec else "v_dot_in_m3_s"
+    pressure = number(spec.get("p_atm_pa", 101325.), "p_atm_pa")
+    if number(spec[flow_key], flow_key) <= 0 or pressure <= 0:
+        raise ValueError("air flow and pressure must be positive")
+    moisture = {"rh", "w_kg_per_kgda", "t_wb_c", "t_dp_c"}
+    for key in ("inlet", "outlet"):
+        state = spec.get(key)
+        if (not isinstance(state, dict) or "t_db_c" not in state
+                or len(state.keys() & moisture) != 1 or state.keys() - moisture - {"t_db_c"}):
+            raise ValueError(f"{key} requires dry bulb and exactly one humidity measurement")
+        for name, v in state.items():
+            number(v, name)
+        if "rh" in state and not 0 <= state["rh"] <= 1:
+            raise ValueError("relative humidity must be in [0,1]")
+        if any(state[k] > state["t_db_c"] for k in ("t_wb_c", "t_dp_c") if k in state):
+            raise ValueError("wet bulb and dew point cannot exceed dry bulb")
+    t = number(spec.get("t_condensate_c", spec["outlet"]["t_db_c"]), "t_condensate_c")
+    if phase == "mixed":
+        f = number(spec.get("ice_mass_fraction"), "ice_mass_fraction")
+        if t != 0 or not 0 <= f <= 1:
+            raise ValueError("mixed products require 0 C and a supplied ice mass fraction in [0,1]")
+    else:
+        if "ice_mass_fraction" in spec:
+            raise ValueError("ice_mass_fraction requires a mixed product")
+        f = float(phase == "ice")
+    if phase == "ice" and not -60 <= t <= 0:
+        raise ValueError("ice enthalpy requires -60 to 0 C")
+    if phase == "liquid" and (not 0 <= t <= 200 or _pws_ashrae_pa(t) > pressure):
+        raise ValueError("liquid product temperature must be between freezing and boiling")
+    if phase != "liquid" and spec.get("load_split") == "ashrae_dew_point":
+        raise ValueError("ashrae_dew_point requires a liquid drain")
+    h = (f*_ice_enthalpy_kj_kg(t) if f else 0.) + (1-f)*4.186*t
+    return phase, f, t, h
+
+
 def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "state")).strip().lower()
+    water = None
+    if mode == "cooling_coil" and spec.keys() & {"condensate_phase", "ice_mass_fraction", "condensate_model"}:
+        try:
+            water = _explicit_coil_water(spec)
+        except (ValueError, ArithmeticError) as exc:
+            return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": str(exc)}
     p_atm = float(spec.get("p_atm_pa", 101325.0))
 
     if mode == "state":
@@ -2082,8 +2135,12 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
         return res
 
     if mode == "cooling_coil":
-        s_in = _psychro_state(spec["inlet"], p_atm)
-        s_out = _psychro_state(spec["outlet"], p_atm)
+        try:
+            switch = .01 if water else 0.
+            s_in = _psychro_state(spec["inlet"], p_atm, ice_below_c=switch)
+            s_out = _psychro_state(spec["outlet"], p_atm, ice_below_c=switch)
+        except (ValueError, ArithmeticError) as exc:
+            return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": str(exc)}
         if not s_in.get("passed") or not s_out.get("passed"):
             return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": s_in.get("reason") or s_out.get("reason")}
         split = spec.get("load_split", "moist_air_midpoint")
@@ -2098,6 +2155,13 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
 
         m_cond_kg_s = m_da * max(0.0, s_in["w_kg_per_kgda"] - s_out["w_kg_per_kgda"])
         t_cond = float(spec.get("t_condensate_c", s_out["t_db_c"]))
+        if water:
+            phase, ice_fraction, t_cond, water_h = water
+            if s_out["w_kg_per_kgda"] > s_in["w_kg_per_kgda"] or s_out["t_db_c"] > s_in["t_db_c"]:
+                return {"passed": False, "domain": "psychrometrics", "mode": mode,
+                        "reason": "A cooling/dehumidifying coil cannot add moisture or heat"}
+        else:
+            phase, ice_fraction, water_h = "liquid", 0., 4.186*t_cond
         split_fields = {}
         if split == "ashrae_dew_point":
             # ASHRAE HVAC Systems and Equipment (2024), ch. 23, Eq. 38:
@@ -2125,9 +2189,19 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
                 return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": "Unrepresentable cooling-coil rate"}
             shr = sensible / total if total > 0.0 else 1.0
             split_fields = {"load_split": split, "condensation_t_dp_c": dew, "condensate_sensible_kw": m_da * drain}
+        elif water:
+            wi, wo = s_in["w_kg_per_kgda"], s_out["w_kg_per_kgda"]
+            ti, to = s_in["t_db_c"], s_out["t_db_c"]
+            sensible = (1.006 + 1.86*(wi+wo)/2)*(ti-to)
+            latent = (wi-wo)*(2501. + 1.86*(ti+to)/2 - water_h)
+            total = math.fsum((sensible, latent))
+            q_sens_kw, q_lat_kw, q_total_kw = m_da*sensible, m_da*latent, m_da*total
+            shr = sensible/total if total > 0 else 1.
+            if not all(map(math.isfinite, (q_total_kw, q_sens_kw, q_lat_kw, m_cond_kg_s*3600.))):
+                return {"passed": False, "domain": "psychrometrics", "mode": mode,
+                        "reason": "Unrepresentable cooling-coil rate"}
         else:
-            h_f_kj_kg = 4.186 * t_cond
-            q_total_kw = m_da * (s_in["h_kj_per_kgda"] - s_out["h_kj_per_kgda"]) - m_cond_kg_s * h_f_kj_kg
+            q_total_kw = m_da * (s_in["h_kj_per_kgda"] - s_out["h_kj_per_kgda"]) - m_cond_kg_s * water_h
             cp_moist = 1.006 + 1.86 * 0.5 * (s_in["w_kg_per_kgda"] + s_out["w_kg_per_kgda"])
             q_sens_kw = m_da * cp_moist * (s_in["t_db_c"] - s_out["t_db_c"])
             q_lat_kw = q_total_kw - q_sens_kw
@@ -2140,6 +2214,14 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
             "m_da_kg_s": m_da,
             "condensate_kg_s": m_cond_kg_s,
             "condensate_kg_hr": m_cond_kg_s * 3600.0,
+            "condensate_phase": phase, "phase_source": "supplied" if water else "assumed_liquid",
+            "ice_mass_fraction": ice_fraction, "water_product_temperature_c": t_cond,
+            "water_temperature_source": "supplied" if "t_condensate_c" in spec else "outlet_dry_bulb",
+            "water_product_enthalpy_kj_kg": water_h,
+            "deposited_ice_kg_s": m_cond_kg_s*ice_fraction,
+            "drained_liquid_kg_s": m_cond_kg_s*(1-ice_fraction),
+            "inlet_w_kg_per_kgda": s_in["w_kg_per_kgda"],
+            "outlet_w_kg_per_kgda": s_out["w_kg_per_kgda"],
             "q_total_kw": q_total_kw,
             "q_sensible_kw": q_sens_kw,
             "q_latent_kw": q_lat_kw,
