@@ -10,6 +10,8 @@ import secrets
 import shlex
 import zipfile
 
+from taskbridge import Cancelled
+
 NUMBERS = "zero one two three four five six seven eight nine ten eleven twelve".split()
 EARLY_RE = re.compile(
     r"\b(?:early.{0,65}improv|first.{0,60}complete.{0,120}(?:then\s+)?(?:iterat|improv))",
@@ -160,6 +162,8 @@ async def provision(session, targets):
     try:
         if await asyncio.wait_for(session.write_file(helper, body), 12) != len(body):
             return None
+    except Cancelled:
+        raise
     except Exception:
         return None
     target = targets[0]["path"]
@@ -182,6 +186,8 @@ async def run_command(session, command):
         reply = await asyncio.wait_for(session.exec(command, timeout_sec=30), 33)
         return (reply.get("exit_code") == 0 and not reply.get("timed_out")
                 and not reply.get("truncated"))
+    except Cancelled:
+        raise
     except Exception:
         return False
 
