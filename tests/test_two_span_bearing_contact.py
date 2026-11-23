@@ -84,3 +84,15 @@ class TwoSpanContact(unittest.TestCase):
         for invalid in ({"D": "compression_only"}, {"C": "pinned_maybe"}, ["A"]):
             with self.assertRaisesRegex(ValueError, "support_conditions"):
                 beam(1000, 1000, invalid)
+
+    def test_nonzero_contact_values_below_binary64_range(self):
+        # A released overhang rotates by qL^3/(24EI) at B. Its C gap is
+        # positive, but qL^4/(24EI) cannot be published as a nonzero float.
+        base = dict(span1=2.**-15, span2=2.**-15, udl1=2.**-1000, udl2=0.,
+                    E=2.**30, I=1., support_conditions={"C": "compression_only"})
+        # R_A = 3qL/8 is also nonzero and rounds to zero for this tiny load.
+        other = dict(span1=1., span2=1., udl1=math.ulp(0.), udl2=math.ulp(0.),
+                     E=1., I=1., support_conditions={"A": "compression_only"})
+        for spec in (base, other):
+            with self.assertRaisesRegex(ValueError, "reporting range"):
+                run_dual_verify_spec(dict(mode="domain", kind="continuous_beam_2span", spec=spec))
