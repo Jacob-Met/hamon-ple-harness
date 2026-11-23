@@ -109,7 +109,8 @@ class StepAnalyticFrameTests(unittest.TestCase):
 
     def test_cylinder_mass_properties_follow_the_same_frame(self):
         def cylinder(text):
-            return text.replace("BLOCK('',#4,2.,3.,4.)", "RIGHT_CIRCULAR_CYLINDER('',#4,4.,2.)")
+            return (text.replace("BLOCK('',#4,2.,3.,4.)", "RIGHT_CIRCULAR_CYLINDER('',#4,4.,2.)")
+                    .replace("AXIS2_PLACEMENT_3D('',#1,#2,#3)", "AXIS1_PLACEMENT('',#1,#2)"))
         base = self.verify(cylinder(block_text()))
         moved = self.verify(cylinder(block_text((1e-200,0.,0.),(0.,1e200,0.))))
         matrix = np.array([[0.,0.,1.],[1.,0.,0.],[0.,1.,0.]])
