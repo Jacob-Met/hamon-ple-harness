@@ -2109,7 +2109,8 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
                 return {"passed": False, "domain": "psychrometrics", "mode": mode,
                         "reason": "Dew-point split requires finite cooling and nonincreasing humidity"}
             dew = s_in["t_dp_c"] if wi > wo else None
-            if wi > wo and (dew is None or dew < 0.0 or t_cond < 0.0):
+            if wi > wo and (dew is None or dew < 0.0 or not 0.0 <= t_cond <= 200.0
+                            or _pws_ashrae_pa(t_cond) > p_atm):
                 return {"passed": False, "domain": "psychrometrics", "mode": mode,
                         "reason": "Condensing dew-point split requires a liquid dew point and liquid drain"}
             # Evaluate per kg dry air first so that the intensive SHR does not

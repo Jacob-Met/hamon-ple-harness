@@ -58,11 +58,15 @@ class CoolingCoilSplit(unittest.TestCase):
         self.assertEqual((no_load["q_total_kw"], no_load["q_sensible_kw"], no_load["q_latent_kw"]), (0, 0, 0))
 
     def test_refused_phase_flow_and_selector(self):
-        for args in ({"t_condensate_c": -2}, {"m_da_kg_s": 0}, {"m_da_kg_s": float("inf")},
+        for args in ({"t_condensate_c": -2}, {"t_condensate_c": 150}, {"m_da_kg_s": 0}, {"m_da_kg_s": float("inf")},
                      {"load_split": "unrecognized"}, {"inlet": {"t_db_c": 5, "t_dp_c": -3},
                                                        "outlet": {"t_db_c": 1, "t_dp_c": -7}}):
             with self.subTest(args=args):
                 self.assertFalse(coil(**args)["passed"])
+
+    def test_liquid_drain_uses_system_pressure(self):
+        self.assertFalse(coil(t_condensate_c=105)["passed"])
+        self.assertTrue(coil(t_condensate_c=105, p_atm_pa=200000)["passed"])
 
     def test_default_path_remains_the_midpoint_split(self):
         spec = {"mode": "cooling_coil", "inlet": {"t_db_c": 32, "t_wb_c": 24},
