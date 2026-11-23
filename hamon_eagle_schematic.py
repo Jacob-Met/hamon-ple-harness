@@ -813,7 +813,7 @@ def _outlined_supplies(paths, wire_ink, pitch, wires, membership):
     for glyph in candidates:
         if glyph["shape"] != "supply_arrow" or not .9*pitch < math.dist(glyph["foot"], glyph["tip"]) < 1.1*pitch:
             continue
-        word = outlined.supply_word(glyph, letters)
+        word = outlined.anchored_voltage(glyph, letters)
         if word:
             name, occurrence = word
             index = min(endpoints.near(glyph["foot"]))

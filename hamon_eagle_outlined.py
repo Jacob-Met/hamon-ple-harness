@@ -107,81 +107,6 @@ class LetterStrokes:
                 yield from self.cells[x, y]
 
 
-def _word(lines, direction):
-    points = [(direction*x, direction*y) for segment in lines for x, y in segment]
-    left, right = min(x for x, _ in points), max(x for x, _ in points)
-    bottom, top = min(y for _, y in points), max(y for _, y in points)
-    height = top - bottom
-    if not .54 < height < .77:
-        return None
-    step_y = height / 6
-    length = round(((right - left) / step_y - 4) / 6) + 1
-    if not 2 <= length <= 6:
-        return None
-    step_x = (right - left) / (6 * length - 2)
-    if not .95 < step_x / step_y < 1.05:
-        return None
-    letters = defaultdict(list)
-    for i in range(0, len(points), 2):
-        ends = []
-        for x, y in points[i:i+2]:
-            u, v = (x-left)/step_x, (y-bottom)/step_y
-            if max(abs(u-round(u)), abs(v-round(v))) > .22:
-                return None
-            ends.append((round(u), round(v)))
-        pos = ends[0][0] // 6
-        if any(x // 6 != pos or x % 6 > 4 or not 0 <= y <= 6 for x, y in ends):
-            return None
-        letters[pos].append(tuple(sorted((x%6, y) for x,y in ends)))
-    result = [_ALPHABET.get(tuple(sorted(letters[i]))) for i in range(length)]
-    return "".join(result) if all(result) else None
-
-
-def supply_word(mark, lettering):
-    foot, tip = mark["foot"], mark["tip"]
-    length = math.dist(foot, tip)
-    ux, uy = (tip[0]-foot[0])/length, (tip[1]-foot[1])/length
-    def project(p):
-        dx, dy = (p[0]-tip[0])/length, (p[1]-tip[1])/length
-        return -dx*uy + dy*ux, dx*ux + dy*uy
-    nearby = [(a, b, project(a), project(b)) for a, b in lettering.nearby(tip, 4*length)]
-    def read_region(inside, turn):
-        segments, physical, outside = [], [], []
-        for a, b, p, q in nearby:
-            hits = [inside(*t) for t in (p, q)]
-            local = tuple((y, -x) if turn else (x, y) for x,y in (p,q))
-            if all(hits):
-                segments.append(local)
-                physical.append(tuple(sorted((a,b))))
-            elif any(hits):
-                return None
-            else:
-                outside.append(local)
-        if not 5 <= len(segments) <= 55:
-            return None
-        words = {_word(segments, sense) for sense in (-1,1)} - {None}
-        if len(words) != 1:
-            return None
-        word = words.pop()
-        edges = [v for line in segments for v in line]
-        xmin, xmax = min(x for x,_ in edges), max(x for x,_ in edges)
-        ymin, ymax = min(y for _,y in edges), max(y for _,y in edges)
-        # A word can continue beyond the collection window without any
-        # individual segment crossing its boundary. Guard both letter ends.
-        for line in outside:
-            if any(xmin-.65 < x < xmax+.65 and ymin-.02 < y < ymax+.02 for x,y in line):
-                return None
-        if word in {"+5V", "+3V3", "VCC"}:
-            return word, tuple(sorted(physical))
-        return None
-    sources = [read_region(lambda x,y: abs(x) < 2.1 and -.035 < y < 1.18, False)]
-    if mark["shape"] == "supply_arrow":
-        for side in (-1,1):
-            sources.append(read_region(lambda x,y: .85 < side*x < 1.88 and -2.2 < y < .70, True))
-    unique = set(sources) - {None}
-    return unique.pop() if len(unique) == 1 else None
-
-
 def _signal_word(edges, baseline, pitch):
     """Decode an entire baseline run, including the underscore below the wire."""
     points = [p for edge in edges for p in edge]
@@ -246,7 +171,7 @@ def wire_words(wires, segments, pitch):
                     xmin, xmax = sorted(p[0] for p in edge)
                     ymin, ymax = sorted(p[1] for p in edge)
                     if (ymin < y+.13*pitch and ymax > y-.76*pitch
-                            and xmax >= left-pitch and xmin <= right+pitch):
+                            and xmax >= left-16*pitch and xmin <= right+16*pitch):
                         near.append((xmin, xmax, edge))
             groups = []
             for xmin, xmax, edge in sorted(near):
@@ -262,12 +187,80 @@ def wire_words(wires, segments, pitch):
                 after = group_index+1 < len(groups) and groups[group_index+1][0]-end < .96*pitch
                 if before or after:
                     continue
-                if start < left-.08*pitch or end > right+.08*pitch or not 4 <= len(edges) <= 140:
+                overlap = min(end, right) - max(start, left)
+                if overlap < .60*(end-start) or not 4 <= len(edges) <= 140:
                     continue
                 name = _signal_word(edges, y-.03*pitch, pitch)
                 if name:
                     occurrence = tuple(sorted(tuple(sorted(line)) for line in edges))
                     # A horizontal label origin can be left- or right-aligned.
-                    offsets = ((start-left)/pitch-.03, (right-end)/pitch-.03)
-                    registered = min(abs(v-round(v)) for v in offsets) < .025
+                    offsets = []
+                    if left-.08*pitch < start < right+.08*pitch:
+                        offsets.append((start-left)/pitch-.03)
+                    if left-.08*pitch < end < right+.08*pitch:
+                        offsets.append((right-end)/pitch-.03)
+                    registered = any(abs(v-round(v)) < .025 for v in offsets)
                     yield index, name, (vertical, occurrence), registered
+
+def _fit_voltage(nearby, center, direction, units, name):
+    """Compare the entire word and both adjacent-cell margins to the exact font."""
+    dx, dy = direction
+    sx, sy = units
+    extent = 6*len(name)-2
+    expected = {
+        tuple((6*i+x, y) for x, y in edge)
+        for i, letter in enumerate(name) for edge in _edges(_GLYPHS[letter])
+    }
+    physical, actual = [], []
+    for a, b in nearby:
+        edge = []
+        for point in (a, b):
+            x, y = point[0]-center[0], point[1]-center[1]
+            edge.append((2+(dx*x+dy*y)/sx, 3+(dy*x-dx*y)/sy))
+        if not any(-2.4 < x < extent+2.4 and -.32 < y < 6.32 for x, y in edge):
+            continue
+        if any(abs(v-round(v)) > .32 for p in edge for v in p):
+            return None
+        actual.append(tuple(sorted((round(x), round(y)) for x, y in edge)))
+        physical.append(tuple(sorted((a, b))))
+    if len(actual) == len(expected) and set(actual) == expected:
+        return tuple(sorted(physical))
+
+
+def anchored_voltage(mark, lettering):
+    """Two perpendicular strokes of a printed plus fix the font origin and scale."""
+    foot, tip = mark["foot"], mark["tip"]
+    stem = math.dist(foot, tip)
+    along = tuple((b-a)/stem for a, b in zip(foot, tip))
+    nearby = list(lettering.nearby(tip, 4*stem))
+    crosses = defaultdict(list)
+    for a, b in nearby:
+        delta = tuple(y-x for x, y in zip(a, b))
+        length = math.hypot(*delta)
+        if .39*stem < length < .46*stem:
+            vertical = abs(delta[0]) < .02
+            if vertical or abs(delta[1]) < .02:
+                crosses[vertical].append((tuple((x+y)/2 for x, y in zip(a, b)), length))
+    matches = set()
+    for center, height in crosses[True]:
+        if math.dist(center, tip) > 2.9*stem:
+            continue
+        for cross_center, width in crosses[False]:
+            if math.dist(center, cross_center) > .10:
+                continue
+            for dx, dy in ((1, 0), (0, -1)):
+                sx, sy = (width/4, height/4) if dx else (height/4, width/4)
+                for name in ("+5V", "+3V3"):
+                    distance = (3*len(name)-3)*sx
+                    mx, my = center[0]+dx*distance-tip[0], center[1]+dy*distance-tip[1]
+                    forward = (mx*along[0]+my*along[1])/stem
+                    across = (mx*along[1]-my*along[0])/stem
+                    if abs(dx*along[0]+dy*along[1]) < .05:
+                        placed = .02 < forward < 1.20 and abs(across) < .45
+                    else:
+                        placed = -.90 < forward < .55 and .85 < abs(across) < 1.90
+                    if placed:
+                        occurrence = _fit_voltage(nearby, center, (dx, dy), (sx, sy), name)
+                        if occurrence:
+                            matches.add((name, occurrence))
+    return matches.pop() if len(matches) == 1 else None
