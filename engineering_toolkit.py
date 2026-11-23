@@ -12,6 +12,7 @@ import csv
 from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, getcontext
+from fractions import Fraction
 import io
 import json
 import math
@@ -255,89 +256,6 @@ _CONVERT_UNITS = {
         "yd": "yd", "g": "g", "kg": "kg", "lbm": "lbm", "sec": "s", "hr": "hr",
     }.items()
 }
-_DIRECT_CONVERT = re.compile(
-    rf"CONVERT\(\s*(?:(?P<sheet>'(?:[^']|'')+'|[A-Z_][A-Z0-9_.]*)!)?"
-    rf'(?P<source>{_CELL_REF})\s*,\s*"(?P<from_unit>[A-Z]+)"\s*,\s*'
-    r'"(?P<to_unit>[A-Z]+)"\s*\)', re.I | re.ASCII)
-
-
-def _conversion_audit(formulas, literals):
-    """Reconstruct normal CONVERT chains independently of all saved formula caches."""
-    producers = {(sheet, addr): expression for sheet, addr, expression, _ in formulas}
-    evaluated = {}
-    visiting = set()
-
-    def evaluate(key):
-        if key in evaluated:
-            return evaluated[key]
-        if key in visiting:
-            return {"reason": "cyclic_reference"}
-        visiting.add(key)
-        result = calculate(key)
-        visiting.remove(key)
-        evaluated[key] = result
-        return result
-
-    def calculate(key):
-        sheet, _ = key
-        match = _DIRECT_CONVERT.fullmatch(producers[key])
-        if match is None:
-            return {"reason": "unsupported_conversion"}
-        ref_sheet = match["sheet"] or sheet
-        if ref_sheet.startswith("'"):
-            ref_sheet = ref_sheet[1:-1].replace("''", "'")
-        if any(c in ref_sheet for c in "[]:"):
-            return {"reason": "external_or_multisheet_reference"}
-        names = [n for n in literals if n == ref_sheet or (
-            n.isascii() and ref_sheet.isascii() and n.lower() == ref_sheet.lower())]
-        if len(names) != 1:
-            return {"reason": "unknown_or_ambiguous_worksheet"}
-        ref = (names[0], match["source"].replace("$", "").upper())
-        try:
-            _grid_position(ref[1])
-        except ValueError:
-            return {"reason": "invalid_cell_reference"}
-        source = _CONVERT_UNITS.get(match["from_unit"])
-        target = _CONVERT_UNITS.get(match["to_unit"])
-        if source is None or target is None:
-            return {"reason": "unsupported_unit"}
-        value = literals[ref[0]].get(ref[1])
-        root_sheet, root_cell = ref
-        depth = 1
-        if value is None:
-            if ref not in producers:
-                return {"reason": "unsupported_or_missing_dependency"}
-            prior = evaluate(ref)
-            if "expected" not in prior:
-                return {"reason": prior.get("reason", "invalid_upstream_conversion")}
-            if prior["to_unit"] != match["from_unit"]:
-                return {"reason": "upstream_unit_disagrees", "upstream_unit": prior["to_unit"],
-                        "from_unit": match["from_unit"]}
-            value = prior["expected"]
-            root_sheet, root_cell = prior["root_sheet"], prior["root_cell"]
-            depth = prior["conversion_depth"] + 1
-        evidence = {"source_sheet": ref[0], "source_cell": ref[1], "source_value": value,
-                    "root_sheet": root_sheet, "root_cell": root_cell, "conversion_depth": depth,
-                    "from_unit": match["from_unit"], "to_unit": match["to_unit"]}
-        if source.dim != target.dim:
-            return {**evidence, "dimension_mismatch": True}
-        expected = float(D(value) * source.val / target.val)
-        if not math.isfinite(expected) or (expected == 0 and value != 0):
-            return {"reason": "numeric_range"}
-        return {**evidence, "expected": expected}
-
-    for sheet, address, _, cached in formulas:
-        evidence = evaluate((sheet, address))
-        status = "unverified"
-        if cached is not None:
-            if evidence.get("dimension_mismatch"):
-                status = "dimension_mismatch"
-            elif "expected" in evidence:
-                agrees = math.isclose(cached, evidence["expected"], rel_tol=1e-12, abs_tol=0.0)
-                status = "matched" if agrees else "mismatch"
-        yield {"sheet": sheet, "cell": address, **evidence, "cached": cached, "status": status}
-
-
 def _grid_position(address):
     match = re.fullmatch(r"([A-Z]{1,3})([1-9][0-9]{0,6})", address.replace("$", "").upper())
     if match is None:
@@ -419,6 +337,16 @@ def _numeric_cell(cell, value):
     except (ValueError, OverflowError):
         return None
     return number if math.isfinite(number) else None
+
+
+
+def _typed_numeric_cache(cell, value, ns):
+    typ = cell.get("t", "n")
+    if value is not None and (typ == "str" or (typ in ("s", "b", "e") and value.text is not None)):
+        return typ
+    if typ == "inlineStr" and cell.find(ns + "is") is not None:
+        return typ
+    return None
 
 
 _SHEET_TOKEN = r"'(?:[^'\[\]:*!?/\\]|'')+'|[A-Z_][A-Z0-9_.]*"
@@ -524,68 +452,82 @@ def _verify_lookup(sheet, formula, cached, literals):
     return {"status": "unverified"}
 
 
+
 _ARITHMETIC_TOKEN = re.compile(
-    rf"{_local_reference('ref')}|(?P<number>(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:E[+-]?[0-9]+)?)"
-    r"|(?P<operator>[()+*/-])|(?P<space>\s+)", re.I | re.ASCII)
+    rf"(?P<convert>CONVERT)(?=\s*\()|{_local_reference('ref')}|"
+    r"(?P<number>(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:E[+-]?[0-9]+)?)"
+    r'|(?P<unit>"[A-Z]+")|(?P<operator>[(),+*/-])|(?P<space>\s+)',
+    re.I | re.ASCII)
 
-
-class _DimensionConflict(ValueError):
-    def __init__(self, key, left, right):
-        super().__init__("incompatible_additive_dimensions")
-        self.key, self.left, self.right = key, left, right
-
-
-# Bare formula numbers can scale a quantity. A bare additive offset carries no
-# declared physical unit; only two independently grounded dimensions can conflict.
 _COEFFICIENT = object()
 
 
-def _arithmetic_dimension(key, op, left, right):
+@dataclass(frozen=True)
+class _FormulaUnit:
+    scale: Fraction
+    dimension: tuple
+
+
+@dataclass(frozen=True)
+class _FormulaNumber:
+    value: float
+    unit: Any = None
+    roots: tuple = ()
+    conversion_depth: int = 0
+    arithmetic_depth: int = 0
+    evidence: Any = None
+
+
+class _FormulaConflict(ValueError):
+    def __init__(self, key, status, reason, **evidence):
+        super().__init__(reason)
+        self.key, self.status, self.evidence = key, status, evidence
+
+
+def _formula_unit(key, operation, left, right):
     if left is None or right is None:
         return None
     if left is _COEFFICIENT and right is _COEFFICIENT:
         return _COEFFICIENT
-    if isinstance(op, (ast.Add, ast.Sub)):
+    if isinstance(operation, (ast.Add, ast.Sub)):
         if left is _COEFFICIENT or right is _COEFFICIENT:
             return None
-        if left != right:
-            raise _DimensionConflict(key, left, right)
+        if left.dimension != right.dimension:
+            raise _FormulaConflict(key, "dimension_mismatch", "incompatible_additive_dimensions",
+                                   left_dimension=list(left.dimension), right_dimension=list(right.dimension))
+        if left.scale != right.scale:
+            raise _FormulaConflict(key, "unit_scale_mismatch", "incompatible_additive_unit_scales",
+                                   left_scale_si=str(left.scale), right_scale_si=str(right.scale),
+                                   si_dimension=list(left.dimension))
         return left
-    left = ZERO if left is _COEFFICIENT else left
-    right = ZERO if right is _COEFFICIENT else right
-    return scaled(left, right) if isinstance(op, ast.Mult) else reduced(left, right)
+    left = _FormulaUnit(Fraction(1), ZERO) if left is _COEFFICIENT else left
+    right = _FormulaUnit(Fraction(1), ZERO) if right is _COEFFICIENT else right
+    if isinstance(operation, ast.Mult):
+        unit = _FormulaUnit(left.scale*right.scale, scaled(left.dimension, right.dimension))
+    else:
+        unit = _FormulaUnit(left.scale/right.scale, reduced(left.dimension, right.dimension))
+    if (max(unit.scale.numerator.bit_length(), unit.scale.denominator.bit_length()) > 4096
+            or max(map(abs, unit.dimension)) > 1024):
+        raise ValueError("unsupported_unit_range")
+    return unit
 
 
-def _arithmetic_audit(producers, literals, converted):
-    """Reconstruct ordinary scalar formulas from numeric literals across worksheets."""
-    results, visiting = {}, set()
-    operations = {ast.Add: operator.add, ast.Sub: operator.sub,
-                  ast.Mult: operator.mul, ast.Div: operator.truediv}
+def _scalar_formula_audit(arithmetic, conversions, literals):
+    """Evaluate one dependency graph for ordinary arithmetic and CONVERT calls.
 
-    def cell(key):
-        if key in results:
-            return results[key]
-        if key in converted:
-            return converted[key]
-        if key not in producers:
-            value = literals[key[0]].get(key[1])
-            if value is None:
-                raise ValueError("unsupported_or_missing_dependency")
-            return value, None
-        if key in visiting or len(visiting) >= 40:
-            raise ValueError("cyclic_or_deep_dependency")
-        visiting.add(key)
-        try:
-            value = formula(key, producers[key][0])
-        finally:
-            visiting.remove(key)
-        results[key] = value
-        return value
+    Topological evaluation preserves the 256-cell conversion-chain contract
+    without growing the Python call stack. All numeric dependencies come from
+    literals or reconstructed formulas; cached results are comparison data only.
+    """
+    producers = {key: (*row, "arithmetic") for key, row in arithmetic.items()}
+    for row in conversions:
+        sheet, address, expression, cached, *typed = row
+        producers[(sheet, address)] = (expression, cached, typed[0] if typed else None, "conversion")
+    parsed, values, reverse, waiting = {}, {}, {}, {}
+    operations = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv}
 
-    def formula(key, expression):
-        sheet = key[0]
-        # Python supplies grouping and precedence; only the scalar AST below is interpreted.
-        tokens, values = [], {}
+    def parse(key, expression):
+        tokens, symbols, references = [], {}, {}
         pos = 0
         while pos < len(expression):
             token = _ARITHMETIC_TOKEN.match(expression, pos)
@@ -594,169 +536,169 @@ def _arithmetic_audit(producers, literals, converted):
             pos = token.end()
             if token["space"]:
                 continue
+            if token["convert"]:
+                tokens.append("_convert")
+                continue
             if token["operator"]:
                 tokens.append(token["operator"])
                 continue
+            if token["unit"]:
+                tokens.append(token["unit"])
+                continue
+            operand = f"v{len(symbols)+len(references)}"
             if token["number"]:
-                value, dimension = float(token["number"]), _COEFFICIENT
+                number = float(token["number"])
+                if not math.isfinite(number) or 0 < abs(number) < sys.float_info.min:
+                    raise ValueError("unsupported_operand_range")
+                symbols[operand] = _FormulaNumber(number, _COEFFICIENT)
             else:
-                name = token["ref_sheet"] or sheet
+                name = token["ref_sheet"] or key[0]
                 if name.startswith("'"):
                     name = name[1:-1].replace("''", "'")
                 sheets = [s for s in literals if s == name or (
                     s.isascii() and name.isascii() and s.lower() == name.lower())]
                 if len(sheets) != 1:
                     raise ValueError("unknown_or_ambiguous_worksheet")
-                value, dimension = cell((sheets[0], _address(*_grid_position(token["ref_start"]))))
-            if not math.isfinite(value) or 0 < abs(value) < sys.float_info.min:
-                raise ValueError("unsupported_operand_range")
-            operand = f"v{len(values)}"
-            values[operand] = value, dimension
+                references[operand] = (sheets[0], _address(*_grid_position(token["ref_start"])))
             tokens.append(operand)
+        return ast.parse(" ".join(tokens), mode="eval").body, symbols, references
+
+    for key, row in producers.items():
+        try:
+            parsed[key] = parse(key, row[0])
+        except (ValueError, SyntaxError, ArithmeticError) as exc:
+            values[key] = exc
+    for key in parsed:
+        dependencies = {ref for ref in parsed[key][2].values() if ref in producers and ref not in values}
+        waiting[key] = len(dependencies)
+        for dependency in dependencies:
+            reverse.setdefault(dependency, []).append(key)
+
+    def reference(ref):
+        if ref in values:
+            result = values[ref]
+            if isinstance(result, Exception):
+                raise result
+            return result
+        if ref in producers:
+            raise ValueError("cyclic_reference")
+        value = literals[ref[0]].get(ref[1])
+        if value is None:
+            raise ValueError("unsupported_or_missing_dependency")
+        if not math.isfinite(value) or 0 < abs(value) < sys.float_info.min:
+            raise ValueError("unsupported_operand_range")
+        return _FormulaNumber(value, roots=(ref,))
+
+    def evaluate(key):
+        tree, symbols, references = parsed[key]
 
         def scalar(node):
             if isinstance(node, ast.Name):
-                return values[node.id]
+                return reference(references[node.id]) if node.id in references else symbols[node.id]
             if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-                value, dimension = scalar(node.operand)
-                return (-value if isinstance(node.op, ast.USub) else value), dimension
+                result = scalar(node.operand)
+                return _FormulaNumber(-result.value if isinstance(node.op, ast.USub) else result.value,
+                                      result.unit, result.roots, result.conversion_depth, result.arithmetic_depth)
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "_convert" and len(node.args) == 3 and not node.keywords):
+                if any(not isinstance(arg, ast.Constant) or type(arg.value) is not str for arg in node.args[1:]):
+                    raise ValueError("unsupported_conversion_units")
+                from_name, to_name = (arg.value for arg in node.args[1:])
+                source, target = _CONVERT_UNITS.get(from_name), _CONVERT_UNITS.get(to_name)
+                if source is None or target is None:
+                    raise ValueError("unsupported_unit")
+                actual = scalar(node.args[0])
+                evidence = {"source_value": actual.value, "from_unit": from_name, "to_unit": to_name,
+                            "conversion_depth": actual.conversion_depth+1}
+                if isinstance(node.args[0], ast.Name) and node.args[0].id in references:
+                    ref = references[node.args[0].id]
+                    evidence.update(source_sheet=ref[0], source_cell=ref[1])
+                if len(actual.roots) == 1:
+                    evidence.update(root_sheet=actual.roots[0][0], root_cell=actual.roots[0][1])
+                elif actual.roots:
+                    evidence["root_cells"] = [list(ref) for ref in actual.roots]
+                if source.dim != target.dim:
+                    raise _FormulaConflict(key, "dimension_mismatch", "incompatible_conversion_dimensions",
+                                           **evidence, dimension_mismatch=True)
+                source_unit = _FormulaUnit(Fraction(source.val), source.dim)
+                if isinstance(actual.unit, _FormulaUnit) and actual.unit != source_unit:
+                    raise ValueError("upstream_unit_disagrees")
+                expected = float(D(actual.value)*source.val/target.val)
+                if (not math.isfinite(expected) or (expected == 0 and actual.value != 0)
+                        or 0 < abs(expected) < sys.float_info.min):
+                    raise ValueError("numeric_range")
+                return _FormulaNumber(expected, _FormulaUnit(Fraction(target.val), target.dim),
+                                      actual.roots, actual.conversion_depth+1, actual.arithmetic_depth, evidence)
             if not isinstance(node, ast.BinOp) or type(node.op) not in operations:
                 raise ValueError("unsupported_arithmetic_operator")
-            left, left_dimension = scalar(node.left)
-            right, right_dimension = scalar(node.right)
-            dimension = _arithmetic_dimension(key, node.op, left_dimension, right_dimension)
-            value = operations[type(node.op)](left, right)
-            if isinstance(node.op, (ast.Add, ast.Sub)) and 0 < max(abs(left), abs(right)):
-                if abs(value) <= 1e-14 * max(abs(left), abs(right)):
+            left, right = scalar(node.left), scalar(node.right)
+            unit = _formula_unit(key, node.op, left.unit, right.unit)
+            number = operations[type(node.op)](left.value, right.value)
+            if isinstance(node.op, (ast.Add, ast.Sub)) and 0 < max(abs(left.value), abs(right.value)):
+                if abs(number) <= 1e-14*max(abs(left.value), abs(right.value)):
                     raise ValueError("cancellation_sensitive_result")
-            if not math.isfinite(value) or 0 < abs(value) < sys.float_info.min:
+            if not math.isfinite(number) or 0 < abs(number) < sys.float_info.min:
                 raise ValueError("unsupported_result_range")
-            return value, dimension
+            return _FormulaNumber(number, unit, tuple(sorted(set(left.roots+right.roots))),
+                                  max(left.conversion_depth,right.conversion_depth),
+                                  max(left.arithmetic_depth,right.arithmetic_depth))
 
-        return scalar(ast.parse(" ".join(tokens), mode="eval").body)
+        result = scalar(tree)
+        # A plain CONVERT chain may contain all 256 indexed conversion cells.
+        # Arithmetic dependency depth keeps its independent, smaller bound.
+        has_arithmetic = (producers[key][3] == "arithmetic"
+                          or any(isinstance(node,(ast.BinOp,ast.UnaryOp)) for node in ast.walk(tree)))
+        result = _FormulaNumber(result.value, result.unit, result.roots, result.conversion_depth,
+                                result.arithmetic_depth+int(has_arithmetic), result.evidence)
+        if result.arithmetic_depth > 40:
+            raise ValueError("cyclic_or_deep_dependency")
+        return result
 
-    for key, (_, cached, incompatible_type) in producers.items():
-        record = {"sheet": key[0], "cell": key[1], "cached": cached, "status": "unverified"}
+    ready = [key for key, count in waiting.items() if count == 0]
+    while ready:
+        key = ready.pop()
         try:
-            expected, dimension = cell(key)
-            if isinstance(dimension, tuple):
-                record["si_dimension"] = list(dimension)
-            record["expected"] = expected
+            values[key] = evaluate(key)
+        except (ValueError, SyntaxError, ArithmeticError, RecursionError, KeyError) as exc:
+            values[key] = exc
+        for child in reverse.get(key, ()):
+            waiting[child] -= 1
+            if waiting[child] == 0:
+                ready.append(child)
+    for key in producers:
+        if key not in values:
+            values[key] = ValueError("cyclic_reference")
+
+    reports = {"arithmetic": [], "conversion": []}
+    for key, (expression, cached, incompatible_type, kind) in producers.items():
+        record = {"sheet":key[0], "cell":key[1], "cached":cached, "status":"unverified"}
+        result = values[key]
+        if isinstance(result, _FormulaConflict):
+            if result.key == key:
+                record.update(reason=str(result), **result.evidence)
+                if kind != "conversion" or cached is not None:
+                    record["status"] = result.status
+            else:
+                record.update(reason="upstream_"+result.status,
+                              source_sheet=result.key[0], source_cell=result.key[1])
+        elif isinstance(result, Exception):
+            reason = str(result) if isinstance(result,ValueError) else type(result).__name__
+            if kind == "arithmetic" and reason == "cyclic_reference":
+                reason = "cyclic_or_deep_dependency"
+            record["reason"] = reason
+        else:
+            record.update(result.evidence or {})
+            record["expected"] = result.value
+            if isinstance(result.unit,_FormulaUnit):
+                record.update(si_dimension=list(result.unit.dimension), unit_scale_si=str(result.unit.scale))
             if incompatible_type:
                 record.update(status="mismatch", cached_type=incompatible_type, reason="nonnumeric_cache")
             elif cached is None:
                 record["reason"] = "missing_numeric_cache"
             else:
-                record["status"] = "matched" if math.isclose(cached, expected, rel_tol=1e-12) else "mismatch"
-        except _DimensionConflict as exc:
-            if exc.key == key:
-                record.update(status="dimension_mismatch", reason=str(exc),
-                              left_dimension=list(exc.left), right_dimension=list(exc.right))
-            else:
-                record.update(reason="upstream_dimension_mismatch",
-                              source_sheet=exc.key[0], source_cell=exc.key[1])
-        except (ValueError, SyntaxError, ArithmeticError, RecursionError) as exc:
-            record["reason"] = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
-        yield record
-
-
-def _equipment_catalog(filename, edition, sheet_name, title_sheet):
-    """Resolve both the selected equipment sheet and its issue through the workbook index."""
-    from collections import defaultdict
-    def rich_string(node):
-        # Phonetic guides and document annotations are not part of a cell's display text.
-        return "".join(t.text or "" for t in node.findall("{*}t") + node.findall("{*}r/{*}t"))
-    with zipfile.ZipFile(filename) as archive:
-        workbook, parts = _xlsx_parts(archive)
-        if not workbook or sheet_name == title_sheet:
-            raise ValueError("expected distinct named title and catalog worksheets")
-        def part(name):
-            found = [s for s in parts if s["name"] == name]
-            if len(found) != 1 or found[0]["kind"] != "worksheet" or found[0]["state"] != "visible":
-                raise ValueError(f"expected one visible worksheet named {name!r}")
-            return found[0]["part"]
-        root = pathlib.PurePosixPath(workbook)
-        rels = _xlsx_relationships(archive, str(root.parent / "_rels" / (root.name + ".rels")))
-        shared = []
-        tables = [r for r in rels.values() if r.get("Type") in {base + "/sharedStrings" for base in _DOCUMENT_RELS}]
-        if tables:
-            if len(tables) != 1 or tables[0].get("TargetMode", "Internal") != "Internal":
-                raise ValueError("ambiguous shared string table")
-            table = _xlsx_xml(archive, _xlsx_target(workbook, tables[0].get("Target", "")), 25000000)
-            shared = [rich_string(node) for node in table.findall("{*}si")]
-        def read(name):
-            rows = defaultdict(dict)
-            worksheet = _xlsx_xml(archive, part(name), 25000000)
-            if any(r.get("hidden") in ("1", "true") for r in worksheet.findall("{*}sheetData/{*}row")):
-                raise ValueError(f"hidden rows in source worksheet {name!r}")
-            for c in worksheet.findall("{*}sheetData/{*}row/{*}c"):
-                match = re.fullmatch(r"([A-Z]{1,3})([1-9][0-9]{0,6})", c.get("r",""))
-                if not match:
-                    raise ValueError("invalid worksheet cell reference")
-                col, number = match.groups()
-                if col in rows[int(number)]:
-                    raise ValueError("duplicate worksheet cell reference")
-                typ = c.get("t", "n")
-                value = c.findtext("{*}v", "")
-                if c.find("{*}f") is not None or typ == "e":
-                    value = None
-                elif typ == "s":
-                    if not value.isascii() or not value.isdigit() or int(value) >= len(shared):
-                        raise ValueError("unresolved shared string")
-                    value = shared[int(value)]
-                elif typ == "inlineStr":
-                    node = c.find("{*}is")
-                    value = rich_string(node) if node is not None else ""
-                elif typ not in ("str",):
-                    value = None if value else ""
-                rows[int(number)][col] = value
-            return rows
-        def norm(s):
-            return " ".join((s or "").split()).casefold()
-        title = read(title_sheet)
-        issues = [(n,row.get("B")) for n,row in title.items() if norm(row.get("A")) in {"doc no.","doc no","document number"}]
-        if len(issues)!=1 or issues[0][1]!=edition:
-            raise ValueError("requested edition does not match the unique title-block document number")
-        rows = read(sheet_name)
-        headers = [(n,[col for col,v in row.items() if norm(v)=="manufacturer"],
-                       [col for col,v in row.items() if norm(v)=="model"]) for n,row in rows.items()]
-        headers = [h for h in headers if h[1] and h[2]]
-        if len(headers)!=1 or len(headers[0][1])!=1 or len(headers[0][2])!=1:
-            raise ValueError("expected one manufacturer/model header row")
-        start, (maker,), (model,) = headers[0]
-        catalog = defaultdict(list)
-        for n, row in rows.items():
-            if n<=start or all(v=="" for v in row.values()): continue
-            if not norm(row.get(maker)) or not norm(row.get(model)):
-                raise ValueError(f"missing literal manufacturer or model at {sheet_name} row {n}")
-            key = " ".join((row[maker]+" "+row[model]).split())
-            catalog[key].append({"manufacturer":row[maker],"model":row[model],
-                                 "cells":[f"{sheet_name}!{maker}{n}",f"{sheet_name}!{model}{n}"]})
-        if not catalog:
-            raise ValueError("empty equipment catalog")
-        return catalog, f"{title_sheet}!B{issues[0][0]}"
-
-
-def witness_equipment(pdf, filename, edition, sheet, title_sheet, equipment_type):
-    import hashlib
-    import hamon_witness_package
-    documents = [pathlib.Path(pdf), pathlib.Path(filename)]
-    payloads = []
-    for path in documents:
-        with path.open("rb") as source:
-            data = source.read(32 * 1024 * 1024 + 1)
-        if len(data) > 32 * 1024 * 1024:
-            raise ValueError("equipment source exceeds 32 MiB")
-        payloads.append(data)
-    catalog, title_cell = _equipment_catalog(io.BytesIO(payloads[1]), edition, sheet, title_sheet)
-    converted = subprocess.run(["pdftotext","-layout","-","-"],input=payloads[0],
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25)
-    if converted.returncode:
-        raise ValueError("unable to read PDF text")
-    result = hamon_witness_package.match_installation(converted.stdout.decode("utf-8"), catalog, equipment_type)
-    result.update(edition=edition, title_cell=title_cell, catalog_sheet=sheet,
-                  sources=[{"file":str(p),"sha256":hashlib.sha256(b).hexdigest()} for p,b in zip(documents,payloads)])
-    return result
+                record["status"] = "matched" if math.isclose(cached,result.value,rel_tol=1e-12) else "mismatch"
+        reports[kind].append(record)
+    return reports
 
 
 def xlsx_audit(filename: str):
@@ -847,7 +789,8 @@ def xlsx_audit(filename: str):
                     if expression.upper().startswith("CONVERT("):
                         conversion_total += 1
                         if len(conversions) < 256 and len(expression) <= 512 and formula_type == "normal":
-                            conversions.append((name, address, expression, _numeric_cell(cell, value)))
+                            conversions.append((name, address, expression, _numeric_cell(cell, value),
+                                                _typed_numeric_cache(cell, value, ns)))
                     if not expression.upper().startswith(("CONVERT(", "VLOOKUP(", "HLOOKUP(", "INDEX(")):
                         arithmetic_total += 1
                         if (complete_index and full_precision and formula_type == "normal"
@@ -917,30 +860,20 @@ def xlsx_audit(filename: str):
                 counts[result["status"]] += 1
             examples.append({"sheet": name, "cell": address, **result})
     manifest["lookup_audit"] = {"counts": counts, "examples": examples}
-    counts = {"matched": 0, "mismatch": 0, "dimension_mismatch": 0, "unverified": conversion_total}
-    examples = []
-    converted = {}
-    if complete_index:
-        for result in _conversion_audit(conversions, literals):
-            if "expected" in result:
-                converted[(result["sheet"], result["cell"])] = (
-                    result["expected"], _CONVERT_UNITS[result["to_unit"]].dim)
-            if result["status"] != "unverified":
-                counts["unverified"] -= 1
-                counts[result["status"]] += 1
-            examples.append(result)
-    manifest["conversion_audit"] = {"counts": counts, "examples": examples}
-    counts = {"matched": 0, "mismatch": 0, "unverified": arithmetic_total}
-    examples = []
-    if complete_index and full_precision:
-        for record in _arithmetic_audit(arithmetic, literals, converted):
+    reconstructed = (_scalar_formula_audit(arithmetic, conversions, literals)
+                     if complete_index and full_precision else {"conversion": [], "arithmetic": []})
+    for kind, total in (("conversion", conversion_total), ("arithmetic", arithmetic_total)):
+        counts = {"matched": 0, "mismatch": 0, "unverified": total}
+        if kind == "conversion":
+            counts["dimension_mismatch"] = 0
+        examples = reconstructed[kind]
+        for record in examples:
             if record["status"] != "unverified":
                 counts["unverified"] -= 1
                 counts[record["status"]] = counts.get(record["status"], 0) + 1
-            examples.append(record)
-    manifest["arithmetic_audit"] = {"counts": counts, "examples": examples}
+        manifest[kind + "_audit"] = {"counts": counts, "examples": examples}
     manifest["note"] = ("Checked numeric formulas are reconstructed from literal inputs. Explicit conversion units "
-                        "can establish arithmetic dimensions. Unverified caches can be stale.")
+                        "establish dimensions and exact multiplicative unit scales. Unverified caches can be stale.")
     return manifest
 
 
@@ -1202,15 +1135,19 @@ def audit_local_deliverable(path: str | pathlib.Path) -> dict[str, Any]:
         err_cells = sum(s.get("error_count", 0) for s in audit.get("sheets", []))
         mismatches = audit.get("lookup_audit", {}).get("counts", {}).get("mismatch", 0)
         conversion = audit["conversion_audit"]["counts"]
-        conversion_errors = conversion["mismatch"] + conversion["dimension_mismatch"]
+        conversion_errors = (conversion["mismatch"] + conversion["dimension_mismatch"]
+                             + conversion.get("unit_scale_mismatch", 0))
         arithmetic = audit["arithmetic_audit"]["counts"]
         dimension_errors = arithmetic.get("dimension_mismatch", 0)
-        if err_cells > 0 or mismatches > 0 or conversion_errors or arithmetic["mismatch"] or dimension_errors:
+        scale_errors = arithmetic.get("unit_scale_mismatch", 0)
+        if err_cells > 0 or mismatches > 0 or conversion_errors or arithmetic["mismatch"] or dimension_errors or scale_errors:
             detail = f"error_cells={err_cells},lookup_mismatches={mismatches}"
             if arithmetic["mismatch"]:
                 detail += f",arithmetic_mismatches={arithmetic['mismatch']}"
             if dimension_errors:
                 detail += f",arithmetic_dimension_mismatches={dimension_errors}"
+            if scale_errors:
+                detail += f",arithmetic_unit_scale_mismatches={scale_errors}"
             if conversion_errors:
                 detail += f",conversion_errors={conversion_errors}"
             return {
@@ -1427,3 +1364,4 @@ def run(argv=None):
 
 if __name__=="__main__":
     sys.exit(run())
+
