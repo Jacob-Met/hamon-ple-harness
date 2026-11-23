@@ -150,12 +150,12 @@ def recover(stage: Path, target: Path, names: list[str]) -> str:
     return "published"
 
 
-def publish(stage: Path, target: Path, names: list[str]) -> None:
+def publish(stage: Path, target: Path, names: list[str], *, after_empty=False) -> None:
     if not names or len(names) != len(set(names)) or any(
         not n or n in {".", ".."} or "/" in n or "\\" in n for n in names
     ):
         raise ValueError("expected distinct root filenames")
-    if not target.exists():
+    if not after_empty and not target.exists():
         _hydrate_stage_from_output_dir(stage, target.parent, names)
     sources = [stage / n for n in names]
     if any(not _valid_regular_file(p) for p in sources):
@@ -174,9 +174,53 @@ def publish(stage: Path, target: Path, names: list[str]) -> None:
         verify(candidate, names)
         if initial != [stamp(p) for p in sources]:
             raise ValueError("staged members changed during publication")
-        _replace_synced(candidate, target)
+        if after_empty:
+            _install_over_empty(candidate, target, names)
+        else:
+            _replace_synced(candidate, target)
     finally:
         candidate.unlink(missing_ok=True)
+
+
+def _install_over_empty(candidate, target, names):
+    """Keep an independent atomic publication arriving before or during installation."""
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise ValueError("archive destination is not a regular file")
+    if target.exists() and target.stat().st_size:
+        verify(target, names)
+        return
+    with candidate.open("rb") as stream:
+        os.fsync(stream.fileno())
+    # Renaming onto an existing regular tempfile cannot move a directory.
+    with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".ple-prior-", delete=False) as f:
+        prior = Path(f.name)
+    parked = False
+    try:
+        try:
+            os.replace(target, prior)
+            parked = True
+        except FileNotFoundError:
+            pass
+        use_prior = parked and (prior.is_symlink() or not prior.is_file() or prior.stat().st_size != 0)
+        try:
+            os.link(prior if use_prior else candidate, target, follow_symlinks=False)
+        except FileExistsError:
+            pass
+        if target.is_symlink() or not target.is_file():
+            raise ValueError("archive destination is not a regular file")
+        verify(target, names)
+        directory_fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if parked:
+            try:
+                os.link(prior, target, follow_symlinks=False)
+            except FileExistsError:
+                pass
+        prior.unlink(missing_ok=True)
 
 
 def publish_loose(stage: Path, target: Path, names: list[str]) -> None:
@@ -198,9 +242,10 @@ def publish_after_empty(stage: Path, target: Path, names: list[str]) -> None:
         verify(target, names)
         return
     if not stage.is_symlink() and all(_valid_regular_file(stage / name) for name in names):
-        publish(stage, target, names)
+        source = stage
     else:
-        publish_loose(stage, target, names)
+        source = target.parent
+    publish(source, target, names, after_empty=True)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,14 @@
 """An empty output placeholder is recoverable only from observed new loose files."""
 import asyncio
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import zipfile
 
 import archive_checkpoint as checkpoint
@@ -68,3 +70,33 @@ class EmptyArchiveRecovery(unittest.TestCase):
             (stage / 'notes.md').write_text('other staged version')
             checkpoint.publish_after_empty(stage, target, self.names)
             self.assertEqual(target.read_bytes(), saved)
+
+    def test_preserve_concurrent_publisher_on_either_side_of_placeholder_removal(self):
+        for phase in ('before_park', 'before_link'):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                target, other = root / 'result.zip', root / 'other.zip'
+                target.touch()
+                (root / 'first.json').write_text('{"ours":true}')
+                (root / 'notes.md').write_text('ours')
+                with zipfile.ZipFile(other, 'w') as archive:
+                    archive.writestr('first.json', '{"other":true}')
+                    archive.writestr('notes.md', 'independent writer')
+                expected = other.read_bytes()
+                replace, link = os.replace, os.link
+
+                def interleave_replace(src, dst):
+                    if phase == 'before_park' and src == target:
+                        replace(other, target)
+                    return replace(src, dst)
+
+                def interleave_link(src, dst, **kwargs):
+                    if phase == 'before_link' and other.exists() and dst == target:
+                        replace(other, target)
+                    return link(src, dst, **kwargs)
+
+                with patch.object(os, 'replace', interleave_replace), patch.object(os, 'link', interleave_link):
+                    checkpoint.publish_after_empty(root / 'stage', target, self.names)
+                self.assertFalse(other.exists())
+                self.assertEqual(target.read_bytes(), expected)
+                self.assertEqual(list(root.glob('.ple-prior-*')), [])
