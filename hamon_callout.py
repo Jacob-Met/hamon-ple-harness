@@ -165,6 +165,8 @@ def _text_rects(page,frame):
         x,y=first.get("text"),second.get("text")
         if not isinstance(x,str) or not isinstance(y,str):
             continue
+        if first.get("source_line_id") != second.get("source_line_id"):
+            continue
         proposed=_label(x.strip()+" "+y.strip())
         if proposed is None:
             continue
@@ -570,7 +572,8 @@ def auto_measure_page(page,targets,quantity,metre,calibration_model="affine_spd"
             axes.append(unit)
         refs.append({
             "from":m["from"],"to":m["to"],
-            "length":m["length"],"source_label":m["source_label"]})
+            "length":m["length"],"source_label":m["source_label"],
+            "source_word_span":[m["word_ids"][0], m["word_ids"][-1]+1]})
         if len(refs)==64:
             break
     if len(refs)<(4 if calibration_model=="affine_spd" else 2):
@@ -588,6 +591,7 @@ def auto_measure_page(page,targets,quantity,metre,calibration_model="affine_spd"
     result["annotation_evidence"]=[{
         "source_label":m["source_label"],
         "bbox_pdf_pt":m["bbox_pdf_pt"],
+        "word_ids":m["word_ids"],
         "from":m["from"],"to":m["to"],
         "endpoint_witnesses":m["endpoint_witnesses"],
         **({"source_fragments": m["source_fragments"]} if "source_fragments" in m else {}),
