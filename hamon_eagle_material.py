@@ -194,6 +194,17 @@ def _stadium_domain(ordered, source_rows, removed):
         proof.append({"arc_sources": [list(r["source"]) for r in arcs],
                       "center_nm": [str(v) for v in center], "sweeps_deg": sweeps})
 
+    spine = LineString([tuple(map(float, p)) for p in centers])
+    domain, error = _guarded_round_boundary(spine, radius, removed)
+    return domain, {"model": "stadium", "caps": proof,
+                    "sources": [list(row["source"]) for row in source_rows],
+                    "wire_count": len(source_rows), "quarter_count": 0,
+                    "boundary_guard_nm": _GUARD, "arc_sagitta_upper_bound_nm": error,
+                    ("removed_area_upper_bound_mm2" if removed else
+                     "interior_area_lower_bound_mm2"): domain.area/1e12}
+
+
+def _guarded_round_boundary(center_or_spine, radius, removed):
     # GEOS buffers the spine with a regular inscribed polygon at each end.
     # Scaling the radius by sec(half_step) makes each edge a supporting
     # tangent of the true circle, including across the straight sides.
@@ -205,25 +216,51 @@ def _stadium_domain(ordered, source_rows, removed):
             break
         count += 1
     else:
-        raise ValueError("stadium exceeds bounded circular approximation")
-    spine = LineString([tuple(map(float, p)) for p in centers])
-    polygon = spine.buffer(radius/cos(half_step) if removed else radius, quad_segs=count)
+        raise ValueError("radius exceeds bounded circular approximation")
+    polygon = center_or_spine.buffer(radius/cos(half_step) if removed else radius, quad_segs=count)
     domain = polygon.buffer(_GUARD if removed else -_GUARD, join_style="mitre",
                             mitre_limit=_MITRE_LIMIT)
     if domain.is_empty or not domain.is_valid or (removed and not domain.covers(polygon)):
-        raise ValueError("unresolved stadium guard")
-    return domain, {"model": "stadium", "caps": proof,
-                    "sources": [list(row["source"]) for row in source_rows],
-                    "wire_count": len(source_rows), "quarter_count": 0,
-                    "boundary_guard_nm": _GUARD, "arc_sagitta_upper_bound_nm": error,
+        raise ValueError("unresolved circular boundary guard")
+    return domain, error
+
+
+def _circular_contour(rows, removed):
+    """Recognize a simple full turn in a single rational circle."""
+    sweeps = [row["curve"] for row in rows]
+    if (any(abs(deg) not in (90, 180) for deg in sweeps)
+            or abs(sum(sweeps)) != 360 or sum(abs(deg) for deg in sweeps) != 360):
+        raise ValueError("circular opening requires one consistently oriented full turn")
+    sign = 1 if sweeps[0] > 0 else -1
+    center = None
+    for row in rows:
+        (ax, ay), (bx, by) = row["a"], row["b"]
+        cx, cy = Fraction(ax + bx, 2), Fraction(ay + by, 2)
+        if abs(row["curve"]) == 90:
+            cx -= sign * Fraction(by - ay, 2)
+            cy += sign * Fraction(bx - ax, 2)
+        if center is not None and center != (cx, cy):
+            raise ValueError("circular opening arcs do not share a center")
+        center = cx, cy
+    # Adjacent arcs share endpoints. Equal centers therefore imply equal radii.
+    radius = hypot(ax - cx, ay - cy)
+    if radius <= 4 * _GUARD:
+        raise ValueError("circular opening radius is unresolved")
+    domain, error = _guarded_round_boundary(Point(float(cx), float(cy)), radius, removed)
+    return domain, {"model": "circle", "center_nm": [str(cx), str(cy)],
+                    "sweeps_deg": sweeps, "sources": [list(row["source"]) for row in rows],
+                    "wire_count": len(rows), "quarter_count": 0, "boundary_guard_nm": _GUARD,
+                    "arc_sagitta_upper_bound_nm": error,
                     ("removed_area_upper_bound_mm2" if removed else
-                     "interior_area_lower_bound_mm2"): domain.area/1e12}
+                     "interior_area_lower_bound_mm2"): domain.area / 1e12}
 
 
 def _contour_domain(source_rows, *, removed=False):
     """Enclose removed material, or inset retained material, at validated quarters."""
     ordered = _straight_runs(source_rows)
     curved = [row for row in ordered if row["curve"]]
+    if curved and len(curved) == len(ordered):
+        return _circular_contour(ordered, removed)
     if len(ordered) - len(curved) == 2 and 2 <= len(curved) <= 4:
         return _stadium_domain(ordered, source_rows, removed)
     if removed and len(curved) > 1:
@@ -506,8 +543,8 @@ def nominal_board_domain(records):
     cycles = _outline_cycles(records)
     if len(cycles) == 1:
         domain, info = _contour_domain(cycles[0])
-        if info["model"] == "stadium":
-            raise ValueError("stadium supported only as an isolated interior opening")
+        if info["model"] in {"stadium", "circle"}:
+            raise ValueError("round contour supported only as an isolated interior opening")
         return domain, info
 
     # A qualified outer inset strictly contains the entire inner enclosure.
@@ -516,9 +553,9 @@ def nominal_board_domain(records):
     candidates = [(_contour_domain(rows), rows) for rows in cycles]
     candidates.sort(key=lambda candidate: candidate[0][0].area, reverse=True)
     (domain, info), _ = candidates[0]
-    if info["model"] == "stadium" or (len(cycles) > 2 and any(
-            candidate[0][1]["model"] == "stadium" for candidate in candidates)):
-        raise ValueError("stadium supported only as an isolated interior opening")
+    if info["model"] in {"stadium", "circle"} or (len(cycles) > 2 and any(
+            candidate[0][1]["model"] in {"stadium", "circle"} for candidate in candidates)):
+        raise ValueError("round contour supported only as an isolated interior opening")
     cutouts = []
     # Order by physical position so swapping loops of equal area preserves their roles.
     inner_rows = sorted((candidate[1] for candidate in candidates[1:]), key=lambda rows: rows[0]["a"])
@@ -547,6 +584,11 @@ def nominal_board_domain(records):
     if len(holes) == 1:
         hole_info = holes[0]
         hole_model = "outer_outline_with_one_straight_dimension_hole"
+        if hole_info["model"] == "circle":
+            hole_model = "outer_outline_with_circular_dimension_hole"
+            info = dict(info, hole_center_nm=hole_info["center_nm"], hole_sweeps_deg=hole_info["sweeps_deg"],
+                        hole_arc_error_upper_bound_nm=hole_info["arc_sagitta_upper_bound_nm"],
+                        removed_area_upper_bound_mm2=hole_info["removed_area_upper_bound_mm2"])
         if hole_info["model"] == "stadium":
             hole_model = "outer_outline_with_stadium_dimension_hole"
             info = dict(info, hole_caps=hole_info["caps"],
