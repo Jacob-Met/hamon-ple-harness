@@ -970,6 +970,11 @@ def run(argv=None):
     links=sub.add_parser("pdf-detail-links",help="Resolve printed detail references across drawing sheets")
     links.add_argument("file")
     links.add_argument("--target-sheet", help="Return references to this printed sheet ID after indexing the entire document")
+    bom=sub.add_parser("pdf-bom-sheet",help="Find a schedule part on a uniquely titled drawing sheet")
+    bom.add_argument("file")
+    bom.add_argument("--equipment", required=True)
+    bom.add_argument("--part-id", required=True)
+    bom.add_argument("--title", required=True)
     native=sub.add_parser("eagle-netlist",help="Read native EAGLE XML schematic pins and physical pad nets")
     native.add_argument("file")
     native.add_argument("--board",help="Compare predicted pad nets with an EAGLE XML PCB")
@@ -1048,6 +1053,9 @@ def run(argv=None):
             import hamon_drawing
             out=hamon_drawing.render_window(args.file,args.output,args.page,args.region,
                                            args.dpi,args.limit_paths)
+        elif args.cmd=="pdf-bom-sheet":
+            import hamon_drawing
+            out=hamon_drawing.bom_sheet(args.file,args.equipment,args.part_id,args.title)
         elif args.cmd=="pdf-detail-links":
             import hamon_drawing
             out=hamon_drawing.detail_links(args.file, args.target_sheet)
