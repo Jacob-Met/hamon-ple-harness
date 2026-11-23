@@ -2152,7 +2152,7 @@ def _distillation_trays(xd, xb, alpha, intersection, rect_slope, strip_slope, on
 
 def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]:
     subkind = str(
-        params.get("subkind") or ("distillation" if "alpha" in params else "electrochemistry")
+        params.get("subkind") or ("distillation" if "alpha" in params or "equilibrium_points" in params else "electrochemistry")
     ).strip().lower()
 
     if subkind == "equilibrium_flash":
@@ -2161,6 +2161,10 @@ def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]
 
     if subkind == "electrochemistry":
         return _electrochemistry(params)
+
+    if subkind == "distillation" and "equilibrium_points" in params:
+        from hamon_tabulated_distillation import tabulated_distillation
+        return tabulated_distillation(params)
 
     if subkind == "distillation":
         z_f = float(params["z_F"])
