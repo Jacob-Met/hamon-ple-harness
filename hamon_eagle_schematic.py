@@ -1056,6 +1056,8 @@ def _ground_glyph_precedence(name, components, glyphs, labels, occurrences):
         marks = glyphs[component]
         if not set(marks) <= {(name, "ground_bar"), (name, "ground_triangle")}:
             return False
+        # A triangle can ground a local wire. Overriding conflicting printed
+        # text across sheets still requires two distinct bar-backed islands.
         roots = marks[name, "ground_bar"]
         if len(roots) < 2:
             return False
