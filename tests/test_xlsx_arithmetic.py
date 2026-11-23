@@ -39,6 +39,26 @@ class ArithmeticWorkbookTests(TestCase):
                 self.assertEqual(audit["examples"][-1]["expected"], 20)
                 self.assertEqual(audit_local_deliverable(path)["ok"], wrong == 0)
 
+    def test_present_text_and_boolean_caches_contradict_only_grounded_numeric_results(self):
+        for typ, value in (("str", "wrong"), ("str", ""), ("b", "0"), ("s", "2")):
+            for expression, expected in (("1+1", "mismatch"), ("UNKNOWN(1)", "unverified")):
+                with self.subTest(typ=typ, expression=expression):
+                    path = self.workbook([[("A", expression, value)]])
+                    with ZipFile(path) as original:
+                        parts = {p: original.read(p) for p in original.namelist()}
+                    sheet = "xl/worksheets/1.xml"
+                    parts[sheet] = parts[sheet].replace(b'<c r="A1"', f'<c t="{typ}" r="A1"'.encode())
+                    with ZipFile(path, "w") as archive:
+                        for name, data in parts.items():
+                            archive.writestr(name, data)
+                    item = xlsx_audit(str(path))["arithmetic_audit"]["examples"][0]
+                    self.assertEqual(item["status"], expected)
+                    self.assertEqual(audit_local_deliverable(path)["ok"], expected == "unverified")
+                    if expected == "mismatch":
+                        self.assertEqual(item["cached_type"], typ)
+        missing = self.workbook([[("A", "1+1", None)]])
+        self.assertEqual(xlsx_audit(str(missing))["arithmetic_audit"]["examples"][0]["status"], "unverified")
+
     def test_ordinary_cli_distinguishes_stale_correct_and_unsupported(self):
         cli = Path(__file__).resolve().parents[1] / "engineering_toolkit.py"
         for formula, cached, status in (("2*10", 20, 0), ("2*10", 33, 3), ("SUM(2,3)", 5, 0)):

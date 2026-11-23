@@ -603,12 +603,14 @@ def _arithmetic_audit(producers, literals):
 
         return scalar(ast.parse(" ".join(tokens), mode="eval").body)
 
-    for key, (_, cached) in producers.items():
+    for key, (_, cached, incompatible_type) in producers.items():
         record = {"sheet": key[0], "cell": key[1], "cached": cached, "status": "unverified"}
         try:
             expected = cell(key)
             record["expected"] = expected
-            if cached is None:
+            if incompatible_type:
+                record.update(status="mismatch", cached_type=incompatible_type, reason="nonnumeric_cache")
+            elif cached is None:
                 record["reason"] = "missing_numeric_cache"
             else:
                 record["status"] = "matched" if math.isclose(cached, expected, rel_tol=1e-12) else "mismatch"
@@ -710,7 +712,15 @@ def xlsx_audit(filename: str):
                         arithmetic_total += 1
                         if (complete_index and full_precision and formula_type == "normal"
                                 and len(expression) <= 512 and len(arithmetic) + len(sheet_arithmetic) < 256):
-                            sheet_arithmetic[(name, address)] = (expression, _numeric_cell(cell, value))
+                            # Typed string and Boolean results are physically distinct
+                            # from a missing numeric cache. A date may use another encoding.
+                            typed_cache = None
+                            if value is not None and (typ == "str" or (
+                                    typ in ("s", "b", "e") and value.text is not None)):
+                                typed_cache = typ
+                            if typ == "inlineStr" and cell.find(ns + "is") is not None:
+                                typed_cache = typ
+                            sheet_arithmetic[(name, address)] = (expression, _numeric_cell(cell, value), typed_cache)
                     formulas += 1
                     if value is None:
                         missing += 1
