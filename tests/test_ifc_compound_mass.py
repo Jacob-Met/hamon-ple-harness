@@ -9,7 +9,7 @@ FACES = [(1, 3, 2), (1, 2, 4), (1, 4, 3), (2, 3, 4)]
 
 
 def course(*, reverse=True, reflect=False, millimetres=False, cavity=False,
-           open_surface=False, declared_open=False, swap=False, shift=4.0, mirror_left=False):
+           open_surface=False, declared_open=False, swap=False, shift=4.0, mirror_left=False, probe=False, right_scale=2., misorient=False):
     unit = 1000 if millimetres else 1
     entities = []
 
@@ -41,8 +41,10 @@ def course(*, reverse=True, reflect=False, millimetres=False, cavity=False,
         left_points = np.vstack([vertices, vertices / 4 + 1/8])
         left_faces += [tuple(i + 4 for i in reversed(f)) for f in FACES]
     left = tessellation(left_points, left_faces)
-    right_points = 2 * vertices
+    right_points = right_scale * vertices
     right_faces = [f[::-1] if reverse else f for f in FACES]
+    if misorient:
+        right_faces[0] = right_faces[0][::-1]
     if open_surface:
         right_faces.pop(0)
     if reflect or mirror_left:
@@ -65,6 +67,11 @@ def course(*, reverse=True, reflect=False, millimetres=False, cavity=False,
     body = add(f"IFCPRODUCTDEFINITIONSHAPE($,$,({shape}))")
     local = add(f"IFCLOCALPLACEMENT($,{placement})")
     add(f"IFCBEAM('0AzR0sseD4bBOcPJ50wSE2',$,'compound',$,$,{local},{body},$,.BEAM.)")
+    if probe:
+        witness = tessellation(vertices + [12., 2., 1.], FACES)
+        witness_shape = add(f"IFCSHAPEREPRESENTATION({context},'Body','Tessellation',({witness}))")
+        witness_body = add(f"IFCPRODUCTDEFINITIONSHAPE($,$,({witness_shape}))")
+        add(f"IFCDUCTSEGMENT('0AzR0sseD4bBOcPJ50wSE3',$,'probe',$,$,{local},{witness_body},$,.RIGIDSEGMENT.)")
     return ("ISO-10303-21;\nHEADER;FILE_DESCRIPTION(('Compound mass course'),'2;1');\n"
             "FILE_NAME('compound.ifc','2026-01-01T00:00:00',('test'),('test'),'course','test','');\n"
             "FILE_SCHEMA(('IFC4'));ENDSEC;\nDATA;\n"
@@ -88,13 +95,24 @@ class CompoundMassTest(unittest.TestCase):
                 np.testing.assert_allclose(mesh.centroid_m(), np.average(centres, weights=volumes, axis=0),
                                            rtol=0, atol=1e-12)
 
+    def test_equal_opposing_items(self):
+        # Outward source triangles mapped through a reflection in only one item.
+        text = course(reverse=False, reflect=True, right_scale=1.)
+        self.assertAlmostEqual(run_router_ifc_clash({"ifc_text": text})["total_solid_volume_m3"],
+                               1/3, places=12)
+        mesh, = load_ifc_solids(text)
+        np.testing.assert_allclose(mesh.centroid_m(), [2.25, 0., .25], rtol=0, atol=1e-12)
+
     def test_unresolved_quantity_preserves_clash_report(self):
-        for options in [{"open_surface": True}, {"shift": .25}, {"declared_open": True},
+        for options in [{"open_surface": True}, {"misorient": True}, {"shift": .25}, {"declared_open": True},
                         {"declared_open": True, "reflect": True}]:
             with self.subTest(options=options):
-                result = run_router_ifc_clash({"ifc_text": course(**options)})
+                result = run_router_ifc_clash({"ifc_text": course(probe=True, **options)})
                 self.assertTrue(result["ok"])
-                self.assertEqual(result["solid_count"], 1)
-                self.assertEqual(result["all_pairs"], [])
+                self.assertEqual(result["solid_count"], 2)
+                pair, = result["all_pairs"]
+                self.assertEqual(pair["status"], "clear")
+                self.assertGreater(pair["min_distance_m"], 0.)
+                self.assertIsNotNone(pair["witness_point_m"])
                 self.assertIsNone(result["total_solid_volume_m3"])
                 self.assertEqual(result["volume_status"], "unresolved")
