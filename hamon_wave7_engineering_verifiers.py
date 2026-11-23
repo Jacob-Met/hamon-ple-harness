@@ -1760,6 +1760,70 @@ def _butler_volmer(params, current, electrons, temperature, mode):
             "kinetic_current_relative_residual": residual}
 
 
+def _activity_log_quotient(terms):
+    """Log of the product of dimensionless activities for one written reaction."""
+    if not isinstance(terms, list) or not terms:
+        raise ValueError("activity_terms must be a nonempty list")
+    species = set()
+    powers = {}
+    for term in terms:
+        if not isinstance(term, Mapping) or set(term) != {"species", "stoich", "activity"}:
+            raise ValueError("each activity term needs species, stoich and activity")
+        name = term["species"]
+        if not isinstance(name, str) or not name.strip() or name.strip() in species:
+            raise ValueError("activity species must have distinct nonempty names")
+        species.add(name.strip())
+        values = (term["stoich"], term["activity"])
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in values):
+            raise ValueError("activity and stoich must be numbers")
+        coefficient, activity = (Decimal(str(v)) for v in values)
+        if not all(v.is_finite() and math.isfinite(float(v)) for v in (coefficient, activity)):
+            raise ValueError("activity and stoich must be finite")
+        if not coefficient or activity <= 0:
+            raise ValueError("stoich must be nonzero and activity positive")
+        powers[activity] = powers.get(activity, Fraction(0)) + Fraction(coefficient)
+    powers = {a: n for a, n in powers.items() if n and a != 1}
+    if not powers:
+        return 0.0
+
+    # Decimal.ln is correctly rounded at the requested precision. Sum its
+    # weighted enclosures exactly so cancellation cannot hide a small term.
+    for precision in (40, 720):
+        total = error = Fraction(0)
+        with localcontext() as ctx:
+            ctx.prec = precision
+            for activity, exponent in powers.items():
+                log_a = activity.ln()
+                total += exponent * Fraction(log_a)
+                unit = Fraction(Decimal(1).scaleb(log_a.adjusted() - precision + 1))
+                error += abs(exponent) * unit / 2
+        low, high = total - error, total + error
+        if low * high > 0 and float(low) == float(high):
+            log_q = float(low)
+            if log_q and math.isfinite(log_q):
+                return log_q
+            raise ArithmeticError("activity_log_quotient_outside_numeric_range")
+        if low <= 0 <= high and _activity_product_is_one(powers):
+            return 0.0
+    raise ArithmeticError("activity_log_quotient_unresolved_at_numeric_precision")
+
+
+def _activity_product_is_one(powers):
+    # Clear rational exponents for an exact equilibrium check only when the
+    # resulting integer products are small enough to materialize.
+    denominator = math.lcm(*(n.denominator for n in powers.values()))
+    product = Fraction(1)
+    bits = 0
+    for activity, n in powers.items():
+        a = Fraction(activity)
+        k = int(n * denominator)
+        bits += abs(k) * max(a.numerator.bit_length(), a.denominator.bit_length())
+        if bits > 65536:
+            return False
+        product *= a ** k
+    return product == 1
+
+
 def _electrochemistry(params: Mapping[str, Any]) -> Dict[str, Any]:
     """One written reaction and one identified product, at constant current."""
     result = {"domain": "electrochem_separations", "subkind": "electrochemistry"}
@@ -1831,6 +1895,12 @@ def _electrochemistry(params: Mapping[str, Any]) -> Dict[str, Any]:
         rt = R_GAS_UNIV * temperature
         nf = electrons * FARADAY_C_MOL
         log_q = math.log(quotient)
+        if "activity_terms" in params:
+            activity_log_q = _activity_log_quotient(params["activity_terms"])
+            if "Q_reaction" in params and not math.isclose(log_q, activity_log_q, rel_tol=0, abs_tol=1e-12):
+                raise ValueError("Q_reaction conflicts with supplied activity_terms")
+            log_q = activity_log_q
+            result["ln_Q_reaction"] = log_q
         equilibrium = potential - (rt / nf) * log_q
         standard_gibbs = -nf * potential
         gibbs = -nf * equilibrium
