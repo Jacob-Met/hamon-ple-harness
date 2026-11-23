@@ -63,6 +63,13 @@ def edited_pdf(source, destination, edit):
                 (a, move), (b, line) = operations[-2:]
                 if move == b"m" and line == b"l":
                     pair = (tuple(a), tuple(b))
+                    deleted = {
+                        "erase_voltage_stroke": ((16898, 2273), (16949, 2273)),
+                        "erase_signal_underscore": ((1453, 11490), (1504, 11490)),
+                    }
+                    if edit in deleted and set(pair) == set(deleted[edit]):
+                        op = b"n"
+                        ground_edits += 1
                     if ((edit == "erase_ground_bar" and pair == ((16258, 7492), (16258, 7312))) or
                             (edit == "break_ground_G" and pair == ((16311, 7467), (16298, 7480)))):
                         op = b"n"
@@ -74,7 +81,8 @@ def edited_pdf(source, destination, edit):
                             operations[n] = ([NumberObject(x - 120), NumberObject(y)], operations[n][1])
                         ground_edits += 1
             operations.append((operands, op))
-        if i == 0 and edit in ("erase_ground_bar", "break_ground_G", "move_ground_word_toward_MOSI"):
+        if i == 0 and edit in ("erase_ground_bar", "break_ground_G", "move_ground_word_toward_MOSI",
+                               "erase_voltage_stroke", "erase_signal_underscore"):
             require(ground_edits == (18 if edit == "move_ground_word_toward_MOSI" else 1),
                     "Expected original painted ground strokes missing")
         if i < 2:
@@ -101,19 +109,30 @@ def main():
     require(baseline["status"] == "candidate_evidence" and
             [p["status"] for p in baseline["pages"]] == ["candidate_evidence"] * 2 + ["text_only_license"]
             and baseline["document_wire_groups"][2] == []
-            and [link["name"] for link in baseline["inter_sheet_anchors"]] == ["GND"],
+            and {"GND", "+3V3", "JTAG_TMS", "JTAG_TCK"} <= {link["name"] for link in baseline["inter_sheet_anchors"]},
             "Unexpected sheet or appendix classification")
     require([len(p["wires"]) for p in baseline["pages"]] == [468, 407, 0], "Unexpected wire roster")
     positive = ([41, 42, 45, 48, 56, 60, 63, 66, 67, 71, 102, 108, 111, 113, 118,
                  121, 122, 123, 125, 127, 156, 157, 160, 162, 165, 168, 169, 170, 171],
                 [3, 5, 10, 11, 12, 15, 34, 35, 36, 72, 73, 75, 76, 77, 78, 80])
     for page, indices in zip(baseline["pages"], positive):
-        require(page["printed_equivalence_anchors"] == {"GND": indices}, "Ground anchor roster changed")
+        require(page["printed_equivalence_anchors"].get("GND") == indices, "Ground anchor roster changed")
+    page1, page2 = baseline["pages"][:2]
+    require(page1["printed_equivalence_anchors"]["+5V"] == [2, 4, 14, 16, 24, 28, 31, 40]
+            and page1["printed_equivalence_anchors"]["+3V3"] == [196, 202]
+            and page2["printed_equivalence_anchors"]["+3V3"] == [104, 109, 138, 142, 147, 148, 150, 153, 158, 160],
+            "Complete voltage arrows no longer have the same physical endpoints")
+    for page, tms, tck in ((page1, 230, 231), (page2, 178, 182)):
+        anchors = page["printed_equivalence_anchors"]
+        require(anchors["JTAG_TMS"] == [tms] and anchors["JTAG_TCK"] == [tck]
+                and "JTAG" not in anchors and page["wire_groups"][tms] != page["wire_groups"][tck],
+                "A printed underscore, following suffix, or distinct wire was lost")
     controls = {}
     if args.controls:
         with tempfile.TemporaryDirectory() as directory:
             for edit in ("recolor", "erase_one", "erase_terminal_mark", "erase_dots", "appendix_stroke",
-                         "erase_ground_bar", "break_ground_G", "move_ground_word_toward_MOSI"):
+                         "erase_ground_bar", "break_ground_G", "move_ground_word_toward_MOSI",
+                         "erase_voltage_stroke", "erase_signal_underscore"):
                 path = Path(directory, edit + ".pdf")
                 edited_pdf(args.pdf, path, edit)
                 controls[edit] = read_pdf(path)
@@ -146,6 +165,20 @@ def main():
             actual = [*changed["document_wire_groups"][0], *changed["document_wire_groups"][1]]
             require(partition(actual) == partition(expected_groups),
                     f"{edit} failed to isolate only wire 41 or joined a decoy")
+        for edit, name, index in (("erase_voltage_stroke", "+3V3", 196),
+                                  ("erase_signal_underscore", "JTAG_TMS", 230)):
+            changed = controls[edit]
+            anchors = changed["pages"][0]["printed_equivalence_anchors"]
+            require(all(a["wires"] == b["wires"] for a, b in zip(changed["pages"], baseline["pages"]))
+                    and index not in anchors.get(name, []) and "JTAG" not in anchors
+                    and anchors["JTAG_TCK"] == [231], f"{edit} retained the erased evidence or joined a prefix")
+            old = sum(baseline["document_wire_groups"], [])
+            new = sum(changed["document_wire_groups"], [])
+            by_group = defaultdict(set)
+            for before, after in zip(old, new, strict=True):
+                by_group[after].add(before)
+            require(all(len(previous) == 1 for previous in by_group.values())
+                    and len(set(new)) > len(set(old)), f"{edit} failed to withdraw precisely supported connectivity")
     require(sha256(args.vendor_archive.read_bytes()).hexdigest() == ARCHIVE_SHA, "Unexpected CAD archive")
     with ZipFile(args.vendor_archive) as archive:
         cad = archive.read("A000056-cad-files/DUE_V02g.sch")
@@ -154,7 +187,7 @@ def main():
     require(len(truth) == 2, "Native sheet count differs")
     document = []
     other_islands = defaultdict(list)
-    for index, (sheet, expected) in enumerate(zip(truth, ((138, 128, 0, 1317), (125, 108, 0, 3821)))):
+    for index, (sheet, expected) in enumerate(zip(truth, ((138, 129, 0, 651), (125, 117, 0, 1829)))):
         page = baseline["pages"][index]
         names = align(page["wires"], sheet)
         rows = list(zip(names, baseline["document_wire_groups"][index], strict=True))
@@ -165,12 +198,12 @@ def main():
             if name != "GND":
                 other_islands[group].append([index + 1, i])
         print(json.dumps({"page": index + 1, "wire_sections": len(names), **observed}))
-    # Frozen on #400, independent of the numeric IDs assigned to wire groups.
+    # Frozen after the PDF-only voltage and signal run, independent of numeric group IDs.
     other_roster = json.dumps(sorted(other_islands.values()), separators=(",", ":")).encode()
-    require(sha256(other_roster).hexdigest() == "2c3e19f0182689d652c81a11f4ee8cc9c3640b479c2bf9317f14ddd65257aadc",
+    require(sha256(other_roster).hexdigest() == "d92513ae259ac0543bdc8ded93807d6dde2daba985aeb8593bd83a8885b3a378",
             "The partition of the 640 non-ground wire sections changed")
     result = counts(document)
-    require(result == {"nets": 176, "exact": 77, "false_connected": 0, "false_separated": 9518},
+    require(result == {"nets": 176, "exact": 122, "false_connected": 0, "false_separated": 6144},
             f"Document metric changed: {result}")
     pairs = sum(n * (n - 1) // 2 for n in Counter(name for name, _ in document).values())
     print(json.dumps({"document": result, "correct_pairs": pairs - result["false_separated"],
