@@ -846,6 +846,10 @@ def audit_local_deliverable(path: str | pathlib.Path) -> dict[str, Any]:
 def run(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     sub=p.add_subparsers(dest="cmd",required=True)
+    wp=sub.add_parser("witness-package", help="Reconcile dated scope, release evidence and standing case items before writing a Word package")
+    wp.add_argument("file", nargs="?")
+    wp.add_argument("--example", action="store_true", help="print a constructed input template")
+    wp.add_argument("--output", help="new DOCX path, written only on an exact schedule match")
     q=sub.add_parser("quantity",help="Convert a dimension-safe arithmetic expression")
     q.add_argument("expression");q.add_argument("--to",required=True)
     e=sub.add_parser("check",help="Assert two physical quantities match under relative tolerance")
@@ -913,7 +917,18 @@ def run(argv=None):
     fmg.add_argument("file")
     args=p.parse_args(argv)
     try:
-        if args.cmd=="calc-pack": out=calc_pack(args.file)
+        if args.cmd=="witness-package":
+            import hamon_witness_package
+            if args.example and args.file is None and args.output is None:
+                print(json.dumps(hamon_witness_package.example(), indent=2))
+                return 0
+            if not args.file or args.example:
+                raise ValueError("supply a spec file or use --example by itself")
+            out=hamon_witness_package.witness_package(args.file,args.output)
+            if not out["schedule_matches"]:
+                print(json.dumps({"ok":False,**out},ensure_ascii=True))
+                return 3
+        elif args.cmd=="calc-pack": out=calc_pack(args.file)
         elif args.cmd=="quantity": out=conversion(args.expression,args.to)
         elif args.cmd=="check": out=equal_dimensions(args.lhs,args.rhs,args.rtol)
         elif args.cmd=="xlsx-audit": out=xlsx_audit(args.file)

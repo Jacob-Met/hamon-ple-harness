@@ -342,6 +342,31 @@ function _registerPleWave3DomainTools(pi: any) {
   });
 
   pi.registerTool({
+    name: "compile_witness_package",
+    label: "Commissioning witness package",
+    description: "Reconcile documented array dispositions with case scheduling items. Write a new Word package in the task container only on an exact match. For the input fields, run the task CLI witness-package --example. Filing and case updates use their respective applications.",
+    parameters: {
+      type: "object",
+      properties: {
+        spec_path: { type: "string", description: "Absolute task path to dated source and case records in JSON" },
+        output_docx: { type: "string", description: "Optional new absolute task path for the Word document" },
+      },
+      required: ["spec_path"],
+    },
+    async execute(_id: string, params: any) {
+      const args = ["python3", "/tmp/hamon-engineering-toolkit.py", "witness-package"];
+      if (params.output_docx) args.push("--output", params.output_docx);
+      args.push("--", params.spec_path);
+      const result = await relay("exec", { command: args.map(quote).join(" "), timeout_sec: 120 });
+      if (result.truncated || result.timed_out || (result.exit_code !== 0 && result.exit_code !== 3)) {
+        throw new Error(`Witness package could not be compiled: ${result.output ?? ""}`);
+      }
+      const details = JSON.parse(result.output ?? "");
+      return { content: [{ type: "text", text: JSON.stringify(details) }], details };
+    },
+  });
+
+  pi.registerTool({
     name: "check_deliverable_preflight",
     label: "Deliverable Preflight Gate",
     description: "Validate output deliverable existence, archive/file integrity, non-empty content, finite numerics, and required task IDs before submission.",
