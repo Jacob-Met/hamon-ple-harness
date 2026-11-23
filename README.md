@@ -40,6 +40,19 @@ The `dual-verify` command also computes passive transformer voltage regulation, 
 
 The [pile-group compression contract](docs/pile_group_capacity.md) gives the `pile_group_capacity` inputs, the two competing resistance calculations and the scope of the load check.
 
+For a small diaphragm model with strongly contrasting stiffnesses, set
+`displacement_precision` to `compensated` in the existing `diaphragm_membrane`
+spec. The solver checks up to 64 displacement degrees of freedom and 1,024
+strain rows (five per rectangular panel, one per axial bar or spring).
+When `verified_displacement_representation` is `binary64_primary_plus_remainder`,
+the equilibrium and work checks apply to the sum of `displacements_m` and
+`displacement_remainders_m`, element by element. Both arrays hold binary64
+numbers in metres and follow the input node order. To reproduce a displacement
+in Python, use a Decimal context with at least 60 digits and evaluate
+`Decimal.from_float(primary) + Decimal.from_float(remainder)` after parsing
+the JSON. A binary64 addition can discard the remainder. The capacity decision
+uses the axial force from the decoded pair before rounding the displayed ratio.
+
 ## Files
 
 | File | Purpose |

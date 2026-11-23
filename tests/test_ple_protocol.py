@@ -109,7 +109,7 @@ class OfficialProtocolRoundtrip(unittest.TestCase):
                 self.assertEqual(record["stdin"],b"Determine MEP clashes and stress values")
                 self.assertEqual(len(record["commands"]),1)
                 self.assertIn("python3 -c",record["commands"][0])
-                self.assertEqual(list(record["writes"]),["/tmp/hamon_geometry.py","/tmp/hamon_drawing.py","/tmp/hamon_eagle_schematic.py","/tmp/hamon_scale.py","/tmp/hamon_affine_metric.py","/tmp/hamon_callout.py","/tmp/hamon_dxf.py","/tmp/office_package.py","/tmp/hamon_consolidation.py","/tmp/hamon_pipe_network.py","/tmp/hamon_diaphragm.py","/tmp/hamon_diaphragm_modes.py","/tmp/hamon_turbomachinery.py","/tmp/hamon_ac_power_flow.py","/tmp/hamon_bearing_capacity.py","/tmp/hamon_dual_verifier.py","/tmp/hamon_cad_takeoff.py","/tmp/hamon_pareto.py","/tmp/hamon-engineering-toolkit.py"])
+                self.assertEqual(list(record["writes"]),["/tmp/hamon_geometry.py","/tmp/hamon_drawing.py","/tmp/hamon_eagle_schematic.py","/tmp/hamon_scale.py","/tmp/hamon_affine_metric.py","/tmp/hamon_callout.py","/tmp/hamon_dxf.py","/tmp/office_package.py","/tmp/hamon_consolidation.py","/tmp/hamon_pipe_network.py","/tmp/hamon_diaphragm.py","/tmp/hamon_diaphragm_modes.py","/tmp/hamon_diaphragm_compensated.py","/tmp/hamon_turbomachinery.py","/tmp/hamon_ac_power_flow.py","/tmp/hamon_bearing_capacity.py","/tmp/hamon_dual_verifier.py","/tmp/hamon_cad_takeoff.py","/tmp/hamon_pareto.py","/tmp/hamon-engineering-toolkit.py"])
                 self.assertEqual(record["writes"]["/tmp/hamon_eagle_schematic.py"],
                                  (Path(engineering_toolkit.__file__).parent/"hamon_eagle_schematic.py").read_bytes())
                 self.assertEqual(record["writes"]["/tmp/hamon_drawing.py"],
@@ -118,7 +118,7 @@ class OfficialProtocolRoundtrip(unittest.TestCase):
                                  (Path(engineering_toolkit.__file__).parent/"hamon_geometry.py").read_bytes())
                 self.assertEqual(record["writes"]["/tmp/hamon_callout.py"],
                                  (Path(engineering_toolkit.__file__).parent/"hamon_callout.py").read_bytes())
-                for module in ("office_package.py", "hamon_consolidation.py", "hamon_pipe_network.py", "hamon_diaphragm.py", "hamon_diaphragm_modes.py", "hamon_turbomachinery.py", "hamon_ac_power_flow.py", "hamon_bearing_capacity.py"):
+                for module in ("office_package.py", "hamon_consolidation.py", "hamon_pipe_network.py", "hamon_diaphragm.py", "hamon_diaphragm_modes.py", "hamon_diaphragm_compensated.py", "hamon_turbomachinery.py", "hamon_ac_power_flow.py", "hamon_bearing_capacity.py"):
                     self.assertEqual(record["writes"]["/tmp/" + module],
                                      (Path(engineering_toolkit.__file__).parent / module).read_bytes())
                 self.assertEqual(record["writes"]["/tmp/hamon_dxf.py"],

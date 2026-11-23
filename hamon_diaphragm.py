@@ -118,6 +118,12 @@ def _recover_stations(requests, cells, xy, shears):
 
 
 def solve_diaphragm(spec):
+    precision = spec.get("displacement_precision", "binary64")
+    if precision == "compensated":
+        from hamon_diaphragm_compensated import check_compensated_size, solve_compensated
+        check_compensated_size(spec)
+    elif precision != "binary64":
+        raise ValueError("displacement_precision must be binary64 or compensated")
     xy = np.asarray(spec["nodes_m"], dtype=float)
     if xy.ndim != 2 or xy.shape[1] != 2 or not np.isfinite(xy).all() or len(xy) < 4:
         raise ValueError("nodes_m must contain finite [x,y] coordinates")
@@ -188,6 +194,11 @@ def solve_diaphragm(spec):
     if not np.isfinite(ground).all():
         raise ValueError("nonfinite assembled spring stiffness")
     basis = diaphragm_coordinates(xy, panel_nodes, bars, ground)
+    if precision == "compensated":
+        result = solve_compensated(spec, xy, springs, _bar_checks)
+        result["stations"] = _recover_stations(spec.get("stations", []), spec["panels"],
+                                              xy, result["panel_center_shear_N_m"])
+        return result
     for use_nodal in (False, True):
         if use_nodal:
             # Mixed restraints on slender panels can lose spring displacement
@@ -357,14 +368,7 @@ def _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, ba
             break
     else:
         return None
-    member_checks = []
-    for i, (bar, tension) in enumerate(zip(spec.get("bars", []), bar_forces)):
-        if any(k in bar for k in ("allowable_tension_N", "allowable_compression_N", "demand_factor")):
-            tension_limit = _positive(bar["allowable_tension_N"])
-            compression_limit = _positive(bar["allowable_compression_N"])
-            demand = abs(tension) * _positive(bar.get("demand_factor", 1.0))
-            ratio = demand / (tension_limit if tension >= 0 else compression_limit)
-            member_checks.append({"bar": i, "ratio": float(ratio), "passes": bool(ratio <= 1)})
+    member_checks = _bar_checks(spec, bar_forces)
     stations = _recover_stations(spec.get("stations", []), spec["panels"], xy, panel_shears)
     return {"stations": stations, "bar_capacity_checks": member_checks,
             "displacements_m": u.astype(float, copy=False).reshape((-1, 2)).tolist(),
@@ -374,3 +378,15 @@ def _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, ba
             "force_residual_N": force_error.tolist(), "moment_residual_Nm": moment_error,
             "strain_energy_J": energy / 2, "external_work_J": work / 2,
             "dual_rel_discrepancy": float(max(errors)), "dual_verified": True}
+
+
+def _bar_checks(spec, bar_forces, *, convert=float, output=float):
+    member_checks = []
+    for i, (bar, tension) in enumerate(zip(spec.get("bars", []), bar_forces)):
+        if any(k in bar for k in ("allowable_tension_N", "allowable_compression_N", "demand_factor")):
+            tension_limit = convert(_positive(bar["allowable_tension_N"]))
+            compression_limit = convert(_positive(bar["allowable_compression_N"]))
+            demand = abs(tension) * convert(_positive(bar.get("demand_factor", 1.0)))
+            ratio = demand / (tension_limit if tension >= 0 else compression_limit)
+            member_checks.append({"bar": i, "ratio": output(ratio), "passes": bool(ratio <= 1)})
+    return member_checks

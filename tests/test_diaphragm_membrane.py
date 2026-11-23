@@ -1,4 +1,8 @@
 import copy
+import json
+from decimal import Decimal, localcontext
+from fractions import Fraction
+from itertools import product
 
 import unittest
 
@@ -184,6 +188,109 @@ class DiaphragmTests(unittest.TestCase):
                 assert_allclose(result["bar_tension_N"], [-sign * 4.8793850904796265e-9], rtol=1e-7)
                 self.assertEqual(result["bar_capacity_checks"][0]["passes"], sign > 0)
                 assert_allclose(result["strain_energy_J"], 2.4986302820438824e-14, rtol=1e-7)
+
+    def test_compensated_displacements_replay_after_json_round_trip(self):
+        spec = {"nodes_m": [[0, 0], [1, 0], [1, .01], [0, .01]],
+                "panels": [{"nodes": [0, 1, 2, 3], "Dx_N_m": 1e-6,
+                            "Dy_N_m": 1e-5, "G_N_m": 1e4}],
+                "springs": [{"node": i, "axis": axis, "k_N_m": k} for i, axis, k in
+                            [(0,"y",1e14), (1,"x",.01), (2,"x",.001), (2,"y",1e4), (3,"y",1e3)]],
+                "loads": [{"node": 0, "force_N": [1e-11, 0]}]}
+        with self.assertRaises(ValueError):
+            run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": spec})
+        spec["displacement_precision"] = "compensated"
+        result = run_router_conservation_cad_verifier(
+            {"spec": {"calculation": "diaphragm_membrane", **spec}})
+        wire = json.loads(json.dumps(result, allow_nan=False))
+        self.assertTrue(wire["conservation_verified"])
+        self.assertEqual(wire["verified_displacement_representation"], "binary64_primary_plus_remainder")
+        with localcontext() as ctx:
+            ctx.prec = 60
+            d = lambda x: Decimal.from_float(float(x))
+            high = [[d(v) for v in node] for node in wire["displacements_m"]]
+            total = [[v+d(e) for v,e in zip(node,tail)] for node,tail in
+                     zip(high, wire["displacement_remainders_m"])]
+            # Independent Simpson integration of the bilinear shape gradients.
+            def relative_force_error(u):
+                applied = d(1e-11)
+                forces = [[Decimal(0), Decimal(0)] for _ in u]
+                width, height = d(1), d(.01)
+                points = [(d(0),1), (d(.5),4), (d(1),1)]
+                for (x, wx), (y, wy) in product(points, repeat=2):
+                    nx = [-(1-y)/width, (1-y)/width, y/width, -y/width]
+                    ny = [-(1-x)/height, -x/height, x/height, (1-x)/height]
+                    sx = d(1e-6)*sum(n*a[0] for n,a in zip(nx,u))
+                    sy = d(1e-5)*sum(n*a[1] for n,a in zip(ny,u))
+                    shear = d(1e4)*sum(n*a[0]+m*a[1] for n,m,a in zip(ny,nx,u))
+                    area = width*height*wx*wy/36
+                    for i in range(4):
+                        forces[i][0] += area*(nx[i]*sx + ny[i]*shear)
+                        forces[i][1] += area*(ny[i]*sy + nx[i]*shear)
+                scale = applied
+                for spring in spec["springs"]:
+                    i, j = spring["node"], int(spring["axis"] == "y")
+                    f = d(spring["k_N_m"])*u[i][j]
+                    forces[i][j] += f
+                    scale += abs(f)
+                forces[0][0] -= applied
+                return max(abs(f) for node in forces for f in node)/scale
+            self.assertLess(relative_force_error(total), d(1e-7))
+            self.assertGreater(relative_force_error(high), d(1e-7))
+
+    def test_compensated_collector_and_true_mechanism(self):
+        original = strip()
+        expected = run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": original})
+        result = run_dual_verify_spec({"kind": "diaphragm_membrane",
+                                     "spec": {**original, "displacement_precision": "compensated"}})
+        for key in ("bar_tension_N", "panel_center_shear_N_m", "spring_transmitted_N",
+                    "strain_energy_J", "displacements_m"):
+            assert_allclose(result[key], expected[key], rtol=1e-11, atol=1e-13)
+        original.update(displacement_precision="compensated", springs=original["springs"][:2], loads=[])
+        with self.assertRaises(ValueError):
+            run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": original})
+
+    def test_compensated_bounds_translation_and_output_range(self):
+        spec = strip()
+        spec.update(displacement_precision="compensated")
+        solve = lambda item: run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": item})
+        original = solve(spec)
+        moved = {**spec, "nodes_m": [[x + 2**43, y - 2**44] for x,y in spec["nodes_m"]]}
+        self.assertEqual(original, solve(moved))
+        for load in (1e-300, 1e300):
+            with self.subTest(load=load), self.assertRaisesRegex(ValueError, "binary64|nonfinite"):
+                solve({**spec, "loads": [{"node": 4, "force_N": [load, 0]}]})
+        full = {**spec, "nodes_m": [[i,j] for j in (0,1) for i in range(16)],
+                "panels": [{**spec["panels"][0], "nodes": [i,i+1,i+17,i+16]} for i in range(15)],
+                "bars": [], "springs": [{"node": i%32, "axis": "xy"[i//32%2], "k_N_m": 2}
+                                        for i in range(949)]}
+        self.assertTrue(solve(full)["dual_verified"])
+        with self.assertRaisesRegex(ValueError, "64 displacement DOFs"):
+            solve({**full, "springs": full["springs"] + full["springs"][:1]})
+        with self.assertRaisesRegex(ValueError, "64 displacement DOFs"):
+            solve({**full, "nodes_m": full["nodes_m"] + [[40,40]],
+                   "springs": full["springs"][:100] +
+                   [{"node": 32, "axis": axis, "k_N_m": 2} for axis in ("x","y")]})
+
+    def test_compensated_cancellation_and_rounded_capacity_boundary(self):
+        spec = {**strip(), "displacement_precision": "compensated",
+                "bars": [{"nodes": [0, 7], "EA_N": 205}]}
+        def result(forces):
+            loads = [{"node": 4, "force_N": [f, 0]} for f in forces]
+            return run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": {**spec, "loads": loads}})
+        unit = result([1])
+        for values in ((2.**250, 1., -2.**250), (1., -2.**250, 2.**250)):
+            self.assertEqual(result(values), unit)
+        motion = [[Fraction(h) + Fraction(t) for h,t in zip(hi,lo)] for hi,lo in
+                  zip(unit["displacements_m"], unit["displacement_remainders_m"])]
+        # The diagonal has edge (3,1) and squared length 10.
+        force = 205*(3*(motion[7][0]-motion[0][0]) + motion[7][1]-motion[0][1])/10
+        limit = abs(unit["bar_tension_N"][0])
+        self.assertGreater(abs(force), Fraction(limit))
+        spec["bars"][0].update(allowable_compression_N=limit, allowable_tension_N=limit)
+        for sign in (-1, 1):
+            check = result([sign])["bar_capacity_checks"][0]
+            self.assertEqual(check["ratio"], 1.0)
+            self.assertFalse(check["passes"])
 
     def test_center_shear_sign_and_reaction_moment_for_pure_shear_patch(self):
         spec = {"nodes_m": [[0, 0], [1, 0], [1, 1], [0, 1]],
