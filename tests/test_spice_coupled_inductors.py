@@ -1,4 +1,5 @@
 import cmath
+from fractions import Fraction
 import math
 import unittest
 
@@ -65,6 +66,30 @@ class TestCoupledInductors(unittest.TestCase):
         r = circuit("No coupling\nV1 a 0 AC 1\nLa a 0 1\nLb b 0 2\nR2 b 0 3", freq_hz=60)
         self.assertTrue(r["conservation_verified"])
         self.assertEqual(complex(*r["node_voltages"]["b"]), 0)
+
+    def test_perfect_coupling_zero_energy_and_nonzero_neighbors(self):
+        for scale in (1, 10000):
+            deck = (f"Balanced MMF\nIa 0 a AC {2*scale}\nIb 0 b AC {scale} 180\n"
+                    "La a 0 2\nLb b 0 8\nK1 La Lb 1")
+            r = circuit(deck, freq_hz=1000)
+            self.assertTrue(r["conservation_verified"])
+            self.assertEqual(r["node_voltages"]["a"], [0, 0])
+            self.assertEqual(r["node_voltages"]["b"], [0, 0])
+            self.assertEqual(r["total_complex_power_delivered_VA"], [0, 0])
+
+        # The loading resistors participate in cancellation. With turns 5:7,
+        # Va = (Ea/Ra + t*Eb/Rb)/(1/Ra + t²/Rb + 1/(j*omega*La)).
+        t = Fraction(7, 5)
+        for e2 in (-65., math.nextafter(-65., -math.inf), math.nextafter(-65., math.inf)):
+            deck = (f"Resistively fed null\nVa aa 0 AC 49\nRa aa a 7\nLa a 0 25\n"
+                    f"Vb bb 0 AC {e2}\nRb bb b 13\nLb b 0 49\nK1 La Lb 1")
+            r = circuit(deck, freq_hz=1000)
+            numerator = Fraction(49, 7) + t * Fraction(e2) / 13
+            va = float(numerator)/(1/7 + float(t*t)/13 + 1/(1j*math.tau*1000*25))
+            self.assertTrue(r["conservation_verified"], r)
+            for port, expected in (("a", va), ("b", float(t)*va)):
+                actual = complex(*r["node_voltages"][port])
+                self.assertLessEqual(abs(actual-expected), 1e-13*abs(expected))
 
     def test_bad_couplings_refused_before_certification(self):
         deck = "Coils\nLa a 0 1\nLb b 0 2\nLc c 0 3\nIa 0 a AC 1\n"

@@ -1382,10 +1382,7 @@ def _mutual_inductances(branches):
             if b in coefficients[a]:
                 raise ValueError("Self or duplicate mutual inductance")
             coefficients[a][b] = coefficients[b][a] = Fraction(k)
-            la, lb = float(branches[a]["value"]), float(branches[b]["value"])
-            # Equal windings should yield M = k L exactly at unit coupling.
-            mean = la if la == lb else math.sqrt(la) * math.sqrt(lb)
-            mutual[a][b] = mutual[b][a] = k * mean
+            mutual[a][b] = mutual[b][a] = k
 
     # L = diag(sqrt(Li)) C diag(sqrt(Li)). Check C by exact symmetric
     # elimination on the input coefficients, including singular ideal coupling.
@@ -1420,6 +1417,88 @@ def _complex_gauss_solve(a_mat: np.ndarray, b_vec: np.ndarray) -> np.ndarray:
     return aug[:, n]
 
 
+def _circuit_source(br, coupled):
+    magnitude = float(br["value"])
+    angle = float(br.get("phase_deg", 0.0))
+    if coupled:
+        quadrant = {0: 1, 90: 1j, -90: -1j, 180: -1, -180: -1}.get(math.remainder(angle, 360))
+        if quadrant is not None:
+            return complex(magnitude * quadrant)
+    return cmath.rect(magnitude, math.radians(angle))
+
+
+def _circuit_matrix(branches, omega, n_idx, current_row, coupling, exact=False):
+    """Stamp the same circuit topology in floating or exact coefficient arithmetic."""
+    dim = len(n_idx) + len(current_row)
+    if exact:
+        import sympy as sp
+        mna, rhs = sp.zeros(dim), sp.zeros(dim, 1)
+        number, jomega = sp.Rational, sp.I * sp.Rational(omega)
+    else:
+        mna = np.zeros((dim, dim), dtype=np.complex128)
+        rhs = np.zeros(dim, dtype=np.complex128)
+        number, jomega = float, 1j * omega
+
+    def source(br):
+        v = _circuit_source(br, coupling)
+        return number(v.real) + sp.I * number(v.imag) if exact else v
+
+    mutual = {}
+    admittances = {}
+    for index, br in enumerate(branches):
+        bt = str(br["type"]).upper()
+        if bt == "K":
+            continue
+        ip, im = (n_idx.get(str(br[key])) for key in ("n_pos", "n_neg"))
+        val = number(float(br["value"]))
+        if index in current_row:
+            row = current_row[index]
+            if not math.isfinite(float(val)):
+                raise ValueError("Nonfinite voltage or winding constraint")
+            # In AC a coupled winding enforces v/(j omega) = sum_j Lij ij.
+            vf = 1/jomega if index in coupling and omega else 1
+            if ip is not None: mna[ip, row] += 1; mna[row, ip] += vf
+            if im is not None: mna[im, row] -= 1; mna[row, im] -= vf
+            if bt == "V":
+                rhs[row] = source(br)
+            elif bt == "E":
+                cp, cm = (n_idx.get(str(br[key])) for key in ("nc_pos", "nc_neg"))
+                if cp is not None: mna[row, cp] -= val
+                if cm is not None: mna[row, cm] += val
+            elif index in coupling and omega:
+                mna[row, row] -= val
+                mutual[index] = {}
+                for other, k in coupling[index].items():
+                    lb = number(float(branches[other]["value"]))
+                    if exact:
+                        mean = sp.sqrt(val * lb)
+                    else:
+                        ma, ea = math.frexp(val)
+                        mb, eb = math.frexp(lb)
+                        exponent, odd = divmod(ea + eb, 2)
+                        mean = math.ldexp(math.sqrt(math.ldexp(ma * mb, odd)), exponent)
+                    inductance = number(k) * mean
+                    mutual[index][other] = inductance
+                    mna[row, current_row[other]] -= inductance
+        elif bt in ("R", "L", "C"):
+            y = 1/val if bt == "R" else (1/(jomega*val) if bt == "L" else jomega*val)
+            admittances[index] = y
+            if ip is not None: mna[ip, ip] += y
+            if im is not None: mna[im, im] += y
+            if ip is not None and im is not None: mna[ip, im] -= y; mna[im, ip] -= y
+        elif bt == "I":
+            current = source(br)
+            if ip is not None: rhs[ip] -= current
+            if im is not None: rhs[im] += current
+        elif bt == "G":
+            cp, cm = (n_idx.get(str(br[key])) for key in ("nc_pos", "nc_neg"))
+            for row, sign in ((ip, 1), (im, -1)):
+                if row is not None:
+                    if cp is not None: mna[row, cp] += sign * val
+                    if cm is not None: mna[row, cm] -= sign * val
+    return mna, rhs, admittances, mutual
+
+
 def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
     if spec.get("calculation") == "symmetrical_fault":
         from hamon_ac_power_flow import verify_symmetrical_fault
@@ -1443,62 +1522,32 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
     # An ideal inductor has zero terminal voltage at DC. Its current, like
     # the current of a voltage source, is an independent MNA unknown.
     constraint_types = {"V", "E", "L"} if freq_hz == 0 else {"V", "E"}
-    mutual = _mutual_inductances(branches)
+    coupling = _mutual_inductances(branches)
     constraints = [i for i, br in enumerate(branches)
-                   if str(br["type"]).upper() in constraint_types or i in mutual]
+                   if str(br["type"]).upper() in constraint_types or i in coupling]
     current_row = {i: len(nodes) + offset for offset, i in enumerate(constraints)}
-    dim = len(nodes) + len(constraints)
-    mna = np.zeros((dim, dim), dtype=np.complex128)
-    rhs = np.zeros(dim, dtype=np.complex128)
-    ni = lambda s: None if str(s) in gnd else n_idx[str(s)]
-
-    for index, row in current_row.items():
-        vs = branches[index]
-        ip, im = ni(vs["n_pos"]), ni(vs["n_neg"])
-        if ip is not None: mna[ip, row] += 1.0; mna[row, ip] += 1.0
-        if im is not None: mna[im, row] -= 1.0; mna[row, im] -= 1.0
-        value = float(vs["value"])
-        if not math.isfinite(value):
-            raise ValueError("Voltage-source and DC-inductor values must be finite")
-        if str(vs["type"]).upper() == "E":
-            icp, icm = ni(vs["nc_pos"]), ni(vs["nc_neg"])
-            if icp is not None: mna[row, icp] -= value
-            if icm is not None: mna[row, icm] += value
-        elif index in mutual and freq_hz > 0:
-            mna[row, row] -= 1j * omega * value
-            for winding, inductance in mutual[index].items():
-                mna[row, current_row[winding]] -= 1j * omega * inductance
-        elif str(vs["type"]).upper() == "V":
-            rhs[row] = cmath.rect(value, math.radians(float(vs.get("phase_deg", 0.0))))
-
-    admittances = {}
-    for index, br in enumerate(branches):
-        bt = str(br["type"]).upper()
-        if bt == "K" or index in current_row:
-            continue
-        ip, im = ni(br["n_pos"]), ni(br["n_neg"])
-        if bt in ("R", "L", "C"):
-            val = float(br["value"])
-            y = (1.0 / val) if bt == "R" else (1.0 / (1j * omega * val) if bt == "L" else 1j * omega * val)
-            admittances[index] = y
-            if ip is not None: mna[ip, ip] += y
-            if im is not None: mna[im, im] += y
-            if ip is not None and im is not None: mna[ip, im] -= y; mna[im, ip] -= y
-        elif bt == "I":
-            icur = cmath.rect(float(br["value"]), math.radians(float(br.get("phase_deg", 0.0))))
-            if ip is not None: rhs[ip] -= icur
-            if im is not None: rhs[im] += icur
-        elif bt == "G":
-            gm = float(br["value"])
-            icp, icm = ni(br["nc_pos"]), ni(br["nc_neg"])
-            for r_i, sgn in ((ip, 1.0), (im, -1.0)):
-                if r_i is not None:
-                    if icp is not None: mna[r_i, icp] += sgn * gm
-                    if icm is not None: mna[r_i, icm] -= sgn * gm
-
+    inputs = (branches, omega, n_idx, current_row, coupling)
+    mna, rhs, admittances, mutual = _circuit_matrix(*inputs)
     sol_g = _complex_gauss_solve(mna, rhs)
     sol_lu = np.linalg.solve(mna, rhs)
     dual_err = float(np.linalg.norm(sol_g - sol_lu) / max(float(np.linalg.norm(sol_lu)), 1e-30))
+    # A small winding voltage may be a genuine residual or an exact magnetic
+    # null. Recover the original complete network before rounding either one.
+    for index, neighbors in mutual.items():
+        terms = [float(branches[index]["value"]) * sol_lu[current_row[index]]]
+        terms.extend(m * sol_lu[current_row[j]] for j, m in neighbors.items())
+        scale = sum(map(abs, terms))
+        if scale and abs(sum(terms)) <= 1e-8 * scale:
+            exact_mna, exact_rhs, _, _ = _circuit_matrix(*inputs, exact=True)
+            reduced, pivots = exact_mna.row_join(exact_rhs).to_DM(extension=True).rref()
+            if tuple(pivots) != tuple(range(len(rhs))):
+                raise ValueError("Singular coupled circuit")
+            exact_solution = reduced.to_Matrix()[:, -1]
+            refined = np.array([complex(v.evalf(50)) for v in exact_solution])
+            dual_err = max(dual_err, float(np.linalg.norm(refined-sol_lu) /
+                                            max(float(np.linalg.norm(refined)), 1e-30)))
+            sol_lu = refined
+            break
     v_node: Dict[str, complex] = {"0": 0j, "GND": 0j, **{nm: complex(sol_lu[i]) for nm, i in n_idx.items()}}
 
     kcl_sum: Dict[str, complex] = {nm: 0j for nm in nodes}
@@ -1515,7 +1564,7 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
             ibr = complex(sol_lu[current_row[index]])
             expected_voltage = 0j
             if bt == "V":
-                expected_voltage = cmath.rect(float(br["value"]), math.radians(float(br.get("phase_deg", 0.0))))
+                expected_voltage = _circuit_source(br, coupling)
             elif bt == "E":
                 control = v_node.get(str(br["nc_pos"]), 0j) - v_node.get(str(br["nc_neg"]), 0j)
                 expected_voltage = float(br["value"]) * control
@@ -1528,7 +1577,7 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
                 s_deliv += vd * (-ibr).conjugate()
             kvl_max = max(kvl_max, abs(vd - expected_voltage))
         elif bt == "I":
-            ibr = cmath.rect(float(br["value"]), math.radians(float(br.get("phase_deg", 0.0))))
+            ibr = _circuit_source(br, coupling)
             s_deliv += vd * (-ibr).conjugate()
         elif bt == "G":
             ibr = float(br["value"]) * (v_node.get(str(br["nc_pos"]), 0j) - v_node.get(str(br["nc_neg"]), 0j))
