@@ -527,11 +527,31 @@ def _hx_inverse(arrangement, field, measurement, hot, cold, c_hot, c_cold, c_min
         if arrangement == "counterflow":
             odds = e / (1 - e)
             return float(odds if r == 1 else (1 + odds * (1 - r)).ln() / (1 - r))
-        if arrangement == "parallel":
-            remainder, factor = 1 - e * (1 + r), 1 + r
-        elif arrangement == "shell_tube_1_2":
-            factor = (1 + r*r).sqrt()
-            remainder = (2 - e * (1 + r + factor)) / (2 - e * (1 + r - factor))
+        if arrangement in ("parallel", "shell_tube_1_2"):
+            # Determine contact from the exact binary64 measurements. A rounded
+            # recurring capacity ratio can leave a fictitious positive gap.
+            ratio = Fraction(c_min) / Fraction(c_max)
+            duty_scale = Fraction(c_min) * (Fraction(hot) - Fraction(cold))
+            exact = Fraction(measurement)
+            if field == "Q":
+                exact /= duty_scale
+            elif field == "T_h_out":
+                exact = Fraction(c_hot) * (Fraction(hot) - exact) / duty_scale
+            elif field == "T_c_out":
+                exact = Fraction(c_cold) * (exact - Fraction(cold)) / duty_scale
+            if arrangement == "parallel":
+                gap = 1 - exact * (1 + ratio)
+                factor = 1 + r
+                denominator = 1
+            else:
+                # Rationalize the difference against sqrt(1+r²) before rounding.
+                midpoint = 2 - exact * (1 + ratio)
+                gap = midpoint**2 - exact**2 * (1 + ratio**2)
+                factor = (1 + r*r).sqrt()
+                denominator = (2 - e*(1+r) + e*factor)**2
+            if gap <= 0:
+                raise ValueError("Observation reaches or exceeds the finite-NTU limit")
+            remainder = Decimal(gap.numerator) / Decimal(gap.denominator) / denominator
         elif arrangement == "crossflow_cmax_mixed":
             remainder, factor = 1 + (1 - r*e).ln() / r, 1
         else:  # Cmin mixed, Cmax unmixed.
@@ -705,6 +725,26 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
             # Let another supplied measurement size the exchanger if it is informative.
             driver = next((key for key in ("effectiveness", "Q", "T_h_out", "T_c_out")
                            if key in observed and bounds[key][0] < observed[key] < bounds[key][1]), None)
+            # Rounded mixed-flow and equilibrium ceilings can equal a float
+            # strictly inside the physical range. When no interior reading is
+            # available, invert the original measurement in its supplied units.
+            # Phase-changing or unit-effectiveness end points stay unidentifiable.
+            boundary_ntu = None
+            finite_ceiling = arr in ("parallel", "shell_tube_1_2", "crossflow_cmax_mixed", "crossflow_cmin_mixed")
+            if driver is None and finite_ceiling:
+                for key in ("effectiveness", "Q", "T_h_out", "T_c_out"):
+                    if key not in observed:
+                        continue
+                    boundary = bounds[key][0 if key == "T_h_out" else 1]
+                    value = observed[key]
+                    if abs(value - boundary) > 2 * math.ulp(boundary):
+                        continue
+                    try:
+                        boundary_ntu = _hx_inverse(arr, key, value, t_hi, t_ci, c_h, c_c, c_min, limit)
+                    except ValueError:
+                        continue
+                    driver = key
+                    break
             # With a nonzero inlet span, exact zero duty uniquely gives UA=0.
             # Prefer an interior measurement if a sensible outlet merely rounds
             # to its inlet. A phase-changing outlet stays fixed at every UA.
@@ -730,6 +770,8 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
                 eps_target = c_c * (reading - t_ci) / q_max
             if reading == zero_values[driver]:
                 ntu = 0.0
+            elif boundary_ntu is not None:
+                ntu = boundary_ntu
             elif arr == "crossflow_unmixed":
                 if not 0.0 < eps_target < 1.0:
                     return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False,
