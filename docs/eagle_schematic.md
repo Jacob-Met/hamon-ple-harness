@@ -12,19 +12,19 @@ The native-text profile uses green linework for wires, red linework for symbols 
 
 ## Geometry of outlined electrical sheets
 
-The outlined profile looks for a single stroke ink with consistently sized, filled circular junctions. Their centers must establish a regular grid along both page axes. At least six distinct centers must coincide with three or more wire ends in multiple directions. Straight strokes need both ends on that grid. Same-ink strokes used for outlined lettering can fall outside it. Two coincident ends can form a corner or continue a wire. A site with three or more incident ends needs a visible junction dot. The reader reports the selected stroke, measured grid pitch, marked branch count and number of excluded off-grid strokes. It does not assign names to outlined labels.
+The outlined profile looks for a single stroke ink with consistently sized, filled circular junctions. Their centers must establish a regular grid along both page axes. At least six distinct centers must coincide with three or more wire ends in multiple directions. Straight strokes need both ends on that grid. Same-ink strokes used for outlined lettering can fall outside it. Two coincident ends can form a corner or continue a wire. A site with three or more incident ends needs a visible junction dot. The reader reports the selected stroke, measured grid pitch, marked branch count and number of excluded off-grid strokes. The ground reader looks for a one-grid stem touching a wire endpoint and a perpendicular bar centered at its tip. Beyond the bar it requires all 18 strokes of the G, N and D glyphs in their relative positions. Both reading directions are supported. The output records the physical stem, bar tip, and attached wire for each accepted word.
 
 The Arduino Due PDF contains two electrical sheets followed by a Creative Commons notice. The notice has native text, a white background and no schematic geometry. A recognized text-only notice contributes an empty wire list. A graphical or unrecognized sheet still leaves document membership unresolved.
 
 | Due V02g | Visible wires matched to native CAD | Exact native nets | Fragmented nets | False joined pairs | Separated native pairs |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Sheet 1 | 468 | 128/138 | 10 | 0 | 8,411 |
-| Sheet 2 | 407 | 108/125 | 17 | 0 | 6,587 |
-| Whole drawing | 875 | 77/176 | 99 | 0 | 29,874 |
+| Sheet 1 | 468 | 128/138 | 10 | 0 | 1,317 |
+| Sheet 2 | 407 | 108/125 | 17 | 0 | 3,821 |
+| Whole drawing | 875 | 77/176 | 99 | 0 | 9,518 |
 
-The flat-document CLI recovers 2,987 of the 32,861 native same-net wire pairs. Its memberships use page-local electrical geometry. Signal identity across sheets and across separate label-only islands remains unresolved. The comparison covers visible wire sections. It does not measure device-pin connectivity or an organizer score.
+The flat-document CLI recovers 23,343 of 32,861 native same-net wire pairs. The ground word and bar connect 29 islands on the first sheet and 16 on the second, adding 20,356 correct pairs over the junction-only receiver. Together those islands contain 210 of the 235 ground sections. The partition of all 640 sections on other nets is identical to the junction-only result. The comparison measures visible wire connectivity.
 
-Run `python ship/verify_eagle_outlined.py DUE.pdf DUE.zip --controls` with Poppler and pypdf. The receiver runs the maintained CLI and freezes every prediction before opening the paired native schematic. It checks each wire section against the manufacturer's schematic geometry and tests recoloring the wire layer, deleting a three-arm junction, deleting a terminal mark, deleting all junctions, and adding graphical ink to the legal notice. [Arduino Due schematic PDF](https://docs.arduino.cc/resources/schematics/A000056-schematics.pdf) and [CAD archive](https://docs.arduino.cc/static/f051671bbed80ddf7352991d62cb0d5c/A000056-cad-files.zip).
+Run `python ship/verify_eagle_outlined.py DUE.pdf DUE.zip --controls` with Poppler and pypdf. The receiver runs the maintained CLI and freezes every prediction before opening the paired native schematic. It checks each wire section against the manufacturer's schematic geometry and tests recoloring the wire layer, deleting a three-arm junction, deleting a terminal mark, deleting all junctions, and adding graphical ink to the legal notice. On the first sheet, removing the bar or a stroke of the G, or moving the complete word one grid step toward the neighboring MOSI wire, isolates just the single affected ground section. The receiver checks the complete document partition for each edit. [Arduino Due schematic PDF](https://docs.arduino.cc/resources/schematics/A000056-schematics.pdf) and [CAD archive](https://docs.arduino.cc/static/f051671bbed80ddf7352991d62cb0d5c/A000056-cad-files.zip).
 
 ## External comparison
 
