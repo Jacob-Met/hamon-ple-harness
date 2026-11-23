@@ -1,0 +1,16 @@
+# Euler rigid-body verifier
+
+The registered `hamon_conservation_cad_verifier` accepts `mode="lagrangian_orbital"` with `spec.subkind="euler_rigid_body"`. Supply three principal moments `I` in kg m², initial body-frame `omega0` in rad/s, and an optional constant **body-frame** `torque` in N m. The defaults are zero torque, one second and 2,000 RK4 steps. The response gives the endpoint angular velocity in that same principal-axis basis, kinetic energy in joules and angular momentum magnitude in N m s.
+
+All three positive moments must satisfy the triangle inequalities. For example, `[1,1,2]` can describe a planar body. For `[1,1,3]` the implied axial second mass moment is negative, so the verifier refuses the input. The check uses the exact binary64 values obtained from the input. A zero principal moment lies outside this nonsingular Euler-equation solver.
+
+The primary integrator accumulates work from τ·ω and the change of half the squared angular momentum from τ·H. An adaptive solver independently integrates angular velocity to the requested time. The response reports the maximum of the dimensionless solver, work and angular-momentum balance residuals. The solver compares dimensionless angular velocities, using the greater of the initial component magnitude and the constant-drive velocity increment as the reference scale. Each balance compares the absolute defect to the largest magnitude among its two endpoints and its integral. The acceptance threshold is 1e−8. Scaling moments and torque together preserves the velocity dynamics. `work_done_J` and `torque_half_H2_change_Nms2` are the integrated SI terms. When the latter falls outside the representable range, the SI field is null. The corresponding physical integral is the reported `torque_half_H2_change_scaled` times the square of `moment_scale_kg_m2 * omega_scale_rad_s`.
+
+`precession_rate_rad_s` is the constant azimuth rate of the transverse **body-frame angular velocity** around principal axis 3 for a torque-free body with equal first and second principal moments and a nonzero transverse projection. It is null outside that domain. Two initial instantaneous measurements are also returned.
+
+- `initial_body_omega_azimuth_rate_rad_s` is the signed derivative of atan2(ω₂, ω₁), including the applied torque. It is null when both transverse components are zero.
+- `initial_inertial_H_direction_speed_rad_s` is the speed at which the angular-momentum unit vector turns in an inertial frame. Its value is |H × τ| / |H|², calculated in the instantaneous body basis. It is null at zero angular momentum.
+
+For a unit sphere with ω(0) = (1, 0, 0), τ = (0, 1, 0) and a one-second interval, ω(1) = (1, 1, 0). The work is 0.5 J, the final kinetic energy is 1 J and both initial direction rates are 1 rad/s. The constant free-top rate is undefined. The verification applies to the supplied principal moments and constant body-frame load. Model fidelity to a measured body requires separate evidence.
+
+The physical inertia criterion follows from the second mass moments in [Wensing, Kim and Slotine](https://arxiv.org/abs/1701.04395). The rotational dynamics and frame conventions follow the Euler equations in [Structure and Interpretation of Classical Mechanics, chapter 2](https://mitp-content-server.mit.edu/books/content/sectbyfn/books_pres_0/9579/sicm_edition_2.zip/chapter002.html).
