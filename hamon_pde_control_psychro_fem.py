@@ -30,7 +30,8 @@ numerical cross-verification suite for Physical Engineering's Last Exam (PLE):
        solver with thermal strain support, kinematic mechanism detection, nodal reaction
        equilibrium, and Clapeyron work-strain-energy theorem verification.
      - 1D multi-element Euler-Bernoulli cubic Hermite beam solver with consistent distributed
-       load vectors, shear/moment recovery, and Clapeyron strain-energy gate.
+       load vectors, shear/moment recovery, and Clapeyron strain-energy gate. Each element
+       accepts a uniform q_N_m or a linear profile given by q_start_N_m and q_end_N_m.
 """
 
 from __future__ import annotations
@@ -2296,14 +2297,29 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
             {"EI_Nm2": default_ei, "q_N_m": default_q} for _ in range(n_nodes - 1)
         ]
 
+        if len(el_specs) != n_nodes - 1:
+            return {"passed": False, "domain": "fem", "mode": mode,
+                    "reason": "Provide one element record per beam span"}
         beam_elements = []
         for e_idx in range(n_nodes - 1):
             le = x_nodes[e_idx + 1] - x_nodes[e_idx]
             ei = float(el_specs[e_idx].get("EI_Nm2", default_ei))
-            q_val = float(el_specs[e_idx].get("q_N_m", default_q))
+            element = el_specs[e_idx]
+            left, right = "q_start_N_m", "q_end_N_m"
+            if left in element or right in element:
+                if left not in element or right not in element or "q_N_m" in element:
+                    return {"passed": False, "domain": "fem", "mode": mode,
+                            "reason": "Give both endpoint loads or one uniform element load"}
+                q0, q1 = float(element[left]), float(element[right])
+            else:
+                q0 = q1 = float(element.get("q_N_m", default_q))
+            if not (math.isfinite(q0) and math.isfinite(q1)):
+                return {"passed": False, "domain": "fem", "mode": mode,
+                        "reason": "Beam distributed loads must be finite"}
             if ei <= 0.0:
                 return {"passed": False, "domain": "fem", "mode": mode, "reason": "Non-positive flexural rigidity EI_Nm2"}
-            beam_elements.append((le, ei, q_val))
+            average = 0.5 * q0 + 0.5 * q1
+            half_difference = 0.5 * q1 - 0.5 * q0
             c_fac = ei / (le ** 3)
             ke = [
                 [12.0 * c_fac, 6.0 * le * c_fac, -12.0 * c_fac, 6.0 * le * c_fac],
@@ -2311,7 +2327,12 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
                 [-12.0 * c_fac, -6.0 * le * c_fac, 12.0 * c_fac, -6.0 * le * c_fac],
                 [6.0 * le * c_fac, 2.0 * le * le * c_fac, -6.0 * le * c_fac, 4.0 * le * le * c_fac],
             ]
-            fe = [0.5 * q_val * le, (q_val * le * le) / 12.0, 0.5 * q_val * le, -(q_val * le * le) / 12.0]
+            # Integrate each cubic Hermite shape against q(t) = average + half_difference*(2t-1).
+            fe = [le * (average / 2.0 - half_difference / 5.0),
+                  le ** 2 * (average / 12.0 - half_difference / 60.0),
+                  le * (average / 2.0 + half_difference / 5.0),
+                  -le ** 2 * (average / 12.0 + half_difference / 60.0)]
+            beam_elements.append((le, ei, average, half_difference, fe))
             dofs = [2 * e_idx, 2 * e_idx + 1, 2 * (e_idx + 1), 2 * (e_idx + 1) + 1]
             for a_i in range(4):
                 f_eq[dofs[a_i]] += fe[a_i]
@@ -2352,24 +2373,26 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
             sum(k_glob[i][j] * u_full[j] for j in range(ndof)) - f_eq[i]
             for i in range(ndof)
         ]
-        # A constant distributed load adds a clamped quartic particular solution
-        # h*t²*(1-t)², t=(x-x_i)/L. It has zero nodal displacement and slope,
-        # so the assembled nodal solution and reactions already include its load.
+        # The particular displacement has zero nodal values and slopes. Its even
+        # and odd modes are t²(1-t)² and (2t-1)t²(1-t)², where t is local x/L.
+        # Their curvatures are orthogonal to each other and to the Hermite field.
         energy_terms = []
         distributed_work = []
         midspans = []
-        for index, (length, rigidity, load) in enumerate(beam_elements):
-            w0, theta0, w1, theta1 = u_full[2 * index:2 * index + 4]
-            h = load * length ** 4 / (24.0 * rigidity)
-            # The second derivative with respect to t separates into orthogonal
-            # constant, linear and quadratic terms on [0,1]. Integrate EI*w''²/2.
+        for index, (length, rigidity, average, half_difference, fe) in enumerate(beam_elements):
+            nodal = u_full[2 * index:2 * index + 4]
+            w0, theta0, w1, theta1 = nodal
+            even = average * length ** 4 / (24.0 * rigidity)
+            odd = half_difference * length ** 4 / (120.0 * rigidity)
             constant = length * (theta1 - theta0)
             linear = length * (theta0 + theta1) - 2.0 * (w1 - w0)
-            energy_terms.append(0.5 * rigidity / length ** 3
-                                * (constant ** 2 + 3.0 * linear ** 2 + 0.8 * h ** 2))
-            average_w = 0.5 * (w0 + w1) + length * (theta0 - theta1) / 12.0 + h / 30.0
-            distributed_work.append(0.5 * load * length * average_w)
-            midspans.append(0.5 * (w0 + w1) + length * (theta0 - theta1) / 8.0 + h / 16.0)
+            energy_terms.append(0.5 * rigidity / length ** 3 *
+                                (constant ** 2 + 3.0 * linear ** 2 +
+                                 0.8 * even ** 2 + (4.0 / 7.0) * odd ** 2))
+            hermite_work = math.fsum(f * u for f, u in zip(fe, nodal))
+            interior_work = length * (average * even / 30.0 + half_difference * odd / 210.0)
+            distributed_work.append(0.5 * (hermite_work + interior_work))
+            midspans.append(0.5 * (w0 + w1) + length * (theta0 - theta1) / 8.0 + even / 16.0)
 
         point_work = [0.5 * force * displacement for force, displacement in zip(nodal_loads, u_full)]
         support_terms = [0.5 * reactions[d] * value for d, value in prescribed.items()]

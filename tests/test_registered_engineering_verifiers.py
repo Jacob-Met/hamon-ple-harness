@@ -66,6 +66,33 @@ CASES = [
     ("electrochem_separations", {"subkind": "electrochemistry", "E0_V": 1.05,
                                  "n_electrons": 2.0, "T_K": 298.15, "Q_reaction": 0.12}),
 ]
+def beam_profile(q0, q1, count, rigidity=1000.0):
+    nodes = [2.0 * k / count for k in range(count + 1)]
+    loads = [q0 + (q1 - q0) * x / 2.0 for x in nodes]
+    return {
+        "mode": "euler_bernoulli_beam_1d", "x_nodes_m": nodes, "EI_Nm2": rigidity,
+        "supports": [{"node": 0, "fix_w": True, "fix_theta": True}],
+        "elements": [{"q_start_N_m": a, "q_end_N_m": b} for a, b in zip(loads, loads[1:])],
+    }
+
+
+BEAM_PROFILES = {
+    "beam-ramp-coarse": beam_profile(0, -600, 1),
+    "beam-ramp-fine": beam_profile(0, -600, 4),
+    "beam-reverse-small": beam_profile(-600, 0, 3, rigidity=1e6),
+    "beam-trapezoid": beam_profile(-100, -600, 2),
+    "beam-uniform-ends": beam_profile(-350, -350, 1),
+    "beam-uniform": {**beam_profile(-350, -350, 1), "elements": [{"q_N_m": -350}]},
+    "beam-antisymmetric": {**beam_profile(-600, 600, 1),
+        "supports": [{"node": i, "fix_w": True, "fix_theta": True} for i in (0, 1)]},
+    "beam-extra-element": {**beam_profile(0, -600, 1),
+                           "elements": [{"q_N_m": 0}, {"q_start_N_m": 0, "q_end_N_m": -600}]},
+    "beam-incomplete": {**beam_profile(0, -600, 1), "elements": [{"q_end_N_m": -600}]},
+    "beam-ambiguous": {**beam_profile(0, -600, 1), "elements": [
+        {"q_N_m": -600, "q_start_N_m": 0, "q_end_N_m": -600}]},
+}
+
+
 NEGATIVE_PHYSICS = [
     ("pde", {**CASES[0][1], "length_m": -0.11}),
     ("thermo_cycles", {"subkind": "otto", "r": 0.9, "T1": 295.0, "T3": 2050.0}),
@@ -466,6 +493,8 @@ def routed(tmp_path_factory):
             field, value, atol = claim
             spec.update(claimed_field=field, claimed_value=value, atol=atol, rtol=0)
         calls.append({"id": case, "mode": "pde", "spec": spec})
+    calls.extend({"id": name, "mode": "fem", "spec": spec}
+                 for name, spec in BEAM_PROFILES.items())
     source = r"""
 import registerTaskTools, { PLE_DOMAIN_TOOL_NAMES } from './task-tools.ts';
 const tools = new Map();
@@ -1350,3 +1379,45 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
         for args in HEAT_AMPLITUDE_CASES:
             with self.subTest(case=args[0]):
                 test_registered_heat_modal_amplitude(self.routed_data, *args)
+
+@pytest.mark.parametrize("name,q0,q1,rigidity", [
+    ("beam-ramp-coarse", 0, -600, 1000), ("beam-ramp-fine", 0, -600, 1000),
+    ("beam-reverse-small", -600, 0, 1e6), ("beam-trapezoid", -100, -600, 1000),
+    ("beam-uniform-ends", -350, -350, 1000),
+])
+def test_beam_linear_load_against_section_equilibrium(routed, name, q0, q1, rigidity):
+    outcome = routed[name]
+    assert outcome["completed"], outcome
+    got = outcome["details"]
+    assert got["passed"], got
+    length = 2.0
+    slope = (q1 - q0) / length
+    # Independent section equilibrium: M(x) = integral_x^L q(s) (s-x) ds.
+    moment = [q0 * length ** 2 / 2 + slope * length ** 3 / 3,
+              -q0 * length - slope * length ** 2 / 2, q0 / 2, slope / 6]
+    def deflection(x):
+        return sum(c * x ** (i + 2) / ((i + 1) * (i + 2))
+                   for i, c in enumerate(moment)) / rigidity
+    energy = sum(a * b * length ** (i + j + 1) / (i + j + 1)
+                 for i, a in enumerate(moment) for j, b in enumerate(moment)) / (2 * rigidity)
+    assert got["reactions_V_M"][0] == pytest.approx([moment[1], -moment[0]])
+    assert got["tip_deflection_m"] == pytest.approx(deflection(length))
+    assert got["strain_energy_J"] == pytest.approx(energy)
+    assert got["external_work_J"] == pytest.approx(energy)
+    nodes = BEAM_PROFILES[name]["x_nodes_m"]
+    assert got["element_midspan_deflections_m"] == pytest.approx(
+        [deflection((a + b) / 2) for a, b in zip(nodes, nodes[1:])])
+
+
+def test_beam_antisymmetric_load_energy_and_profile_contract(routed):
+    same = routed["beam-uniform-ends"]["details"]
+    assert same == routed["beam-uniform"]["details"]
+    got = routed["beam-antisymmetric"]["details"]
+    assert got["passed"] and got["element_midspan_deflections_m"] == [0.0]
+    # For q=600(2t-1), the fixed-end bubble is h*(2t-1)t²(1-t)².
+    h = 600 * 2**4 / (120 * 1000)
+    energy = 0.5 * 1000 / 2**3 * (4 / 7) * h**2
+    assert got["strain_energy_J"] == pytest.approx(energy)
+    assert got["external_work_J"] == pytest.approx(energy)
+    for case in ("beam-incomplete", "beam-ambiguous", "beam-extra-element"):
+        assert not routed[case]["details"]["passed"]
