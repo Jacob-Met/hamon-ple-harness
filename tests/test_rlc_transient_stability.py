@@ -122,6 +122,17 @@ class RlcTransientStabilityTests(unittest.TestCase):
                     actual = self.assert_solution(spec)
                     self.assertEqual(actual["regime"], expected)
 
+    def test_subnormal_resistance_and_inductance_preserve_the_decay_rate(self):
+        spec = dict(R=5e-324, L=5e-324, C=1e308, V_s=0., v_c0=1e-308,
+                    i_l0=1., t=1e-8)
+        actual = wave6.solve_transmission_line_rlc(dict(spec, subkind="rlc_transient"))
+        self.assertTrue(actual["verified"], actual)
+        self.assertEqual(actual["regime"], "underdamped")
+        self.assertTrue(math.isclose(actual["zeta"] * actual["omega0_rad_s"], 0.5))
+        voltage, current = reference(spec)
+        self.assertTrue(math.isclose(actual["v_c_V"], voltage, rel_tol=1e-8))
+        self.assertTrue(math.isclose(actual["i_l_A"], current, rel_tol=1e-8))
+
     def test_decimal_critical_components_with_unequal_rounded_rates(self):
         actual = self.assert_solution(dict(R=.14, L=.0049, C=1., V_s=1., t=.025))
         self.assertEqual(actual["regime"], "critically_damped")

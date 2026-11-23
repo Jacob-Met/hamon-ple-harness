@@ -803,17 +803,22 @@ def _rlc_overdamped_modes(r, l, c, vs, v0, i0, time_):
         return float(voltage), float(current_end)
 
 
-def _rlc_poles(r, l, c):
-    """Classify the public decimal components before rounding any derived rates."""
-    resistance, inductance, capacitance = (Fraction(str(x)) for x in (r, l, c))
+def _rlc_scales(r, l, c):
+    """Use the same physical component values as the independent matrix reference."""
+    rd, ld, cd = (Decimal(str(value)) for value in (r, l, c))
+    resistance, inductance, capacitance = map(Fraction, (rd, ld, cd))
     discriminant = resistance**2 * capacitance - 4 * inductance
-    if discriminant == 0:
-        return "critically_damped", 0.0
-    squared_rate = abs(discriminant) / (4 * inductance**2 * capacitance)
     with localcontext() as context:
         context.prec = 50
+        alpha = float(rd / (2 * ld))
+        omega = float(1 / (ld * cd).sqrt())
+        impedance = float((ld / cd).sqrt())
+        if discriminant == 0:
+            return alpha, omega, impedance, "critically_damped", 0.0
+        squared_rate = abs(discriminant) / (4 * inductance**2 * capacitance)
         rate = (Decimal(squared_rate.numerator) / Decimal(squared_rate.denominator)).sqrt()
-    return ("overdamped" if discriminant > 0 else "underdamped"), float(rate)
+    regime = "overdamped" if discriminant > 0 else "underdamped"
+    return alpha, omega, impedance, regime, float(rate)
 
 
 def _rlc_analytic_state(alpha, omega, impedance, vs, v0, i0, time_, r, l, c, regime, modal_rate):
@@ -891,17 +896,13 @@ def _solve_rlc_transient(params):
         raise ValueError("RLC parameters must be finite")
     if r < 0 or l <= 0 or c <= 0 or time_ < 0:
         raise ValueError("Passive RLC requires R >= 0, L > 0, C > 0 and t >= 0")
-    alpha = (0.5 * r) / l
-    # Multiplying L and C first can round a subnormal product by several ppm.
-    omega = (1.0 / math.sqrt(l)) / math.sqrt(c)
-    impedance = math.sqrt(l) / math.sqrt(c)
+    alpha, omega, impedance, regime, modal_rate = _rlc_scales(r, l, c)
     if not all(math.isfinite(value) and value > 0 for value in (omega, impedance)):
         raise ValueError("RLC natural scales exceed the supported finite range")
     if not math.isfinite(alpha) or not math.isfinite(alpha / omega):
         raise ValueError("RLC damping exceeds the supported finite range")
     if not math.isfinite(v0 - vs) or not math.isfinite(i0 * impedance):
         raise ValueError("RLC initial state exceeds the supported finite range")
-    regime, modal_rate = _rlc_poles(r, l, c)
     voltage, current, regime = _rlc_analytic_state(
         alpha, omega, impedance, vs, v0, i0, time_, r, l, c, regime, modal_rate)
     if not math.isfinite(voltage) or not math.isfinite(current):
