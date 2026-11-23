@@ -47,6 +47,8 @@ def _report(value):
     shown = float(value)
     if not math.isfinite(shown) or (value and not shown):
         raise ValueError("feeder result exceeds the finite nonzero reporting range")
+    if value and abs(Decimal.from_float(shown) - value) > abs(value) * Decimal("1e-10"):
+        raise ValueError("feeder quantity lies outside the supported relative reporting resolution")
     return shown
 
 
