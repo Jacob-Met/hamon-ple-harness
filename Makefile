@@ -6,3 +6,6 @@ verify-distillation:
 
 verify-pfr:
 	$(PYTHON) -m unittest discover -s tests -p 'test_pfr*.py' -v
+.PHONY: verify-witness-equipment
+verify-witness-equipment:
+	$(PYTHON) -m unittest discover -s tests -p 'test_witness_equipment.py' -v

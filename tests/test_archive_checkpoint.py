@@ -238,8 +238,8 @@ class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
             subprocess.run(command + ["--verify"], check=True, cwd=root)
             archive_checkpoint.verify(target, names)
 
-    async def exercise(self, complete):
-        prompt = public_task("eor-review-corrections")
+    async def exercise(self, complete, late_foundation=False, inspect=None, acknowledge_repair=False):
+        prompt = public_task("foundation-strategy" if late_foundation else "eor-review-corrections")
         original = next((ROOT/"artifacts/eor-review-corrections/files").rglob("submission.zip"))
         with tempfile.TemporaryDirectory() as tmp:
             workdir = "/filesystem/fixture"
@@ -256,8 +256,20 @@ class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
                 if log_prefix == "pi: ":
                     self.assertIn(b"FIRST COMPLETE VERSION", stdin)
                     self.assertFalse(target.exists())
-                    with zipfile.ZipFile(original) as z:
-                        z.extractall(stage)
+                    if late_foundation:
+                        stage.mkdir()
+                        for member in members:
+                            if member.endswith(".xlsx"):
+                                with zipfile.ZipFile(original) as z:
+                                    data = z.read("constraint_register.xlsx")
+                            elif member.endswith(".json"):
+                                data = b'{"control":"format only"}'
+                            else:
+                                data = b"# Format-only fixture"
+                            (stage/member).write_bytes(data)
+                    else:
+                        with zipfile.ZipFile(original) as z:
+                            z.extractall(stage)
                     if not complete:
                         (stage/members[-1]).unlink()
                     events.append("first pass")
@@ -271,6 +283,14 @@ class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(target.exists())
                     self.assertIn(b"REQUIRED DELIVERY REPAIR", stdin)
                     events.append("delivery repair")
+                    if late_foundation:
+                        (stage/members[-1]).write_text("# Format-only repaired member")
+                        if acknowledge_repair:
+                            await on_line(json.dumps({"type": "tool_execution_start", "toolCallId": "last",
+                                                      "toolName": "write", "args": {"path": str(stage/members[-1])}}).encode())
+                            await on_line(b'{"type":"message_end","message":{"role":"toolResult","toolCallId":"last","isError":false}}')
+                            archive_checkpoint.verify(target, members)
+                            events.append("verified before repair exit")
                 else:
                     archive_checkpoint.verify_checkpoint(stage, target, members)
                     self.assertIn(b"Work only on staged members", stdin)
@@ -311,7 +331,13 @@ class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
                     (harness.archive_contract,"recover_after_refinement",dict(return_value="kept")),
                 ]:
                     stack.enter_context(mock.patch.object(obj,attr,**kw))
-                await harness.solve(session)
+                result = await harness.solve(session)
+                if late_foundation:
+                    archive_checkpoint.verify(target, members)
+                    self.assertEqual(len(members), 6)
+                    self.assertNotIn("Incomplete delivery", result)
+                    if inspect:
+                        inspect(target)
             return events, target.exists()
 
     async def test_verified_first_package_precedes_optional_run(self):
@@ -322,4 +348,14 @@ class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
     async def test_missing_member_allows_repair_and_prevents_refinement(self):
         events, exists = await self.exercise(complete=False)
         self.assertFalse(exists)
-        self.assertEqual(events, ["first pass", "incomplete", "initial process still running", "incomplete", "delivery repair"])
+        self.assertEqual(events, ["first pass", "incomplete", "initial process still running", "incomplete", "delivery repair", "incomplete"])
+
+    async def test_foundation_last_repair_member_is_published_without_another_model_turn(self):
+        events, exists = await self.exercise(complete=False, late_foundation=True)
+        self.assertTrue(exists)
+        self.assertEqual(events[-3:], ["incomplete", "delivery repair", "published"])
+
+    async def test_last_repair_acknowledgement_publishes_before_process_exit(self):
+        events, exists = await self.exercise(complete=False, late_foundation=True, acknowledge_repair=True)
+        self.assertTrue(exists)
+        self.assertEqual(events[-3:], ["delivery repair", "published", "verified before repair exit"])

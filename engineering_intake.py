@@ -320,6 +320,8 @@ async def provision_engineering_cli(session: Any) -> str:
         "\nDETERMINISTIC ENGINEERING TOOLS (in the task container; no internet):"
         "\n  python3 /tmp/hamon-engineering-toolkit.py witness-package SPEC.json --output PACKAGE.docx"
         " reconciles source-dated commissioning dispositions and the actual standing case items; use witness-package --example for its JSON fields."
+        "\n  python3 /tmp/hamon-engineering-toolkit.py witness-equipment CHECKLIST.pdf LIST.xlsx --edition ISSUE --title-sheet TITLE --sheet EQUIPMENT"
+        " distinguishes explicit installed-model records from cover-sheet references and returns exact catalog cells."
         "\n  python3 /tmp/hamon-engineering-toolkit.py quantity '12*kip/(8*in_**2)' --to ksi"
         "\n  python3 /tmp/hamon-engineering-toolkit.py check '1*kN' '1000*N'"
         "\n  python3 /tmp/hamon-engineering-toolkit.py xlsx-audit FILE.xlsx"
