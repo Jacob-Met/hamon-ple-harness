@@ -373,3 +373,18 @@ def test_electrochem_invalid_input_returns_structured_refusal():
         row = solve_electrochem_or_separation({**spec, **patch})
         assert row["verified"] is False and row["error"]
         assert "mass_deposited_g" not in row
+
+
+def test_registered_distillation_uses_tabulated_equilibrium_over_scalar_volatility():
+    from hamon_conservation_cad_verifier import run_router_conservation_cad_verifier
+    spec = {"subkind": "distillation", "z_F": .5, "x_D": .9, "x_B": .1,
+            "alpha": 3, "R": 1.5, "equilibrium_points":
+            [[0,0], [.1,.2], [.3,.4], [.5,.75], [.7,.78], [.9,.95], [1,1]]}
+    result = run_router_conservation_cad_verifier({"mode": "electrochem_separations", "spec": spec})
+    assert result["verified"] is False
+    assert result["min_operating_gap"] == 0
+    assert result["limiting_composition"] == .7
+    spec["R"] = 2
+    result = run_router_conservation_cad_verifier({"mode": "electrochem_separations", "spec": spec})
+    assert result["verified"] is True
+    assert (result["N_stages_integer"], result["feed_stage"]) == (16, 7)

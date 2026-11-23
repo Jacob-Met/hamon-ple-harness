@@ -15,27 +15,56 @@ def _interpolate(x, xs, ys):
     return ys[i] + (x - xs[i]) * (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i])
 
 
+def _inverse(y, xs, ys, increasing):
+    if increasing:
+        if ys[0] <= y <= ys[-1]:
+            return _interpolate(y, ys, xs)
+    else:
+        roots = set()
+        for x0, x1, y0, y1 in zip(xs, xs[1:], ys, ys[1:]):
+            if min(y0, y1) <= y <= max(y0, y1):
+                if y0 == y1:
+                    raise ValueError("ambiguous_equilibrium_inverse")
+                roots.add(x0 + (y-y0)*(x1-x0)/(y1-y0))
+                if len(roots) > 1:
+                    raise ValueError("ambiguous_equilibrium_inverse")
+        if roots:
+            return roots.pop()
+    raise ValueError("stage_outside_equilibrium_table")
+
+
 def solve_tabulated_distillation(spec):
     result = {"domain": "electrochem_separations", "subkind": "distillation",
               "equilibrium_model": "piecewise_linear_table", "verified": False}
     try:
-        if "alpha" in spec:
+        measured = "equilibrium_points" in spec
+        if measured and "equilibrium_table" in spec:
+            raise ValueError("supply only one equilibrium table")
+        if not measured and "alpha" in spec:
             raise ValueError("supply either equilibrium_table or alpha")
-        table = spec["equilibrium_table"]
+        table = spec["equilibrium_points" if measured else "equilibrium_table"]
         if not isinstance(table, (list, tuple)) or len(table) < 2:
             raise ValueError("equilibrium_table requires at least two [x,y] pairs")
         if any(not isinstance(row, (list, tuple)) or len(row) != 2 for row in table):
             raise ValueError("expected [liquid_fraction,vapor_fraction] pairs")
         xs, ys = zip(*[(_number(x), _number(y)) for x, y in table])
-        if (xs[0], ys[0], xs[-1], ys[-1]) != (0, 0, 1, 1):
-            raise ValueError("equilibrium_table must span (0,0) to (1,1)")
-        if any(a >= b for axis in (xs, ys) for a, b in zip(axis, axis[1:])):
-            raise ValueError("equilibrium coordinates must increase strictly on both axes")
+        if any(value < 0 or value > 1 for axis in (xs, ys) for value in axis):
+            raise ValueError("equilibrium fractions must lie between zero and one")
+        if any(a >= b for a, b in zip(xs, xs[1:])):
+            raise ValueError("liquid compositions must increase strictly")
+        increasing = all(a < b for a, b in zip(ys, ys[1:]))
+        if not measured:
+            if (xs[0], ys[0], xs[-1], ys[-1]) != (0, 0, 1, 1):
+                raise ValueError("equilibrium_table must span (0,0) to (1,1)")
+            if not increasing:
+                raise ValueError("equilibrium coordinates must increase strictly on both axes")
         xb, z, xd = (_number(spec[k]) for k in ("x_B", "z_F", "x_D"))
         q = _number(spec.get("q", 1))
         feed = _number(spec.get("F_mol_s", 100))
         if not 0 < xb < z < xd < 1 or feed <= 0:
             raise ValueError("invalid feed or product compositions")
+        if xs[0] > xb or xs[-1] < xd:
+            raise ValueError("equilibrium table does not cover the product interval")
         d = feed * (z - xb) / (xd - xb)
         b = feed - d
         floor = max(Fraction(0), (1 - q) * feed / d - 1)
@@ -90,7 +119,7 @@ def solve_tabulated_distillation(spec):
             raise ArithmeticError("feed intersection violates the material balances")
         result.update(feed_intersection_x=float(xi), feed_intersection_y=float(yi))
         if not l and not vs:
-            if _interpolate(xb, xs, ys) != xd:
+            if _inverse(xd, xs, ys, increasing) != xb:
                 raise ValueError("zero-circulation flash products are not in equilibrium")
             return dict(result, verified=True, section_mode="single_equilibrium_flash",
                         N_stages_integer=1, N_theoretical=1., feed_stage=1, residual=0.)
@@ -109,7 +138,7 @@ def solve_tabulated_distillation(spec):
         result["section_mode"] = mode
         stage_y, previous, feed_stage = xd, xd, None
         for count in range(1, 4097):
-            x = _interpolate(stage_y, ys, xs)
+            x = _inverse(stage_y, xs, ys, increasing)
             if x >= previous:
                 raise ArithmeticError("stage failed to descend")
             if feed_stage is None and x <= xi:
