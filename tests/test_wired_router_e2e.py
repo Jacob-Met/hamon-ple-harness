@@ -106,11 +106,15 @@ def test_select_and_dispatch_ple_bim():
 
 
 def test_task_tools_ts_live_relay_roundtrip():
+    from test_ifc_compound_mass import course
+
     here = Path(__file__).resolve().parent.parent
     relay_ops = []
     with tempfile.TemporaryDirectory(prefix="ple-ts-router-") as td:
         wdir = Path(td)
         (wdir / "site.ifc").write_text(SAMPLE_IFC, encoding="utf-8")
+        (wdir / "reflected.ifc").write_text(course(reverse=False, reflect=True, right_scale=1.))
+        (wdir / "open.ifc").write_text(course(declared_open=True, reflect=True, probe=True))
         pdf_bytes = hamon_drawing_reader.build_minimal_vector_pdf([
             {
                 "width_pt": 612.0,
@@ -134,11 +138,17 @@ const pi = {
 };
 registerTaskTools(pi);
 const ifcOut = await tools.get('hamon_ifc_spatial_clash').execute('1', { path: 'site.ifc', required_clearance_m: 0.08, cross_discipline_only: true }, null, () => {}, {});
+const ifc = tools.get('hamon_ifc_spatial_clash');
+const reflected = await ifc.execute('reflection', { path: 'reflected.ifc' }, null, () => {}, {});
+const open = await ifc.execute('open', { path: 'open.ifc' }, null, () => {}, {});
 const pdfOut = await tools.get('hamon_drawing_reader').execute('2', { path: 'sheet.pdf' }, null, () => {}, {});
 const preOut = await tools.get('check_deliverable_preflight').execute('3', { path: 'predictions.json', expected_task_ids: ['task_a', 'task_b'] }, null, () => {}, {});
 console.log(JSON.stringify({
   domain_names: PLE_DOMAIN_TOOL_NAMES,
   ifc_ok: ifcOut.details.ok,
+  reflected_volume: reflected.details.total_solid_volume_m3,
+  open_volume: open.details.total_solid_volume_m3,
+  open_witness: open.details.all_pairs[0].closest_points_m,
   pdf_ok: pdfOut.details.ok,
   pre_ok: preOut.details.ok,
 }));
@@ -162,6 +172,9 @@ console.log(JSON.stringify({
             out = json.loads(proc.stdout.strip().splitlines()[-1])
             assert out["domain_names"] == ["hamon_ifc_spatial_clash", "hamon_drawing_reader", "hamon_conservation_cad_verifier", "check_deliverable_preflight"]
             assert out["ifc_ok"] is True
+            assert abs(out["reflected_volume"] - 1/3) < 1e-12
+            assert out["open_volume"] is None
+            assert len(out["open_witness"]) == 2
             assert out["pdf_ok"] is True
             assert out["pre_ok"] is True
             assert len(relay_ops) >= 2
