@@ -15,10 +15,9 @@ The signed load moment M is defined so that the balancing pressure satisfies
     integral p(x) dx = N
     integral x p(x) dx = M
 
-A positive M places the compression resultant toward positive x. Combine all
-applied moments about the base center with that sign before calling. A wall's
-horizontal thrust and its separately integrated toe moment must not be
-collapsed to a thrust location when the thrust is zero.
+A positive M places the compression resultant toward positive x. A balanced
+pair of horizontal forces at different elevations contributes a signed couple
+even when its net thrust is zero.
 
 This model requires **p(x) = max(0, a + b*x)** over the whole base. It is the
 standard linear pressure, compression-only contact idealization. An arbitrary
@@ -34,13 +33,26 @@ an equivalent uniform effective-area pressure is not the contact diagram here.
 
 ## Inputs and outputs
 
-All three inputs are required:
+Supply the strip width and either the two aggregate loads below or an
+`applied_loads` list.
 
 | Input | Numeric SI unit | Meaning |
 |---|---|---|
 | base_width_m | m | Positive strip width |
 | vertical_resultant_N_m | N/m | Downward normal load per unit length |
 | moment_Nm_m | N m/m | Signed load moment per unit length about the center |
+
+In `applied_loads`, a force has `horizontal_N_m` (right positive) and its
+`height_m` (up positive), `vertical_N_m` (down positive) and its `x_m`
+(right positive), or both pairs for a force with two components. A free
+couple has the single field `couple_Nm_m` (clockwise positive). The optional
+`base_center` object supplies both `x_m` and `height_m` of the base center
+in the same frame as the application points. Its default is (0, 0).
+For each action the solver sums H, V, and
+`H*(height-center_height) + V*(x-center_x) + couple`. The reported contact
+coordinates always refer to the base center. Action input also reports
+`horizontal_resultant_N_m`. A nonzero value prevents an equilibrium
+certificate because the model supplies only normal pressure.
 
 Numbers use those SI units. Strings must carry compatible dimensions, such as
 `"3000*mm"`, `"100*kN/m"`, and `"144*kN*m/m"`. Booleans, nonfinite
@@ -101,6 +113,20 @@ This gives partial contact over [1.32, 1.50] m, contact width 0.18 m, and
 maximum pressure 1111111.111111111 Pa. Reversing M reflects the interval to
 [-1.50, -1.32] m with the same width and maximum pressure. The ordinary
 full-base extrapolation would instead demand -62666.6667 Pa at one edge.
+
+These individual actions give the same pressure diagram:
+
+```json
+{
+  "calculation": "rigid_strip_contact",
+  "base_width_m": 3,
+  "applied_loads": [
+    {"vertical_N_m": 100000, "x_m": 0},
+    {"horizontal_N_m": 48000, "height_m": 3},
+    {"horizontal_N_m": -48000, "height_m": 0}
+  ]
+}
+```
 
 ## Basis
 
