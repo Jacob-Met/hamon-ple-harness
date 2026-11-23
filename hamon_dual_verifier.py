@@ -2723,9 +2723,9 @@ def _column_quantity(spec: dict[str, Any], field: str, unit: str) -> float:
     raise ValueError(f"{field} must have units compatible with {unit}, got {quantity.dim_list()}")
 
 
-def _column_force(spec: dict[str, Any], field: str) -> Fraction:
-    """Keep rational load arithmetic exact for the H1 equation boundary."""
-    _column_quantity(spec, field, "N")
+def _column_exact_quantity(spec: dict[str, Any], field: str, unit: str) -> Fraction:
+    """Keep force and moment ratios exact through the H1 branch and capacity checks."""
+    _column_quantity(spec, field, unit)
     expression = str(spec[field])
 
     def amount(node: ast.AST) -> Fraction:
@@ -2734,7 +2734,7 @@ def _column_force(spec: dict[str, Any], field: str) -> Fraction:
                 return Fraction(node.value)
             literal = Decimal(ast.get_source_segment(expression, node).replace("_", ""))
             if literal and literal.adjusted() < -8192:
-                raise ValueError(f"{field} exceeds the supported exact force precision")
+                raise ValueError(f"{field} exceeds the supported exact load precision")
             return Fraction(literal)
         if isinstance(node, ast.Name):
             # Pressure times area is also a force. Preserve the exact customary
@@ -2743,6 +2743,10 @@ def _column_force(spec: dict[str, Any], field: str) -> Fraction:
                 force = "kip" if node.id.startswith("k") else "lbf"
                 length = "ft" if node.id.endswith("f") else "inch"
                 return Fraction(_EXACT_SI_SCALES[force][0]) / Fraction(_EXACT_SI_SCALES[length][0])**2
+            if node.id in ("lbf_ft", "lbf_in", "kip_ft", "kip_in"):
+                force, length = node.id.split("_")
+                length = "inch" if length == "in" else length
+                return Fraction(_EXACT_SI_SCALES[force][0]) * Fraction(_EXACT_SI_SCALES[length][0])
             if node.id == "tonf":
                 return 2000 * Fraction(_EXACT_SI_SCALES["lbf"][0])
             if node.id in _EXACT_SI_SCALES:
@@ -2764,7 +2768,7 @@ def _column_force(spec: dict[str, Any], field: str) -> Fraction:
             if right.denominator == 1:
                 exponent = int(right)
                 if max(left.numerator.bit_length(), left.denominator.bit_length()) * abs(exponent) > 65536:
-                    raise ValueError(f"{field} exceeds the supported exact force precision")
+                    raise ValueError(f"{field} exceeds the supported exact load precision")
                 return left ** exponent
         if isinstance(node, ast.Call) and node.func.id in ("abs", "min", "max"):
             values = [amount(arg) for arg in node.args]
@@ -2779,7 +2783,7 @@ def _column_force(spec: dict[str, Any], field: str) -> Fraction:
         except (ValueError, ArithmeticError):
             value = Decimal(str(eval_quantity(term).val))
         if value and abs(value.adjusted()) > 8192:
-            raise ValueError(f"{field} exceeds the supported exact force precision")
+            raise ValueError(f"{field} exceeds the supported exact load precision")
         return Fraction(value)
 
     return amount(ast.parse(expression, mode="eval").body)
@@ -2807,35 +2811,32 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
             res[f"wall_{wid}_shear_N"] = v
         return res
     if kind == "column_interaction_aisc":
-        pu = _column_force(spec, "Pu")
-        pc = _column_force(spec, "Pc")
-        mux = _column_quantity(spec, "Mux", "N_m")
-        mcx = _column_quantity(spec, "Mcx", "N_m")
-        muy = _column_quantity(spec, "Muy", "N_m")
-        mcy = _column_quantity(spec, "Mcy", "N_m")
-        # Symbolic vs float cross-check
-        axial = pu / pc
-        r_p = float(axial)
-        symbolic_axial = Decimal(axial.numerator) / Decimal(axial.denominator)
+        pu, pc = (_column_exact_quantity(spec, k, "N") for k in ("Pu", "Pc"))
+        mux, mcx, muy, mcy = (_column_exact_quantity(spec, k, "N_m")
+                              for k in ("Mux", "Mcx", "Muy", "Mcy"))
+        if min(pc, mcx, mcy) <= 0:
+            raise ValueError("Available axial and flexural strengths must be positive")
+        # AISC 360-22, H1.1: all interaction terms are positive. The caller
+        # supplies each available strength for the particular member and load sense.
+        axial = abs(pu) / pc
+        mx, my = mux / mcx, muy / mcy
         if axial >= Fraction(1, 5):
-            eq = "H1-1a"
-            u_num = r_p + (8.0 / 9.0) * (mux / mcx + muy / mcy)
-            u_sym = float(symbolic_axial + (Decimal(8) / Decimal(9)) * (
-                Decimal(str(mux)) / Decimal(str(mcx)) + Decimal(str(muy)) / Decimal(str(mcy))
-            ))
+            equation, axial_term, bending_factor = "H1-1a", axial, Fraction(8, 9)
         else:
-            eq = "H1-1b"
-            u_num = 0.5 * r_p + (mux / mcx + muy / mcy)
-            u_sym = float(Decimal("0.5") * symbolic_axial + (
-                Decimal(str(mux)) / Decimal(str(mcx)) + Decimal(str(muy)) / Decimal(str(mcy))
-            ))
+            equation, axial_term, bending_factor = "H1-1b", axial / 2, Fraction(1)
+        utilization = axial_term + bending_factor * (abs(mx) + abs(my))
+        # Recover the positive sum independently as the maximum over the four
+        # possible signed axis combinations.
+        corner = max(sx*float(mx) + sy*float(my) for sx in (-1, 1) for sy in (-1, 1))
+        replay = float(axial_term) + float(bending_factor)*corner
+        discrepancy = _rel_diff(float(utilization), replay)
         return {
-            "axial_ratio": r_p,
-            "governing_equation": eq,
-            "interaction_ratio": u_num,
-            "passes": u_num <= 1.0,
-            "dual_rel_discrepancy": _rel_diff(u_sym, u_num),
-            "dual_verified": True,
+            "axial_ratio": float(axial),
+            "governing_equation": equation,
+            "interaction_ratio": float(utilization),
+            "passes": utilization <= 1,
+            "dual_rel_discrepancy": discrepancy,
+            "dual_verified": discrepancy <= 1e-12,
         }
     if kind == "column_buckling_aisc_e3":
         K = float(spec.get("K", 1.0))
