@@ -1329,9 +1329,19 @@ def solve_nodal_kcl(spec: dict[str, Any], *, omega: float | None = None) -> dict
         branch_values[collection, index] = value
         surplus.setdefault(n1, []).append(-value)
         surplus.setdefault(n2, []).append(value)
+    # Keep each cut sum on the original represented injections and ordinary
+    # branch currents. Rounding a child winding before propagation can erase
+    # a surviving parent current when opposing loads nearly cancel.
+    cut = {}
+    for node in representative:
+        terms = surplus.get(node, ())
+        cut[node] = [sum(Fraction(v.real) for v in terms), sum(Fraction(v.imag) for v in terms)]
     for child, parent, index in reversed(winding_tree):
-        flow = sum_currents(surplus.get(child, ()))
+        real_flow, imag_flow = cut[child]
+        flow = complex(real_flow, imag_flow)
         branch_values["inductors", index] = flow if child == winding_start[index] else -flow
+        cut[parent][0] += real_flow
+        cut[parent][1] += imag_flow
         surplus.setdefault(parent, []).append(flow)
         surplus.setdefault(child, []).append(-flow)
     if winding_tree:
@@ -1356,7 +1366,8 @@ def solve_nodal_kcl(spec: dict[str, Any], *, omega: float | None = None) -> dict
     # subtracting independent injections. Parallel ideal supplies at one node
     # do not individually have a determined current.
     out["prescribed_node_supply_A"] = {
-        node: current_value(-sum_currents(surplus.get(node, ()))) for node in fixed_v if node != "__GND__"
+        node: current_value(-complex(*cut[node]) if node in cut else -sum_currents(surplus.get(node, ())))
+        for node in fixed_v if node != "__GND__"
     }
     return out
 

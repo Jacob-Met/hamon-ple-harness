@@ -64,6 +64,19 @@ class DCWindingTests(unittest.TestCase):
         self.assertEqual(value(o["prescribed_node_supply_A"]["bus"]),1.5-.25j)
         self.assertEqual(o["branch_currents"][2]["current_A"],0)
 
+    def test_subtree_cut_retains_remainder_when_an_inner_current_rounds(self):
+        for order in (1, -1):
+            for polarity in (1, -1):
+                # Inner current rounds to 1e20*(1−j), but the outer cut
+                # carries the full residual (1+2j). Source supply is its negative.
+                leaves = [dict(node="b",I_A=[1e20,-1e20]), dict(node="b",I_A=[1,2]),
+                          dict(node="a",I_A=[-1e20,1e20])]
+                outer = winding("a","s") if polarity == 1 else winding("s","a")
+                o = solve(dict(voltage_sources_to_ground={"s":3},current_injections=leaves[::order],
+                               inductors=[winding("b","a"),outer]))
+                self.assertEqual(value(o["branch_currents"][1]["current_A"]),polarity*(1+2j))
+                self.assertEqual(value(o["prescribed_node_supply_A"]["s"]),-1-2j)
+
     def test_nonunique_windings_and_incompatible_prescriptions(self):
         for winds,fixed in [
             ([winding("s","x"),winding("s","x")],{"s":10}),
