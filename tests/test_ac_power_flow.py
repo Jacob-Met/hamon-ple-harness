@@ -473,3 +473,113 @@ def test_saturated_claim_requires_reactive_power_at_its_bound(upper, angle):
     rejected = verify_ac_power_flow(spec)
     assert not rejected["conservation_verified"]
     assert rejected["proposed_pv_limits_consistent"] is False
+
+
+@pytest.mark.parametrize("p,x", [(-1e-9, 1e-6), (1e-12, 1e-6), (-1e-7, 1e-8)])
+@pytest.mark.parametrize("kind,reverse", [("PQ", False), ("PV", True)])
+def test_stiff_line_preserves_signed_active_injection_in_the_published_map(p, x, kind, reverse):
+    # For a lossless line and a unit slack S=V*conj((V-1)/(jX)),
+    # so P=Im(V)/X and Q=(|V|²-Re(V))/X, independent of line orientation.
+    load = {"id": "L", "type": kind, "p_injection_pu": p}
+    load.update({"q_injection_pu": 0} if kind == "PQ" else {"vm_pu": 1})
+    start, end = ("L", "S") if reverse else ("S", "L")
+    spec = {
+        "buses": [{"id": "S", "type": "slack", "vm_pu": 1}, load],
+        "lines": [{"id": "SL", "from": start, "to": end, "r_pu": 0, "x_pu": x}],
+    }
+    result = verify_ac_power_flow(spec)
+    assert result["conservation_verified"], result
+    leaf = result["voltages"]["L"]
+    assert leaf["vm_pu"] * math.sin(math.radians(leaf["va_deg"])) / x == pytest.approx(
+        p, rel=1e-7, abs=0)
+    assert result["bus_injections"]["L"]["p_pu"] == pytest.approx(p, rel=1e-7, abs=0)
+
+    # Both high-voltage branches have vm=1 to binary64 precision here.
+    # The separating angle is representable even for the smallest loading.
+    angle = math.degrees(math.asin(p * x))
+    for multiplier, valid in [(1, True), (0, False), (-1, False)]:
+        proposed = {"S": {"vm_pu": 1, "va_deg": 0},
+                    "L": {"vm_pu": 1, "va_deg": multiplier * angle}}
+        assert verify_ac_power_flow({**spec, "proposed_voltages": proposed})["conservation_verified"] is valid
+
+
+def test_native_flat_map_must_replay_its_terminal_injections():
+    # No shunts or charging, so equal bus voltages produce zero current in
+    # both lines. Summing the B row of Ybus can manufacture precisely 2^-39j.
+    spec = {
+        "buses": [
+            {"id": "A", "type": "slack", "vm_pu": 1},
+            {"id": "B", "type": "PQ", "p_injection_pu": 0, "q_injection_pu": 2**-39},
+            {"id": "C", "type": "PQ", "p_injection_pu": 0, "q_injection_pu": 0},
+        ],
+        "lines": [
+            {"id": "AB", "from": "A", "to": "B", "r_pu": 0, "x_pu": 1.7e-5},
+            {"id": "BC", "from": "B", "to": "C", "r_pu": 0, "x_pu": 1.3e-4},
+        ],
+    }
+    result = verify_ac_power_flow(spec)
+    if result["conservation_verified"]:
+        volts = {name: cmath.rect(v["vm_pu"], math.radians(v["va_deg"]))
+                 for name, v in result["voltages"].items()}
+        current = ((volts["B"] - volts["A"]) / 1.7e-5j
+                   + (volts["B"] - volts["C"]) / 1.3e-4j)
+        assert (volts["B"] * current.conjugate()).imag == pytest.approx(2**-39, rel=1e-7, abs=0)
+    assert not verify_ac_power_flow({
+        **spec, "proposed_voltages": {key: {"vm_pu": 1, "va_deg": 0} for key in "ABC"},
+    })["conservation_verified"]
+
+
+@pytest.mark.parametrize("winding", [-360, 360])
+def test_whole_turn_cannot_create_active_flow(winding):
+    reactance = 1e-6
+    prescribed = math.sin(math.radians(winding)) / reactance
+    spec = {
+        "buses": [{"id": "S", "type": "slack", "vm_pu": 1},
+                  {"id": "L", "type": "PQ", "p_injection_pu": prescribed, "q_injection_pu": 0}],
+        "lines": [{"id": "SL", "from": "S", "to": "L", "r_pu": 0, "x_pu": reactance}],
+    }
+    assert verify_ac_power_flow(spec)["conservation_verified"]
+    for angle in (0, winding):
+        # V_L and V_S are physically identical, and the branch current is zero.
+        claim = {"S": {"vm_pu": 1, "va_deg": 0}, "L": {"vm_pu": 1, "va_deg": angle}}
+        assert not verify_ac_power_flow({**spec, "proposed_voltages": claim})["conservation_verified"]
+
+
+def test_one_ulp_at_rotated_pv_bus_has_its_own_signed_transfer():
+    reference = 17.0
+    angle = math.nextafter(reference, math.inf)
+    reactance = 2**-20
+    prescribed = 5.5664262965032565e-11
+    # For two unit magnitudes the exact terminal transfer depends on delta,
+    # not the difference of two separately rounded rectangular phasors.
+    physical = math.sin(math.radians(angle - reference)) / reactance
+    assert abs(physical - prescribed) > 0.15 * prescribed
+    spec = {
+        "buses": [{"id": "S", "type": "slack", "vm_pu": 1, "va_deg": reference},
+                  {"id": "L", "type": "PV", "vm_pu": 1, "p_injection_pu": prescribed}],
+        "lines": [{"id": "SL", "from": "S", "to": "L", "r_pu": 0, "x_pu": reactance}],
+        "proposed_voltages": {"S": {"vm_pu": 1, "va_deg": reference},
+                              "L": {"vm_pu": 1, "va_deg": angle}},
+    }
+    assert not verify_ac_power_flow(spec)["conservation_verified"]
+    del spec["proposed_voltages"]
+    result = verify_ac_power_flow(spec)
+    if result["conservation_verified"]:
+        v = result["voltages"]
+        actual = (v["S"]["vm_pu"] * v["L"]["vm_pu"]
+                  * math.sin(math.radians(v["L"]["va_deg"] - v["S"]["va_deg"])) / reactance)
+        assert actual == pytest.approx(prescribed, rel=1e-7, abs=0)
+
+
+def test_stiff_line_large_transfer_still_meets_absolute_power_tolerance():
+    target = 149922522.2315777
+    reactance = 2**-36
+    assert abs(math.sin(math.radians(0.125)) / reactance - target) > 6e-6
+    spec = {
+        "buses": [{"id": "S", "type": "slack", "vm_pu": 1, "va_deg": 45},
+                  {"id": "L", "type": "PV", "vm_pu": 1, "p_injection_pu": target}],
+        "lines": [{"id": "SL", "from": "S", "to": "L", "r_pu": 0, "x_pu": reactance}],
+        "proposed_voltages": {"S": {"vm_pu": 1, "va_deg": 45},
+                              "L": {"vm_pu": 1, "va_deg": 45.125}},
+    }
+    assert not verify_ac_power_flow(spec)["conservation_verified"]

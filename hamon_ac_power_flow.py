@@ -146,11 +146,11 @@ def network(spec):
         return 32 * np.finfo(float).eps * np.abs(v) * (np.abs(ybus) @ np.abs(v))
 
     def power_tolerances(v, targets, positions):
-        # Terminal currents can cancel even when the specified net injection
-        # is exactly zero. Allow local floating-point cancellation, not a
-        # whole-network relative error that can erase a small bus load.
-        rounding = power_roundoff(v)
-        return np.minimum(1e-6, 1e-7 * np.abs(targets[positions]) + rounding[positions])
+        # A specified load or generation must close on its own scale. A zero
+        # specification still needs the allowance for cancelling terminal flows.
+        magnitude = np.abs(targets[positions])
+        return np.minimum(1e-6, np.where(magnitude == 0, power_roundoff(v)[positions],
+                                        1e-7 * magnitude))
 
     def reactive_violation(value, lower, upper, roundoff):
         bound = float(np.clip(value, lower, upper))
@@ -459,10 +459,77 @@ def network(spec):
                     return False
         return True
 
+    def specified_power_matches(v, power):
+        return (np.all(np.abs(power.real[nonslack] - p[nonslack]) <= power_tolerances(v, p, nonslack))
+                and np.all(np.abs(power.imag[pq] - q[pq]) <= power_tolerances(v, q, pq)))
+
+    def resolved_wire_injections(wire):
+        # A tiny angular separation on a stiff line can turn ordinary phasor
+        # roundoff into an entire specified load. Replay only the nonzero
+        # bus components whose relative tolerance is that small.
+        magnitude = np.array([wire[k]["vm_pu"] for k in ids])
+        tapped_magnitude = magnitude[f] / np.abs(tap)
+        # Opposing parallel admittances can cancel in Ybus. Bound their
+        # individual terminal contributions before summing at a bus.
+        series_scale = np.abs(y) * (tapped_magnitude + magnitude[t])
+        scale = magnitude**2 * np.abs(shunt)
+        np.add.at(scale, f, tapped_magnitude * (series_scale + np.abs(yc) * tapped_magnitude))
+        np.add.at(scale, t, magnitude[t] * (series_scale + np.abs(yc) * magnitude[t]))
+        rounding = 32 * np.finfo(float).eps * scale
+        checks = [(i, axis, target[i]) for target, positions, axis
+                  in ((p, nonslack, "real"), (q, pq, "imag")) for i in positions
+                  if target[i] and rounding[i] >= min(1e-6, 1e-7 * abs(target[i]))]
+        if not checks:
+            return True
+        from mpmath import mp
+
+        ctx = mp.clone()
+        tolerances = {(i, axis): min(ctx.mpf(1e-6), ctx.mpf(1e-7) * abs(target))
+                      for i, axis, target in checks}
+        # Reserve guard bits beyond the precision needed to resolve the
+        # absolute or relative tolerance, including subnormal specifications.
+        ctx.prec = 100 + max(0, max(ctx.mag(rounding[i]) - ctx.mag(tolerances[i, axis])
+                                    for i, axis, _ in checks))
+
+        def phase(degrees):
+            return ctx.expjpi(ctx.mpf(math.remainder(degrees, 360)) / 180)
+
+        v = [ctx.mpf(wire[k]["vm_pu"]) * phase(wire[k]["va_deg"]) for k in ids]
+        currents = {i: [ctx.mpc(shunt[i]) * v[i]] for i, _, _ in checks}
+        for k, line in enumerate(branches):
+            i, j = f[k], t[k]
+            if i not in currents and j not in currents:
+                continue
+            ratio = ctx.mpf(line.get("tap_ratio", 1)) * phase(line.get("phase_shift_deg", 0))
+            tapped = v[i] / ratio
+            series = (tapped - v[j]) / ctx.mpc(line["r_pu"], line["x_pu"])
+            charging = ctx.mpc(0, line.get("line_charging_b_pu", 0)) / 2
+            if i in currents:
+                currents[i].append((series + charging * tapped) / ratio.conjugate())
+            if j in currents:
+                currents[j].append(-series + charging * v[j])
+        for i, axis, target in checks:
+            power = v[i] * ctx.fsum(currents[i]).conjugate()
+            if abs(getattr(power, axis) - target) > tolerances[i, axis]:
+                return False
+        return True
+
+    def polar_phasor(magnitude, degrees):
+        return magnitude * np.exp(1j * math.radians(degrees))
+
+    published = {
+        name: {"vm_pu": float(abs(v)), "va_deg": float(np.angle(v, deg=True))}
+        for name, v in zip(ids, voltage)
+    }
+    emitted = np.array([polar_phasor(row["vm_pu"], row["va_deg"]) for row in published.values()])
+    emitted_power = emitted * np.conj(branch_currents(emitted)[0])
     complementarity = regulated_state(voltage, injection)
     proposed_limits = None
     verified = (
         complementarity
+        and specified_power_matches(emitted, emitted_power)
+        and regulated_state(emitted, emitted_power)
+        and resolved_wire_injections(published)
         and independent_res < 1e-6
         and difference < 1e-6
         and tellegen < 1e-6
@@ -478,7 +545,7 @@ def network(spec):
             deg = number(claims[name]["va_deg"])
             if mag <= 0:
                 raise ValueError("Proposed voltage magnitude must be positive")
-            values.append(mag * np.exp(1j * math.radians(deg)))
+            values.append(polar_phasor(mag, deg))
         claimed = np.asarray(values)
         claim_error = np.max(np.abs(claimed - voltage))
         power = claimed * np.conj(branch_currents(claimed)[0])
@@ -489,13 +556,8 @@ def network(spec):
             and claim_error < 1e-6
             and abs(claimed[slack] - initial[slack])
             <= 16 * np.finfo(float).eps * vset[slack]
-            and np.all(
-                np.abs(power.real[nonslack] - p[nonslack])
-                <= power_tolerances(claimed, p, nonslack)
-            )
-            and np.all(
-                np.abs(power.imag[pq] - q[pq]) <= power_tolerances(claimed, q, pq)
-            )
+            and specified_power_matches(claimed, power)
+            and resolved_wire_injections(claims)
             and np.all(
                 np.abs(np.abs(claimed[pv]) - vset[pv])
                 <= 16 * np.finfo(float).eps * vset[pv]
@@ -505,10 +567,7 @@ def network(spec):
         "ok": True,
         "calculation": "ac_power_flow",
         "conservation_verified": bool(verified),
-        "voltages": {
-            name: {"vm_pu": float(abs(v)), "va_deg": float(np.angle(v, deg=True))}
-            for name, v in zip(ids, voltage)
-        },
+        "voltages": published,
         "bus_injections": {
             name: {"p_pu": float(s.real), "q_pu": float(s.imag)}
             for name, s in zip(ids, injection)
