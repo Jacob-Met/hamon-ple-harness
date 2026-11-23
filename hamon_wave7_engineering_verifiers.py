@@ -307,60 +307,8 @@ def solve_thermodynamic_cycle(params: Mapping[str, Any]) -> Dict[str, Any]:
         return _rankine_cycle(params)
 
     if subkind in ("otto", "diesel"):
-        r = float(params["r"])
-        t1 = float(params.get("T1", 300.0))
-        gamma = float(params.get("gamma", 1.4))
-        cv = float(params.get("cv", 718.0))
-        p1 = float(params.get("P1", 101325.0))
-        if r <= 1.0 or t1 <= 0.0 or gamma <= 1.0 or cv <= 0.0 or p1 <= 0.0:
-            return {"domain": "thermo_cycles", "subkind": subkind, "verified": False, "error": "invalid_ic_cycle_parameters"}
-        cp = gamma * cv
-        r_spec = cp - cv
-        t2 = t1 * (r ** (gamma - 1.0))
-
-        if subkind == "otto":
-            if "T3" in params:
-                t3 = float(params["T3"])
-                q_in = cv * (t3 - t2)
-            else:
-                q_in = float(params["q_in"])
-                t3 = t2 + q_in / cv
-            if t3 <= t2:
-                return {"domain": "thermo_cycles", "subkind": subkind, "verified": False, "error": "non_positive_heat_addition"}
-            t4 = t3 / (r ** (gamma - 1.0))
-            q_out = cv * (t4 - T1_val if (T1_val := t1) else t1)
-            eta_exact = 1.0 - (r ** (1.0 - gamma))
-        else:
-            r_c = float(params["r_c"])
-            if r_c <= 1.0 or r_c >= r:
-                return {"domain": "thermo_cycles", "subkind": subkind, "verified": False, "error": "invalid_cutoff_ratio"}
-            t3 = t2 * r_c
-            t4 = t3 * ((r_c / r) ** (gamma - 1.0))
-            q_in = cp * (t3 - t2)
-            q_out = cv * (t4 - t1)
-            eta_exact = 1.0 - (1.0 / (r ** (gamma - 1.0))) * ((r_c ** gamma - 1.0) / (gamma * (r_c - 1.0)))
-
-        w_net = q_in - q_out
-        eta_th = w_net / q_in
-        v1 = r_spec * t1 / p1
-        v2 = v1 / r
-        mep_pa = w_net / (v1 - v2)
-        residual = float(abs(eta_th - eta_exact))
-        return {
-            "domain": "thermo_cycles",
-            "subkind": subkind,
-            "T2_K": float(t2),
-            "T3_K": float(t3),
-            "T4_K": float(t4),
-            "w_net_J_kg": float(w_net),
-            "q_in_J_kg": float(q_in),
-            "q_out_J_kg": float(q_out),
-            "eta_thermal": float(eta_th),
-            "eta_closed_form": float(eta_exact),
-            "MEP_Pa": float(mep_pa),
-            "residual": residual,
-            "verified": bool(residual < 1e-11),
-        }
+        from hamon_air_standard_cycle import air_standard_cycle
+        return air_standard_cycle(params, subkind)
 
     if subkind == "vapor_compression":
         return _vapor_compression_cycle(params)
