@@ -111,6 +111,31 @@ def test_pipe_gravity_reaches_certified_budget_only_after_validation():
     assert "presolve_result_json" not in route({**SPECS[0], "gravity_m_s2": -1})
 
 
+def test_staged_consolidation_keeps_unloading_and_physical_claims_in_the_route():
+    history = [{"time_s": 0, "surcharge_Pa": 10000},
+               {"time_s": 1, "surcharge_Pa": 10000},
+               {"time_s": 1, "surcharge_Pa": 0}]
+    spec = {"calculation": "consolidation_history_1d", "H_clay_m": 1,
+            "cv_m2_s": 1, "mv_per_Pa": 1e-7, "time_s": 1, "drainage": "single",
+            "load_history": history}
+    plan = route(spec)
+    assert plan["thinking_tier"] == "low"
+    result = json.loads(plan["presolve_result_json"])
+    pressure = result["mean_excess_pore_pressure_Pa"]
+    assert pressure < 0 and result["settlement_at_time_m"] > 0
+    assert result["mean_effective_increment_Pa"] == pytest.approx(-pressure)
+    assert result["dual_solver_rel_residual"] == result["dual_solver_abs_residual_Pa"] / 10000
+    assert not route(dict(spec, proposed_mean_excess_pore_pressure_Pa=-pressure))["presolve_verified"]
+    assert not route(dict(spec, load_history=[dict(history[0], surcharge_kPa=10)]))["presolve_verified"]
+    assert not route(dict(spec, load_history=history * 11))["presolve_verified"]
+
+    unloaded = dict(spec, load_history=[{"time_s": 0, "surcharge_Pa": 0},
+                                        {"time_s": 2, "surcharge_Pa": 0},
+                                        {"time_s": 2, "surcharge_Pa": 10000}])
+    zero = json.loads(route(unloaded)["presolve_result_json"])
+    assert zero["dual_solver_abs_residual_Pa"] == zero["dual_solver_rel_residual"] == 0
+
+
 def test_extra_work_or_unsupported_evidence_keeps_normal_budget():
     spec = SPECS[-1]
     changes = [

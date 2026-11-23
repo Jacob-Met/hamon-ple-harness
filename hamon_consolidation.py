@@ -458,7 +458,8 @@ def verify_consolidation_history(spec):
                       mean_excess_pore_pressure_Pa=pressure, settlement_at_time_m=settlement,
                       finite_volume_mean_effective_increment_Pa=fv_eff,
                       finite_volume_mean_excess_pore_pressure_Pa=fv_pressure,
-                      dual_solver_abs_residual_Pa=residual)
+                      dual_solver_abs_residual_Pa=residual,
+                      dual_solver_rel_residual=residual / scale if scale > 0 else 0.0)
     except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError) as exc:
         result["reason"] = str(exc)
     return result
