@@ -3095,25 +3095,8 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
     if kind == "manning_channel":
         return solve_manning_channel_dual(spec)
     if kind == "spillway_weir":
-        q_d, cd, lw = float(spec["Q_design_m3_s"]), float(spec["Cd_si"]), float(spec["weir_length_m"])
-        crest, top, fb_min = float(spec["crest_el_m"]), float(spec["dam_top_el_m"]), float(spec["min_freeboard_m"])
-        sp_pair = None
-        if HAS_SYMPY:
-            h_s = _sp.Symbol("h", positive=True)
-            sp_pair = (_sp.Float(repr(cd * lw), 30) * h_s**_sp.Rational(3, 2) - _sp.Float(repr(q_d), 30), h_s)
-        rt = dual_solve_scalar_root(lambda h: cd * lw * (h**1.5) - q_d, sp_pair, (1e-4, 30.0), 1.5)
-        h_req = rt["root"]
-        wse = crest + h_req
-        fb = top - wse
-        q_cap = cd * lw * (max(0.0, top - fb_min - crest) ** 1.5)
-        return {
-            "head_required_m": h_req,
-            "water_surface_el_m": wse,
-            "freeboard_m": fb,
-            "Q_capacity_with_freeboard_m3_s": q_cap,
-            "passes_freeboard": fb >= fb_min,
-            "dual_verified": True,
-        }
+        from hamon_spillway_stage import spillway_stage
+        return spillway_stage(spec)
     if kind == "compaction_acceptance":
         return verify_compaction_lot(spec)
     if kind == "rankine_retaining":
