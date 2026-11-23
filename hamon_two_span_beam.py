@@ -1,4 +1,4 @@
-"""Level supports on a continuous Euler–Bernoulli beam, prismatic on each span.
+"""Prescribed support levels on a continuous beam, prismatic on each span.
 
 Positive distributed load is downward. Reactions and vertical displacements
 are positive upward, and bending moments are positive in sagging.
@@ -6,8 +6,9 @@ are positive upward, and bending moments are positive in sagging.
 The support_conditions map accepts A, B and C. Missing entries are bilateral
 (vertical displacement fixed, signed reaction). A negative bilateral reaction
 is reported as hold_down. A compression_only bearing can carry positive force
-at zero displacement (bearing), separate with positive displacement and zero
-force (lifted), or have zero displacement and zero force (touching).
+at zero gap (bearing), separate with positive gap and zero force (lifted),
+or have zero gap and zero force (touching). Gap is measured from the local
+support elevation. The beam displacement is measured from the original datum.
 """
 from fractions import Fraction
 from itertools import combinations
@@ -28,14 +29,16 @@ def _reported(value):
     return shown
 
 
-def _reactions(x, loads, rigidities, active):
+def _reactions(x, loads, rigidities, active, levels):
     l1, l2 = x[1], x[2] - x[1]
     q1, q2 = loads
     total = q1 * l1 + q2 * l2
     if len(active) == 3:
         # The rotations at B must match, with each span weighted by its flexibility.
         e1, e2 = rigidities
-        middle = -(q1 * l1**3 / e1 + q2 * l2**3 / e2) / (8 * (l1 / e1 + l2 / e2))
+        chord_change = (levels[2] - levels[1]) / l2 - (levels[1] - levels[0]) / l1
+        load_rotation = (q1 * l1**3 / e1 + q2 * l2**3 / e2) / 8
+        middle = (3 * chord_change - load_rotation) / (l1 / e1 + l2 / e2)
         left = q1 * l1 / 2 + middle / l1
         right = q2 * l2 / 2 + middle / l2
         return (left, total - left - right, right)
@@ -48,7 +51,7 @@ def _reactions(x, loads, rigidities, active):
     return tuple(reactions)
 
 
-def _station_motion(x, loads, rigidities, active, reactions):
+def _station_motion(x, loads, rigidities, active, reactions, levels):
     # Integrate v'' = M/EI from the left. Carry the previous span's end
     # displacement and rotation across B, including when its rigidity jumps.
     offsets, slopes = [ZERO], [ZERO]
@@ -65,8 +68,8 @@ def _station_motion(x, loads, rigidities, active, reactions):
         moment += shear * length - q * length**2 / 2
         shear -= q * length
     i, j = active[0], active[-1]
-    tilt = (offsets[i] - offsets[j]) / (x[j] - x[i])
-    shift = -offsets[i] - tilt * x[i]
+    tilt = (levels[j] - levels[i] + offsets[i] - offsets[j]) / (x[j] - x[i])
+    shift = levels[i] - offsets[i] - tilt * x[i]
     return ([v + tilt * s + shift for v, s in zip(offsets, x)],
             [slope + tilt for slope in slopes])
 
@@ -112,7 +115,7 @@ def _signed_moments(x, loads, reactions):
     return middle, max(extrema), -min(extrema)
 
 
-def two_span_beam(l1, l2, q1, q2, ei, conditions):
+def two_span_beam(l1, l2, q1, q2, ei, conditions, levels=(ZERO, ZERO, ZERO)):
     if not isinstance(conditions, dict) or any(
         key not in NAMES or value not in ("bilateral", "compression_only")
         for key, value in conditions.items()
@@ -127,17 +130,18 @@ def two_span_beam(l1, l2, q1, q2, ei, conditions):
             active = sorted((*bilateral, *contacts))
             if len(active) < 2:
                 continue
-            reactions = _reactions(x, loads, rigidities, active)
+            reactions = _reactions(x, loads, rigidities, active, levels)
             if any(reactions[i] < 0 for i in bearings):
                 continue
-            gaps, rotations = _station_motion(x, loads, rigidities, active, reactions)
+            motion, rotations = _station_motion(x, loads, rigidities, active, reactions, levels)
+            gaps = [v - level for v, level in zip(motion, levels)]
             if any(gaps[i] != 0 for i in active):
                 raise ValueError("two-span contact support compatibility mismatch")
             if any(gaps[i] < 0 for i in bearings):
                 continue
             if not _unique_motion(x, bilateral, reactions, gaps):
                 raise ValueError("two-span bearing equilibrium has nonunique rigid motion")
-            _verify_elements(x, loads, rigidities, gaps, rotations, reactions)
+            _verify_elements(x, loads, rigidities, motion, rotations, reactions)
             middle, sagging, hogging = _signed_moments(x, loads, reactions)
             states = {}
             for i, name in enumerate(NAMES):
@@ -157,7 +161,8 @@ def two_span_beam(l1, l2, q1, q2, ei, conditions):
                 "M_max_sagging_Nm": _reported(sagging),
                 "M_max_hogging_Nm": _reported(hogging),
                 "M_max_Nm": _reported(max(sagging, hogging)),
-                "support_displacements_m": dict(zip(NAMES, map(_reported, gaps))),
+                "support_displacements_m": dict(zip(NAMES, map(_reported, motion))),
+                "support_gaps_m": dict(zip(NAMES, map(_reported, gaps))),
                 "support_states": states,
                 "equilibrium_residual_N": float(abs(sum(reactions) - q1 * l1 - q2 * l2)),
                 "dual_rel_discrepancy": 0.0,

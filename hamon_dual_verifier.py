@@ -1921,6 +1921,9 @@ def solve_continuous_beam_2span_dual(spec: dict[str, Any]) -> dict[str, Any]:
 
     Set span_EI to [EI_AB, EI_BC] in N m² (numbers in SI or unit expressions).
     Without span_EI, the common E and I retain their usual values and defaults.
+    support_settlements_m maps A, B and C to downward movement (default zero).
+    Station displacements are positive upward. Gaps are measured from the
+    displaced supports.
     """
     # JSON numbers are coherent SI. An expression carries its own units.
     def read_si(value: Any, field: str, unit: str) -> Fraction:
@@ -1952,8 +1955,15 @@ def solve_continuous_beam_2span_dual(spec: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("two-span beam requires positive modulus and inertia")
         rigidities = (E * I, E * I)
 
-    from hamon_two_span_beam import two_span_beam
-    return two_span_beam(L1, L2, q1, q2, rigidities, spec.get("support_conditions", {}))
+    from hamon_two_span_beam import NAMES, two_span_beam
+    settlements = spec.get("support_settlements_m", {})
+    if not isinstance(settlements, dict) or any(name not in NAMES for name in settlements):
+        raise ValueError("support_settlements_m maps A, B, C to downward settlement lengths")
+    levels = tuple(
+        -read_si(settlements.get(name, 0), f"support_settlements_m[{name}]", "m")
+        for name in NAMES
+    )
+    return two_span_beam(L1, L2, q1, q2, rigidities, spec.get("support_conditions", {}), levels)
 
 
 def solve_bolt_group_eccentric_dual(spec: dict[str, Any]) -> dict[str, Any]:
