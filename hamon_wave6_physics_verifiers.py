@@ -986,7 +986,16 @@ def _transmission_port(params):
         characteristic = complex(params.get("Z0", 50.))
         if not characteristic or not all(map(math.isfinite, (characteristic.real, characteristic.imag))):
             raise ValueError("Characteristic impedance must be finite and nonzero")
-        r, x = scalar("R_L", 100.), scalar("X_L", 0.)
+        termination = params.get("load_kind", "impedance")
+        if termination not in ("impedance", "open", "short"):
+            raise ValueError("load_kind must be impedance, open, or short")
+        if termination == "open" and ("R_L" in params or "X_L" in params):
+            raise ValueError("An open load cannot also specify a finite impedance")
+        r, x = scalar("R_L", 100. if termination == "impedance" else 0.), scalar("X_L", 0.)
+        if termination == "short" and (r or x):
+            raise ValueError("A short load requires zero resistance and reactance")
+        if termination == "impedance" and r == x == 0:
+            termination = "short"
         length = scalar("length_m", 1.)
         attenuation = scalar("alpha_np_m", 0.)*length
         in_turns = params.get("length_wavelengths") is not None
@@ -1011,15 +1020,20 @@ def _transmission_port(params):
             return ctx.mpf(q.numerator)/q.denominator
 
         line = ctx.mpc(characteristic.real, characteristic.imag)
-        load = ctx.mpc(real(r), real(x))
-        if load+line == 0:
+        # Homogeneous coordinates (V, Z0*I) include an ideal open without
+        # an infinite number. Finite impedances use an arbitrary unit current.
+        if termination == "open":
+            load_v, load_i = ctx.mpc(1), ctx.mpc(0)
+        else:
+            load_v, load_i = ctx.mpc(real(r), real(x)), line
+        if load_v+load_i == 0:
             raise ValueError("Load reflection coefficient is undefined")
         phase = real(remaining)*(2*ctx.pi if in_turns else 1)
         loss = real(attenuation)
         # At exact eighth turns, use only {0,±1,±i}. The common scale of V
         # and I is arbitrary, so no independently rounded sqrt(2) is needed.
-        a, b = ((load, line), (load+ctx.j*line, line+ctx.j*load),
-                (line, load), (load-ctx.j*line, line-ctx.j*load))[landmark % 4]
+        a, b = ((load_v, load_i), (load_v+ctx.j*load_i, load_i+ctx.j*load_v),
+                (load_i, load_v), (load_v-ctx.j*load_i, load_i-ctx.j*load_v))[landmark % 4]
         if not remaining and not attenuation:
             v, i = a, b
         else:
@@ -1030,7 +1044,7 @@ def _transmission_port(params):
 
         # Independently propagate the forward/backward traveling waves. Their
         # common attenuation cancels, leaving one relative reflection factor.
-        reflection = (load-line)/(load+line)
+        reflection = (load_v-load_i)/(load_v+load_i)
         eighth = (1, -ctx.j, -1, ctx.j)[landmark % 4]
         reflected = reflection*eighth*ctx.exp(-2*ctx.mpc(loss,phase))
         v_check, i_check = 1+reflected, 1-reflected
@@ -1059,9 +1073,9 @@ def _transmission_port(params):
 
         # The lossless forward/backward load-wave ratio can be exactly one
         # even though its voltage standing-wave ratio has no finite value.
-        plus, minus = abs(load+line), abs(load-line)
+        plus, minus = abs(load_v+load_i), abs(load_v-load_i)
         gamma = abs(reflection)
-        power = 4*ctx.re(load*line.conjugate())
+        power = 4*ctx.re(load_v*load_i.conjugate())
         vswr, vswr_status = None, "unbounded"
         if power:
             try:
@@ -1082,9 +1096,10 @@ def _transmission_port(params):
             except ArithmeticError:
                 loss_status = "outside_numeric_range"
         transformer = None
-        if not x and r >= 0 and characteristic.real >= 0 and not characteristic.imag:
+        if termination != "open" and not x and r >= 0 and characteristic.real >= 0 and not characteristic.imag:
             transformer = wire(ctx.sqrt(real(r)*line.real))
-        return dict(result, Z_in_kind=kind, Z_in_real=zr, Z_in_imag=zi,
+        return dict(result, load_kind=termination,
+                    Z_in_kind=kind, Z_in_real=zr, Z_in_imag=zi,
                     Y_in_real=yr, Y_in_imag=yi, gamma_load_mag=wire(gamma),
                     gamma_load_deg=wire(ctx.degrees(ctx.arg(reflection))),
                     VSWR=vswr, VSWR_status=vswr_status,
