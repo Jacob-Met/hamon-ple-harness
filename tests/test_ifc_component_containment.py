@@ -24,9 +24,9 @@ class Scene:
         profile = self.add(f"IFCRECTANGLEPROFILEDEF(.AREA.,$,$,{side},{side})")
         return self.sweep(profile, (x, y, -side / 2 if z is None else z), side)
 
-    def element(self, kind, name, items):
+    def element(self, kind, name, items, rep_type="SweptSolid"):
         refs = ",".join(f"#{i}" for i in items)
-        shape = self.add(f"IFCSHAPEREPRESENTATION($,'Body','SweptSolid',({refs}))")
+        shape = self.add(f"IFCSHAPEREPRESENTATION($,'Body','{rep_type}',({refs}))")
         product = self.add(f"IFCPRODUCTDEFINITIONSHAPE($,$,(#{shape}))")
         return self.add(f"{kind}('{name}',$,'{name}',$,$,$,#{product},$,$)")
 
@@ -83,6 +83,45 @@ def test_nonconvex_notch_and_material(tmp_path, xy, expected):
     profile = scene.add(f"IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#{line})")
     scene.element("IFCDUCTSEGMENT", "L", [scene.sweep(profile, (0., 0., -1.), 2.)])
     scene.element("IFCBEAM", "compound", [scene.box(1., 10.), scene.box(0.2, xy[0], y=xy[1])])
+    report = scene.report(tmp_path)
+    assert report["min_clearance_m"] == pytest.approx(expected)
+    assert report["hard_clash_count"] == int(expected == 0.)
+
+
+@pytest.mark.parametrize("centres,sides", [((-0.9, 0.9), (4., 4.)), ((0., 0.), (4., 2.)),
+                                          ((0., 0.), (4., 4.))])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_overlapping_and_nested_positive_body_items(tmp_path, centres, sides, reverse):
+    scene = Scene()
+    positive = [scene.box(side, centre) for side, centre in zip(sides, centres)]
+    scene.element("IFCDUCTSEGMENT", "additive body", positive[::-1] if reverse else positive)
+    scene.element("IFCBEAM", "inside both", [scene.box(0.2, 0.)])
+    report = scene.report(tmp_path)
+    assert report["min_clearance_m"] == 0
+    assert report["hard_clash_count"] == 1
+
+
+@pytest.mark.parametrize("inner_void,expected", [(False, 0.), (True, 0.9)])
+def test_nested_shell_orientation_within_one_tessellated_item(tmp_path, inner_void, expected):
+    # The same vertices describe either an inward cavity or a second outward
+    # shell. This single tessellated item has no separate Body metadata.
+    scene = Scene()
+    points = []
+    triangles = []
+    faces = [(1, 3, 2), (1, 4, 3), (5, 6, 7), (5, 7, 8), (1, 2, 6), (1, 6, 5),
+             (2, 3, 7), (2, 7, 6), (3, 4, 8), (3, 8, 7), (4, 1, 5), (4, 5, 8)]
+    for i, radius in enumerate([2, 1]):
+        points.extend((x, y, z) for z in (-radius, radius)
+                      for x, y in [(-radius, -radius), (radius, -radius),
+                                   (radius, radius), (-radius, radius)])
+        for face in faces:
+            order = reversed(face) if i == 1 and inner_void else face
+            triangles.append(tuple(index + 8*i for index in order))
+    vertices = scene.add("IFCCARTESIANPOINTLIST3D((" + ",".join(map(str, points)) + "))")
+    shell = scene.add(f"IFCTRIANGULATEDFACESET(#{vertices},$,.T.,("
+                      + ",".join(map(str, triangles)) + "),$)")
+    scene.element("IFCDUCTSEGMENT", "shells", [shell], rep_type="Tessellation")
+    scene.element("IFCBEAM", "probe", [scene.box(0.2, 0.)])
     report = scene.report(tmp_path)
     assert report["min_clearance_m"] == pytest.approx(expected)
     assert report["hard_clash_count"] == int(expected == 0.)
