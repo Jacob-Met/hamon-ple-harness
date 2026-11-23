@@ -1394,11 +1394,11 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
 
 
 _SPICE_HIERARCHY = re.compile(r"(?im)^\s*\.(?:subckt|ends)\b|^[ \t]*X\S*\s")
-_SPICE_SCALE = {"f": 1e-15, "p": 1e-12, "n": 1e-9, "u": 1e-6, "m": 1e-3, "k": 1e3, "meg": 1e6, "g": 1e9, "t": 1e12}
+_SPICE_SCALE = {"a": 1e-18, "mil": 25.4e-6, "f": 1e-15, "p": 1e-12, "n": 1e-9, "u": 1e-6, "m": 1e-3, "k": 1e3, "meg": 1e6, "g": 1e9, "t": 1e12}
 
 
 def _parse_spice_num(tok: str) -> float:
-    m = re.match(r"^([-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)(meg|[fpnumkgt])?", tok.strip().lower())
+    m = re.match(r"^([-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)(meg|mil|[afpnumkgt])?", tok.strip().lower())
     if not m:
         raise ValueError(f"Invalid SPICE token {tok!r}")
     return float(m.group(1)) * (_SPICE_SCALE[m.group(2)] if m.group(2) else 1.0)
@@ -1432,14 +1432,14 @@ def _independent_source_value(tokens: List[str], frequency: float) -> Tuple[floa
     return dc[0], 0.0
 
 
-_LINEAR_GAIN = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?(?:meg|[fpnumkgt])?", re.I)
+_LINEAR_GAIN = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?(?:meg|mil|[afpnumkgt])?", re.I)
 _BEHAVIORAL_E = re.compile(r"^(?:poly(?:\(|$)|(?:value|vol|table|laplace|freq)(?:=|$))", re.I)
 
 
 def _parse_spice_netlist(netlist: str, frequency_override: Optional[float] = None) -> Tuple[List[Dict[str, Any]], float]:
     if _SPICE_HIERARCHY.search(netlist):
         from hamon_spice_hierarchy import elaborate_subcircuits
-        netlist = elaborate_subcircuits(netlist)
+        netlist = elaborate_subcircuits(netlist, _LINEAR_GAIN)
     branches: List[Dict[str, Any]] = []
     source_clauses = []
     freq_hz = 0.0

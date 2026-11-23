@@ -66,6 +66,16 @@ class HierarchicalCircuits(unittest.TestCase):
         self.assertTrue(r["conservation_verified"])
         self.assertEqual(len([v for v in r["node_voltages"].values() if math.isclose(v,2)]), 2)
 
+    def test_scale_factors_and_first_line_title(self):
+        for high, low in (("1mil", "25.4u"), ("1MEG", "1000k"), ("1e18a", "1")):
+            deck = (f"X-ray divider characterization\nV1 in 0 1\nXload in out div\n"
+                    f".subckt div a o\nR1 a o {high}\nR2 o 0 {low}\n.ends")
+            r = route(deck, proposed_node_voltages={"out": .5})
+            self.assertTrue(r["conservation_verified"])
+            self.assertAlmostEqual(r["node_voltages"]["out"], .5)
+        with self.assertRaises(ValueError):
+            route("Xmissing in out absent\nV1 in 0 1\nR1 out 0 1k")
+
     def test_incomplete_or_unsupported_hierarchy_refuses(self):
         definition = ".subckt simple in out\nR1 in out 1k\nR2 out 0 1k\n.ends simple\n"
         for bad in ("Xbad p o missing", "Xbad p simple", "Xbad p o simple gain=2",

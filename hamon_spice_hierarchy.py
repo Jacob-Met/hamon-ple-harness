@@ -18,12 +18,22 @@ def _lines(deck):
     return lines
 
 
-def _is_card(tokens, number):
+def _is_card(tokens, number, rest):
     """Recognize the usual titleless primitive extension on the first line."""
     first = tokens[0].upper()
     kind = first[0]
-    if first.startswith(".") or kind == "X":
+    if first.startswith("."):
         return True
+    if kind == "X":
+        # The first physical line is conventionally a title. A declaration
+        # identifies a titleless call. Retain a dangling call for diagnosis
+        # when it names a numbered instance or a terminal used by the deck.
+        declared = {line[1].casefold() for line in rest
+                    if len(line) > 1 and line[0].casefold() == ".subckt"}
+        terminals = {part.casefold() for line in rest
+                     if line[0][0] != "." for part in line[1:3]}
+        return (tokens[-1].casefold() in declared or re.match(r"^X\d", first) is not None
+                or any(port.casefold() in terminals for port in tokens[1:-1]))
     if kind in "RLC":
         return len(tokens) >= 4 and bool(number.fullmatch(tokens[3]))
     if kind in "VI":
@@ -34,13 +44,12 @@ def _is_card(tokens, number):
     return kind == "K" and len(tokens) >= 4 and tokens[1].upper().startswith("L")
 
 
-def elaborate_subcircuits(deck):
+def elaborate_subcircuits(deck, gain):
     number = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?[a-zA-Z]*")
-    gain = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?(?:meg|[fpnumkgt])?", re.I)
     lines = _lines(deck)
     first_physical = deck.splitlines()[0].strip() if deck.splitlines() else ""
     if (lines and first_physical and first_physical[0] not in "*;$"
-            and not _is_card(lines[0], number)):
+            and not _is_card(lines[0], number, lines[1:])):
         if re.match(r"^[a-zA-Z]\d", lines[0][0]):
             raise ValueError(f"Malformed or unsupported initial device {lines[0][0]!r}")
         lines = lines[1:]
