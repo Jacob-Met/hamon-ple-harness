@@ -281,6 +281,23 @@ def rule_via_annulus(board, drill):
     return diameter, dict(rules=values, drill_nm=drill, outer_diameter_lower_bound_nm=diameter)
 
 
+def wire_material(row, ref):
+    layer, width = int(row.attrib["layer"]), nm(row.get("width"))
+    cap = row.get("cap", "round")
+    if (layer not in FACES or width <= 0 or cap not in ("round", "flat")
+            or row.get("style", "continuous") != "continuous"):
+        raise ValueError("requires a continuous positive-width outer-layer trace")
+    curve = Decimal(row.get("curve", "0"))
+    if not curve.is_finite() or abs(curve) >= 360 or (curve and cap != "round"):
+        raise ValueError("unsupported curved-wire sweep or cap")
+    a, b = [tuple(float(nm(row.get(axis + suffix), subgrid=True))
+                  for axis in ("x", "y")) for suffix in ("1", "2")]
+    if a == b:
+        raise ValueError("zero-length trace")
+    return dict(source=ref, layers=(layer,), shape="arc" if curve else "segment",
+                           a=a, b=b, width=width, cap=cap, curve=float(curve))
+
+
 def material_fallback(result, board, signal, terminals, elements, footprints, bores):
     """Prove additional routes using a conservative subset of finite copper."""
     try:
@@ -349,20 +366,7 @@ def material_fallback(result, board, signal, terminals, elements, footprints, bo
         ordinal[kind] += 1
         try:
             if kind == "wire":
-                layer, width = int(row.attrib["layer"]), nm(row.get("width"))
-                cap = row.get("cap", "round")
-                if (layer not in FACES or width <= 0 or cap not in ("round", "flat")
-                        or row.get("style", "continuous") != "continuous"):
-                    raise ValueError("requires a continuous positive-width outer-layer trace")
-                curve = Decimal(row.get("curve", "0"))
-                if not curve.is_finite() or abs(curve) >= 360 or (curve and cap != "round"):
-                    raise ValueError("unsupported curved-wire sweep or cap")
-                a, b = [tuple(float(nm(row.get(axis + suffix), subgrid=True))
-                              for axis in ("x", "y")) for suffix in ("1", "2")]
-                if a == b:
-                    raise ValueError("zero-length trace")
-                primitives.append(dict(source=ref, layers=(layer,), shape="arc" if curve else "segment",
-                                       a=a, b=b, width=width, cap=cap, curve=float(curve)))
+                primitives.append(wire_material(row, ref))
             elif kind == "via":
                 drill = plating(row)
                 if row.get("extent") != "1-16" or row.get("shape", "round") != "round":
@@ -552,4 +556,52 @@ def routed_continuity(prediction, board_path, signal_name, *, pad_pair=None):
         steps.reverse()
         witnesses.append(dict(start=list(root), end=list(destination), steps=steps))
     result.update(status="witnessed", witnesses=witnesses)
+    return result
+
+
+def inter_net_contact(board_path, net_names):
+    """Witness overlap of signal wires, without asserting whole-board clearance."""
+    if len(net_names) != 2 or net_names[0] == net_names[1]:
+        raise ValueError("Select two distinct board signals")
+    board, digest = _read(board_path, "board")
+    signals = _named(board.findall("signals/signal"))
+    if any(name not in signals for name in net_names):
+        raise ValueError("Unknown board signal in contact query")
+    result = dict(status="unresolved", signals=list(net_names), board_sha256=digest,
+                  scope="Same-layer explicit outer-layer wires minus known circular drills",
+                  clearance="not_certified", contacts=[], unsupported=[])
+    try:
+        from hamon_eagle_material import wire_contact_witnesses
+        from shapely.errors import ShapelyError
+    except ImportError:
+        result["reason"] = "finite_width_geometry_dependency_unavailable"
+        return result
+    try:
+        bores = board_bores(board, _named(board.findall("elements/element")),
+                            _named(board.findall("libraries/library")), None, set())
+        groups = []
+        for name in net_names:
+            wires = []
+            ordinal = defaultdict(int)
+            for row in signals[name]:
+                ref = (row.tag, ordinal[row.tag])
+                ordinal[row.tag] += 1
+                if row.tag == "contactref":
+                    continue
+                try:
+                    if row.tag != "wire":
+                        raise ValueError("only explicit wire copper considered")
+                    wires.append(wire_material(row, ref))
+                except (KeyError, ValueError, InvalidOperation) as exc:
+                    result["unsupported"].append(dict(signal=name, source=ref, reason=str(exc)))
+            groups.append(wires)
+        result["contacts"] = wire_contact_witnesses(groups, bores, net_names, result["unsupported"])
+    except (KeyError, ValueError, InvalidOperation, ShapelyError, OverflowError) as exc:
+        result["reason"] = "material_geometry_unresolved"
+        result["detail"] = str(exc)
+        return result
+    if result["contacts"]:
+        result["status"] = "contact_witnessed"
+    else:
+        result["reason"] = "no_positive_overlap_witness"
     return result
