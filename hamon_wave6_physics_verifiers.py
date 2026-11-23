@@ -1083,47 +1083,127 @@ def solve_transmission_line_rlc(params: Mapping[str, Any]) -> Dict[str, Any]:
     raise ValueError(f"Unsupported rf_transmission_rlc subkind: {subkind}")
 
 
+def _rounded_stress_root(compare):
+    """Round a real algebraic stress quantity by exact comparisons with binary64 values."""
+    import struct
+
+    def value(bits):
+        return struct.unpack(">d", bits.to_bytes(8, "big"))[0]
+
+    sign = compare(Fraction(0))
+    if not sign:
+        return 0.0
+    low, high = 0, 0x7ff0000000000000
+    while high-low > 1:
+        mid = (low+high)//2
+        candidate = value(mid)
+        side = sign*compare(sign*Fraction(candidate))
+        if side == 0:
+            return sign*candidate
+        if side > 0:
+            low = mid
+        else:
+            high = mid
+    a = Fraction(value(low))
+    b = Fraction(1 << 1024) if high == 0x7ff0000000000000 else Fraction(value(high))
+    side = sign*compare(sign*(a+b)/2)
+    chosen = low if side < 0 or (side == 0 and low%2 == 0) else high
+    if chosen == 0x7ff0000000000000 or chosen == 0:
+        raise ValueError("Nonzero stress result exceeds the binary64 reporting range")
+    return sign*value(chosen)
+
+
+def _mohr_stress(params):
+    """Recover pressure-independent shear and yield from both Cartesian and principal invariants."""
+    def sign(v):
+        return int(v > 0) - int(v < 0)
+
+    def number(key):
+        v = float(params.get(key, 0.0))
+        if not math.isfinite(v):
+            raise ValueError("Stress inputs must be finite")
+        return Fraction(v)
+
+    def compare_root(index, quadratic, linear, constant):
+        # The shifted monic cubic has three real roots. Sign variations
+        # count those strictly above zero, including their multiplicities.
+        signs = [v > 0 for v in (1, quadratic, linear, constant) if v]
+        greater = sum(a != b for a, b in zip(signs, signs[1:]))
+        equal = (1 + int(linear == 0) + int(linear == 0 and quadratic == 0)) if constant == 0 else 0
+        return 1 if index < greater else (0 if index < greater+equal else -1)
+
+    def positive_sqrt(square, threshold):
+        return 1 if threshold < 0 else sign(square-threshold*threshold)
+
+    try:
+        x, y, z = (number(k) for k in ("sigma_x", "sigma_y", "sigma_z"))
+        xy, xz, yz = (number(k) for k in ("tau_xy", "tau_xz", "tau_yz"))
+        strength = number("sigma_yield") if params.get("sigma_yield") is not None else None
+        if strength is not None and strength < 0:
+            raise ValueError("Yield strength must be nonnegative")
+        mean = (x+y+z)/3
+        a, b, c = x-mean, y-mean, z-mean
+        j2 = ((x-y)**2+(y-z)**2+(z-x)**2)/6 + xy*xy+xz*xz+yz*yz
+        j3 = a*b*c + 2*xy*xz*yz - a*yz*yz - b*xz*xz - c*xy*xy
+
+        def principal(index, threshold):
+            v = threshold-mean
+            return compare_root(index, 3*v, 3*v*v-j2, v*(v*v-j2)-j3)
+
+        # The three squared pairwise principal differences form another
+        # real-rooted cubic. Its largest root is the squared Tresca stress.
+        gap_a, gap_b = -6*j2, 9*j2*j2
+        discriminant = 4*j2**3-27*j3*j3
+
+        def gap(threshold):
+            if threshold < 0:
+                return 1
+            v = threshold*threshold
+            return compare_root(0, 3*v+gap_a, 3*v*v+2*gap_a*v+gap_b,
+                                ((v+gap_a)*v+gap_b)*v-discriminant)
+
+        def safety(compare):
+            if strength is None or not j2:
+                return None
+            if not strength:
+                return 0.0
+            return _rounded_stress_root(lambda t: 1 if t <= 0 else -compare(strength/t))
+
+        vm = lambda t: positive_sqrt(3*j2, t)
+        ux, uy = x-y, 2*xy
+        scale = max(abs(ux), abs(uy))
+        angle = 0.5*math.degrees(math.atan2(float(uy/scale), float(ux/scale))) if scale else 0.
+        principal_wire = ([_rounded_stress_root(lambda t: principal(i, t)) for i in range(3)]
+                          if j2 else [float(mean)]*3)
+        residual = 0.
+        if j2:
+            # Independent numerical spectrum in deviatoric coordinates. The
+            # pressure shift cannot hide a wrong J2, determinant or stress gap.
+            unit = max(map(abs, (a,b,c,xy,xz,yz)))
+            tensor = np.array([[float(v/unit) for v in row] for row in
+                               ((a,xy,xz), (xy,b,yz), (xz,yz,c))])
+            spectrum = np.linalg.eigvalsh(tensor)
+            ref_gap = _rounded_stress_root(lambda t: gap(unit*t))
+            residual = max(abs(float(spectrum.sum())),
+                           abs(float(spectrum @ spectrum)/2 - float(j2/unit**2)),
+                           abs(float(np.prod(spectrum)) - float(j3/unit**3)),
+                           abs(float(spectrum[-1]-spectrum[0])-ref_gap))
+        return {"sigma_1": principal_wire[0], "sigma_2": principal_wire[1], "sigma_3": principal_wire[2],
+                "tau_max_inplane": _rounded_stress_root(lambda t: positive_sqrt(ux*ux/4+xy*xy, t)),
+                "tau_max_abs": _rounded_stress_root(lambda t: gap(2*t)),
+                "theta_p_deg": angle, "sigma_von_mises": _rounded_stress_root(vm),
+                "safety_factor_vm": safety(vm), "safety_factor_tresca": safety(gap),
+                "residual": residual, "verified": residual < 1e-11}
+    except (ArithmeticError, ValueError) as exc:
+        return {"verified": False, "error": str(exc)}
+
+
 def solve_mohr_vessel_buckling(params: Mapping[str, Any]) -> Dict[str, Any]:
     """Deterministic solver for 2D/3D stress states, Lame/thin vessels, and Euler-Johnson buckling."""
     subkind = str(params.get("subkind", "mohr_stress")).strip().lower()
 
     if subkind == "mohr_stress":
-        sx = float(params.get("sigma_x", 0.0))
-        sy = float(params.get("sigma_y", 0.0))
-        sz = float(params.get("sigma_z", 0.0))
-        txy = float(params.get("tau_xy", 0.0))
-        txz = float(params.get("tau_xz", 0.0))
-        tyz = float(params.get("tau_yz", 0.0))
-        tensor = np.array([[sx, txy, txz], [txy, sy, tyz], [txz, tyz, sz]], dtype=float)
-        eigvals = np.sort(np.linalg.eigvalsh(tensor))[::-1]
-        s1, s2, s3 = float(eigvals[0]), float(eigvals[1]), float(eigvals[2])
-        tau_inplane = math.hypot(0.5 * (sx - sy), txy)
-        tau_abs_max = 0.5 * (s1 - s3)
-        theta_p_deg = 0.5 * math.degrees(math.atan2(2.0 * txy, sx - sy))
-        sigma_vm = math.sqrt(0.5 * ((s1 - s2) ** 2 + (s2 - s3) ** 2 + (s3 - s1) ** 2))
-
-        sy_yield = params.get("sigma_yield")
-        sf_vm = float(sy_yield) / sigma_vm if sy_yield is not None and sigma_vm > 0 else None
-        sf_tresca = float(sy_yield) / (s1 - s3) if sy_yield is not None and (s1 - s3) > 0 else None
-
-        i1_tensor = sx + sy + sz
-        i1_eig = s1 + s2 + s3
-        residual = abs(i1_tensor - i1_eig) / max(abs(i1_tensor), abs(s1), 1.0)
-        return {
-            "domain": "solid_mohr_vessel_buckling",
-            "subkind": subkind,
-            "sigma_1": s1,
-            "sigma_2": s2,
-            "sigma_3": s3,
-            "tau_max_inplane": tau_inplane,
-            "tau_max_abs": tau_abs_max,
-            "theta_p_deg": theta_p_deg,
-            "sigma_von_mises": sigma_vm,
-            "safety_factor_vm": sf_vm,
-            "safety_factor_tresca": sf_tresca,
-            "residual": residual,
-            "verified": residual < 1e-11,
-        }
+        return {"domain": "solid_mohr_vessel_buckling", "subkind": subkind, **_mohr_stress(params)}
 
     if subkind == "pressure_vessel":
         ri = float(params["r_i"])
