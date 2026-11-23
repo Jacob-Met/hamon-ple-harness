@@ -2956,17 +2956,8 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
         from hamon_pv_feeder import solve_pv_interconnection
         return solve_pv_interconnection(spec)
     if kind == "rc_precharge":
-        v_b, c_f, r_o, frac = float(spec["V_bus_V"]), float(spec["C_uF"]) * 1e-6, float(spec["R_precharge_ohm"]), float(spec["target_fraction"])
-        tau = r_o * c_f
-        # Dual solve: analytic -tau*ln(1-frac) vs numerical root of 1 - exp(-t/tau) - frac = 0
-        rt = dual_solve_scalar_root(lambda t: 1.0 - math.exp(-t / tau) - frac, None, (0.0, 20.0 * tau), tau)
-        return {
-            "tau_s": tau,
-            "t_target_s": rt["root"],
-            "stored_energy_J": 0.5 * c_f * (v_b**2),
-            "dual_rel_discrepancy": _rel_diff(-tau * math.log(1.0 - frac), rt["root"]),
-            "dual_verified": True,
-        }
+        from hamon_rc_precharge import rc_precharge_state
+        return rc_precharge_state(spec)
     if kind == "symmetrical_fault":
         from hamon_ac_power_flow import verify_symmetrical_fault
         result = verify_symmetrical_fault(spec)
