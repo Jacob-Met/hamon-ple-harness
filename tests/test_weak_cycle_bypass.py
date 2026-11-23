@@ -96,3 +96,16 @@ class WeakCycleBypass(unittest.TestCase):
         answer = verify_pipe_network({"nodes": nodes, "pipes": pipes, "proposed_flows_m3_s": expected})
         self.assertTrue(answer["conservation_verified"], answer)
 
+    def test_bypass_remains_resolved_below_inverse_bracketing_scale(self):
+        for demand in (1e-32, -1e-32):
+            with self.subTest(demand=demand):
+                spec, flows, head = laminar_bypass(demand, triangle=True, reverse=False)
+                answer = verify_pipe_network({**spec, "proposed_flows_m3_s": flows})
+                self.assertTrue(answer["conservation_verified"], answer)
+                self.assertTrue(math.isclose(answer["flows_m3_s"]["bypass"], flows["bypass"],
+                                             rel_tol=1e-7, abs_tol=0))
+                self.assertTrue(math.isclose(answer["heads_m"]["J"], head, rel_tol=1e-7, abs_tol=0))
+                for factor in (0, -1):
+                    wrong = {**flows, "bypass": factor * flows["bypass"]}
+                    self.assertFalse(verify_pipe_network(
+                        {**spec, "proposed_flows_m3_s": wrong})["conservation_verified"])

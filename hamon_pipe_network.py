@@ -329,7 +329,10 @@ def network(spec):
             derivative = A / law(flow)[1]
             return residual, derivative @ paths
 
-        tree_drop = newton(initial, nodal_equations, min(1e-12, 5e-13 * scale))
+        # The minimum flow used to bracket a pipe inverse is not the scale
+        # of the continuity equations for a very lightly loaded closed mesh.
+        mass_scale = float(np.abs(d).sum()) if len(reservoirs) == 1 else scale
+        tree_drop = newton(initial, nodal_equations, min(1e-12, 5e-13 * mass_scale))
         qnode = inverse(pipe_drops(tree_drop), scale)
         relative_tree_drop = tree_drop - boundary_drop[basis]
         head = np.linalg.solve(basis_incidence.T, relative_tree_drop)
@@ -354,8 +357,9 @@ def network(spec):
             return cycles.T @ (drop - boundary_drop), (cycles.T * slope) @ cycles
 
         loss_scale = np.max(np.abs(law(feasible)[0] - boundary_drop))
+        loss_floor = 0.0 if len(reservoirs) == 1 else 1e-26
         loop_tolerance = max(32 * np.finfo(float).eps * loss_scale,
-                             min(1e-13, max(1e-26, 1e-13 * loss_scale)))
+                             min(1e-13, max(loss_floor, 1e-13 * loss_scale)))
         amplitude = newton(np.zeros(cycles.shape[1]), loop_equations, loop_tolerance)
         qloop = feasible + cycles @ amplitude
         drop, _ = law(qloop)
