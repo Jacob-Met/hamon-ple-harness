@@ -172,6 +172,49 @@ archive_checkpoint.publish(Path(stage), Path(target), names)
             self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), good_sha)
 
 class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
+    async def test_acknowledged_loose_members_publish_before_task_cutoff(self):
+        names = ["result.json", "basis.md"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "output/submission.zip"
+            target.parent.mkdir()
+            stage = root / "stage"
+            async def execute(command, timeout_sec):
+                self.assertEqual(command, "publish --from-output")
+                try:
+                    archive_checkpoint.publish_loose(stage, target, names)
+                except ValueError:
+                    return {"exit_code": 1}
+                return {"exit_code": 0}
+            session = SimpleNamespace(exec=mock.AsyncMock(side_effect=execute), log=mock.AsyncMock())
+            watcher = archive_contract.FirstPublication((str(stage), "publish"),
+                                                         target=str(target), members=names)
+
+            async def event(name, call_id, *, ack=True, failed=False):
+                await watcher.observe(session, {"type": "tool_execution_start", "toolCallId": call_id,
+                                               "toolName": "write", "args": {"path": str(target.parent / name)}})
+                if ack:
+                    await watcher.observe(session, {"type": "message_end", "message": {"role": "toolResult",
+                        "toolCallId": call_id, "toolName": "write", "isError": failed}})
+
+            stage.mkdir()
+            (stage / names[0]).write_text('{"status": "earlier staged version"}')
+            (target.parent / names[0]).write_text('{"status": "format control"}')
+            await event(names[0], "first")
+            await event(names[1], "interrupted", ack=False)
+            await event(names[1], "failed", failed=True)
+            session.exec.assert_not_awaited()
+            await event(names[1], "missing")
+            self.assertFalse(target.exists())
+            self.assertFalse(watcher.published)
+            (target.parent / names[1]).write_text("# Basis")
+            await event(names[1], "delivered")
+            self.assertTrue(watcher.published)
+            archive_checkpoint.verify(target, names)
+            with zipfile.ZipFile(target) as archive:
+                self.assertEqual(archive.read(names[0]), (target.parent / names[0]).read_bytes())
+            self.assertIn("earlier staged version", (stage / names[0]).read_text())
+
     async def test_provisioned_publisher_is_standalone(self):
         prompt = public_task("eor-review-corrections")
         original = next((ROOT / "artifacts/eor-review-corrections/files").rglob("submission.zip"))
