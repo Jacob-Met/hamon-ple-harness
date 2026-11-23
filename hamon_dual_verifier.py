@@ -2332,6 +2332,22 @@ def verify_compaction_lot(spec):
         return {"lot_accepted": False, "dual_verified": False, "reason": str(exc)}
 
 
+def _column_quantity(spec: dict[str, Any], field: str, unit: str) -> float:
+    value = spec[field]
+    expression = str(value)
+    quantity = eval_quantity(expression)
+    if type(value) in (int, float) or quantity.dim == SI_UNITS[unit].dim:
+        return quantity.val
+    if quantity.is_dimensionless():
+        # Preserve scalar SI expressions such as "200e9" and "2 * 100000".
+        # A ratio such as "4*m/m" explicitly denotes a dimensionless input.
+        names = (node.id for node in ast.walk(ast.parse(expression, mode="eval"))
+                 if isinstance(node, ast.Name))
+        if not any(name in SI_UNITS and name != "pi" for name in names):
+            return quantity.val
+    raise ValueError(f"{field} must have units compatible with {unit}, got {quantity.dim_list()}")
+
+
 def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
     """Unified dispatcher for general multi-discipline engineering checks (zero task ID branching)."""
     if kind in ("beam_design_check", "beam_fixed_fixed"):
@@ -2355,12 +2371,12 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
             res[f"wall_{wid}_shear_N"] = v
         return res
     if kind == "column_interaction_aisc":
-        pu = eval_quantity(str(spec["Pu"])).val
-        pc = eval_quantity(str(spec["Pc"])).val
-        mux = eval_quantity(str(spec["Mux"])).val
-        mcx = eval_quantity(str(spec["Mcx"])).val
-        muy = eval_quantity(str(spec["Muy"])).val
-        mcy = eval_quantity(str(spec["Mcy"])).val
+        pu = _column_quantity(spec, "Pu", "N")
+        pc = _column_quantity(spec, "Pc", "N")
+        mux = _column_quantity(spec, "Mux", "N_m")
+        mcx = _column_quantity(spec, "Mcx", "N_m")
+        muy = _column_quantity(spec, "Muy", "N_m")
+        mcy = _column_quantity(spec, "Mcy", "N_m")
         # Symbolic vs float cross-check
         r_p = pu / pc
         if r_p >= 0.2:
@@ -2385,11 +2401,11 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
         }
     if kind == "column_buckling_aisc_e3":
         K = float(spec.get("K", 1.0))
-        L = eval_quantity(str(spec["L"])).val
-        r = eval_quantity(str(spec["r"])).val
-        E = eval_quantity(str(spec["E"])).val
-        Fy = eval_quantity(str(spec["Fy"])).val
-        Ag = eval_quantity(str(spec["Ag"])).val
+        L = _column_quantity(spec, "L", "m")
+        r = _column_quantity(spec, "r", "m")
+        E = _column_quantity(spec, "E", "Pa")
+        Fy = _column_quantity(spec, "Fy", "Pa")
+        Ag = _column_quantity(spec, "Ag", "m2")
         phi_c = float(spec.get("phi_c", 0.9))
         kl_r = K * L / r
         fe = (math.pi**2 * E) / (kl_r**2)
