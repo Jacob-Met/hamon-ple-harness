@@ -359,6 +359,9 @@ def routed(tmp_path_factory):
             {"id": "unknown-input-" + family, "mode": family,
              "spec": {selector: spec[selector], "typo_parameter": 1}},
         ])
+    calls.append({"id": "enriched-product-two-tray", "mode": "electrochem_separations",
+                  "spec": {"subkind": "distillation", "z_F": .8, "x_D": .9, "x_B": .7,
+                           "alpha": 2., "q": 1., "R": 1000., "F_mol_s": 100.}})
     refrigerator = {"subkind": "vapor_compression", "h1": 250000., "h2s": 280000.,
                     "h3": 100000., "eta_c": .75}
     for name, data in (("specific", {}), ("measured", {"Q_evap_W": 75000.}),
@@ -1443,3 +1446,22 @@ def test_beam_antisymmetric_load_energy_and_profile_contract(routed):
     assert got["external_work_J"] == pytest.approx(energy)
     for case in ("beam-incomplete", "beam-ambiguous", "beam-extra-element"):
         assert not routed[case]["details"]["passed"]
+
+
+def test_registered_enriched_product_uses_whole_equilibrium_trays(routed):
+    from fractions import Fraction
+
+    receipt = routed["enriched-product-two-tray"]
+    assert receipt["completed"], receipt
+    result = receipt["details"]
+    top, bottom, alpha = Fraction(9, 10), Fraction(7, 10), Fraction(2)
+    first = top / (alpha - (alpha - 1)*top)
+    vapor = (1000*first + top)/1001
+    second = vapor / (alpha - (alpha - 1)*vapor)
+    assert first > Fraction(4, 5) and second < bottom < first
+    graphical = 1 + (first-bottom)/(first-second)
+    assert result["N_theoretical"] == float(graphical)
+    assert result["N_theoretical"] < result["N_min_fenske"] < 2
+    assert result["N_stages_integer"] == result["feed_stage"] == 2
+    assert result["residual"] < 1e-10
+    assert result["verified"], result
