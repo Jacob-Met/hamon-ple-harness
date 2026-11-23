@@ -161,7 +161,7 @@ _WAVE8_ROW_KEYS = {
     "pipes": "id from to length_m diameter_m roughness_m minor_loss_K",
     "buses": "id type p_injection_pu q_injection_pu vm_pu va_deg q_min_injection_pu q_max_injection_pu shunt_g_pu shunt_b_pu",
     "lines": "id from to r_pu x_pu tap_ratio phase_shift_deg line_charging_b_pu",
-    "layers": "thickness_m phi_deg gamma_above_water_N_m3 gamma_submerged_N_m3",
+    "layers": "thickness_m phi_deg gamma_above_water_N_m3 gamma_submerged_N_m3 gamma_saturated_N_m3",
 }
 _STATION_KEYS = "radius_m meridional_velocity_m_s absolute_tangential_velocity_m_s absolute_flow_angle_deg relative_flow_angle_deg blade_metal_angle_deg"
 _WAVE8_RECORD_KEYS = {

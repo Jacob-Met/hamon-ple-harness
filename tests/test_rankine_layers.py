@@ -60,6 +60,35 @@ class TestRankineLayers(unittest.TestCase):
             self.assertAlmostEqual(r["thrust_N_m"],2300*h+120*PCF*h*h/2)
             self.assertAlmostEqual(r["moment_Nm_m"],2300*h*h/2+120*PCF*h**3/6)
 
+    def test_submerged_unit_weight_forms_and_independent_pressure_diagram(self):
+        water, height, saturated = 9810., 6., 19810.
+        submerged = saturated - water
+        for state, coeff in (("active", 1/3), ("passive", 3)):
+            for weights in ({"gamma_submerged_N_m3": submerged},
+                            {"gamma_saturated_N_m3": saturated},
+                            {"gamma_saturated_N_m3": saturated, "gamma_submerged_N_m3": submerged}):
+                with self.subTest(state=state, weights=weights):
+                    row = {"thickness_m": height, "phi_deg": 30, **weights}
+                    r = run(state, [row], water_table_depth_m=0, gamma_water_N_m3=water)
+                    self.assertTrue(r["conservation_verified"], r)
+                    gradient = coeff * submerged + water
+                    self.assertAlmostEqual(r["thrust_N_m"], gradient * height**2 / 2)
+                    self.assertAlmostEqual(r["moment_Nm_m"], gradient * height**3 / 6)
+
+    def test_water_table_reconciles_only_the_occupied_phases(self):
+        dry = {"thickness_m": 2, "phi_deg": 0, "gamma_above_water_N_m3": 16000}
+        wet = {"thickness_m": 3, "phi_deg": 0, "gamma_saturated_N_m3": 19000}
+        r = run("active", [dry, wet], water_table_depth_m=2, gamma_water_N_m3=10000)
+        self.assertTrue(r["conservation_verified"], r)
+        self.assertEqual(r["profile"][1]["effective_bottom_Pa"], 2*16000 + 3*9000)
+        self.assertEqual(r["profile"][1]["water_bottom_Pa"], 30000)
+        for table, weights in ((0, {"gamma_submerged_N_m3": 14000}), (0, {"gamma_saturated_N_m3": 10000}),
+                               (0, {"gamma_saturated_N_m3": True}), (1, {})):
+            row = {**wet, **weights}
+            with self.subTest(table=table, row=row):
+                self.assertFalse(run("active", [row], water_table_depth_m=table,
+                                     gamma_water_N_m3=10000)["conservation_verified"])
+
     def test_out_of_scope_or_false_claims(self):
         for kw in [{"backfill_slope_deg":2},{"wall_friction_deg":1},{"surcharge_Pa":-10},
                    {"water_table_depth_m":0},{"proposed_thrust_N_m":0}]:
