@@ -447,9 +447,10 @@ def _verify_index_match(sheet, formula, cached, literals):
         name = match[field + "_sheet"] or sheet
         if name.startswith("'"):
             name = name[1:-1].replace("''", "'")
-        if name not in literals or sum(str(s).casefold() == name.casefold() for s in literals) != 1:
+        candidates = [s for s in literals if s is not None and s.casefold() == name.casefold()]
+        if len(candidates) != 1 or (candidates[0] != name and not (name.isascii() and candidates[0].isascii())):
             return {"status": "unverified", "reason": "missing_or_ambiguous_sheet"}
-        resolved[field] = name
+        resolved[field] = candidates[0]
     try:
         key_x, key_y = _grid_position(match["keys_start"])
         key_end_x, key_end_y = _grid_position(match["keys_end"])

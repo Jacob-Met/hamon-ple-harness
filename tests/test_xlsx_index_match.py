@@ -38,6 +38,19 @@ class IndexMatchTests(TestCase):
                 self.assertEqual(result["status"], "matched" if cache == 175 else "mismatch")
                 self.assertEqual(audit_local_deliverable(str(path))["ok"], cache == 175)
 
+    def test_sheet_case_and_ambiguity(self):
+        path = self.make_sheet(self.formula.replace("Ratings 2026", "rAtInGs 2026"), 175)
+        self.assertEqual(xlsx_audit(path)["lookup_audit"]["counts"]["matched"], 1)
+        with ZipFile(path) as archive:
+            parts = {n: archive.read(n) for n in archive.namelist()}
+        parts["xl/workbook.xml"] = parts["xl/workbook.xml"].replace(
+            b"</sheets>", b'<sheet name="ratings 2026" sheetId="3" r:id="s2"/></sheets>')
+        with ZipFile(path, "w") as archive:
+            for n, value in parts.items():
+                archive.writestr(n, value)
+        evidence = xlsx_audit(path)["lookup_audit"]["examples"][0]
+        self.assertEqual(evidence["reason"], "missing_or_ambiguous_sheet")
+
     def test_unsupported_forms_never_validate_cached_results(self):
         for change, into in ((",0)", ",1)"), (",0)", ")"), ("A1:A3","A1:B3"),
                              ("A1:A3","A1:A4"), ("A1:A3","A1:A2049"),
