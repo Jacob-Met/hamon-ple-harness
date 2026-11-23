@@ -363,14 +363,12 @@ print(json.dumps(result,separators=(",",":")))
 
 
 async def snapshot(session: Any, targets: list[dict[str, str]], *,
-                   deadline: float | None = None, observe_loose_baseline: bool = False) -> dict | None:
+                   deadline: float | None = None) -> dict | None:
     """One bounded, read-only remote observation; None means unavailable."""
     if not targets:
         return {}
     members = archive_contract.declared_members(getattr(session, "instruction", ""), targets)
     probe_targets = [{**targets[0], "root_members": members}] if members else targets
-    if members and observe_loose_baseline:
-        probe_targets[0]["observe_loose_baseline"] = True
     argv = shlex.quote(json.dumps(probe_targets, separators=(",",":")))
     cmd = "python3 -c " + shlex.quote(REMOTE_PROBE) + " " + argv
     try:
