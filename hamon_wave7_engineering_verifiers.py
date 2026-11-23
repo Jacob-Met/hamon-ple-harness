@@ -2163,6 +2163,9 @@ def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]
         return _electrochemistry(params)
 
     if subkind == "distillation":
+        if "equilibrium_table" in params:
+            from hamon_tabulated_distillation import solve_tabulated_distillation
+            return solve_tabulated_distillation(params)
         z_f = float(params["z_F"])
         x_d = float(params["x_D"])
         x_b = float(params["x_B"])
