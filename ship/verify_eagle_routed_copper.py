@@ -65,6 +65,7 @@ def trace(a, b, layer, wires):
             and int(w.attrib["layer"]) == layer
             and D(w.attrib["width"]) > 0
             and D(w.get("curve", "0")) == 0
+            and w.get("style", "continuous") == "continuous"
         ):
             matches.append(
                 {
