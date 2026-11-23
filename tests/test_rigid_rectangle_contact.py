@@ -85,6 +85,52 @@ class RigidRectangleContact(unittest.TestCase):
         self.assertFalse(out['conservation_verified'])
         self.assertTrue(solve({**weak, 'moment_x_Nm': 0})['conservation_verified'])
 
+    def test_uniform_full_contact_keeps_centered_certificate_under_translation(self):
+        for axis in (0,1):
+            dims = [1.5,1.5]
+            dims[axis] = .125
+            reference = None
+            for origin in (0,2**21,-2**21,2**22,-2**22):
+                center = [0,0]
+                center[axis] = origin
+                spec = {**BASE,'base_width_m':dims[0],'base_length_m':dims[1],
+                        'base_center_m':center,'vertical_resultant_N':1,
+                        'moment_x_Nm':center[0],'moment_y_Nm':center[1]}
+                out = solve(spec)
+                with self.subTest(axis=axis,origin=origin):
+                    self.assertTrue(out['conservation_verified'],out)
+                    local = [[x-center[0],y-center[1]] for x,y in out['contact_polygon_m']]
+                    field = (local,out['contact_vertex_pressure_Pa'])
+                    if reference is None: reference = field
+                    self.assertEqual(field,reference)
+                    self.assertTrue(solve({**spec,'proposed_contact_polygon_m':out['contact_polygon_m'],
+                                          'proposed_contact_vertex_pressure_Pa':field[1]})['conservation_verified'])
+
+    def test_resolved_full_contact_component_checks_pressure_magnitude(self):
+        # For [-1,1]^2, p=1+(3/4)*(Mx*x+My*y) exactly gives N=4 and
+        # the supplied centered first moments. Every pressure here is dyadic.
+        for weak_axis in (0,1):
+            for sign in (-1,1):
+                target = [1,1]
+                target[weak_axis] = sign*2.**-43
+                spec = {**BASE,'moment_x_Nm':target[0],'moment_y_Nm':target[1]}
+                corners = [(-1,-1),(1,-1),(1,1),(-1,1)]
+                out = solve(spec)
+                self.assertEqual(out['full_contact_moment_resolution'],
+                                 {'polygon':[True,True],'corners':[True,True]})
+                for factor,valid in [(1,True),(0,False),(-1,False),(1024,False)]:
+                    supplied = target.copy()
+                    supplied[weak_axis] *= factor
+                    pressures = [1+.75*(x*supplied[0]+y*supplied[1]) for x,y in corners]
+                    for claim in [{'proposed_corner_pressure_Pa':pressures},
+                                  {'proposed_contact_polygon_m':corners,
+                                   'proposed_contact_vertex_pressure_Pa':pressures}]:
+                        with self.subTest(axis=weak_axis,sign=sign,factor=factor):
+                            self.assertEqual(solve({**spec,**claim})['conservation_verified'],valid)
+        weak = solve({**BASE,'moment_x_Nm':2.**-62,'moment_y_Nm':1})
+        self.assertFalse(weak['full_contact_moment_resolution']['polygon'][0])
+        self.assertFalse(weak['conservation_verified'])
+
     def test_product_of_strips_is_not_the_joint_contact(self):
         for claim in [{'proposed_contact_area_m2':2.25},{'proposed_q_max_Pa':64/9},
                       {'proposed_contact_polygon_m':[[-.5,-.5],[1,-.5],[1,1],[-.5,1]]}]:

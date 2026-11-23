@@ -54,9 +54,24 @@ The solver uses degree-two triangle integration. It separately integrates
 the returned polygon and vertex pressures with exact rational arithmetic
 on their binary64 values. Force, both moments, area and the returned affine
 field must agree within 1e-9 relative physical scales before
-`output_geometry_verified` is true. Moment residuals scale with force times
-base dimension, not distance to the global origin. Rounded coordinates
-that collapse an actual contact patch cannot pass.
+`output_geometry_verified` is true. The acceptance check integrates first moments about the base center. It uses
+the displayed force to center the displayed moments and the requested force
+to center the requested moments. This keeps the verdict invariant when the
+same representable local geometry and pressures move to a different global
+origin. The reported `moment_residual_Nm` retains its global-origin convention.
+Rounded coordinates that collapse an actual contact patch cannot pass.
+
+For full rectangular contact, proposed corner and polygon pressure fields
+also have a separate tolerance for each centered first moment. The allowance
+sums the displayed reference field's absolute component residual, one part
+in a billion of the requested component magnitude, and a pressure-rounding
+allowance. The last term is the displayed area times the largest distance
+along that axis from the base center times the largest binary64 pressure ULP
+among the vertices. `full_contact_moment_resolution` reports, separately
+for corner and polygon fields, whether each nonzero requested component
+exceeds that allowance. A zero demand is recorded as null. A flat or
+reversed component still fails the direction check for a nonzero demand.
+This is a numerical acceptance bound for the reported field.
 
 `ship/verify_rectangular_contact.py` supplies an independent forward oracle:
 rational vertical cross-sections integrated by Simpson 3/8, exact for the
