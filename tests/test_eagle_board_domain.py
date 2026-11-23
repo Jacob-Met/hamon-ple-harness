@@ -105,7 +105,7 @@ class BoardDomainTests(unittest.TestCase):
 
     def test_declared_ambiguous_boundaries_never_fall_back_to_unbounded_copper(self):
         shapes=[rectangle()[:-1],rectangle()+[edge((-2,-2),(0,0))],
-                rectangle()+rectangle(-.05,.05,-.05,.05),
+                rectangle()+rectangle(-.5,.5,-.5,.5)+rectangle(-.05,.05,-.05,.05),
                 rectangle()+rectangle(10,14),
                 outline([(-2,-2),(2,2),(-2,2),(2,-2)]),
                 [ET.Element("circle",x="0",y="0",radius="2",width="0",layer="20")]]
@@ -119,6 +119,29 @@ class BoardDomainTests(unittest.TestCase):
         absent=self.query([])
         self.assertEqual(absent["board_domain"]["status"],"unbounded_artwork")
         self.assertEqual(absent["status"],"contact_witnessed")
+
+    def test_one_straight_hole_is_independent_of_winding_and_wire_order(self):
+        outer = rectangle()
+        inner = outline([(-.5,-.5),(.5,-.5),(.5,0),(0,0),(0,.5),(-.5,.5)])
+        for rows in (outer+inner, reverse_rows(inner)+outer, (inner+outer)[::2]+(inner+outer)[1::2]):
+            _, drawing = board(rows)
+            domain, info = nominal_board_domain(dimension_records(drawing))
+            self.assertEqual((info["wire_count"],info["hole_wire_count"],len(info["hole_sources"])),(10,6,6))
+            self.assertFalse(domain.covers(Point(-250000,250000)))
+            self.assertTrue(domain.covers(Point(250000,250000)))
+        _, drawing = board(rounded_rectangle(1)+rectangle(1,2,1,2))
+        domain,info = nominal_board_domain(dimension_records(drawing))
+        self.assertEqual(info["quarter_count"],4)
+        self.assertFalse(domain.covers(Point(1500000,1500000)))
+
+    def test_inner_boundary_ambiguity_fails_closed(self):
+        for inner in (rectangle(2,3,0,1),rectangle(1,3,0,1),
+                      rectangle(1,1.999999999,0,1),
+                      outline([(-.5,-.5),(.5,.5),(-.5,.5),(.5,-.5)]),
+                      rounded_rectangle(".1")):
+            result = self.query(rectangle()+inner)
+            self.assertEqual(result["board_domain"]["status"],"unresolved")
+            self.assertFalse(result["contacts"])
 
     def test_convex_quarters_have_the_independently_known_circle_margin(self):
         for r,center,good,bad in (
