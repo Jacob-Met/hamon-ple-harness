@@ -55,7 +55,7 @@ def _drained_column(spec, dispatch):
     height = math.fsum(row["thickness_m"] for row in rows)
     result = {"ok": True, "conservation_verified": True, "mode": "civil_geotech", "calculation": spec["calculation"],
               "interface_condition": "fully_drained", "layers": rows,
-              "dual_solver_rel_residual": max(row["dual_solver_rel_residual"] for row in rows)}
+              "dual_solver_rel_residual": max(abs(row["dual_solver_rel_residual"]) for row in rows)}
     for prefix in ("", "finite_volume_"):
         pressure = prefix + "mean_excess_pore_pressure_Pa"
         settlement = prefix + "settlement_at_time_m"

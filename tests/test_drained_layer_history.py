@@ -87,3 +87,17 @@ def test_a_reporting_bin_must_contain_both_computed_values():
     request = {**LAYER, "calculation": "consolidation_history_1d", "proposed_settlement_m": 0,
                "settlement_reporting_increment_m": .01}
     assert history_certificate(request, disagree) is None
+
+
+def test_column_reports_worst_absolute_layer_residual():
+    from hamon_consolidation_certificate import history_certificate
+
+    residuals = iter([-6e-7, 2e-8])
+
+    def checked_layer(tool, request):
+        return {"ok": True, "conservation_verified": True, "calculation": "consolidation_history_1d",
+                "dual_solver_rel_residual": next(residuals), "settlement_at_time_m": 0,
+                "finite_volume_mean_effective_increment_Pa": 0, "mean_excess_pore_pressure_Pa": 0,
+                "finite_volume_mean_excess_pore_pressure_Pa": 0}
+
+    assert history_certificate(COLUMN, checked_layer)["dual_solver_rel_residual"] == 6e-7
