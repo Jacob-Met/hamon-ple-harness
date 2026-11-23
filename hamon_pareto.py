@@ -11,6 +11,8 @@ import hashlib
 import json
 import math
 import re
+from decimal import Decimal, localcontext
+from fractions import Fraction
 from typing import Any
 
 from engineering_toolkit import audit_local_deliverable
@@ -273,7 +275,82 @@ def _wave8_request(instruction):
             return None
     elif cover == "batch" or not isinstance(value, dict):
         return None
+    requests = value if isinstance(value, list) else [value]
+    activity_requests = [i for i, req in enumerate(requests)
+                         if isinstance(req, dict) and req.get("mode") == "electrochem_separations"
+                         and isinstance(req.get("spec"), dict)
+                         and req["spec"].get("subkind") == "electrochemistry"]
+    if activity_requests:
+        # The text is the source of the certificate. Refuse a numeric lexeme
+        # rounded to a different decimal value by the ordinary JSON decoder.
+        literal = json.loads(text, parse_float=Decimal)
+        literal_requests = literal if isinstance(literal, list) else [literal]
+        for i in activity_requests:
+            parsed = json.loads(json.dumps(requests[i], allow_nan=False), parse_float=Decimal)
+            if parsed != literal_requests[i]:
+                return None
     return value
+
+
+def _nernst_equilibrium_result(req):
+    """Qualify a complete open-circuit request against an exact activity product."""
+    spec = req["spec"]
+    if set(spec) != {"subkind", "E0_V", "n_electrons", "T_K", "activity_terms"}:
+        return None
+    if spec["subkind"] != "electrochemistry":
+        return None
+    if any(type(spec[key]) not in (int, float) or not math.isfinite(spec[key]) for key in ("E0_V", "T_K")):
+        return None
+    n, terms = spec["n_electrons"], spec["activity_terms"]
+    if type(n) is not int or n <= 0 or spec["T_K"] <= 0 or not isinstance(terms, list) or not 1 <= len(terms) <= 16:
+        return None
+    product = Fraction(1)
+    species = set()
+    for row in terms:
+        if not isinstance(row, dict) or set(row) != {"species", "activity", "stoich"}:
+            return None
+        name = row["species"]
+        if not isinstance(name, str) or not name.strip() or name.strip() in species:
+            return None
+        species.add(name.strip())
+        activity, power = row["activity"], row["stoich"]
+        if type(power) is not int or not 1 <= abs(power) <= 16:
+            return None
+        if type(activity) not in (float, int) or not math.isfinite(activity) or activity <= 0:
+            return None
+        product *= Fraction(str(activity)) ** power
+    result = dispatch_ple_tool("hamon_conservation_cad_verifier", req)
+    if result.get("verified") is not True or result.get("subkind") != "electrochemistry":
+        return None
+    with localcontext() as ctx:
+        ctx.prec = 70
+        quotient = Decimal(product.numerator) / Decimal(product.denominator)
+        log_q = quotient.ln()
+        if product != 1 and log_q == 0:
+            return None
+        shift = Decimal("8.314462618") * Decimal(str(spec["T_K"])) * log_q / (n * Decimal("96485.33212"))
+        voltage = Decimal(str(spec["E0_V"])) - shift
+        nf = n * Decimal("96485.33212")
+        rt = Decimal("8.314462618") * Decimal(str(spec["T_K"]))
+        e0 = Decimal(str(spec["E0_V"]))
+        expected_fields = {
+            "ln_Q_reaction": log_q, "E_nernst_V": voltage, "V_cell_V": voltage,
+            "delta_G0_J_mol": -nf * e0, "delta_G_J_mol": -nf * voltage,
+            "ln_K_eq": nf * e0 / rt, "n_electrons": n, "product_stoich": 1,
+            "charge_passed_C": 0, "reaction_charge_C": 0, "reaction_extent_mol": 0,
+            "moles_reacted": 0, "product_moles": 0, "mass_deposited_g": 0,
+        }
+    residual = result.get("residual")
+    if type(residual) not in (int, float) or not 0 <= residual < 1e-11:
+        return None
+    for field, expected in expected_fields.items():
+        observed = result.get(field)
+        if type(observed) not in (float, int) or not math.isfinite(observed):
+            return None
+        reference = float(expected)
+        if (expected and reference == 0) or not math.isclose(observed, reference, rel_tol=1e-12, abs_tol=0):
+            return None
+    return result
 
 
 def _distillation_result(req):
@@ -328,6 +405,8 @@ def _wave8_result(req):
         return None
     spec = req["spec"]
     if req["mode"] == "electrochem_separations":
+        if spec.get("subkind") == "electrochemistry":
+            return _nernst_equilibrium_result(req)
         return _distillation_result(req)
     calculation = spec["calculation"]
     mode, fields, required = _WAVE8_INPUTS[calculation]
@@ -506,8 +585,7 @@ def route_from_intake_prompt(
             )
             if certificate is not None:
                 plan["presolve_result_json"] = certificate
-                if fin_request:
-                    plan["presolve_source_sha256"] = hashlib.sha256(instruction.encode()).hexdigest()
+                plan["presolve_source_sha256"] = hashlib.sha256(instruction.encode()).hexdigest()
             elif fin_request:
                 plan["presolve_abstention"] = abstention
             return plan
@@ -578,5 +656,4 @@ from hamon_wave7_engineering_verifiers import (
     dispatch_wave7_verifier,
     infer_wave7_domain,
 )
-
 
