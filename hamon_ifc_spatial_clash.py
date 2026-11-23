@@ -915,9 +915,14 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
         return _extract_solid_item(entities, args[0], unit_scale, mass_issues, active_items)
     if itype == "IFCBLOCK" and len(args) == 4:
         try:
+            location, _, _ = _required_ifc_entity(entities, args[0], "IFCAXIS2PLACEMENT3D")
+            (coordinates,) = _required_ifc_entity(entities, location, "IFCCARTESIANPOINT")
+            coordinates = np.asarray(coordinates, dtype=float)
+            if coordinates.shape != (3,) or not np.isfinite(coordinates * unit_scale).all():
+                raise ValueError("expected a finite 3D block location")
             x, y, z = (float(value) * unit_scale for value in args[1:])
         except (ValueError, TypeError, OverflowError) as exc:
-            raise UnresolvedSolidGeometry("invalid IFC block dimensions") from exc
+            raise UnresolvedSolidGeometry("invalid IFC block placement or dimensions") from exc
         if not all(0 < value < math.inf for value in (x, y, z)):
             raise UnresolvedSolidGeometry("IFC block dimensions must be finite and positive")
         vertices, faces = _extrude_polygon_2d(np.array([(0., 0.), (x, 0.), (x, y), (0., y)]),

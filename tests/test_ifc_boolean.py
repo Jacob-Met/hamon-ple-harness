@@ -163,6 +163,32 @@ class PolyhedralBooleans(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertIsNone(result["total_solid_volume_m3"])
 
+    def test_block_requires_a_real_3d_placement_and_location(self):
+        scene = Scene()
+        point = scene.vector("IFCCARTESIANPOINT", [1., 0., 0.])
+        point2 = scene.vector("IFCCARTESIANPOINT", [1., 0.])
+        direction = scene.vector("IFCDIRECTION", [1., 0., 0.])
+        frame2 = scene.add(f"IFCAXIS2PLACEMENT2D(#{point2},$)")
+        bad_frames = ["$", "#999999", f"#{point}", f"#{frame2}"]
+        for location in ("$", "#999998", f"#{direction}", f"#{point2}"):
+            bad_frames.append(f"#{scene.add(f'IFCAXIS2PLACEMENT3D({location},$,$)')}")
+        a = box(scene, [0,0,0], [2,2,2], primitive=True)
+        valid = scene.add(f"IFCAXIS2PLACEMENT3D(#{point},$,$)")
+        b = scene.add(f"IFCBLOCK(#{valid},2.,2.,2.)")
+        union = scene.add(f"IFCBOOLEANRESULT(.UNION.,#{a},#{b})")
+        scene.product(union, np.eye(3), [0,0,0])
+        text = scene.text()
+        accepted = run_router_ifc_clash({"ifc_text":text})
+        self.assertTrue(accepted["ok"], accepted)
+        self.assertAlmostEqual(accepted["total_solid_volume_m3"], 12., places=12)
+        for position in bad_frames:
+            with self.subTest(position=position):
+                invalid = text.replace(f"#{b}=IFCBLOCK(#{valid},", f"#{b}=IFCBLOCK({position},")
+                result = run_router_ifc_clash({"ifc_text":invalid})
+                self.assertFalse(result["ok"], result)
+                self.assertEqual(result["status"], "unresolved_solid_geometry")
+                self.assertIsNone(result["total_solid_volume_m3"])
+
 
 if __name__ == "__main__":
     unittest.main()
