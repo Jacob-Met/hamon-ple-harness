@@ -313,3 +313,63 @@ def test_zero_duty_exchanger_inverse_binds_all_observations():
             # Precise nonzero duty can coexist with an outlet rounded to its inlet.
             tiny = check(Q=1e-13, T_h_out=400., T_c_out=300.)
             assert tiny["verified"] and tiny["UA_W_K"] > 0.
+
+
+def test_electrochem_species_and_written_reaction_normalization():
+    from fractions import Fraction
+
+    spec = dict(E0_V=0.7996, n_electrons=1, Q_reaction=0.25, current_A=0.5,
+                time_s=7200, molar_mass_g_mol=107.8682, faradaic_efficiency=0.75)
+    base = solve_electrochem_or_separation(spec)
+    charge = Fraction(2700)
+    silver = charge / Fraction("96485.33212")
+    for scale in range(1, 101):
+        row = dispatch_wave7_verifier("electrochem_separations", {
+            **spec, "n_electrons": scale, "product_stoich": scale,
+            "Q_reaction": 0.25 ** scale,
+        })
+        assert row["verified"]
+        assert row["E_nernst_V"] == pytest.approx(base["E_nernst_V"], rel=1e-14)
+        assert row["delta_G_J_mol"] == pytest.approx(scale * base["delta_G_J_mol"], rel=1e-14)
+        assert row["n_electrons"] == row["product_stoich"] == scale
+        assert row["charge_passed_C"] == 3600 and row["reaction_charge_C"] == charge
+        assert row["reaction_extent_mol"] == row["moles_reacted"] == float(silver / scale)
+        assert row["product_moles"] == float(silver)
+        assert row["mass_deposited_g"] == float(silver * Fraction("107.8682"))
+
+
+def test_electrochem_mass_information_and_time_for_target():
+    spec = dict(E0_V=0.8, n_electrons=2, product_stoich=3, current_A=5, time_s=10)
+    solve = lambda **fields: solve_electrochem_or_separation({**spec, **fields})
+    assert solve()["verified"] and solve()["mass_deposited_g"] is None
+    assert solve(time_s=0)["mass_deposited_g"] == 0
+    zero = solve(faradaic_efficiency=0)
+    assert zero["verified"] and zero["charge_passed_C"] == 50
+    assert zero["reaction_charge_C"] == zero["product_moles"] == zero["mass_deposited_g"] == 0
+    target = solve(molar_mass_g_mol=10, faradaic_efficiency=0.5, target_mass_g=0.4)
+    expected = 0.4 * 2 * 96485.33212 / (5 * 0.5 * 3 * 10)
+    assert target["verified"] and target["target_time_s"] == pytest.approx(expected)
+    assert target["target_mass_status"] == "unique"
+    replay = solve(time_s=target["target_time_s"], molar_mass_g_mol=10, faradaic_efficiency=0.5)
+    assert replay["mass_deposited_g"] == pytest.approx(0.4, rel=1e-14)
+    assert solve(target_mass_g=1)["target_mass_status"] == "molar_mass_required"
+    for stop in ({"current_A": 0}, {"faradaic_efficiency": 0}):
+        failed = solve(target_mass_g=1, **stop)
+        assert not failed["verified"] and failed["target_time_s"] is None
+        assert failed["target_mass_status"] == "unreachable_at_zero_rate"
+        flat = solve(target_mass_g=0, **stop)
+        assert flat["verified"] and flat["target_mass_status"] == "all_nonnegative_times"
+        assert flat["target_time_s"] is None
+    assert solve(target_mass_g=0)["target_time_s"] == 0
+
+
+def test_electrochem_invalid_input_returns_structured_refusal():
+    spec = {"E0_V": 0.8, "n_electrons": 1}
+    for patch in ({"time_s": -1}, {"molar_mass_g_mol": -1}, {"molar_mass_g_mol": 0},
+                  {"product_stoich": 0}, {"product_stoich": -1}, {"mode": "typo"},
+                  {"faradaic_efficiency": -0.1}, {"faradaic_efficiency": 1.1},
+                  {"target_mass_g": -1}, {"current_A": True}, {"T_K": float("inf")},
+                  {"E0_V": float("nan")}, {"time_s": "bad"}, {"n_electrons": None}):
+        row = solve_electrochem_or_separation({**spec, **patch})
+        assert row["verified"] is False and row["error"]
+        assert "mass_deposited_g" not in row
