@@ -152,3 +152,12 @@ def test_certificate_requires_finite_numeric_strict_residual(residual):
     }
     with mock.patch.object(router, "dispatch_ple_tool", return_value=invalid):
         assert "presolve_result_json" not in route(SPECS[-1])
+
+
+def test_submerged_rankine_budget_requires_consistent_weights():
+    row = {"thickness_m": 6, "phi_deg": 30, "gamma_saturated_N_m3": 19810}
+    spec = {"calculation": "rankine_layers", "pressure_state": "active",
+            "layers": [row], "water_table_depth_m": 0, "gamma_water_N_m3": 9810}
+    assert route(spec)["thinking_tier"] == "low"
+    conflict = dict(row, gamma_submerged_N_m3=14000)
+    assert not route(dict(spec, layers=[conflict]))["presolve_verified"]

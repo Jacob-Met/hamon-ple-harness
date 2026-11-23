@@ -139,12 +139,25 @@ def verify_rankine_layers(spec):
         profile = []
         for i, layer in enumerate(layers):
             end = z + _finite(layer["thickness_m"], "thickness_m")
-            dry = _finite(layer["gamma_above_water_N_m3"], "gamma_above_water_N_m3")
-            if end <= z or dry <= 0 or _finite(layer.get("cohesion_Pa", 0), "cohesion_Pa") != 0:
-                raise ValueError("Each layer requires positive thickness and weight and zero cohesion")
-            wet = _finite(layer["gamma_submerged_N_m3"], "gamma_submerged_N_m3") if end > water else None
-            if wet is not None and wet <= 0:
-                raise ValueError("Submerged effective unit weight must be positive")
+            if end <= z or _finite(layer.get("cohesion_Pa", 0), "cohesion_Pa") != 0:
+                raise ValueError("Each layer requires positive thickness and zero cohesion")
+            dry = None
+            if z < water or "gamma_above_water_N_m3" in layer:
+                dry = _finite(layer["gamma_above_water_N_m3"], "gamma_above_water_N_m3")
+                if dry <= 0:
+                    raise ValueError("Above-water unit weight must be positive")
+            wet = None
+            if end > water:
+                if "gamma_saturated_N_m3" in layer:
+                    saturated = _finite(layer["gamma_saturated_N_m3"], "gamma_saturated_N_m3")
+                    wet = saturated - gw
+                if "gamma_submerged_N_m3" in layer:
+                    supplied = _finite(layer["gamma_submerged_N_m3"], "gamma_submerged_N_m3")
+                    if wet is not None and not math.isclose(wet, supplied, rel_tol=1.e-6):
+                        raise ValueError("Saturated and submerged weights disagree with water unit weight")
+                    wet = supplied
+                if wet is None or wet <= 0:
+                    raise ValueError("Require positive submerged unit weight or saturated weight above water weight")
             k, kn = _coefficients(_finite(layer["phi_deg"], "phi_deg"), state == "passive")
             residual = max(residual, abs(k-kn) / k)
             boundaries = (water, end) if z < water < end else (end,)
