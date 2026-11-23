@@ -81,13 +81,25 @@ def evaluate(root: Path) -> dict:
             removed.append(name)
     tasks_map = manifest.get("tasks")
     empty_file_tasks = []
+    task_harness_mismatches = []
+    task_dev_set_mismatches = []
     if isinstance(tasks_map, dict):
         for tid, trec in sorted(tasks_map.items()):
-            if isinstance(trec, dict) and not (trec.get("files") or {}):
+            if not isinstance(trec, dict):
+                continue
+            # Partial exports retain completed tasks from previous runs. The
+            # organizer compares each explicit snapshot with the latest one.
+            if isinstance(trec.get("tree"), str) and trec["tree"] != harness.get("tree"):
+                task_harness_mismatches.append(tid)
+            if trec.get("dev_set", manifest.get("dev_set")) != manifest.get("dev_set"):
+                task_dev_set_mismatches.append(tid)
+            if not (trec.get("files") or {}):
                 traj = root / "artifacts" / tid / "trajectory.json"
                 if traj.is_file() and ".zip" in traj.read_text(encoding="utf8", errors="ignore").lower():
                     empty_file_tasks.append(tid)
-    status="fresh" if not (missing or diverged or unsafe or removed or empty_file_tasks) else "stale"
+    stale = any((missing, diverged, unsafe, removed, empty_file_tasks,
+                 task_harness_mismatches, task_dev_set_mismatches))
+    status = "stale" if stale else "fresh"
     return {"schema":"hamon.ple.provenance.v1","status":status,
             "manifest_run_commit":harness.get("commit"),
             "manifest_harness_tree":harness.get("tree"),
@@ -98,6 +110,8 @@ def evaluate(root: Path) -> dict:
             "unsafe":unsafe,
             "removed_executable":removed,
             "empty_archive_tasks":empty_file_tasks,
+            "task_harness_mismatches":task_harness_mismatches,
+            "task_dev_set_mismatches":task_dev_set_mismatches,
             "note":"Fresh source hashes are necessary, not sufficient: dev-run provenance, organizer eligibility and real scores must be verified separately."}
 
 
