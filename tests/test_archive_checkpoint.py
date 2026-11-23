@@ -247,7 +247,7 @@ class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
                     events.append("published")
                 return True
             targets = [dict(kind="file",path=str(target))]
-            async def snapshot(_, ts):
+            async def snapshot(_, ts, *, deadline=None):
                 if ts != targets:
                     return {}
                 return {str(target): {"state": "ready" if target.exists() else "missing",

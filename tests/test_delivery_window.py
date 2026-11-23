@@ -23,7 +23,7 @@ class DeliveryWindow(unittest.IsolatedAsyncioTestCase):
         ready = False
         calls = []
 
-        async def snapshot(_, targets):
+        async def snapshot(_, targets, *, deadline=None):
             if not targets:
                 return {}
             return {target: {"state": "ready" if ready else "missing", "fingerprint": "done"}}
