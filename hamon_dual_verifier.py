@@ -2904,18 +2904,8 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
     if kind == "dc_nodal_kcl":
         return solve_nodal_kcl(spec)
     if kind == "three_phase_vdrop":
-        v_ll, cur, pf = float(spec["V_ll_V"]), float(spec["I_A"]), float(spec["pf"])
-        L_km = float(spec["length_m"]) / 1000.0
-        r_km, x_km = float(spec["R_ohm_per_km"]), float(spec["X_ohm_per_km"])
-        sin_p = math.sqrt(max(0.0, 1.0 - pf * pf))
-        vd = math.sqrt(3.0) * cur * (r_km * pf + x_km * sin_p) * L_km
-        vd_pct = 100.0 * vd / v_ll
-        return {
-            "vdrop_ll_V": vd,
-            "vdrop_pct": vd_pct,
-            "passes_3pct": vd_pct <= float(spec.get("max_vdrop_pct", 3.0)),
-            "dual_verified": True,
-        }
+        from hamon_balanced_feeder import three_phase_feeder
+        return three_phase_feeder(spec)
     if kind == "short_circuit_sym":
         from hamon_short_circuit import symmetrical_fault
         return symmetrical_fault(spec)
