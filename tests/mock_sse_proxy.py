@@ -16,7 +16,9 @@ import sys
 class MockStream:
     """Return a real partial Anthropic event stream, then wait for client close."""
 
-    def __init__(self):
+    def __init__(self, reply_text=None):
+        self.reply_text = reply_text
+        self.requests = 0
         self.probed = asyncio.Event()
         self.started = asyncio.Event()
         self.disconnected = asyncio.Event()
@@ -47,14 +49,23 @@ class MockStream:
                 ("message_start", {"message": {"id": "local", "type": "message", "role": "assistant",
                     "model": request["model"], "content": [], "usage": {"input_tokens": 1, "output_tokens": 0}}}),
                 ("content_block_start", {"index": 0, "content_block": {"type": "text", "text": ""}}),
-                ("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": "Partial"}}),
+                ("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": self.reply_text or "Partial"}}),
             ]
+            self.requests += 1
+            if self.reply_text is not None:
+                events.extend([
+                    ("content_block_stop", {"index": 0}),
+                    ("message_delta", {"delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                                       "usage": {"output_tokens": 1}}),
+                    ("message_stop", {}),
+                ])
             for kind, event in events:
                 payload = json.dumps({"type": kind, **event})
                 writer.write(f"event: {kind}\ndata: {payload}\n\n".encode())
             await writer.drain()
             self.started.set()
-            await reader.read()
+            if self.reply_text is None:
+                await reader.read()
             self.disconnected.set()
         finally:
             writer.close()
