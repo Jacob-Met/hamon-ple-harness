@@ -279,11 +279,13 @@ def _wave8_request(instruction):
 def _distillation_result(req):
     """Admit only closed binary-column calculations with consistent stream flows."""
     spec = req["spec"]
-    required = {"z_F", "x_D", "x_B", "alpha"}
-    numeric = required | {"F_mol_s", "q", "R", "R_mult"}
+    required = {"z_F", "x_D", "x_B"}
+    numeric = required | {"alpha", "F_mol_s", "q", "R", "R_mult"}
+    tabulated = "equilibrium_table" in spec
     if (spec.get("subkind") != "distillation"
             or spec.get("domain", req["mode"]) != req["mode"]
-            or not required <= spec.keys() <= numeric | {"subkind", "domain"}
+            or not required <= spec.keys() <= numeric | {"subkind", "domain", "equilibrium_table"}
+            or tabulated == ("alpha" in spec)
             or {"R", "R_mult"} <= spec.keys()
             or not all(type(spec[k]) in (float, int) and math.isfinite(spec[k])
                        for k in numeric & spec.keys())):
@@ -293,6 +295,22 @@ def _distillation_result(req):
     if (result.get("verified") is not True or result.get("domain") != req["mode"]
             or result.get("subkind") != "distillation" or not 0 <= result["residual"] < 1e-10):
         return None
+
+    if tabulated:
+        if result.get("equilibrium_model") != "piecewise_linear_table":
+            return None
+        count = result["N_stages_integer"]
+        fractional = result["N_theoretical"]
+        feed_stage = result["feed_stage"]
+        if (type(count) is not int or type(feed_stage) is not int
+                or not 1 <= feed_stage <= count or not count-1 < fractional <= count):
+            return None
+        if result["section_mode"] == "single_equilibrium_flash":
+            if count != 1 or result["L_rect_mol_s"] != 0 or result["V_strip_mol_s"] != 0:
+                return None
+        elif (result["section_mode"] not in ("two_section", "rectifying_only", "stripping_only")
+              or not result["min_operating_gap"] > 0):
+            return None
 
     feed = spec.get("F_mol_s", 100.0)
     q = spec.get("q", 1.0)
