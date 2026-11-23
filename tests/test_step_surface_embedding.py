@@ -64,6 +64,7 @@ class StepSurfaceEmbeddingTests(unittest.TestCase):
             with self.subTest(apex=(x, z)):
                 got = self.verify(*fans(x, z))
                 self.assertTrue(got["conservation_verified"], got)
+                self.assertTrue(got["embedded_surface_verified"], got)
                 self.assertAlmostEqual(got["volume_m3"], 4*(2-z)/3, places=13)
 
     def test_pinched_vertex_and_crossed_dimples_are_refused(self):
@@ -83,6 +84,36 @@ class StepSurfaceEmbeddingTests(unittest.TestCase):
         faces = [(8, 11, 10, 9), (4, 5, 6, 7), (0, 1, 5, 4),
                  (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
         self.assert_withheld(points, faces)
+
+    def test_signed_axis_permutations_and_translation_preserve_classification(self):
+        # Reflection reverses all face senses together without changing whether
+        # the surface is embedded; well-separated controls survive wire rounding.
+        for axes, signs, scale in (((1, 2, 0), (1, -1, 1), .125),
+                                   ((2, 0, 1), (-1, -1, 1), 16.)):
+            for x, valid in ((.45, True), (.5, False), (.55, False)):
+                with self.subTest(axes=axes, scale=scale, x=x):
+                    points, faces = fans(x)
+                    points = points[:, axes] * np.asarray(signs) * scale + (64., -128., 32.)
+                    got = self.verify(points, faces)
+                    self.assertEqual(got["conservation_verified"], valid, got)
+                    if valid:
+                        self.assertAlmostEqual(got["volume_m3"] / scale**3, 4/3, places=12)
+                    else:
+                        self.assertNotIn("volume_m3", got)
+
+    def test_many_sided_prism_retains_area_and_volume(self):
+        count, radius, height = 128, 2., 3.
+        ring = [(radius*math.cos(2*math.pi*i/count), radius*math.sin(2*math.pi*i/count))
+                for i in range(count)]
+        points = [(x, y, z) for z in (0., height) for x, y in ring]
+        faces = [tuple(reversed(range(count))), tuple(range(count, 2*count))]
+        faces.extend((i, (i+1) % count, (i+1) % count+count, i+count) for i in range(count))
+        got = self.verify(points, faces)
+        self.assertTrue(got["conservation_verified"], got)
+        area = count*radius**2*math.sin(2*math.pi/count)/2
+        perimeter = 2*count*radius*math.sin(math.pi/count)
+        self.assertAlmostEqual(got["volume_m3"], area*height, places=11)
+        self.assertAlmostEqual(got["surface_area_m2"], 2*area+perimeter*height, places=11)
 
 
 if __name__ == "__main__":
