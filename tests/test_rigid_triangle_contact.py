@@ -131,6 +131,13 @@ class RigidTriangleContact(unittest.TestCase):
             self.assertEqual(out['contact_area_m2'],2**-19)
             self.assertEqual(out['q_max_Pa'],3*2**19)
         self.assertFalse(route(payload(((0,0),(4,4),(8,8)),3,12,12))['ok'])
+        # The three base vertices are distinguishable, but the contact
+        # intersection at offset 4/9 m cannot be rendered faithfully here.
+        offset=2**48
+        translated=route(payload(((offset,0),(offset+3,0),(offset,3)),9,9*offset+1,2))
+        self.assertEqual(translated['equilibrium_status'],'finite')
+        self.assertFalse(translated['output_geometry_verified'])
+        self.assertFalse(translated['conservation_verified'])
         too_large=2**54
         rounded=payload(((too_large,0),(too_large+1,0),(too_large,3)),9,9*too_large,9)
         self.assertFalse(route(rounded)['conservation_verified'])

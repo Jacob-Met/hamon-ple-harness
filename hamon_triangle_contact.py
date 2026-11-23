@@ -170,9 +170,16 @@ def verify_rigid_triangle_contact(spec):
             verified = _close(ra, area) and _close(rf, n) and _normalized_balance(
                 vertices, rendered, pressures, centroid)
             verified &= all(abs(x-y) <= n*d/10**9 for x, y, d in zip((rx, ry), moments, dims))
-            for xy, pressure in list(zip(rendered, pressures)) + list(zip(vertices, corner)):
-                affine = F(peak)+sum(F(g)*(x-F(ref)) for g, x, ref in zip(gradient, xy, reference))
-                verified &= abs(max(0,affine)-F(pressure)) <= exact['q_max_Pa']/10**9
+            def displayed_affine(xy):
+                return F(peak)+sum(F(g)*(x-F(ref)) for g, x, ref in zip(gradient, xy, reference))
+
+            tolerance = exact['q_max_Pa']/10**9
+            # At an interior release intersection the signed plane must be zero.
+            # Only base corners outside the contact polygon may be below zero.
+            verified &= all(abs(displayed_affine(xy)-F(h)) <= tolerance
+                            for xy,h in zip(rendered, pressures))
+            verified &= all(abs(max(0,displayed_affine(xy))-h) <= tolerance
+                            for xy,h in zip(vertices, corner))
             out = dict(**{k:_render(val,k) for k,val in exact.items()},
                        contact_regime='full_contact' if shape=='full_triangle' else 'partial_contact',
                        footprint_shape=shape, corner_pressure_Pa=[_render(h,'corner pressure') for h in corner],
