@@ -1112,7 +1112,7 @@ def solve_nodal_kcl(spec: dict[str, Any], *, omega: float | None = None) -> dict
     return out
 
 def solve_pipe_colebrook_dual(spec: dict[str, Any]) -> dict[str, Any]:
-    """Dual-solve Darcy-Weisbach pipe head loss & pump power (SymPy nsolve vs SciPy brentq)."""
+    """Return signed velocity, dissipative loss magnitudes and required shaft power."""
     Q = float(spec["Q_m3_s"])
     D = float(spec["D_m"])
     L = float(spec["L_m"])
@@ -1122,32 +1122,55 @@ def solve_pipe_colebrook_dual(spec: dict[str, Any]) -> dict[str, Any]:
     K_minor = float(spec.get("minor_loss_K", 0.0))
     eta = float(spec.get("pump_efficiency", 1.0))
 
+    if not all(math.isfinite(x) for x in (Q, D, L, eps, rho, mu, K_minor, eta)):
+        raise ValueError("pipe inputs must be finite")
+    if min(D, rho, mu) <= 0 or min(L, eps, K_minor) < 0 or not 0 < eta <= 1:
+        raise ValueError("invalid pipe geometry, fluid properties, loss coefficient or efficiency")
+
     area = 0.25 * math.pi * D**2
     vel = Q / area
-    Re = rho * vel * D / mu
-    if Re < 2300.0:
-        f_val = 64.0 / max(Re, 1e-12)
-        disc = 0.0
+    # Reynolds number and dissipative losses use speed. Only velocity is signed.
+    Re = rho * abs(vel) * D / mu
+    disc = 0.0
+    if Q == 0:
+        f_val = None
+        h_loss = 0.0
     else:
-        def colebrook(f: float) -> float:
-            return 1.0 / math.sqrt(f) + 2.0 * math.log10(eps / (3.7 * D) + 2.51 / (Re * math.sqrt(f)))
+        if not math.isfinite(Re) or Re <= 0:
+            raise ValueError("unrepresentable Reynolds number for nonzero flow")
+        if Re < 2300.0:
+            f_val = 64.0 / Re
+            # Hagen–Poiseuille form retains the linear loss at small flows.
+            h_loss = (32.0 * mu * abs(vel) * L / (rho * D**2) + K_minor * vel**2 / 2.0) / G0_SI
+        else:
+            # Colebrook is monotone in x = 1/sqrt(f). Smooth-pipe conditions
+            # bound x from above for any nonnegative roughness.
+            a, b = (eps / D) / 3.7, 2.51 / Re
+            if a >= 1:
+                raise ValueError("roughness admits no positive Colebrook friction factor")
+            lo = 0.0 if a > 0 else 1.0
+            hi = max(1.0, -2.0 * math.log10(b))
 
-        sp_pair = None
-        if HAS_SYMPY:
-            f_s = _sp.Symbol("f", positive=True)
-            expr_s = 1 / _sp.sqrt(f_s) + 2 * _sp.log(
-                _sp.Float(eps / (3.7 * D), 28) + _sp.Float(2.51 / Re, 28) / _sp.sqrt(f_s), 10
-            )
-            sp_pair = (expr_s, f_s)
-        # Swamee-Jain explicit initial guess
-        f_sj = 0.25 / (math.log10(eps / (3.7 * D) + 5.74 / (Re**0.9)) ** 2)
-        rt = dual_solve_scalar_root(colebrook, sp_pair, (1e-4, 0.25), f_sj)
-        f_val = rt["root"]
-        disc = rt["dual_rel_discrepancy"]
+            def colebrook(x: float) -> float:
+                return x + 2.0 * math.log10(a + b * x)
 
-    h_loss = (f_val * (L / D) + K_minor) * (vel**2) / (2.0 * G0_SI)
+            sp_pair = None
+            if HAS_SYMPY:
+                x_s = _sp.Symbol("x", positive=True)
+                sp_pair = (x_s + 2 * _sp.log(_sp.Float(a, 28) + _sp.Float(b, 28) * x_s, 10), x_s)
+            rt = dual_solve_scalar_root(colebrook, sp_pair, (lo, hi), (lo + hi) / 2)
+            f_val = 1.0 / rt["root"]**2
+            disc = _rel_diff(1.0 / rt["symbolic_root"]**2, f_val)
+            if disc > 1e-7:
+                raise ValueError("independent Colebrook friction factors disagree")
+            h_loss = (f_val * (L / D) + K_minor) * vel**2 / (2.0 * G0_SI)
+        if not math.isfinite(f_val):
+            raise ValueError("unrepresentable Darcy friction factor")
+
     dp = rho * G0_SI * h_loss
-    p_shaft = (Q * dp) / eta
+    p_shaft = (abs(Q) * dp) / eta
+    if not all(math.isfinite(x) for x in (h_loss, dp, p_shaft)):
+        raise ValueError("unrepresentable pipe loss or power")
     return {
         "velocity_m_s": vel,
         "reynolds": Re,
