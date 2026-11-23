@@ -41,3 +41,51 @@ class ObliqueFluidInterface(unittest.TestCase):
             with self.subTest(direction=direction):
                 result = interface(incidence_angle_deg=direction)
                 self.assertFalse(result["verified"], result)
+
+    def test_evanescent_pressure_phase_decay_and_velocity_match(self):
+        for angle in (-45, 45):
+            result = interface(incidence_angle_deg=angle)
+            self.assertTrue(result["verified"], result)
+            self.assertEqual(result["regime"], "evanescent")
+            reflected = complex(*result["pressure_reflection_complex"])
+            transmitted = complex(*result["pressure_transmission_complex"])
+            velocity = complex(*result["transmitted_normal_velocity_ratio"])
+            self.assertAlmostEqual(reflected.real, 1/3)
+            self.assertAlmostEqual(reflected.imag, -2*math.sqrt(2)/3)
+            self.assertAlmostEqual(abs(1+reflected-transmitted), 0)
+            self.assertAlmostEqual(abs(1-reflected-velocity), 0)
+            self.assertAlmostEqual((transmitted*velocity.conjugate()).real, 0)
+            self.assertEqual(result["transmitted_normal_slowness_s_m"], [0, .5])
+            self.assertEqual(result["tangential_slowness_s_m"] > 0, angle > 0)
+            self.assertTrue(result["transmission_loss_infinite"])
+            self.assertIsNone(result["transmission_loss_dB"])
+
+    def test_exact_critical_plus_signed_angular_neighbors(self):
+        for angle in (-30.,30.):
+            for direction, regime in ((math.nextafter(angle,0), "propagating"),
+                                      (angle, "critical"),
+                                      (math.nextafter(angle,2*angle), "evanescent")):
+                result = interface(incidence_angle_deg=direction)
+                self.assertTrue(result["verified"], result)
+                self.assertEqual(result["regime"], regime)
+            critical = interface(incidence_angle_deg=angle)
+            self.assertEqual(critical["pressure_reflection_R"], 1)
+            self.assertEqual(critical["pressure_transmission_T"], 2)
+            self.assertEqual(critical["transmitted_normal_velocity_ratio"], [0,0])
+
+    def test_matching_media_and_normal_cross_check(self):
+        for angle in (0, 12.3, 45, 89.9):
+            result = interface(incidence_angle_deg=angle, rho2=1, c2=1)
+            self.assertTrue(result["verified"], result)
+            self.assertEqual(result["pressure_reflection_complex"], [0,0])
+            self.assertEqual(result["intensity_transmission_TI"], 1)
+            self.assertEqual(result["transmission_loss_dB"], 0)
+        normal = interface()
+        declared = interface(incidence_sine=0)
+        for key in ("pressure_reflection_R", "pressure_transmission_T", "intensity_transmission_TI"):
+            self.assertEqual(normal[key], declared[key])
+        resonator = dict(A_neck=.1, V_cavity=1, L_eff=.5)
+        self.assertEqual(interface(**resonator)["helmholtz_f0_Hz"],
+                         interface(**resonator, incidence_angle_deg=30)["helmholtz_f0_Hz"])
+        self.assertFalse(interface(incidence_sine=.5, incidence_angle_deg=30)["verified"])
+        self.assertFalse(interface(incidence_angle_deg=91)["verified"])
