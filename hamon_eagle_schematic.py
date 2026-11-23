@@ -132,6 +132,7 @@ def _word_directions(words, glyphs):
         for dx, dy in ((1, 0), (0, 1), (-1, 0), (0, -1)):
             if all(dx * x + dy * y > tol and abs(dx * y - dy * x) <= tol for x, y in steps):
                 word["baseline_direction"] = (dx, dy)
+                word["baseline_origin"] = run[0][0]
                 break
 
 
@@ -166,6 +167,67 @@ def _label_anchors(wires, roots, words):
         if len(hits) == 1:
             anchors[word["text"]].update(hits)
     return anchors
+
+
+def _touches_segment(point, segment, tolerance):
+    a, b = segment
+    if any(p < min(q, r) - tolerance or p > max(q, r) + tolerance
+           for p, q, r in zip(point, a, b)):
+        return False
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length2 = dx * dx + dy * dy
+    if not length2:
+        return math.dist(point, a) <= tolerance
+    t = ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / length2
+    t = min(1, max(0, t))
+    return math.dist(point, (a[0] + t * dx, a[1] + t * dy)) <= tolerance
+
+
+def _wire_end_labels(wires, roots, endpoints, lines, words):
+    """Find collinear native text at an electrically free end of a single green wire."""
+    # Only scan ink for endpoints actually overlapped by a qualifying text run.
+    # A symbol stroke or a different wire can meet an endpoint at its interior.
+    free = {}
+    def is_free(index, point):
+        if point not in free:
+            free[point] = (len(set(endpoints.near(point))) == 1
+                           and not any(_touches_segment(point, line, .13) for line in lines)
+                           and not any(i != index and _touches_segment(point, wire, .12)
+                                       for i, wire in enumerate(wires)))
+        return free[point]
+
+    parallel = defaultdict(list)
+    for direction in {w["baseline_direction"] for w in words if "baseline_origin" in w}:
+        for index, (a, b) in enumerate(wires):
+            start, y = _label_frame(a, direction)
+            end, other_y = _label_frame(b, direction)
+            if abs(y - other_y) <= .08:
+                parallel[direction].append((index, min(start, end), max(start, end), y, other_y,
+                                            ((start, a), (end, b))))
+    candidates = []
+    for word in words:
+        if "baseline_origin" not in word:
+            continue
+        direction = word["baseline_direction"]
+        x, y, u, v = word["page_bbox_pt"]
+        ax, ay = _label_frame((x, y), direction)
+        bx, by = _label_frame((u, v), direction)
+        left, right = sorted((ax, bx))
+        height = abs(by - ay)
+        _, baseline = _label_frame(word["baseline_origin"], direction)
+        hits, witnesses = set(), []
+        for index, start, end, y0, y1, loose in parallel[direction]:
+            if (max(abs(y0 - baseline), abs(y1 - baseline)) > .12
+                    or min(right, end) - max(left, start) < .5 * (right - left)):
+                continue
+            hits.add(roots[index])
+            for pos, point in loose:
+                if left - .5 * height <= pos <= right and is_free(index, point):
+                    witnesses.append({"name": word["text"], "wire_index": index, "endpoint": point,
+                                      "baseline_origin": word["baseline_origin"]})
+        if len(hits) == 1 and witnesses:
+            candidates.append((hits.pop(), witnesses[0]))
+    return candidates
 
 
 def _midpoint(a, b):
@@ -223,7 +285,7 @@ def _supply_anchors(wires, roots, lines, words):
     return supplies, marks
 
 
-def _graph(wires, lines, words):
+def _graph(wires, lines, words, *, wire_end_witnesses=None):
     groups, endpoints = Groups(len(wires)), Points(.12)
     for i, (a, b) in enumerate(wires):
         for p in (a, b):
@@ -241,6 +303,43 @@ def _graph(wires, lines, words):
         first = next(iter(hits))
         for other in hits:
             groups.join(first, other)
+    # A loose-end label only extends an independently observed same-page anchor.
+    # Snapshot existing groups before adding joins so inference cannot bootstrap.
+    candidates = _wire_end_labels(wires, roots, endpoints, lines, words)
+    label_roots = defaultdict(lambda: defaultdict(set))
+    occurrences = defaultdict(set)
+    for name, hits in anchors.items():
+        for root in hits:
+            label_roots[groups.root(root)][name].add(root)
+            occurrences[name].add(root)
+    for root, witness in candidates:
+        name = witness["name"]
+        label_roots[groups.root(root)][name].add(root)
+        occurrences[name].add(root)
+    glyphs = defaultdict(lambda: defaultdict(set))
+    for mark in marks:
+        root = mark["wire_index"]
+        glyphs[groups.root(root)][mark["name"], mark["shape"]].add(root)
+    accepted = []
+    for root, witness in candidates:
+        name = witness["name"]
+        existing = anchors.get(name)
+        if not existing or set(label_roots[groups.root(root)]) != {name}:
+            continue
+        if (_GROUND_NAME.fullmatch(name) or _POWER_NAME.fullmatch(name)) and name not in supplies:
+            continue
+        target = groups.root(next(iter(existing)))
+        if (set(label_roots[target]) != {name} and
+                not _ground_glyph_precedence(name, [target], glyphs, label_roots, occurrences)):
+            continue
+        if target != groups.root(root):
+            accepted.append((root, witness))
+    for root, witness in accepted:
+        name = witness["name"]
+        groups.join(next(iter(anchors[name])), root)
+        anchors[name].add(root)
+        if wire_end_witnesses is not None:
+            wire_end_witnesses.append(witness)
     group_ids = {}
     membership = []
     for i in range(len(wires)):
@@ -271,9 +370,11 @@ def page_connectivity(filename, page=1):
     if not re.search(r"\bEAGLE\b", creator, re.I) or not wires or not red or unsupported or stock["embedded_images"]:
         return {**result, "status": "unresolved_profile", "wire_groups": None}
     _word_directions(stock["words"], glyphs)
-    membership, marks, anchors = _graph(wires, red, stock["words"])
+    wire_end_witnesses = []
+    membership, marks, anchors = _graph(wires, red, stock["words"], wire_end_witnesses=wire_end_witnesses)
     return {**result, "status": "candidate_evidence", "wire_groups": membership,
             "group_count": len(set(membership)), "supply_glyphs": marks,
+            "wire_end_label_witnesses": wire_end_witnesses,
             "printed_equivalence_anchors": anchors}
 
 
