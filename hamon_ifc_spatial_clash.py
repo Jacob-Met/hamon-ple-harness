@@ -1254,8 +1254,51 @@ def _triangle_triangle_distance_3d(a0: np.ndarray, a1: np.ndarray, a2: np.ndarra
     return best_d, best_a, best_b
 
 
-def _point_inside_mesh(pt: np.ndarray, mesh: SolidMesh3D) -> bool:
-    if len(mesh.faces) == 0:
+def _closed_surface_components(mesh: SolidMesh3D):
+    """Return one boundary vertex per closed shell and their triangle indices."""
+    # Some tessellations repeat vertex indices across faces. Join exact positions
+    # only, so distinct sides of a thin wall keep their physical gap.
+    _, welded = np.unique(mesh.vertices, axis=0, return_inverse=True)
+    edge_faces = {}
+    neighbors = [[] for _ in mesh.faces]
+    closed_face = [True] * len(mesh.faces)
+    for i, (a, b, c) in enumerate(welded[mesh.faces]):
+        for u, v in ((a, b), (b, c), (c, a)):
+            edge = (min(u, v), max(u, v))
+            edge_faces.setdefault(edge, []).append(i)
+    for (u, v), incident in edge_faces.items():
+        if u != v and len(incident) == 2:
+            a, b = incident
+            neighbors[a].append(b)
+            neighbors[b].append(a)
+        else:
+            for i in incident:
+                closed_face[i] = False
+
+    seeds = []
+    closed_indices = []
+    seen = set()
+    for first in range(len(mesh.faces)):
+        if first in seen:
+            continue
+        pending = [first]
+        seen.add(first)
+        component = []
+        while pending:
+            i = pending.pop()
+            component.append(i)
+            for other in neighbors[i]:
+                if other not in seen:
+                    seen.add(other)
+                    pending.append(other)
+        if all(closed_face[i] for i in component):
+            seeds.append(mesh.vertices[mesh.faces[first, 0]])
+            closed_indices.extend(component)
+    return seeds, mesh.faces[closed_indices]
+
+
+def _point_inside_mesh(pt: np.ndarray, mesh: SolidMesh3D, faces: np.ndarray) -> bool:
+    if len(faces) == 0:
         return False
     if np.any(pt < mesh.aabb_min - 1e-9) or np.any(pt > mesh.aabb_max + 1e-9):
         return False
@@ -1264,7 +1307,7 @@ def _point_inside_mesh(pt: np.ndarray, mesh: SolidMesh3D) -> bool:
     far = pt + ray_dir * (float(np.linalg.norm(mesh.aabb_max - mesh.aabb_min)) * 4.0 + 10.0)
     hits = 0
     v = mesh.vertices
-    for f in mesh.faces:
+    for f in faces:
         v0, v1, v2 = v[f[0]], v[f[1]], v[f[2]]
         e1 = v1 - v0
         e2 = v2 - v0
@@ -1326,30 +1369,25 @@ def evaluate_pair_clash(mesh_a: SolidMesh3D, mesh_b: SolidMesh3D, required_clear
                         closest_points_m=(tuple(map(float, hit)),) * 2,
                         required_clearance_m=required_clearance_m,
                     )
-        if len(va) > 0 and _point_inside_mesh(va[0], mesh_b):
-            p = va[0]
-            return ClashResult(
-                element_a=mesh_a.element_id,
-                element_b=mesh_b.element_id,
-                status="hard_clash",
-                min_distance_m=0.0,
-                overlap_aabb_volume_m3=ov_vol,
-                witness_point_m=tuple(map(float, p)),
-                closest_points_m=(tuple(map(float, p)),) * 2,
-                required_clearance_m=required_clearance_m,
-            )
-        if len(vb) > 0 and _point_inside_mesh(vb[0], mesh_a):
-            p = vb[0]
-            return ClashResult(
-                element_a=mesh_a.element_id,
-                element_b=mesh_b.element_id,
-                status="hard_clash",
-                min_distance_m=0.0,
-                overlap_aabb_volume_m3=ov_vol,
-                witness_point_m=tuple(map(float, p)),
-                closest_points_m=(tuple(map(float, p)),) * 2,
-                required_clearance_m=required_clearance_m,
-            )
+        seeds_a, closed_a = _closed_surface_components(mesh_a)
+        seeds_b, closed_b = _closed_surface_components(mesh_b)
+        # Test occupancy against all closed sheets together. A nested cavity
+        # changes ray parity and must remain empty inside the enclosing shell.
+        for seeds, container, faces in ((seeds_a, mesh_b, closed_b),
+                                        (seeds_b, mesh_a, closed_a)):
+            for point in seeds:
+                if _point_inside_mesh(point, container, faces):
+                    witness = tuple(map(float, point))
+                    return ClashResult(
+                        element_a=mesh_a.element_id,
+                        element_b=mesh_b.element_id,
+                        status="hard_clash",
+                        min_distance_m=0.0,
+                        overlap_aabb_volume_m3=ov_vol,
+                        witness_point_m=witness,
+                        closest_points_m=(witness, witness),
+                        required_clearance_m=required_clearance_m,
+                    )
 
     for tri_a in fa:
         a0, a1, a2 = va[tri_a[0]], va[tri_a[1]], va[tri_a[2]]
