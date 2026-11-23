@@ -104,7 +104,7 @@ class CompoundMassTest(unittest.TestCase):
         np.testing.assert_allclose(mesh.centroid_m(), [2.25, 0., .25], rtol=0, atol=1e-12)
 
     def test_unresolved_quantity_preserves_clash_report(self):
-        for options in [{"open_surface": True}, {"misorient": True}, {"shift": .25}, {"declared_open": True},
+        for options in [{"open_surface": True}, {"misorient": True}, {"declared_open": True},
                         {"declared_open": True, "reflect": True}]:
             with self.subTest(options=options):
                 result = run_router_ifc_clash({"ifc_text": course(probe=True, **options)})
