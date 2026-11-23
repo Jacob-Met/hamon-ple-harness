@@ -191,7 +191,9 @@ A supported outline is one closed, non-self-intersecting endpoint cycle made
 from straight wires and isolated convex or reflex quarter-circle corners. The parser
 uses exact source coordinates to join wires independently of their XML order,
 reverses the signed sweep when reversing an edge, and requires each quarter
-to join its straight tangents. The sharp-corner polygon contains each convex
+to join its straight tangents at any orientation in the drawing. Each quarter's
+square is defined by its two radii in the corner's own coordinate system.
+The sharp-corner polygon contains each convex
 corner box. Its interior excludes each reflex corner box. Corner interiors
 must be disjoint and each box must be free of unrelated boundary segments.
 Convex arcs use inscribed chords. Reflex arcs use the intersections of
@@ -213,6 +215,14 @@ Layer-20 drawings in actually placed packages participate in the domain.
 Their source identity includes element, library, package and original wire
 ordinal; an unused library package does not change the board. Supported
 placement and mirroring follow the existing artwork transform restrictions.
+
+Run `python ship/verify_eagle_rotated_quarters.py --repo . --out rotated-quarters`
+to compare the ordinary CLI on 24 layouts representing two physical cases. Two exact rational
+rotations, a reflection with translation, and reversed XML wires cover both
+retained copper and crossings inside a circular recess. The receiver checks
+the entire returned path, contact disks and terminal collars in the corner's
+local coordinate system, using exact rational arithmetic on their serialized
+coordinates.
 
 Nested Dimension loops can describe internal holes in EAGLE. This
 implementation leaves them unresolved rather than treating the largest loop
