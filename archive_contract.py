@@ -138,10 +138,14 @@ def member_names(instruction: str) -> list[str]:
     return []
 
 
-async def provision(session, targets):
+def declared_members(instruction, targets):
     if len(targets) != 1 or targets[0]["kind"] != "file" or not targets[0]["path"].lower().endswith(".zip"):
-        return None
-    names = member_names(session.instruction)
+        return []
+    return member_names(instruction)
+
+
+async def provision(session, targets):
+    names = declared_members(getattr(session, "instruction", ""), targets)
     if not names:
         return None
     tag = secrets.token_hex(8)
