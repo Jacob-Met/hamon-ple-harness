@@ -174,3 +174,18 @@ def test_opposing_front_water_reaches_the_verified_inline_route():
     assert result["thrust_N_m"] == pytest.approx(60000)
     assert result["moment_Nm_m"] == pytest.approx(120000)
     assert not route(dict(spec, front_water_table_depth_m=-1))["presolve_verified"]
+
+
+def test_opposed_earth_pure_couple_reaches_inline_certificate():
+    rear = {"thickness_m": 6, "phi_deg": 30, "gamma_above_water_N_m3": 18000}
+    front = dict(rear, thickness_m=2)
+    spec = {"calculation": "rankine_layers", "pressure_state": "active", "layers": [rear],
+            "front_layers": [front], "front_surface_depth_m": 4, "front_surcharge_Pa": 0}
+    plan = route(spec)
+    assert plan["presolve_verified"]
+    result = json.loads(plan["presolve_result_json"])
+    assert result["thrust_N_m"] == 0
+    assert result["moment_Nm_m"] == pytest.approx(144000)
+    assert result["resultant_above_base_m"] is None
+    assert not route(dict(spec, front_layers=[dict(front, unidentified_input=1)]))["presolve_verified"]
+    assert not route(dict(spec, front_surface_depth_m=0))["presolve_verified"]

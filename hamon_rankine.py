@@ -96,7 +96,7 @@ def _coefficients(angle_deg, passive):
     if angle_deg == 0:
         return 1.0, 1.0
     a = math.radians(angle_deg)
-    ka = math.tan(math.pi / 4 - a / 2) ** 2
+    ka = math.tan(math.radians((90 - angle_deg) / 2)) ** 2
     # Independent Mohr circle tangent criterion, solved for the minor/major
     # principal effective stress ratio on [0,1]; reciprocal in passive limit.
     sine = math.sin(a)
@@ -122,19 +122,18 @@ def _net_water_head(depth, rear, front):
     return -(min(depth, rear) - front)
 
 
-def verify_rankine_layers(spec):
+def _integrate_face(spec, grade=0.):
     """Integrate signed loads towards the exposed face, per metre of wall.
 
-    Both water tables are hydrostatic and measured downwards from the common
-    wall top. Front water acts on the exposed wall, without opposing soil.
+    Both water tables and the face grade use the common wall-top datum.
+    Equal water tables integrate just the effective earth load on this face.
     """
     result = {"tool": "hamon_conservation_cad_verifier", "mode": "civil_geotech",
               "calculation": "rankine_layers", "ok": False, "conservation_verified": False}
     try:
         allowed = {"calculation", "mode", "pressure_state", "layers", "surcharge_Pa",
                    "water_table_depth_m", "front_water_table_depth_m", "gamma_water_N_m3",
-                   "wall_friction_deg", "wall_batter_deg", "backfill_slope_deg", "cohesion_Pa",
-                   "proposed_thrust_N_m", "proposed_moment_Nm_m"}
+                   "wall_friction_deg", "wall_batter_deg", "backfill_slope_deg", "cohesion_Pa"}
         if spec.keys() - allowed:
             raise ValueError("Unsupported Rankine wall fields: " + ", ".join(sorted(spec.keys() - allowed)))
         state = spec["pressure_state"]
@@ -153,8 +152,8 @@ def verify_rankine_layers(spec):
         vertical = _finite(spec.get("surcharge_Pa", 0), "surcharge_Pa")
         if min(water, front, vertical) < 0 or gw <= 0:
             raise ValueError("Require nonnegative depth and surcharge, and positive water unit weight")
-        height = math.fsum(_finite(layer["thickness_m"], "thickness_m") for layer in layers)
-        z = 0.0
+        height = grade + math.fsum(_finite(layer["thickness_m"], "thickness_m") for layer in layers)
+        z = grade
         soil_force = water_force = soil_moment = water_moment = 0.0
         quadrature_force = quadrature_moment = residual = 0.0
         profile = []
@@ -164,7 +163,9 @@ def verify_rankine_layers(spec):
             if not isinstance(layer, dict) or layer.keys() - layer_keys:
                 raise ValueError("Unsupported Rankine soil layer fields")
             end = z + _finite(layer["thickness_m"], "thickness_m")
-            if end <= z or _finite(layer.get("cohesion_Pa", 0), "cohesion_Pa") != 0:
+            if i == len(layers) - 1:
+                end = height
+            if not math.isfinite(end) or end <= z or _finite(layer.get("cohesion_Pa", 0), "cohesion_Pa") != 0:
                 raise ValueError("Each layer requires positive thickness and zero cohesion")
             dry = None
             if z < water or "gamma_above_water_N_m3" in layer:
@@ -205,9 +206,7 @@ def verify_rankine_layers(spec):
                         water_moment += moment
                 for t in ((1-1/math.sqrt(3))/2, (1+1/math.sqrt(3))/2):
                     depth = z + t * dz
-                    rear_pressure = gw * max(0., depth - water)
-                    front_pressure = gw * max(0., depth - front)
-                    pressure = math.fsum((kn * (vertical + t*dz*gamma), rear_pressure, -front_pressure))
+                    pressure = kn * (vertical + t*dz*gamma) + gw * _net_water_head(depth, water, front)
                     quadrature_force += dz * pressure / 2
                     quadrature_moment += dz * pressure * (height - depth) / 2
                 profile.append({"layer": i, "top_m": z, "bottom_m": bottom, "coefficient": k,
@@ -220,21 +219,110 @@ def verify_rankine_layers(spec):
                 z, vertical = bottom, sigma_end
         thrust = soil_force + water_force
         moment = soil_moment + water_moment
-        residual = max(residual, abs(thrust-quadrature_force)/max(1.,abs(thrust)),
-                       abs(moment-quadrature_moment)/max(1.,abs(moment)))
-        arm = moment / thrust if thrust else None
+        residual = max(residual, abs(thrust-quadrature_force)/max(1.,abs(soil_force),abs(water_force)),
+                       abs(moment-quadrature_moment)/max(1.,abs(soil_moment),abs(water_moment)))
         if not all(math.isfinite(v) for v in (thrust, moment, soil_force,water_force,soil_moment,water_moment,
-                                                quadrature_force,quadrature_moment,residual)) or (arm is not None and not math.isfinite(arm)):
+                                                quadrature_force,quadrature_moment,residual)):
             raise ValueError("Pressure or load exceeds finite numerical range")
         valid = residual < 1e-6
-        for key, predicted in (("proposed_thrust_N_m", thrust), ("proposed_moment_Nm_m", moment)):
-            if key in spec and abs(_finite(spec[key],key)-predicted) > 1e-6*max(1.,abs(predicted)):
-                valid = False
         result.update(ok=True, conservation_verified=valid, pressure_state=state, profile=profile,
                       effective_thrust_N_m=soil_force, hydrostatic_thrust_N_m=water_force,
                       thrust_N_m=thrust, effective_moment_Nm_m=soil_moment, hydrostatic_moment_Nm_m=water_moment,
-                      moment_Nm_m=moment, resultant_above_base_m=arm,
+                      moment_Nm_m=moment, quadrature=(quadrature_force, quadrature_moment),
                       dual_solver_rel_residual=residual)
     except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError) as exc:
         result["reason"] = str(exc)
     return result
+
+
+def _classify_load(thrust, moment, force_scale):
+    if thrust == 0.:
+        return ("pure_couple" if moment else "balanced"), None
+    if abs(thrust) <= 8 * math.ulp(force_scale):
+        return "force_unresolved_at_roundoff", None
+    arm = moment / thrust
+    if not math.isfinite(arm):
+        raise ValueError("Force line of action exceeds finite numerical range")
+    return "force", arm
+
+
+def verify_rankine_layers(spec):
+    """Integrate rear earth minus front earth, plus the signed hydrostatic load.
+
+    Face pressure is positive in compression. Net thrust is positive toward the
+    exposed face. Its first moment uses height above the common toe as the arm.
+    Each soil column starts at its grade; water depths use the common wall top.
+    """
+    invalid = {"tool": "hamon_conservation_cad_verifier", "mode": "civil_geotech",
+               "calculation": "rankine_layers", "ok": False, "conservation_verified": False}
+    try:
+        rear_spec = dict(spec)
+        claims = {k: rear_spec.pop(k) for k in ("proposed_thrust_N_m", "proposed_moment_Nm_m")
+                  if k in rear_spec}
+        front_keys = ("front_layers", "front_surface_depth_m", "front_surcharge_Pa")
+        front = {k: rear_spec.pop(k) for k in front_keys if k in rear_spec}
+        rear = _integrate_face(rear_spec)
+        if not rear["ok"]:
+            return rear
+        components = [rear["effective_thrust_N_m"], rear["hydrostatic_thrust_N_m"]]
+        quadrature = rear.pop("quadrature")
+        if front:
+            rows = front.get("front_layers")
+            if not isinstance(rows, list) or not rows or not all(isinstance(r, dict) for r in rows):
+                raise ValueError("Provide nonempty front_layers from the exposed grade to the toe")
+            height = rear["profile"][-1]["bottom_m"]
+            thicknesses = [_finite(r["thickness_m"], "thickness_m") for r in rows]
+            if min(thicknesses) <= 0:
+                raise ValueError("Front soil layers must have positive thickness")
+            grade = height - math.fsum(thicknesses)
+            if grade < 0:
+                raise ValueError("Exposed grade must be at or below the common wall top")
+            if "front_surface_depth_m" in front:
+                supplied = _finite(front["front_surface_depth_m"], "front_surface_depth_m")
+                if supplied < 0 or abs(supplied - grade) > 4 * math.ulp(height):
+                    raise ValueError("Front soil profile does not terminate at the common toe")
+            state = "passive" if rear["pressure_state"] == "active" else "active"
+            front_spec = {"pressure_state": state, "layers": rows,
+                          "surcharge_Pa": front.get("front_surcharge_Pa", 0.),
+                          "gamma_water_N_m3": rear_spec.get("gamma_water_N_m3", 9810.)}
+            if "front_water_table_depth_m" in rear_spec:
+                # Water on the whole wall has already been integrated on the rear
+                # pass. Equal heads here leave only effective earth pressure.
+                water = rear_spec["front_water_table_depth_m"]
+                front_spec.update(water_table_depth_m=water, front_water_table_depth_m=water)
+            exposed = _integrate_face(front_spec, grade)
+            if not exposed["ok"]:
+                return exposed
+            front_quad = exposed.pop("quadrature")
+            quadrature = tuple(math.fsum((a, -b)) for a, b in zip(quadrature, front_quad))
+            rear.update(front_profile=exposed["profile"], front_pressure_state=state,
+                        front_surface_depth_m=grade)
+            for quantity in ("thrust_N_m", "moment_Nm_m"):
+                earth = "effective_" + quantity
+                rear["rear_" + earth] = rear[earth]
+                rear["front_" + earth] = exposed[earth]
+                rear[earth] = math.fsum((rear[earth], -exposed[earth]))
+                rear[quantity] = math.fsum((rear["rear_" + earth], -exposed[earth],
+                                           rear["hydrostatic_" + quantity]))
+            components.append(exposed["effective_thrust_N_m"])
+            rear["dual_solver_rel_residual"] = max(rear["dual_solver_rel_residual"],
+                                                    exposed["dual_solver_rel_residual"])
+            rear["conservation_verified"] &= exposed["conservation_verified"]
+        force, moment = rear["thrust_N_m"], rear["moment_Nm_m"]
+        moment_scale = max(abs(rear.get("rear_effective_moment_Nm_m", rear["effective_moment_Nm_m"])),
+                           abs(rear.get("front_effective_moment_Nm_m", 0.)), abs(rear["hydrostatic_moment_Nm_m"]))
+        residual = max(rear["dual_solver_rel_residual"],
+                       abs(force-quadrature[0])/max(1., *map(abs, components)),
+                       abs(moment-quadrature[1])/max(1., moment_scale))
+        rear.update(dual_solver_rel_residual=residual,
+                    conservation_verified=rear["conservation_verified"] and residual < 1.e-6)
+        kind, arm = _classify_load(force, moment, max(map(abs, components)))
+        rear.update(resultant_kind=kind, resultant_above_base_m=arm)
+        for key, value in claims.items():
+            prediction = rear[key.removeprefix("proposed_")]
+            if not math.isclose(_finite(value, key), prediction, rel_tol=1e-6, abs_tol=1e-6):
+                rear["conservation_verified"] = False
+        return rear
+    except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError) as exc:
+        invalid["reason"] = str(exc)
+        return invalid
