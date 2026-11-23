@@ -293,8 +293,7 @@ def _extrude_polygon_2d(poly2d: np.ndarray, origin: np.ndarray, x_ax: np.ndarray
 
 
 def _axis2_frame(entities: Dict[int, Tuple[str, List[str]]], aid: Optional[int], scale: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Build a rigid frame from typed coordinates and scale-free direction ratios."""
-    from hamon_ifc_spatial_clash import _placement_normal, _unit_ratios
+    """Build a rigid frame without rounding away the source direction angles."""
     kind, args = entities.get(aid, (None, []))
     if kind not in {"AXIS2_PLACEMENT_3D", "IFCAXIS2PLACEMENT3D"}:
         raise ValueError("Analytic solid requires a defined three-dimensional placement")
@@ -305,7 +304,7 @@ def _axis2_frame(entities: Dict[int, Tuple[str, List[str]]], aid: Optional[int],
 
     def vector(reference, expected, arity, default=None):
         if reference == "$" and default is not None:
-            return np.asarray(default, dtype=float)
+            return tuple(Fraction(value) for value in default)
         entity_kind, values = entities.get(_ref_id(reference), (None, []))
         if entity_kind != expected or len(values) != arity:
             raise ValueError("Analytic placement references a missing or wrongly typed coordinate")
@@ -313,14 +312,31 @@ def _axis2_frame(entities: Dict[int, Tuple[str, List[str]]], aid: Optional[int],
         if not (token.startswith("(") and token.endswith(")")):
             raise ValueError("Analytic placement requires three finite coordinate values")
         try:
-            result = np.asarray([float(value) for value in _split_step_top_args(token[1:-1])])
+            numbers = _split_step_top_args(token[1:-1])
+            if default is not None:
+                if len(numbers) != 3 or any(not re.fullmatch(
+                        r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?", value.strip())
+                        for value in numbers):
+                    raise ValueError("Invalid direction ratio")
+                result = tuple(Fraction(value.strip()) for value in numbers)
+                if not any(result):
+                    raise ValueError("Direction ratios must be nonzero")
+                return result
+            result = np.asarray([float(value) for value in numbers])
         except (ValueError, OverflowError) as exc:
             raise ValueError("Analytic placement requires finite coordinates") from exc
         if result.shape != (3,) or not np.isfinite(result).all():
             raise ValueError("Analytic placement requires three finite coordinate values")
-        if default is not None and not np.any(result):
-            raise ValueError("Analytic placement direction must be nonzero")
         return result
+
+    def cross(a, b):
+        return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
+
+    def unit(ratios):
+        # Only bounded, scale-free components enter the binary64 geometry kernel.
+        largest = max(map(abs, ratios))
+        bounded = np.array([float(value/largest) for value in ratios])
+        return bounded/np.linalg.norm(bounded)
 
     origin = vector(placement[0], "IFCCARTESIANPOINT" if is_ifc else "CARTESIAN_POINT",
                     1 if is_ifc else 2) * scale
@@ -330,18 +346,16 @@ def _axis2_frame(entities: Dict[int, Tuple[str, List[str]]], aid: Optional[int],
     arity = 1 if is_ifc else 2
     z = vector(placement[1], direction_kind, arity, (0., 0., 1.))
     x = vector(placement[2], direction_kind, arity, (1., 0., 0.))
-    z_axis = _unit_ratios(z)
-    y_axis = _placement_normal(z, x)
-    if y_axis is None:
+    normal = cross(z, x)
+    if not any(normal):
         if placement[2] != "$" and (not is_ifc or placement[1] != "$"):
             raise ValueError("Analytic placement has parallel declared axes")
         # An omitted STEP reference uses global X unless Z is parallel to it.
         # Preserve the existing IFC convention when its other axis is omitted.
-        y_axis = _placement_normal(z, np.array([1., 0., 0.]))
-        if y_axis is None:
-            y_axis = _placement_normal(z, np.array([0., 1., 0.]))
-    x_axis = _unit_ratios(np.cross(y_axis, z_axis))
-    return origin, x_axis, y_axis, z_axis
+        normal = cross(z, (1, 0, 0))
+        if not any(normal):
+            normal = cross(z, (0, 1, 0))
+    return origin, unit(cross(normal, z)), unit(normal), unit(z)
 
 
 def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, density_kg_m3: float,
