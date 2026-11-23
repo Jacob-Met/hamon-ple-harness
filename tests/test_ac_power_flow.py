@@ -394,3 +394,31 @@ def test_mixed_limits_on_one_connected_generator_chain(count):
     assert result["clamped_pv_q_pu"] == {f"G{i}": 0 for i in range(count)}
     for name, expected in proposed.items():
         assert result["voltages"][name] == pytest.approx(expected, abs=1e-10)
+
+@pytest.mark.parametrize("upper", [False, True])
+@pytest.mark.parametrize("angle", [0, 17])
+def test_saturated_claim_requires_reactive_power_at_its_bound(upper, angle):
+    bound = 0.1 if upper else -0.1
+    spec = {
+        "buses": [
+            {"id": "S", "type": "slack", "vm_pu": 1, "va_deg": angle},
+            {"id": "G", "type": "PV", "vm_pu": 1.2 if upper else 0.8,
+             "p_injection_pu": 0,
+             "q_min_injection_pu": -1 if upper else bound,
+             "q_max_injection_pu": bound if upper else 1},
+        ],
+        "lines": [{"id": "SG", "from": "S", "to": "G", "r_pu": 0, "x_pu": 1}],
+    }
+    solved = verify_ac_power_flow(spec)
+    assert solved["conservation_verified"], solved
+    assert solved["clamped_pv_q_pu"] == {"G": bound}
+    # Q=V*(V-1). This tiny movement makes Q strictly interior while V is still
+    # far from the regulator target, so it cannot describe a regulated state.
+    magnitude = (1 + math.sqrt(1 + 4 * bound)) / 2
+    spec["proposed_voltages"] = {
+        "S": {"vm_pu": 1, "va_deg": angle},
+        "G": {"vm_pu": magnitude + (-5e-9 if upper else 5e-9), "va_deg": angle},
+    }
+    rejected = verify_ac_power_flow(spec)
+    assert not rejected["conservation_verified"]
+    assert rejected["proposed_pv_limits_consistent"] is False

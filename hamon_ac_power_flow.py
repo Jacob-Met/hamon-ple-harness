@@ -415,8 +415,12 @@ def network(spec):
         for idx, (lower, upper) in limits.items():
             if reactive_violation(s[idx].imag, lower, upper, rounding[idx]) is not None:
                 return False
-            if idx in limited and voltage_violation(idx, limited[idx], abs(v[idx])):
-                return False
+            if idx in limited:
+                bound = limited[idx]
+                tolerance = min(1e-6, rounding[idx] + 4 * math.ulp(bound))
+                if (abs(s[idx].imag - bound) > tolerance
+                        or voltage_violation(idx, bound, abs(v[idx]))):
+                    return False
         return True
 
     complementarity = regulated_state(voltage, injection)
