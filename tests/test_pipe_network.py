@@ -338,3 +338,38 @@ def test_parallel_capillary_feed_keeps_downstream_minor_gradient(direction, tap_
     assert result["flows_m3_s"] == pytest.approx(case["proposed_flows_m3_s"], rel=0, abs=1e-20)
     case["proposed_heads_m"]["T"] = mid
     assert not verify_pipe_network(case)["proposed_checks"]["pipe_head_drops_match"]
+
+
+@pytest.mark.parametrize("demand", [-1e-20, 0.0, 1e-20])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_tree_dead_end_and_signed_demand(demand, reverse):
+    edges = [("R", "J"), ("J", "M"), ("J", "S")]
+    case = {"nodes": [{"id":"R", "fixed_head_m":0}, {"id":"J"},
+                      {"id":"M", "demand_m3_s":.005}, {"id":"S", "demand_m3_s":demand}],
+            "pipes": [{"id":a+b, "from":b if reverse else a, "to":a if reverse else b,
+                       "length_m":3, "diameter_m":.2} for a,b in edges]}
+    result = verify_pipe_network(case)
+    assert result["conservation_verified"], result
+    expected = -demand if reverse else demand
+    assert result["flows_m3_s"]["JS"] == expected
+    case["proposed_flows_m3_s"] = {**result["flows_m3_s"], "JS": -expected if expected else 1e-20}
+    invalid = verify_pipe_network(case)
+    assert not invalid["conservation_verified"]
+    assert not invalid["proposed_checks"]["flows_match"]
+    assert not invalid["proposed_checks"]["junction_demands_match"]
+
+
+def test_exact_root_cut_between_opposing_rounded_branches():
+    case = {"nodes": [{"id":"R", "fixed_head_m":0}, {"id":"M", "demand_m3_s":.005},
+                      {"id":"I", "demand_m3_s":-.005}, {"id":"E", "demand_m3_s":1e-20}],
+            "pipes": [{"id":a+b, "from":a, "to":b, "length_m":3, "diameter_m":.2}
+                      for a,b in [("R","M"), ("R","I"), ("M","E")]]}
+    result = verify_pipe_network(case)
+    assert result["conservation_verified"], result
+    assert result["flows_m3_s"] == {"RM":.005, "RI":-.005, "ME":1e-20}
+    assert result["reservoir_supplies_m3_s"] == {"R":1e-20}
+    assert result["reservoir_supply_m3_s"] == 1e-20
+    # Replacing the third link with a parallel pipe creates a cycle and
+    # isolates the last junction while preserving the apparent tree edge count.
+    case["pipes"][-1].update({"from":"M", "to":"R"})
+    assert not verify_pipe_network(case)["ok"]
