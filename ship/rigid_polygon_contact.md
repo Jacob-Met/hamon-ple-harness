@@ -1,0 +1,11 @@
+# Rigid polygon contact with material holes
+
+Use `calculation=rigid_polygon_contact` for the positive part of one affine normal-pressure plane over an entire footing. Supply `outer_vertices_m`, optional `hole_vertices_m`, `vertical_resultant_N`, `moment_x_Nm` and `moment_y_Nm`. Each simple loop follows its perimeter in either orientation. A repeated closing point is optional. Holes must be strictly interior and disjoint. The harness uses Mx=∫x p dA and My=∫y p dA.
+
+A centered 4 m square with a centered 2 m square void carries 12 N uniformly at 1 Pa over 12 m². Its bounding rectangle would give 0.75 Pa over 16 m². On the same material, 7 N with Mx=10 N·m and My=0 gives the positive part of x over 6 m² with a peak of 2 Pa. The resultant may lie in a void. A positive load whose centroid lies on or outside the convex hull cannot have finite positive-area contact.
+
+The solver partitions occupied material into convex patches using the exact input edges. Full contact uses exact moments. Partial contact minimizes the convex potential of the shared plane using its active moment matrix. With u=(1,x,y), the gradient is the residual in (N,Mx,My) and the Hessian is the integral of uuᵀ on the active material. The moving contact boundary contributes zero because the pressure vanishes there.
+
+The result includes material and contact areas, maximum pressure, the signed pressure plane, individual contact patches, and integrated force and first moments. A patch with `encoding=binary64` contains JSON numbers. When rounding coalesces a vertex, loses convexity or materially changes the patch, `encoding=rational` carries exact fraction strings for its coordinates and pressures. Python's `fractions.Fraction` accepts either form. The output check integrates the emitted values and projects moment residuals along every hull-edge normal. Unloaded material reports null contact area. Invalid geometry and numerical nonconvergence remain unverified. This is a rigid normal-equilibrium model. Soil strength, settlement and hosted competition performance are outside its verification.
+
+Run `python3 -m unittest discover -s tests -p test_rigid_polygon_contact.py -v`. The test oracle integrates Cartesian monomials along the clipped exterior and hole boundaries using Green's theorem, independently of the inverse, its material partition and its area-moment routines.
