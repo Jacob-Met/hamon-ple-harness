@@ -194,23 +194,27 @@ def resolved_laminar_exchange(endpoints, basis, cycles, reservoirs, fixed_heads,
                   for pipe_length, pipe_diameter in zip(length, diameter)]
     forest = forest_walk(endpoints, basis, reservoirs, len(demands))
     root_heads = {node: Rational(float(h)) for node, h in zip(reservoirs, fixed_heads)}
+    roots = {node: node for node in reservoirs}
     for parent, child, _, _ in forest:
+        roots[child] = roots[parent]
         root_heads[child] = root_heads[parent]
     cut = [Rational(float(d)) for d in demands]
     initial = Matrix.zeros(len(endpoints), 1)
     for parent, child, edge, direction in reversed(forest):
         initial[edge] = direction * cut[child]
         cut[parent] += cut[child]
-    chord = SparseMatrix(cycles.astype(int))
-    weighted = chord.T * SparseMatrix.diag(*resistance)
-    boundary = Matrix([root_heads[a] - root_heads[b] for a, b in endpoints])
-    rhs = (-weighted * initial).row_join(chord.T * boundary)
-    # Exact elimination of the two right-hand sides shares the factorization.
-    matrix = (weighted * chord).to_DM().to_field()
-    solution, divisor = matrix.solve_den(rhs.to_DM().convert_to(matrix.domain))
-    amplitudes = solution.to_Matrix() / matrix.domain.to_sympy(divisor)
-    demand_flow = initial + chord * amplitudes[:, 0]
-    boundary_flow = chord * amplitudes[:, 1]
+    demand_flow, boundary_flow = initial, Matrix.zeros(len(endpoints), 1)
+    if cycles.shape[1]:
+        chord = SparseMatrix(cycles.astype(int))
+        weighted = chord.T * SparseMatrix.diag(*resistance)
+        boundary = Matrix([root_heads[a] - root_heads[b] for a, b in endpoints])
+        rhs = (-weighted * initial).row_join(chord.T * boundary)
+        # Exact elimination of both right-hand sides shares the factorization.
+        matrix = (weighted * chord).to_DM().to_field()
+        solution, divisor = matrix.solve_den(rhs.to_DM().convert_to(matrix.domain))
+        amplitudes = solution.to_Matrix() / matrix.domain.to_sympy(divisor)
+        demand_flow = initial + chord * amplitudes[:, 0]
+        boundary_flow = chord * amplitudes[:, 1]
 
     def rounded(value):
         try:
@@ -226,7 +230,19 @@ def resolved_laminar_exchange(endpoints, basis, cycles, reservoirs, fixed_heads,
         loss = (resistance[edge] * (boundary_flow[edge] + demand_flow[edge]/pi)
                 if affected[edge] else Rational(float(drop[edge])))
         heads[child] = heads[parent] - direction * loss
-    return flow, np.array([rounded(heads[i]) for i in range(len(demands))])
+    # A reservoir supplies its own tree's exact demands, plus transfers to
+    # other trees. Summing its published incident flows can erase a small
+    # net supply between individually rounded through-flows.
+    supply = {node: cut[node] for node in reservoirs}
+    for edge, (a, b) in enumerate(endpoints):
+        left, right = roots[a], roots[b]
+        if left != right:
+            q = (demand_flow[edge] + boundary_flow[edge]*pi if affected[edge]
+                 else Rational(float(flow[edge])))
+            supply[left] += q
+            supply[right] -= q
+    return (flow, np.array([rounded(heads[i]) for i in range(len(demands))]),
+            np.array([rounded(supply[node]) for node in reservoirs]))
 
 
 def radial_solution(endpoints, root, demands, datum, law, inverse, re_per_flow):
@@ -271,6 +287,21 @@ def radial_balance(endpoints, root, demands, flows):
             verified = False
     return float(max(map(abs, error))), verified, float(supply)
 
+
+
+def net_reservoir_supply(endpoints, junctions, demands, flows):
+    """Return net fixed-head supply and replay its boundary flux after rounding."""
+    demand = sum(Fraction(float(value)) for value in demands)
+    flux = rounding = Fraction(0)
+    for (a, b), value in zip(endpoints, flows):
+        # Direct reservoir exchanges do not change net supply.
+        direction = int(junctions[b]) - int(junctions[a])
+        if direction:
+            q = float(value)
+            flux += direction * Fraction(q)
+            rounding += Fraction(math.ulp(q)) / 2
+    tolerance = min(Fraction(1, 10**6), abs(demand) / 10**7 + rounding)
+    return float(demand), abs(flux - demand) <= tolerance
 
 
 def network(spec):
@@ -352,6 +383,7 @@ def network(spec):
     d = demands[junctions]
     scale = max(float(np.abs(d).sum()), 1e-12)
 
+    resolved_supply = None
     if radial:
         qloop, qnode, total_head, drop = radial_solution(
             endpoints, reservoirs[0], demands, datum, law, inverse, re_per_flow)
@@ -428,14 +460,19 @@ def network(spec):
             # head or a tree pipe's demand and exchange flows.
             guard = math.sqrt(np.finfo(float).eps)
             path_drop = np.abs(cycles).T @ np.abs(drop) + np.abs(fixed_drop[chords])
-            hidden_drop = (fixed_drop[chords] != 0) & (np.abs(drop[chords]) < guard * path_drop)
+            hidden_drop = np.abs(drop[chords]) < guard * path_drop
             path_flow = np.abs(feasible) + np.abs(cycles) @ np.abs(amplitude)
             hidden_flow = np.abs(qloop[basis]) < guard * path_flow[basis]
-            if np.any(hidden_drop) or np.any(hidden_flow):
+            root_incidence = incidence[reservoirs]
+            root_flow = root_incidence @ qloop
+            hidden_supply = np.abs(root_flow) < guard * (np.abs(root_incidence) @ np.abs(qloop))
+            if np.any(hidden_drop) or np.any(hidden_flow) or np.any(hidden_supply):
                 # Exchanges are coupled only when their forest paths share a
                 # pipe. Independent nonlinear branches keep their own law.
                 support = cycles != 0
                 selected = hidden_drop | np.any(support[np.asarray(basis, dtype=int)[hidden_flow]], axis=0)
+                incident = np.any(root_incidence[hidden_supply] != 0, axis=0)
+                selected |= np.any(support[incident], axis=0)
                 while True:
                     affected = np.any(support[:, selected], axis=1)
                     neighboring = np.any(support[affected], axis=0)
@@ -445,7 +482,7 @@ def network(spec):
                 reynolds = re_per_flow * np.maximum(np.abs(qnode), np.abs(qloop))
                 if np.any(minor[affected]) or np.any(reynolds[affected] >= 2000):
                     raise ValueError("Near-balanced reservoir exchange is unresolved by nonlinear pipe losses")
-                qloop, total_head = resolved_laminar_exchange(
+                qloop, total_head, resolved_supply = resolved_laminar_exchange(
                     endpoints, basis, cycles[:, selected], reservoirs, fixed_heads, demands,
                     length, diameter, viscosity, gravity, affected, qloop, drop)
                 if np.any((re_per_flow * np.abs(qloop))[affected] >= 2000):
@@ -456,8 +493,12 @@ def network(spec):
         supply = np.array([root_supply])
     else:
         local_mass_ok = True
-        supply = incidence[reservoirs] @ qloop
+        supply = incidence[reservoirs] @ qloop if resolved_supply is None else resolved_supply
         continuity = float(np.max(np.abs(A @ qloop + d), initial=0.0))
+    if len(reservoirs) > 1:
+        net_supply, local_mass_ok = net_reservoir_supply(endpoints, junctions, d, qloop)
+    else:
+        net_supply = float(supply.sum())
     energy = float(np.max(np.abs(incidence.T @ total_head - drop)))
     agreement = float(np.max(np.abs(qnode - qloop)))
 
@@ -516,9 +557,7 @@ def network(spec):
         flows_m3_s=dict(zip(pipe_ids, qloop.tolist())),
         heads_m=dict(zip(node_ids, total_head.tolist())),
         reynolds=dict(zip(pipe_ids, (re_per_flow * np.abs(qloop)).tolist())),
-        reservoir_supply_m3_s=(math.fsum(float(q) * (int(junctions[b]) - int(junctions[a]))
-                                         for q, (a, b) in zip(qloop, endpoints))
-                               if len(reservoirs) > 1 else float(supply.sum())),
+        reservoir_supply_m3_s=net_supply,
         reservoir_supplies_m3_s=dict(zip((node_ids[i] for i in reservoirs), supply.tolist())),
         independent_cycles=len(pipes) - len(nodes) + 1,
         max_mass_residual_m3_s=continuity,

@@ -88,3 +88,45 @@ class FixedHeadExchange(unittest.TestCase):
         self.assertEqual(out["heads_m"]["J"], heads["J"])
         wrong = {**out["flows_m3_s"], "B": 0}
         self.assertFalse(verify_pipe_network({**spec, "proposed_flows_m3_s": wrong})["conservation_verified"])
+
+    def test_equal_heads_exchange_the_difference_of_junction_demands(self):
+        # With equal supply resistances r and bridge resistance 32r, continuity
+        # and the path head losses give q_JK = (d_K - d_J) / 34.
+        d = 1e-6
+        for dk in (math.nextafter(d, -math.inf), d, math.nextafter(d, math.inf)):
+            nodes = [{"id": "A", "fixed_head_m": 0}, {"id": "B", "fixed_head_m": 0},
+                     {"id": "J", "demand_m3_s": d}, {"id": "K", "demand_m3_s": dk}]
+            rows = (("AJ", "A", "J", 1, .125), ("BK", "B", "K", 1, .125),
+                    ("JK", "J", "K", 2, .0625))
+            pipes = [{"id": name, "from": a, "to": b, "length_m": length, "diameter_m": diameter}
+                     for name, a, b, length, diameter in rows]
+            cross = (dk - d) / 34
+            flows = {"AJ": d + cross, "BK": dk - cross, "JK": cross}
+            spec = {"nodes": nodes, "pipes": pipes}
+            with self.subTest(dk=dk):
+                result = verify_pipe_network({**spec, "proposed_flows_m3_s": flows})
+                self.assertTrue(result["conservation_verified"], result)
+                self.assertEqual(result["flows_m3_s"]["JK"], cross)
+                if cross:
+                    for substitute in (0, -cross):
+                        wrong = {**flows, "JK": substitute}
+                        self.assertFalse(verify_pipe_network(
+                            {**spec, "proposed_flows_m3_s": wrong})["conservation_verified"])
+
+    def test_net_and_individual_supply_between_opposing_reservoir_flows(self):
+        for demand in (-1e-30, 0., 1e-30):
+            for shared_junction in (True, False):
+                nodes = [{"id": n, "fixed_head_m": h} for n, h in zip("ABC", (0, 1e-8, -1e-8))]
+                nodes.append({"id": "J", "demand_m3_s": demand})
+                rows = (("A", "J"), ("B", "J"), ("C", "J"))
+                if not shared_junction:
+                    nodes.append({"id": "K"})
+                    rows = (("A", "J"), ("B", "J"), ("A", "K"), ("C", "K"))
+                pipes = [{"id": a+b, "from": a, "to": b, "length_m": 1, "diameter_m": .125}
+                         for a, b in rows]
+                with self.subTest(demand=demand, shared_junction=shared_junction):
+                    out = verify_pipe_network({"nodes": nodes, "pipes": pipes})
+                    self.assertTrue(out["conservation_verified"], out)
+                    self.assertEqual(out["reservoir_supply_m3_s"], demand)
+                    self.assertTrue(math.isclose(out["reservoir_supplies_m3_s"]["A"],
+                                                 demand / (3 if shared_junction else 2), rel_tol=1e-12))
