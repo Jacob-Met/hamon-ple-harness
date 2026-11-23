@@ -588,7 +588,9 @@ async def solve(session: taskbridge.Session) -> str:
         f" {done.stderr[-2000:]}"
     )
   if run.tool_turn is not None:
-    return terminal.summary("(pi stopped after requesting a tool, before giving a final answer)")
+    note = "(pi stopped after requesting a tool, before giving a final answer)"
+    observation = terminal.summary("")
+    return f"{observation}\n{note}" if observation else note
   return terminal.summary(session.final_message or "(pi stopped without a final message)")
 
 

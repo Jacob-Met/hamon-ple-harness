@@ -108,8 +108,10 @@ class AcknowledgedToolSession(unittest.IsolatedAsyncioTestCase):
                 calls, result = await self.exercise("complete", local=True,
                                                     finish_followup=finish)
                 self.assertEqual(len(calls), 2)
+                self.assertIn("/filesystem/output/report.pdf (missing)", result)
                 if finish:
-                    self.assertEqual(result, "The requested status was recorded.")
+                    self.assertNotIn("before giving a final answer", result)
+                    self.assertNotIn("The requested status was recorded.", result)
                 else:
                     self.assertIn("before giving a final answer", result)
 
