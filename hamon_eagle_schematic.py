@@ -732,6 +732,90 @@ def _junction_grid(values):
     return origin, pitch
 
 
+# Centerline paths in the exporter's six-unit-high G, N and D stroke font.
+_GND_CHAINS = (
+    ((4, 1), (3, 0), (1, 0), (0, 1), (0, 5), (1, 6), (3, 6), (4, 5), (4, 3), (2, 3)),
+    ((6, 6), (6, 0), (10, 6), (10, 0)),
+    ((12, 0), (12, 6), (15, 6), (16, 5), (16, 1), (15, 0), (12, 0)),
+)
+_GND_EDGES = {tuple(sorted((a, b))) for chain in _GND_CHAINS for a, b in zip(chain, chain[1:])}
+
+
+def _outlined_ground_word(strokes, foot, tip):
+    """Require the entire isolated three-glyph word beyond the transverse bar."""
+    length = math.dist(foot, tip)
+    ux, uy = ((b - a) / length for a, b in zip(foot, tip))
+    center = (tip[0] + .65 * length * ux, tip[1] + .65 * length * uy)
+
+    def project(point):
+        x, y = ((v - origin) / length for v, origin in zip(point, tip))
+        return uy * x - ux * y, ux * x + uy * y
+
+    points = []
+    inks = set()
+    for ink, a, b in strokes.near(center):
+        edge = (project(a), project(b))
+        if all(abs(x) < 1.4 and .05 < y < 1.25 for x, y in edge):
+            points.extend(edge)
+            inks.add(ink)
+    if len(points) != 2 * len(_GND_EDGES) or len(inks) != 1:
+        return False
+
+    # EAGLE keeps the word readable when the supply symbol is upside down.
+    for sign in (1, -1):
+        oriented = [(sign * x, sign * y) for x, y in points]
+        left = min(x for x, _ in oriented)
+        top = min(y for _, y in oriented)
+        unit = (max(x for x, _ in oriented) - left) / 16
+        if not .095 < unit < .12:
+            continue
+        lattice = [((x - left) / unit, (y - top) / unit) for x, y in oriented]
+        if any(abs(v - round(v)) > .24 for point in lattice for v in point):
+            continue
+        rounded = [(round(x), round(y)) for x, y in lattice]
+        if {tuple(sorted(edge)) for edge in zip(rounded[::2], rounded[1::2])} == _GND_EDGES:
+            return True
+    return False
+
+
+def _outlined_supplies(paths, wire_ink, pitch, wires, membership):
+    """Read direct visible symbol and lettering strokes independently of wire ink."""
+    strokes = Points(2 * pitch)
+    endpoints = Points(.13)
+    for i, wire in enumerate(wires):
+        for point in wire:
+            endpoints.add(point, i)
+    candidates = []
+    for ink, elements in paths.items():
+        if ink == wire_ink:
+            continue
+        lines = []
+        for element, matrix in elements:
+            points = drawing._path_points(element.get("d", ""))
+            if points and len(points) == 2:
+                a, b = (drawing.transform_point(matrix, p) for p in points)
+                lines.append((a, b))
+                strokes.add(_midpoint(a, b), (ink, a, b))
+        if 2 <= len(lines) <= 5000:
+            _supply_anchors(wires, membership, lines, [], all_glyphs=candidates)
+
+    marks = []
+    for glyph in candidates:
+        foot, tip = glyph["foot"], glyph["tip"]
+        if (glyph["shape"] == "ground_bar" and .9 * pitch < math.dist(foot, tip) < 1.1 * pitch
+                and _outlined_ground_word(strokes, foot, tip)):
+            marks.append({"wire_index": min(endpoints.near(foot)), "name": "GND", "shape": "ground_bar",
+                          "foot": foot, "tip": tip, "label_source": "outlined_GND_strokes"})
+    indices = sorted({m["wire_index"] for m in marks})
+    if not indices:
+        return membership, [], {}
+    grounded = {membership[i] for i in indices}
+    target = min(grounded)
+    ids = {}
+    merged = [ids.setdefault(target if g in grounded else g, len(ids)) for g in membership]
+    return merged, marks, {"GND": indices}
+
+
 def _geometry_wires(svg):
     """Identify a single wire ink by repeated on-grid, same-ink, branched junctions."""
     root = ElementTree.fromstring(svg)
@@ -833,7 +917,12 @@ def _geometry_wires(svg):
             membership = [ids.setdefault(groups.root(i), len(ids)) for i in range(len(wires))]
             found.append((wires, membership, {"stroke": ink, "pitch_pt": [g[1] for g in grids],
                          "marked_branch_points": len(branched), "off_grid_strokes": len(paths[ink]) - len(wires)}))
-    return found[0] if len(found) == 1 else None
+    if len(found) != 1:
+        return None
+    wires, membership, profile = found[0]
+    membership, marks, anchors = _outlined_supplies(
+        paths, profile["stroke"], max(profile["pitch_pt"]), wires, membership)
+    return wires, membership, profile, marks, anchors
 
 
 def _license_appendix(stock, svg):
@@ -895,11 +984,11 @@ def page_connectivity(filename, page=1):
                     "group_count": 0, "supply_glyphs": [], "printed_equivalence_anchors": {}}
         evidence = None if stock["embedded_images"] else _geometry_wires(svg)
         if evidence:
-            wires, membership, profile = evidence
+            wires, membership, profile, marks, anchors = evidence
             return {**result, "status": "candidate_evidence", "wires": wires, "wire_groups": membership,
                     "scope": "Page-local grid wires and witnessed junctions. Outlined labels and device pins remain unresolved.",
-                    "junction_grid": profile, "group_count": len(set(membership)), "supply_glyphs": [],
-                    "wire_end_label_witnesses": [], "printed_equivalence_anchors": {}}
+                    "junction_grid": profile, "group_count": len(set(membership)), "supply_glyphs": marks,
+                    "wire_end_label_witnesses": [], "printed_equivalence_anchors": anchors}
         return {**result, "status": "unresolved_profile", "wire_groups": None}
     _word_directions(stock["words"], glyphs)
     wire_end_witnesses = []
