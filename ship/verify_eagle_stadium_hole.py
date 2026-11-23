@@ -159,6 +159,36 @@ def reject_off_copper_controls(witness, routed, pads, wires, local, controls):
         reject(forged,"contact_rim_outside_strokes")
 
 
+def check_stadium_metadata(info, board, local, split):
+    """Bind the reported cap centers and radii to the actual curved layer-20 wires."""
+    assert info["model"] == "outer_outline_with_stadium_dimension_hole"
+    assert info["hole_wire_count"] == (6 if split else 4)
+    assert 0 <= Q(info["hole_arc_error_upper_bound_nm"]) <= 1
+    wires = board.findall("./drawing/board/plain/wire")
+    arc_sources = {("plain", "wire", i): wire for i, wire in enumerate(wires)
+                   if wire.get("layer") == "20" and Q(wire.get("curve", "0"))}
+    caps = info["hole_caps"]
+    assert len(caps) == 2 and {local(cap["center_nm"]) for cap in caps} == set(SPINE)
+    seen = set()
+    for cap in caps:
+        center = local(cap["center_nm"])
+        sources, sweeps = cap["arc_sources"], cap["sweeps_deg"]
+        assert len(sources) == len(sweeps) == (2 if split else 1)
+        assert abs(sum(sweeps)) == 180
+        for source, sweep in zip(sources, sweeps):
+            key = tuple(source)
+            assert key in arc_sources and key not in seen
+            seen.add(key)
+            wire = arc_sources[key]
+            assert abs(sweep) == abs(Q(wire.get("curve"))) == (90 if split else 180)
+            # Main reports the rational center and source wires. Recover the
+            # radius from both authored endpoints instead of assuming a radius field.
+            for suffix in ("1", "2"):
+                end_nm = [Q(wire.get(axis + suffix)) * 1_000_000 for axis in ("x", "y")]
+                assert sum((x-y)**2 for x, y in zip(local(end_nm), center)) == 1
+    assert seen == set(arc_sources)
+
+
 def replay(args):
     args.out.mkdir(parents=True,exist_ok=True)
     counts=Counter()
@@ -235,12 +265,7 @@ def replay(args):
                     assert info["status"]=="unresolved" and not witnesses,(name,report)
                 else:
                     assert info["status"]=="bounded" and bool(witnesses)==expected,(name,report)
-                    assert info["hole_semicircle_count"]==2
-                    assert info["hole_wire_count"]==(6 if split else 4)
-                    assert info["hole_arc_error_upper_bound_nm"]<=1
-                    cap_sources=[tuple(source) for cap in info["hole_semicircle_sources"] for source in cap]
-                    assert len(cap_sources)==len(set(cap_sources))==(4 if split else 2)
-                    assert Q(info["hole_capsule_radius_squared_nm2"])==1_000_000**2
+                    check_stadium_metadata(info, board, local, split)
                     pads_by_source,wires_by_source=fixture_copper(board)
                     for witness in witnesses:
                         inspect_copper(witness,routed,pads_by_source,wires_by_source,copper_counts)

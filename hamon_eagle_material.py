@@ -7,7 +7,7 @@ inside the guarded polygons has at least 1 nm nominal in-plane clearance.
 
 from collections import Counter, defaultdict, deque
 from fractions import Fraction
-from math import floor, ceil, cos, hypot, pi, radians, sin, sqrt
+from math import floor, ceil, cos, hypot, isqrt, pi, radians, sin, sqrt
 
 from shapely import constrained_delaunay_triangles
 from shapely.geometry import LineString, Point, Polygon, box
@@ -161,182 +161,110 @@ def _straight_runs(rows):
     return runs
 
 
-def _stadium_geometry(source_rows):
-    """Recognize two exact semicircles and their straight tangent bridges.
+def _stadium_domain(ordered, source_rows, removed):
+    """Validate two opposite parallel tangents and their two circular caps exactly."""
+    first = next(i for i, row in enumerate(ordered) if not row["curve"])
+    cycle = ordered[first:] + ordered[:first]
+    second = next(i for i, row in enumerate(cycle[1:], 1) if not row["curve"])
+    sides = cycle[0], cycle[second]
+    caps = cycle[1:second], cycle[second+1:]
+    centers, proof = [], []
+    for side, other, arcs in zip(sides, sides[::-1], caps):
+        dx, dy = (q-p for p, q in zip(side["a"], side["b"]))
+        if (other["a"][0]-other["b"][0], other["a"][1]-other["b"][1]) != (dx, dy):
+            raise ValueError("stadium sides must be equal and opposite")
+        if dx*dx + dy*dy <= (4*_GUARD)**2:
+            raise ValueError("stadium sides have unresolved length")
+        sweeps = [r["curve"] for r in arcs]
+        if sweeps not in ([180], [-180], [90, 90], [-90, -90]):
+            raise ValueError("stadium ends require one semicircle or two equal quarters")
+        a, b = side["b"], other["a"]
+        center = tuple(Fraction(x+y)/2 for x, y in zip(a, b))
+        ux, uy = a[0]-center[0], a[1]-center[1]
+        sign = 1 if sweeps[0] > 0 else -1
+        tx, ty = -sign*uy, sign*ux
+        if dx*ty != dy*tx or dx*tx + dy*ty <= 0:
+            raise ValueError("stadium end does not follow its straight tangent")
+        if len(arcs) == 2 and arcs[0]["b"] != (center[0]+tx, center[1]+ty):
+            raise ValueError("stadium quarters do not share their semicircle center")
+        radius = hypot(ux, uy)
+        if radius <= 4*_GUARD:
+            raise ValueError("stadium radius is unresolved")
+        centers.append(center)
+        proof.append({"arc_sources": [list(r["source"]) for r in arcs],
+                      "center_nm": [str(v) for v in center], "sweeps_deg": sweeps})
 
-    A cap may be one 180-degree wire or two consecutive 90-degree wires.
-    The returned axis and squared radius are rational authored geometry.
-    """
-    ordered = _straight_runs(source_rows)
-
-    def cross(a, b):
-        return a[0]*b[1] - a[1]*b[0]
-
-    def dot(a, b):
-        return a[0]*b[0] + a[1]*b[1]
-
-    def sub(a, b):
-        return (a[0]-b[0], a[1]-b[1])
-
-    def same_circle(a, b):
-        return (a["curve"] and b["curve"] and a["center"] == b["center"]
-                and a["radius2"] == b["radius2"]
-                and (a["curve"] > 0) == (b["curve"] > 0)
-                and a["b"] == b["a"])
-
-    def joined(a, b):
-        return dict(a, b=b["b"], curve=a["curve"]+b["curve"],
-                    cap_sources=a["cap_sources"]+b["cap_sources"])
-
-    runs = []
-    for row in ordered:
-        current = dict(row)
-        sweep = row["curve"]
-        if sweep:
-            if abs(sweep) not in (90, 180):
-                return None
-            a, b = (tuple(map(Fraction, row[k])) for k in ("a", "b"))
-            sign = 1 if sweep > 0 else -1
-            dx, dy = sub(b, a)
-            center = ((a[0]+b[0])/2, (a[1]+b[1])/2)
-            if abs(sweep) == 90:
-                center = (center[0]-sign*dy/2, center[1]+sign*dx/2)
-            radial = sub(a, center)
-            current.update(a=a, b=b, center=center,
-                           radius2=dot(radial, radial),
-                           cap_sources=[list(row["source"])])
-        if runs and same_circle(runs[-1], current):
-            runs[-1] = joined(runs[-1], current)
-        else:
-            runs.append(current)
-    if len(runs) > 1 and same_circle(runs[-1], runs[0]):
-        runs[0] = joined(runs[-1], runs[0])
-        runs.pop()
-    caps = [row for row in runs if row["curve"]]
-    if (len(runs) != 4 or len(caps) != 2
-            or any(abs(row["curve"]) != 180 for row in caps)
-            or caps[0]["radius2"] != caps[1]["radius2"]
-            or caps[0]["radius2"] <= 0):
-        return None
-    for index, row in enumerate(runs):
-        if not row["curve"]:
-            continue
-        before, after = runs[index-1], runs[(index+1) % len(runs)]
-        if before["curve"] or after["curve"]:
-            return None
-        a, b, center = row["a"], row["b"], row["center"]
-        u, v = sub(a, center), sub(b, center)
-        if v != (-u[0], -u[1]):
-            return None
-        sign = 1 if row["curve"] > 0 else -1
-        ta, tb = (-sign*u[1], sign*u[0]), (-sign*v[1], sign*v[0])
-        incoming, outgoing = sub(a, before["a"]), sub(after["b"], b)
-        if (cross(incoming, ta) or dot(incoming, ta) <= 0
-                or cross(outgoing, tb) or dot(outgoing, tb) <= 0):
-            return None
-    axis = sub(caps[1]["center"], caps[0]["center"])
-    if dot(axis, axis) <= (4*Fraction(_GUARD))**2:
-        raise ValueError("stadium tangent span is unresolved at the numeric guard")
-    for index, cap in enumerate(caps):
-        u = sub(cap["a"], cap["center"])
-        sign = 1 if cap["curve"] > 0 else -1
-        midpoint_radius = (-sign*u[1], sign*u[0])
-        # Both semicircles must face away from the common spine.
-        projection = dot(midpoint_radius, axis)
-        if cross(midpoint_radius, axis) or (projection >= 0 if index == 0 else projection <= 0):
-            return None
-    # Endpoint ordering differs between a half-circle wire and two quarter
-    # wires. Canonical physical traversal makes their numeric bounds identical.
-    caps.sort(key=lambda cap: cap["center"])
-    axis = sub(caps[1]["center"], caps[0]["center"])
-    normal = sub(caps[0]["a"], caps[0]["center"])
-    if cross(axis, normal) < 0:
-        normal = (-normal[0], -normal[1])
-    canonical = []
-    for index, cap in enumerate(caps):
-        cx, cy = cap["center"]
-        nx, ny = normal if index == 0 else (-normal[0], -normal[1])
-        a, b = (cx+nx, cy+ny), (cx-nx, cy-ny)
-        if {a, b} != {cap["a"], cap["b"]}:
-            return None
-        sources = cap["cap_sources"]
-        if a != cap["a"]:
-            sources = sources[::-1]
-        canonical.append(dict(cap, a=a, b=b, curve=180, cap_sources=sources))
-    return dict(caps=canonical, centers=[cap["center"] for cap in canonical],
-                radius2=canonical[0]["radius2"])
+    spine = LineString([tuple(map(float, p)) for p in centers])
+    domain, error = _guarded_round_boundary(spine, radius, removed)
+    return domain, {"model": "stadium", "caps": proof,
+                    "sources": [list(row["source"]) for row in source_rows],
+                    "wire_count": len(source_rows), "quarter_count": 0,
+                    "boundary_guard_nm": _GUARD, "arc_sagitta_upper_bound_nm": error,
+                    ("removed_area_upper_bound_mm2" if removed else
+                     "interior_area_lower_bound_mm2"): domain.area/1e12}
 
 
-def _stadium_domain(source_rows, geometry, *, removed):
-    """Bound a source-proven capsule using inscribed chords or outer tangents."""
-    radius = sqrt(float(geometry["radius2"]))
-    if radius <= 4*_GUARD:
-        raise ValueError("stadium radius is unresolved at the numeric guard")
-    count = max(1, ceil((pi/4)*sqrt(radius/2)))
-    while True:
-        if count > 4096:
-            raise ValueError("stadium arcs exceed the bounded approximation")
+def _guarded_round_boundary(center_or_spine, radius, removed):
+    # GEOS buffers the spine with a regular inscribed polygon at each end.
+    # Scaling the radius by sec(half_step) makes each edge a supporting
+    # tangent of the true circle, including across the straight sides.
+    count = max(1, ceil((pi/2)*sqrt(radius/8)))
+    while count <= 4096:
         half_step = pi/(4*count)
-        error = radius*half_step**2/2
-        if removed:
-            error /= cos(half_step)
+        error = radius*half_step**2/(2*cos(half_step))
         if error <= 1:
             break
         count += 1
-    points = []
-    for cap in geometry["caps"]:
-        cx, cy = map(float, cap["center"])
-        ux, uy = map(float, (cap["a"][0]-cap["center"][0],
-                             cap["a"][1]-cap["center"][1]))
-        sign = 1 if cap["curve"] > 0 else -1
-        if not removed:
-            points.append(tuple(map(float, cap["a"])))
-        if removed:
-            # Each midpoint ray meets the two adjacent circle tangents.
-            # Tangent joins lie on the authored bridge support lines. Omit
-            # their redundant collinear endpoints from this numeric polygon;
-            # all authored endpoints remain in the exact source geometry.
-            scale = 1/cos(half_step)
-            for step in range(2*count):
-                angle = sign*pi*(step+0.5)/(2*count)
-                points.append((cx+scale*(ux*cos(angle)-uy*sin(angle)),
-                               cy+scale*(ux*sin(angle)+uy*cos(angle))))
-        else:
-            for step in range(1, 2*count):
-                angle = sign*pi*step/(2*count)
-                points.append((cx+ux*cos(angle)-uy*sin(angle),
-                               cy+ux*sin(angle)+uy*cos(angle)))
-        if not removed:
-            points.append(tuple(map(float, cap["b"])))
-    polygon = Polygon(points)
-    if (not polygon.is_valid or not polygon.exterior.is_simple
-            or polygon.minimum_clearance <= 4*_GUARD):
-        raise ValueError("stadium boundary is numerically unresolved")
+    else:
+        raise ValueError("radius exceeds bounded circular approximation")
+    polygon = center_or_spine.buffer(radius/cos(half_step) if removed else radius, quad_segs=count)
     domain = polygon.buffer(_GUARD if removed else -_GUARD, join_style="mitre",
                             mitre_limit=_MITRE_LIMIT)
-    if domain.is_empty or not domain.is_valid or domain.geom_type != "Polygon":
-        raise ValueError("stadium interior is unresolved at the numeric guard")
-    if removed and not domain.covers(polygon):
-        raise ValueError("unresolved outward stadium guard")
-    return domain, {
-        "status": "bounded", "layer": 20, "model": "single_stadium_outline",
-        "sources": [list(row["source"]) for row in source_rows],
-        "wire_count": len(source_rows), "quarter_count": 0, "semicircle_count": 2,
-        "semicircle_sources": [cap["cap_sources"] for cap in geometry["caps"]],
-        "capsule_axis_nm": [[str(value) for value in center] for center in geometry["centers"]],
-        "capsule_radius_squared_nm2": str(geometry["radius2"]),
-        "arc_sagitta_upper_bound_nm": error, "boundary_guard_nm": _GUARD,
-        ("removed_area_upper_bound_mm2" if removed else "interior_area_lower_bound_mm2"): domain.area/1e12,
-    }
+    if domain.is_empty or not domain.is_valid or (removed and not domain.covers(polygon)):
+        raise ValueError("unresolved circular boundary guard")
+    return domain, error
+
+
+def _circular_contour(rows, removed):
+    """Recognize a simple full turn in a single rational circle."""
+    sweeps = [row["curve"] for row in rows]
+    if (any(abs(deg) not in (90, 180) for deg in sweeps)
+            or abs(sum(sweeps)) != 360 or sum(abs(deg) for deg in sweeps) != 360):
+        raise ValueError("circular opening requires one consistently oriented full turn")
+    sign = 1 if sweeps[0] > 0 else -1
+    center = None
+    for row in rows:
+        (ax, ay), (bx, by) = row["a"], row["b"]
+        cx, cy = Fraction(ax + bx, 2), Fraction(ay + by, 2)
+        if abs(row["curve"]) == 90:
+            cx -= sign * Fraction(by - ay, 2)
+            cy += sign * Fraction(bx - ax, 2)
+        if center is not None and center != (cx, cy):
+            raise ValueError("circular opening arcs do not share a center")
+        center = cx, cy
+    # Adjacent arcs share endpoints. Equal centers therefore imply equal radii.
+    radius_squared = (ax - cx)**2 + (ay - cy)**2
+    radius = hypot(ax - cx, ay - cy)
+    if radius <= 4 * _GUARD:
+        raise ValueError("circular opening radius is unresolved")
+    domain, error = _guarded_round_boundary(Point(float(cx), float(cy)), radius, removed)
+    return domain, {"model": "circle", "center_nm": [str(cx), str(cy)],
+                    "radius_squared_nm2": str(radius_squared),
+                    "sweeps_deg": sweeps, "sources": [list(row["source"]) for row in rows],
+                    "wire_count": len(rows), "quarter_count": 0, "boundary_guard_nm": _GUARD,
+                    "arc_sagitta_upper_bound_nm": error,
+                    ("removed_area_upper_bound_mm2" if removed else
+                     "interior_area_lower_bound_mm2"): domain.area / 1e12}
 
 
 def _contour_domain(source_rows, *, removed=False):
     """Enclose removed material, or inset retained material, at validated quarters."""
-    stadium = _stadium_geometry(source_rows)
-    if stadium is not None:
-        return _stadium_domain(source_rows, stadium, removed=removed)
     ordered = _straight_runs(source_rows)
     curved = [row for row in ordered if row["curve"]]
+    if curved and len(curved) == len(ordered):
+        return _circular_contour(ordered, removed)
+    if len(ordered) - len(curved) == 2 and 2 <= len(curved) <= 4:
+        return _stadium_domain(ordered, source_rows, removed)
     if removed and len(curved) > 1:
         # The supported multi-arc opening has four equal convex quarters and
         # four straight tangent bridges. The contour checks below establish
@@ -501,19 +429,11 @@ def _contour_domain(source_rows, *, removed=False):
 
 
 def _hole_clearance_features(rows):
-    """Exact source boundary pieces and validated circular-arc enclosures."""
+    """Exact source boundary pieces, enclosing each validated quarter in its local square."""
     features = []
     for row in rows:
         a, b = row["a"], row["b"]
-        if abs(row["curve"]) == 180:
-            sign = 1 if row["curve"] > 0 else -1
-            center = (Fraction(a[0]+b[0])/2, Fraction(a[1]+b[1])/2)
-            ux, uy = a[0]-center[0], a[1]-center[1]
-            mx, my = -sign*uy, sign*ux
-            # The exact half-disk and its uniform outer tangent polygon lie
-            # in this authored diameter-by-radius rectangle at any orientation.
-            points = (a, b, (b[0]+mx, b[1]+my), (a[0]+mx, a[1]+my))
-        elif row["curve"]:
+        if row["curve"]:
             sign = 1 if row["curve"] > 0 else -1
             dx, dy = b[0] - a[0], b[1] - a[1]
             center = (Fraction(a[0] + b[0] - sign * dy) / 2,
@@ -570,7 +490,7 @@ def _segments_far(a, b, c, d, distance):
 
 
 def _inside_chord_loop(point, rows):
-    """Exact parity for a point already separated from all circular-arc enclosures."""
+    """Exact parity for a point already separated from all quarter-corner squares."""
     x, y = point
     inside = False
     for row in rows:
@@ -580,22 +500,6 @@ def _inside_chord_loop(point, rows):
             if (cross > 0) == (by > ay):
                 inside = not inside
     return inside
-
-
-def _convex_enclosures_far(first, second, distance):
-    """A strict exact projection gap lower-bounds every inter-enclosure distance."""
-    for points in (first, second):
-        for a, b in zip(points, points[1:]+points[:1]):
-            nx, ny = a[1]-b[1], b[0]-a[0]
-            norm2 = nx*nx+ny*ny
-            if not norm2:
-                continue
-            p = [nx*x+ny*y for x,y in first]
-            q = [nx*x+ny*y for x,y in second]
-            gap = max(min(p)-max(q), min(q)-max(p))
-            if gap > 0 and gap*gap > distance*distance*norm2:
-                return True
-    return False
 
 
 def _certified_hole_separation(left, right):
@@ -613,8 +517,8 @@ def _certified_hole_separation(left, right):
             if projection > 0 and projection ** 2 > (required + 2 * guard) ** 2 * (nx ** 2 + ny ** 2):
                 return True
 
-    # Every bounded arc stays inside its exact local quarter square or
-    # semicircle rectangle. A mitre moves a boundary by at most (limit + 1) * guard: uncut
+    # Every tangent/chord of a validated quarter stays inside its exact local
+    # square. A mitre moves a boundary by at most (limit + 1) * guard: uncut
     # tips stop at limit * guard; each clipped end is at most one further
     # guard from the bisector clip point. Compare both boundary envelopes.
     distance = required + 2 * (_MITRE_LIMIT + 1) * guard
@@ -626,12 +530,27 @@ def _certified_hole_separation(left, right):
                 continue
             if len(p) == 2 and len(q) == 2 and _segments_far(*p, *q, distance):
                 continue
-            if (len(p) > 2 or len(q) > 2) and _convex_enclosures_far(p, q, distance):
-                continue
             return False
-    # Disjoint boundaries can still nest. Replacing an arc by its chord
-    # preserves parity at points outside its certified enclosure.
+    # Disjoint boundaries can still nest. Replacing a quarter by its chord
+    # preserves parity at points outside its enclosing square.
     return not (_inside_chord_loop(left[0]["a"], right) or _inside_chord_loop(right[0]["a"], left))
+
+
+def _certified_circle_separation(first, second):
+    """Bound both complete removed disks from their authored circle data."""
+    centers = [tuple(map(Fraction, info["center_nm"])) for info in (first, second)]
+    radius_upper = 0
+    for info in (first, second):
+        squared = Fraction(info["radius_squared_nm2"])
+        lower = isqrt(squared.numerator // squared.denominator)
+        radius_upper += lower if lower * lower == squared else lower + 1
+    # At each vertex the circumscribed polygon extends by at most 1 nm.
+    # The radial mitre length is guard/cos(half_step); half_step <= pi/4,
+    # so 3*guard/2 strictly bounds it. Keep the usual two-guard free gap.
+    guard = Fraction(_GUARD)
+    clearance = 2 * guard + 2 * (1 + 3 * guard / 2)
+    distance_squared = sum((a - b)**2 for a, b in zip(*centers))
+    return distance_squared > (radius_upper + clearance)**2
 
 
 def nominal_board_domain(records):
@@ -642,7 +561,10 @@ def nominal_board_domain(records):
         raise ValueError("layer 20 outline exceeds the supported edge count")
     cycles = _outline_cycles(records)
     if len(cycles) == 1:
-        return _contour_domain(cycles[0])
+        domain, info = _contour_domain(cycles[0])
+        if info["model"] in {"stadium", "circle"}:
+            raise ValueError("round contour supported only as an isolated interior opening")
+        return domain, info
 
     # A qualified outer inset strictly contains the entire inner enclosure.
     # Its area must therefore exceed the inner inset's area. This ordering is
@@ -650,6 +572,11 @@ def nominal_board_domain(records):
     candidates = [(_contour_domain(rows), rows) for rows in cycles]
     candidates.sort(key=lambda candidate: candidate[0][0].area, reverse=True)
     (domain, info), _ = candidates[0]
+    paired_circles = len(candidates) == 3 and all(
+        candidate[0][1]["model"] == "circle" for candidate in candidates[1:])
+    if info["model"] in {"stadium", "circle"} or (len(cycles) > 2 and not paired_circles and any(
+            candidate[0][1]["model"] in {"stadium", "circle"} for candidate in candidates)):
+        raise ValueError("round contour supported only as an isolated interior opening")
     cutouts = []
     # Order by physical position so swapping loops of equal area preserves their roles.
     inner_rows = sorted((candidate[1] for candidate in candidates[1:]), key=lambda rows: rows[0]["a"])
@@ -657,8 +584,10 @@ def nominal_board_domain(records):
         removed, cut_info = _contour_domain(rows, removed=True)
         if not domain.contains_properly(removed):
             raise ValueError("layer 20 hole crosses, touches, or lies outside the guarded board")
-        for other, _ in cutouts:
-            if removed.distance(other) <= 2 * _GUARD or not _certified_hole_separation(inner_rows[0], rows):
+        for other, other_info in cutouts:
+            separated = (_certified_circle_separation(other_info, cut_info) if paired_circles
+                         else _certified_hole_separation(inner_rows[0], rows))
+            if removed.distance(other) <= 2 * _GUARD or not separated:
                 raise ValueError("layer 20 holes intersect, nest, touch, or have unresolved separation")
         if cut_info["quarter_count"]:
             sources = [list(row["source"]) for row in rows if row["curve"]]
@@ -678,15 +607,17 @@ def nominal_board_domain(records):
     if len(holes) == 1:
         hole_info = holes[0]
         hole_model = "outer_outline_with_one_straight_dimension_hole"
-        if hole_info.get("semicircle_count"):
-            hole_model = "outer_outline_with_stadium_dimension_hole"
-            info = dict(info, hole_semicircle_count=hole_info["semicircle_count"],
-                        hole_semicircle_sources=hole_info["semicircle_sources"],
-                        hole_capsule_axis_nm=hole_info["capsule_axis_nm"],
-                        hole_capsule_radius_squared_nm2=hole_info["capsule_radius_squared_nm2"],
+        if hole_info["model"] == "circle":
+            hole_model = "outer_outline_with_circular_dimension_hole"
+            info = dict(info, hole_center_nm=hole_info["center_nm"], hole_sweeps_deg=hole_info["sweeps_deg"],
                         hole_arc_error_upper_bound_nm=hole_info["arc_sagitta_upper_bound_nm"],
                         removed_area_upper_bound_mm2=hole_info["removed_area_upper_bound_mm2"])
-        elif hole_info["quarter_count"]:
+        if hole_info["model"] == "stadium":
+            hole_model = "outer_outline_with_stadium_dimension_hole"
+            info = dict(info, hole_caps=hole_info["caps"],
+                        hole_arc_error_upper_bound_nm=hole_info["arc_sagitta_upper_bound_nm"],
+                        removed_area_upper_bound_mm2=hole_info["removed_area_upper_bound_mm2"])
+        if hole_info["quarter_count"]:
             hole_model = "outer_outline_with_one_tangent_quarter_dimension_hole"
             info = dict(info, hole_quarter_count=hole_info["quarter_count"])
             if hole_info["quarter_count"] == 1:
