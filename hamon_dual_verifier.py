@@ -904,7 +904,7 @@ def solve_beam_dual(spec: dict[str, Any]) -> dict[str, Any]:
     ratio = float(spec["deflection_limit_ratio"]) if "deflection_limit_ratio" in spec else None
     if ratio is not None and not (math.isfinite(ratio) and ratio > 0):
         raise ValueError("Beam deflection limit ratio must be finite and positive")
-    max_delta, mid_delta, deflection_ok = _beam_deflections(support, L, EI, q_udl, point_loads, ratio)
+    max_delta, mid_delta, deflection_ok = _beam_deflections(support, L, Fraction(E)*Fraction(I), q_udl, point_loads, ratio)
 
     # --- Path A: Independent Symbolic Boundary-Value Integration (`sympy`) ---
     if HAS_SYMPY:

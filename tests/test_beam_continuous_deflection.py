@@ -1,6 +1,7 @@
 """Continuous displacement and reachability gates for registered beam designs."""
 import math
 import unittest
+from fractions import Fraction
 from unittest.mock import patch
 
 import hamon_dual_verifier as dv
@@ -57,3 +58,15 @@ class BeamContinuousDeflectionTests(unittest.TestCase):
         with patch.object(dv, "HAS_SYMPY", False):
             r = dv.solve_domain_problem("beam_fixed_fixed", {"span":1,"udl":384,"E":1,"I":1})
             self.assertEqual((r["delta_max_m"],r["delta_mid_m"]),(1,1))
+
+    def test_joint_material_and_section_rounding_at_service_limit(self):
+        # The peaks round to (or adjacent to) the displayed limit. Both
+        # independent input fields still determine the physical design decision.
+        a = 2**-28
+        b = 2**-27
+        for modulus, inertia in ((1+a, 1-a), (1., 1.), (1+b, 1-b+2**-53)):
+            exact = Fraction(1)/(Fraction(modulus)*Fraction(inertia))
+            with self.subTest(modulus=modulus, inertia=inertia):
+                r = design("fixed_fixed", udl=384, E=modulus, I=inertia, deflection_limit_ratio=1)
+                self.assertEqual(r["delta_max_m"], float(exact))
+                self.assertEqual(r["deflection_ok"], exact <= 1)
