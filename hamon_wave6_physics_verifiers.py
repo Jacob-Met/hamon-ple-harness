@@ -306,27 +306,144 @@ def _isentropic_nozzle(params, gamma_value, gas_constant):
 _DUCT_SONIC_REL_TOL = 32 * math.ulp(1.0)
 
 
-def _fanno_param(mach: float, gamma: float) -> float:
-    m2 = mach * mach
-    gp1 = gamma + 1.0
-    gm1 = gamma - 1.0
-    if 0.0 < mach <= 1.0 and gamma > 1.0:
-        # Write the remaining friction budget as (gamma+1)/(2 gamma) times
-        # x-log1p(x).  The original formula loses this quadratic near Mach 1.
-        x = (2.0 / gp1) * ((1.0 - mach) * (1.0 + mach) / m2)
-        if x < 1.e-3:
-            difference = x*x*(0.5 + x*(-1.0/3.0 + x*(0.25 + x*(-0.2 + x/6.0))))
+def _ideal_gas_constants(params, gamma, r_gas, model):
+    """Use one calorically perfect gas for all supplied caloric constants."""
+    if not (math.isfinite(gamma) and gamma > 1 and math.isfinite(r_gas) and r_gas > 0):
+        raise ValueError(f"{model} requires gamma > 1 and a positive finite gas constant")
+    g, gas = map(Fraction, (gamma, r_gas))
+    if "cp" in params:
+        cp = float(params["cp"])
+        if not math.isfinite(cp) or cp <= 0:
+            raise ValueError(f"{model} flow requires positive finite specific heat")
+        c = Fraction(cp)
+        if "R" in params:
+            # Use one physical gas. Preserve the supplied cp and R
+            # together when the implied ratio rounds to the declared gamma.
+            if c <= gas:
+                raise ValueError(f"{model} cp, R and gamma describe inconsistent gas properties")
+            implied_gamma = c/(c-gas)
+            if "gamma" in params and float(implied_gamma) != gamma:
+                raise ValueError(f"{model} cp, R and gamma describe inconsistent gas properties")
+            g = implied_gamma
         else:
-            difference = x - math.log1p(x)
-        return gp1 * difference / (2.0 * gamma)
-    return (1.0 - m2) / (gamma * m2) + (gp1 / (2.0 * gamma)) * math.log((gp1 * m2) / (2.0 + gm1 * m2))
+            gas = c*(g-1)/g
+    else:
+        c = g*gas/(g-1)
+
+    return g, gas, c
+
+
+def _fanno_duct(params, gamma, r_gas):
+    """Steady adiabatic constant-area flow at fixed inlet Mach and friction."""
+    from mpmath import mp
+
+    context = mp.clone()
+    context.dps = 90
+    m1, length, diameter, friction = (float(params[key]) for key in ("M1", "L", "D_h", "f"))
+    if not all(map(math.isfinite, (m1, length, diameter, friction))) or min(m1, diameter, friction) <= 0 or length < 0:
+        raise ValueError("Fanno flow requires finite positive Mach, diameter and friction factor, and nonnegative length")
+    convention = str(params.get("friction_factor_convention", "fanning")).lower()
+    if convention not in ("fanning", "darcy"):
+        raise ValueError("Fanno friction_factor_convention must be fanning or darcy")
+    g, _, _ = _ideal_gas_constants(params, gamma, r_gas, "Fanno")
+    branch = "subsonic" if m1 < 1 else "supersonic" if m1 > 1 else "sonic"
+    if "branch" in params and params["branch"] != branch:
+        raise ValueError("Fanno outlet must approach the sonic state on the inlet branch")
+
+    def real(rational):
+        return context.mpf(rational.numerator) / rational.denominator
+
+    def wire(value):
+        result = float(value)
+        if not math.isfinite(result) or (value and result == 0):
+            raise ArithmeticError("Fanno flow output outside binary64 range")
+        return result
+
+    gm1, gp1 = real(g - 1), real(g + 1)
+    factor = real((g + 1) / (2 * g))
+    m = context.mpf(m1)
+    inlet = 1 / m**2
+    friction_per_m = (4 if convention == "fanning" else 1) * context.mpf(friction) / diameter
+    requested = context.mpf(length) * friction_per_m
+
+    def spent(outlet):
+        # z = 1/M^2 advances monotonically between the inlet and 1. For
+        # x = 2(z-1)/(gamma+1), F = factor*(x-log1p(x)). Difference the
+        # two x values directly so finite large M retains its 1/M^2 term.
+        x2 = 2 * (outlet - 1) / gp1
+        ratio = 2 * (inlet - outlet) / (gm1 + 2*outlet)
+        if abs(ratio) < context.mpf("0.01"):
+            # ratio-log1p(ratio) starts at second order near sonic.
+            power = ratio * ratio
+            remainder = power / 2
+            for n in range(3, 100):
+                power *= -ratio
+                term = power / n
+                remainder += term
+                if abs(term) <= context.eps * abs(remainder):
+                    break
+        else:
+            # The positive analytic complement also retains tiny gamma-1 and
+            # 1/M^2 where forming 1+ratio would erase them.
+            remainder = ratio - context.log((gm1 + 2*inlet) / (gm1 + 2*outlet))
+        return factor * (ratio*x2 + remainder)
+
+    def state(z):
+        ratio_t = z * (gm1 + 2*inlet) / (inlet * (gm1 + 2*z))
+        return (wire(1/context.sqrt(z)), wire(context.sqrt(z/inlet * ratio_t)), wire(ratio_t))
+
+    base = {"domain": "compressible_acoustics", "subkind": "fanno", "M1": m1,
+            "requested_length_m": length, "inlet_branch": branch,
+            "friction_factor_convention": convention, "verified": False}
+    try:
+        critical_budget = spent(1)
+        critical = wire(critical_budget/friction_per_m)
+        base["L_choke_m"] = critical
+        # The correctly rounded critical length is the sonic endpoint. A
+        # distinct longer binary64 request cannot share that endpoint.
+        if length > critical:
+            ms, ps, ts = state(context.mpf(1))
+            return dict(base, choked=True, requested_state_feasible=False,
+                        reason="Specified length exceeds the fixed-inlet sonic limit.",
+                        reachable_sonic_state={"M": ms, "length_m": critical,
+                                               "P_over_P1": ps, "T_over_T1": ts},
+                        residual=wire(requested-critical_budget))
+        choked = length == critical
+        if choked:
+            z = context.mpf(1)
+        elif length == 0:
+            z = inlet
+        else:
+            # Geometric bisection resolves both Mach branches, including
+            # finite inlets far out on the asymptotic supersonic friction line.
+            left, right = inlet, context.mpf(1)
+            for _ in range(200):
+                z = context.sqrt(left*right)
+                if spent(z) < requested:
+                    left = z
+                else:
+                    right = z
+                if abs(right-left) <= context.mpf("1e-35")*min(left, right):
+                    break
+            if state(left) != state(right):
+                return dict(base, choked=False, requested_state_feasible=True,
+                            reason="Fanno outlet not resolved to one rounded state")
+            z = context.sqrt(left*right)
+        m2, pressure, temperature = state(z)
+        if 0 < length < critical and (m2 == 1 or m2 == m1):
+            return dict(base, choked=False, requested_state_feasible=True,
+                        reason="Finite Fanno advance unresolved by the reported Mach number")
+        residual = abs(spent(1/context.mpf(m2)**2) - requested)
+        return dict(base, M2=m2, choked=choked, requested_state_feasible=True,
+                    P2_over_P1=pressure, T2_over_T1=temperature,
+                    residual=float(residual), verified=residual < 1e-10)
+    except ArithmeticError as exc:
+        return dict(base, reason=str(exc))
 
 
 def _rayleigh_duct(params, gamma, r_gas):
     """Fixed-inlet Rayleigh line with finite-Mach branch and sonic endpoints."""
     mach, t_in, heat = (float(params[key]) for key in ("M1", "T01", "q_J_kg"))
-    if not (math.isfinite(gamma) and gamma > 1 and math.isfinite(r_gas) and r_gas > 0):
-        raise ValueError("Rayleigh flow requires gamma > 1 and a positive finite gas constant")
     if not all(map(math.isfinite, (mach, t_in, heat))) or min(mach, t_in) <= 0:
         raise ValueError("Rayleigh flow requires positive finite Mach and inlet temperature")
 
@@ -338,25 +455,7 @@ def _rayleigh_duct(params, gamma, r_gas):
                  else center + (center-lower))
         return lower, upper
 
-    g, gas = map(Fraction, (gamma, r_gas))
-    if "cp" in params:
-        cp = float(params["cp"])
-        if not math.isfinite(cp) or cp <= 0:
-            raise ValueError("Rayleigh flow requires positive finite specific heat")
-        c = Fraction(cp)
-        if "R" in params:
-            # Use one physical gas. Preserve the supplied cp and R
-            # together when the implied ratio rounds to the declared gamma.
-            if c <= gas:
-                raise ValueError("Rayleigh cp, R and gamma describe inconsistent gas properties")
-            implied_gamma = c/(c-gas)
-            if "gamma" in params and float(implied_gamma) != gamma:
-                raise ValueError("Rayleigh cp, R and gamma describe inconsistent gas properties")
-            g = implied_gamma
-        else:
-            gas = c*(g-1)/g
-    else:
-        c = g*gas/(g-1)
+    g, gas, c = _ideal_gas_constants(params, gamma, r_gas, "Rayleigh")
     branch = params.get("branch")
     if branch not in (None, "subsonic", "supersonic"):
         raise ValueError("Rayleigh branch must be subsonic or supersonic")
@@ -584,63 +683,7 @@ def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any
         }
 
     if subkind == "fanno":
-        m1 = float(params["M1"])
-        f_fanning = float(params["f"])
-        length_m = float(params["L"])
-        dh_m = float(params["D_h"])
-        subsonic = 0.0 < m1 < 1.0 and gamma > 1.0
-        if subsonic and (not all(math.isfinite(v) for v in (gamma, f_fanning, length_m, dh_m))
-                         or f_fanning <= 0.0 or dh_m <= 0.0 or length_m < 0.0):
-            raise ValueError("Subsonic Fanno flow requires positive Fanning friction and diameter and nonnegative length")
-        phi1 = _fanno_param(m1, gamma)
-        four_fl_d = 4.0 * f_fanning * length_m / dh_m
-        l_choke = phi1 * dh_m / (4.0 * f_fanning)
-        at_limit = subsonic and math.isclose(length_m, l_choke, rel_tol=_DUCT_SONIC_REL_TOL)
-        if subsonic and length_m > l_choke and not at_limit:
-            # The first sonic section is reachable, but it is upstream of the
-            # requested exit. F(M2) cannot equal a negative remaining budget.
-            t_star_t1 = (2.0 + (gamma - 1.0)*m1*m1) / (gamma + 1.0)
-            return {
-                "domain": "compressible_acoustics", "subkind": subkind, "M1": m1,
-                "choked": True, "requested_state_feasible": False,
-                "reason": "Specified length exceeds the sonic limit at the supplied inlet Mach number.",
-                "requested_length_m": length_m, "L_choke_m": l_choke,
-                "reachable_sonic_state": {"M": 1.0, "length_m": l_choke,
-                                          "T_over_T1": t_star_t1,
-                                          "P_over_P1": m1 * math.sqrt(t_star_t1)},
-                "residual": 4.0 * f_fanning * (length_m - l_choke) / dh_m,
-                "verified": False,
-            }
-        sonic_exit = at_limit if subsonic else four_fl_d >= phi1 - 1e-13
-        if sonic_exit:
-            m2 = 1.0
-            choked = True
-            residual = 4.0 * f_fanning * abs(length_m - l_choke) / dh_m if subsonic else 0.0
-        else:
-            choked = False
-            target_phi2 = phi1 - four_fl_d
-            fn = lambda m: _fanno_param(m, gamma) - target_phi2
-            if m1 < 1.0:
-                m2 = float(optimize.brentq(fn, m1, 1.0, xtol=1e-14, rtol=1e-14))
-            else:
-                m2 = float(optimize.brentq(fn, 1.0 + 1e-12, m1, xtol=1e-14, rtol=1e-14))
-            residual = abs(_fanno_param(m2, gamma) - target_phi2)
-        gm1 = gamma - 1.0
-        t2_t1 = (2.0 + gm1 * m1 * m1) / (2.0 + gm1 * m2 * m2)
-        p2_p1 = (m1 / m2) * math.sqrt(t2_t1)
-        return {
-            "domain": "compressible_acoustics",
-            "subkind": subkind,
-            "M1": m1,
-            "M2": m2,
-            "choked": choked,
-            "L_choke_m": l_choke,
-            **({"requested_state_feasible": True} if subsonic else {}),
-            "P2_over_P1": p2_p1,
-            "T2_over_T1": t2_t1,
-            "residual": residual,
-            "verified": residual < 1e-10,
-        }
+        return _fanno_duct(params, gamma, r_gas)
 
     if subkind == "rayleigh":
         return _rayleigh_duct(params, gamma, r_gas)
