@@ -8,7 +8,7 @@ from functools import lru_cache
 import math
 
 import numpy as np
-from scipy.sparse import coo_matrix, diags
+from scipy.sparse import coo_matrix, diags, eye
 from hamon_diaphragm_modes import diaphragm_coordinates
 from scipy.sparse.linalg import splu
 
@@ -187,7 +187,23 @@ def solve_diaphragm(spec):
         ground[dof] += k
     if not np.isfinite(ground).all():
         raise ValueError("nonfinite assembled spring stiffness")
-    transform, elastic, bar_free, elastic_only_bars = diaphragm_coordinates(xy, panel_nodes, bars, ground)
+    basis = diaphragm_coordinates(xy, panel_nodes, bars, ground)
+    for use_nodal in (False, True):
+        if use_nodal:
+            # Mixed restraints on slender panels can lose spring displacement
+            # when reconstructed from rigid and elastic coordinates. In nodal
+            # coordinates every spring acts on its own displacement directly.
+            active = np.ones(ndof, dtype=bool)
+            basis = eye(ndof, format="csc"), active, active, np.ones(len(bars), dtype=bool)
+        result = _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, basis)
+        if result is not None:
+            return result
+    raise ValueError("diaphragm failed local/global equilibrium or work-energy balance")
+
+
+def _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, basis):
+    ndof = len(force)
+    transform, elastic, bar_free, elastic_only_bars = basis
     projection = diags(elastic.astype(float))
     stiffness = (projection @ membrane @ projection + transform.T @ diags(ground) @ transform).tocsc()
     if bars:
@@ -256,7 +272,7 @@ def solve_diaphragm(spec):
               abs(moment_error) / (span * load_scale),
               abs(work - energy) / max(abs(work), abs(energy), 1e-30)]
     if not np.isfinite(errors).all() or max(errors) > 1e-7:
-        raise ValueError("diaphragm failed local/global equilibrium or work-energy balance")
+        return None
     member_checks = []
     for i, (bar, tension) in enumerate(zip(spec.get("bars", []), bar_forces)):
         if any(k in bar for k in ("allowable_tension_N", "allowable_compression_N", "demand_factor")):
