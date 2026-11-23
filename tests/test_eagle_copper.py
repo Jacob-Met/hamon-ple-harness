@@ -61,6 +61,26 @@ class CopperWitnessTests(unittest.TestCase):
         self.assertEqual(out["reason"], "trace_does_not_demonstrably_reach_plating")
         self.assertFalse(out["witnesses"])
 
+    def test_shortcut_inside_a_bore_does_not_hide_a_valid_landing(self):
+        # The through pad and both paths are on the same layer. Only the
+        # four-edge route demonstrates a landing outside the 1 mm bore.
+        detour = (
+            wire(0, 0, -1, 0) + wire(-1, 0, -1, 1)
+            + wire(-1, 1, 1, 1) + wire(1, 1, ".45", 0)
+        )
+        shortcut = wire(0, 0, ".45", 0)
+        pad = dict(end=(".45", 0), pad='pad drill="1" diameter="1.5"')
+        self.assertEqual(self.routed(detour, **pad)["status"], "witnessed")
+        self.assertEqual(self.routed(shortcut, **pad)["status"], "unresolved")
+        for artwork in (detour + shortcut, shortcut + detour, shortcut + detour + shortcut):
+            with self.subTest(artwork=artwork):
+                result = self.routed(artwork, **pad)
+                self.assertEqual(result["status"], "witnessed")
+                steps = result["witnesses"][0]["steps"]
+                self.assertEqual(sum(s["source"][0] == "wire" for s in steps), 4)
+                nodes = [tuple(steps[0]["start"])] + [tuple(s["end"]) for s in steps]
+                self.assertEqual(len(nodes), len(set(nodes)))
+
     def test_unsupported_artwork_does_not_prove_continuity(self):
         for item in (
             wire(0, 0, 2, 1, 19),
