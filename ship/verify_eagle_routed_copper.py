@@ -135,6 +135,27 @@ def source_ordered_witness(doc, name):
     return None if None in steps else {"terminals": spec["terminals"], "steps": steps}
 
 
+def due_board_drill(doc):
+    """Minimum full-width gap at the center of the registered diagonal trace."""
+    board, signal = source_geometry(doc, "N$3")
+    hole = next((h for h in board.findall("plain/hole")
+                 if h.get("x") == "12.4049" and h.get("y") == "28.4999"), None)
+    if hole is None:
+        return None
+    width = D("0.254")
+    diameter = D(hole.attrib["drill"])
+    center = D(hole.attrib["x"]), D(hole.attrib["y"])
+    hits = []
+    for w in signal.findall("wire"):
+        a, b = [(D(w.get("x" + i)), D(w.get("y" + i))) for i in ("1", "2")]
+        if tuple((u + v) / 2 for u, v in zip(a, b)) == center:
+            assert D(w.get("width")) == width
+            assert math.dist(a, b) > float(diameter)
+            hits.append(w)
+    assert len(hits) == 1 and diameter > width
+    return {"cut_length_across_full_width_mm": (diameter**2 - width**2).sqrt()}
+
+
 def cut_bound(doc, name):
     board, s = source_geometry(doc, FIXTURES[name]["signal"])
     if name == "due":
@@ -186,6 +207,9 @@ def variants(raw, name):
             else:
                 (via,) = s.findall("via")
                 s.remove(via)
+        elif mode in ("drill_cut", "remote_drill"):
+            x = "12.4049" if mode == "drill_cut" else "14.4049"
+            ET.SubElement(board.find("plain"), "hole", x=x, y="28.4999", drill="0.60")
         elif mode == "wrong_layer":
             for w in s.findall("wire"):
                 w.set("layer", "16")
@@ -205,7 +229,7 @@ def variants(raw, name):
 
     yield "original", ET.fromstring(raw)
     for mode in (
-        ["cut", "wrong_layer", "airwire", "pour_only", "strip_contacts"]
+        ["cut", "wrong_layer", "airwire", "pour_only", "strip_contacts", "drill_cut", "remote_drill"]
         if name == "due"
         else ["cut", "blind_via", "strip_contacts"]
     ):
@@ -240,7 +264,11 @@ def main():
                     "membership"
                 ]
             witness = source_ordered_witness(doc, name)
-            assert bool(witness) == (mode in ("original", "strip_contacts"))
+            drill = due_board_drill(doc) if name == "due" else None
+            if drill:
+                assert mode == "drill_cut" and witness
+                witness = None
+            assert bool(witness) == (mode in ("original", "strip_contacts", "remote_drill"))
             report.append(
                 {
                     "board": name,
@@ -250,7 +278,7 @@ def main():
                     "exact_contacts": flat["exact_contacts"],
                     "exact_nets": len(flat["exact_nets"]),
                     "source_ordered_witness": witness,
-                    "cut_separation": cut_bound(doc, name) if mode == "cut" else None,
+                    "cut_separation": cut_bound(doc, name) if mode == "cut" else drill,
                 }
             )
     (args.out / "independent.json").write_text(
@@ -339,7 +367,7 @@ def verify_toolkit(raw, repo, cases, output):
         )
     output.write_text(json.dumps(rows, indent=2) + "\n")
     print(
-        f"{len(rows)}/10 ordinary CLI controls verified including every witness point, layer, and source primitive."
+        f"{len(rows)}/12 ordinary CLI controls verified including every witness point, layer, and source primitive."
     )
 
 
