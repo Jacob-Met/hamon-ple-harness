@@ -1026,7 +1026,7 @@ def solve_static_equilibrium_2d(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def solve_truss_2d(spec: dict[str, Any]) -> dict[str, Any]:
-    """Verify axial forces of a small-strain pin-jointed truss with fixed support components."""
+    """Verify small-strain member forces for prescribed support motions and thermal strains."""
     from hamon_pde_control_psychro_fem import (
         _TrussMember, _diagnostic_float, _truss_free_basis, _truss_solve,
     )
@@ -1036,10 +1036,15 @@ def solve_truss_2d(spec: dict[str, Any]) -> dict[str, Any]:
     index = {name: i for i, name in enumerate(names)}
     points = [(Fraction(float(nodes[name]["x"])), Fraction(float(nodes[name]["y"])))
               for name in names]
-    applied, free = [], []
+    applied, free, prescribed = [], [], {}
     for name in names:
         for axis, load in (("x", "Fx"), ("y", "Fy")):
-            if not nodes[name].get("fix_" + axis):
+            motion = Fraction(float(nodes[name].get("u" + axis + "_m", 0.0)))
+            if nodes[name].get("fix_" + axis):
+                prescribed[len(applied)] = motion
+            elif motion:
+                raise ValueError("A prescribed displacement requires a restrained component")
+            else:
                 free.append(len(applied))
             applied.append(Fraction(float(nodes[name].get(load, 0.0))))
 
@@ -1050,7 +1055,8 @@ def solve_truss_2d(spec: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("Truss member IDs must identify distinct output forces")
         members[label] = _TrussMember(
             {"i": index[element["n1"]], "j": index[element["n2"]],
-             "E_pa": element.get("EA", 2e8), "A_m2": 1.0},
+             "E_pa": element.get("EA", 2e8), "A_m2": 1.0,
+             "alpha_per_K": element.get("alpha_per_K", 0.0), "dT_K": element.get("dT_K", 0.0)},
             points, minimum_length=0.0,
         )
     if not members:
@@ -1061,6 +1067,8 @@ def solve_truss_2d(spec: dict[str, Any]) -> dict[str, Any]:
     free_set = set(free)
     rows = [[(i, v) for i, v in member.row if i in free_set] for member in members.values()]
     basis = _truss_free_basis(rows, len(free))
+    # Prescribed-motion and thermal loads lie in the range of B_free.T.
+    # Neither does virtual work on a zero-extension mechanism.
     residual = {i: applied[i] for i in free}
     for pivot in sorted(basis):
         coeff = residual[pivot]
@@ -1073,12 +1081,13 @@ def solve_truss_2d(spec: dict[str, Any]) -> dict[str, Any]:
     # nonpivot free components to zero selects a representative solely for
     # recovering axial forces. No displacement from this choice is reported.
     pivots = sorted(basis)
-    unknown = _truss_solve(list(members.values()), applied, {}, pivots)
-    u = dict(zip(pivots, unknown))
+    unknown = _truss_solve(list(members.values()), applied, prescribed, pivots)
+    u = dict(prescribed)
+    u.update(zip(pivots, unknown))
     forces, internal = {}, [Fraction(0)] * len(applied)
     for label, member in members.items():
         extension_times_length = sum(v*u.get(i, 0) for i, v in member.row)
-        axial = member.ea * extension_times_length / member.length**2
+        axial = member.ea * (extension_times_length / member.length - member.thermal_extension) / member.length
         forces[label] = axial
         for i, v in member.row:
             internal[i] += v * axial / member.length
@@ -1089,33 +1098,39 @@ def solve_truss_2d(spec: dict[str, Any]) -> dict[str, Any]:
     # the member-force response. Common stiffness/load units cancel before
     # the conversion to the numerical solver's binary64 inputs.
     discrepancy = 0.0
+    independent = dict(prescribed)
     if pivots:
         position = {d: k for k, d in enumerate(pivots)}
         gram = [[Fraction(0) for _ in pivots] for _ in pivots]
+        rhs = [applied[d] for d in pivots]
         for member in members.values():
             active = [(position[d], v) for d, v in member.row if d in position]
+            imposed = sum(v*prescribed[d] for d, v in member.row if d in prescribed)
+            fixed_force = member.ea * (imposed/member.length - member.thermal_extension) / member.length
             for i, vi in active:
+                rhs[i] -= vi*fixed_force/member.length
                 for j, vj in active:
                     gram[i][j] += member.weight * vi * vj
         stiffness = max(gram[i][i] for i in range(len(pivots)))
-        load = max(abs(applied[d]) for d in pivots) or Fraction(1)
+        load = max(map(abs, rhs)) or Fraction(1)
         check = dual_solve_linear(
             [[_diagnostic_float(x/stiffness) for x in row] for row in gram],
-            [_diagnostic_float(applied[d]/load) for d in pivots],
+            [_diagnostic_float(value/load) for value in rhs],
         )
-        independent = {d: Fraction(float(x))*load/stiffness
-                       for d, x in zip(pivots, check["solution"])}
+        independent.update((d, Fraction(float(x))*load/stiffness)
+                           for d, x in zip(pivots, check["solution"]))
         discrepancy = check["dual_rel_discrepancy"]
-        for label, member in members.items():
-            terms = [v*independent.get(d, 0)*member.ea/member.length**2 for d, v in member.row]
-            error = abs(sum(terms) - forces[label])
-            # A zero-force member can subtract two large equal joint motions.
-            # Record the force error on its own resolved term scale.
-            scale = max(abs(forces[label]), sum(map(abs, terms)))
-            if scale:
-                discrepancy = max(discrepancy, float(error/scale))
-        if discrepancy > 1e-7:
-            raise ValueError("Independent truss force calculation disagrees")
+    for label, member in members.items():
+        terms = [v*independent.get(d, 0)*member.ea/member.length**2 for d, v in member.row]
+        terms.append(-member.ea*member.thermal_extension/member.length)
+        error = abs(sum(terms) - forces[label])
+        # A zero-force member can subtract two large equal joint motions.
+        # Record the force error on its own resolved term scale.
+        scale = max(abs(forces[label]), sum(map(abs, terms)))
+        if scale:
+            discrepancy = max(discrepancy, float(error/scale))
+    if discrepancy > 1e-7:
+        raise ValueError("Independent truss force calculation disagrees")
 
     nullity = len(free) - len(pivots)
     reported = {key: _diagnostic_float(value) for key, value in forces.items()}
