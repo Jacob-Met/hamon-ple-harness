@@ -1352,6 +1352,16 @@ def solve_pipe_colebrook_dual(spec: dict[str, Any]) -> dict[str, Any]:
 
 def solve_manning_channel_dual(spec: dict[str, Any]) -> dict[str, Any]:
     """Dual-solve open-channel trapezoidal Manning normal depth (SymPy nsolve vs SciPy brentq)."""
+    section = str(spec.get("cross_section", "trapezoidal")).lower()
+    if section == "circular":
+        from hamon_circular_manning import circular_manning
+        return circular_manning(spec)
+    if section not in ("rectangular", "triangular", "trapezoidal"):
+        raise ValueError("Unsupported Manning cross-section")
+    if section == "rectangular" and float(spec.get("side_slope_z", 0)) != 0:
+        raise ValueError("A rectangular channel requires zero side slope")
+    if section == "triangular" and float(spec["bottom_width_m"]) != 0:
+        raise ValueError("A triangular channel requires zero bottom width")
     Q = float(spec["Q_m3_s"])
     b = float(spec["bottom_width_m"])
     z = float(spec.get("side_slope_z", 0.0))
