@@ -64,6 +64,31 @@ class LateConsolidationPressureTests(unittest.TestCase):
                 self.assertEqual(solve(proposed_mean_excess_pore_pressure_Pa=0.)
                                  ["conservation_verified"], expected == 0.)
 
+    def test_unloaded_settlement_is_rounded_after_material_and_height_factors(self):
+        # In the second case mean stress itself rounds to zero, but settlement
+        # remains representable. Multiplying a rounded stress cannot recover it.
+        height, time_scale = 64., 2**18
+        for scale, mv in ((1, 2**-18), (2**-15, .125)):
+            with self.subTest(load_scale=scale, mv=mv):
+                expected_pressure = bounded_late_pressure(0, .125, .375, 303., scale)
+                expected_settlement = -bounded_late_pressure(0, .125, .375, 303., scale*mv*height)
+                self.assertEqual(expected_settlement, math.ulp(0.))
+                spec = dict(calculation="consolidation_history_1d", H_clay_m=height,
+                            cv_m2_s=2**-6, mv_per_Pa=mv, drainage="single", time_s=303.*time_scale,
+                            load_history=[dict(time_s=t*time_scale, surcharge_Pa=q*scale)
+                                          for t, q in ((0, 100000), (.125, 100000), (.375, 0))])
+                answer = run_router_conservation_cad_verifier({"mode": "auto", "spec": {
+                    **spec, "proposed_settlement_m": expected_settlement}})
+                self.assertTrue(answer["conservation_verified"], answer)
+                self.assertEqual(answer["mean_excess_pore_pressure_Pa"], expected_pressure)
+                self.assertEqual(answer["mean_effective_increment_Pa"], -expected_pressure)
+                self.assertEqual(answer["settlement_at_time_m"], expected_settlement)
+                # The existing absolute settlement tolerance still permits
+                # a zero proposal when the computed settlement is positive.
+                zero = run_router_conservation_cad_verifier({"mode": "auto", "spec": {
+                    **spec, "proposed_settlement_m": 0.}})
+                self.assertTrue(zero["conservation_verified"], zero)
+
 
 if __name__ == "__main__":
     unittest.main()
