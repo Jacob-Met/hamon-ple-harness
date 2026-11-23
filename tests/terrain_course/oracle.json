@@ -1,0 +1,245 @@
+{
+  "version": 1,
+  "scope": "Synthetic source-correctness only; no competition data, model or scorer.",
+  "comparison": "Absolute tolerance 1e-8 for volumes (m3) and areas (m2). Invalid input may instead return an explicit parse refusal.",
+  "cases": [
+    {
+      "id": "crossing",
+      "file": "drawings/crossing.dxf",
+      "sha256": "eca68ab86f151b8a94f049df7dd1793c4842a9269a962ed5d92dccbc29467b3b",
+      "insunits": 6,
+      "existing_layer": "EG",
+      "proposed_layer": "FG",
+      "expected": {
+        "qualified": true,
+        "cut_m3": "1/8",
+        "fill_m3": "1/8",
+        "net_fill_m3": "0",
+        "common_area_m2": "1",
+        "existing_area_m2": "1",
+        "proposed_area_m2": "1",
+        "uncovered_existing_area_m2": "0",
+        "uncovered_proposed_area_m2": "0"
+      },
+      "allow_parse_refusal": false,
+      "analytic_basis": "Unit square, E=0, P=x-1/2. Each signed lobe integrates to 1/8."
+    },
+    {
+      "id": "opposite_diagonals",
+      "file": "drawings/opposite_diagonals.dxf",
+      "sha256": "cf93013241e2890eb7a0bc867b04186e7a197615b9dc8a217a4c422222a605ef",
+      "insunits": 6,
+      "existing_layer": "EG",
+      "proposed_layer": "FG",
+      "expected": {
+        "qualified": true,
+        "cut_m3": "1/3",
+        "fill_m3": "0",
+        "net_fill_m3": "-1/3",
+        "common_area_m2": "1",
+        "existing_area_m2": "1",
+        "proposed_area_m2": "1",
+        "uncovered_existing_area_m2": "0",
+        "uncovered_proposed_area_m2": "0"
+      },
+      "allow_parse_refusal": false,
+      "analytic_basis": "High-diagonal E integral 2/3; low-diagonal P integral 1/3; E>=P everywhere."
+    },
+    {
+      "id": "opposite_diagonals_reversed",
+      "file": "drawings/opposite_diagonals_reversed.dxf",
+      "sha256": "f6562f1f4093ba6cd173e5493261bb513eae33eab969c0648a8efac7ce4a02d9",
+      "insunits": 6,
+      "existing_layer": "EG",
+      "proposed_layer": "FG",
+      "expected": {
+        "qualified": true,
+        "cut_m3": "0",
+        "fill_m3": "1/3",
+        "net_fill_m3": "1/3",
+        "common_area_m2": "1",
+        "existing_area_m2": "1",
+        "proposed_area_m2": "1",
+        "uncovered_existing_area_m2": "0",
+        "uncovered_proposed_area_m2": "0"
+      },
+      "allow_parse_refusal": false,
+      "analytic_basis": "Reversing E and P interchanges cut and fill."
+    },
+    {
+      "id": "rotated_translated_mm",
+      "file": "drawings/rotated_translated_mm.dxf",
+      "sha256": "5391c4eb87c28e6e0f8ebd6b5c564278158eff3693df1044a358bd522ef916b1",
+      "insunits": 4,
+      "existing_layer": "EG",
+      "proposed_layer": "FG",
+      "expected": {
+        "qualified": true,
+        "cut_m3": "3/2",
+        "fill_m3": "3/2",
+        "net_fill_m3": "0",
+        "common_area_m2": "4",
+        "existing_area_m2": "4",
+        "proposed_area_m2": "4",
+        "uncovered_existing_area_m2": "0",
+        "uncovered_proposed_area_m2": "0"
+      },
+      "allow_parse_refusal": false,
+      "analytic_basis": "Rotate with cos=3/5,sin=4/5; translate (400000,-300000)m; double XY scale, triple height differences. Tilt shared datum; reverse face order and winding, encode millimetres. Area=4; lobes each (1/8)*4*3."
+    },
+    {
+      "id": "partial_footprints",
+      "file": "drawings/partial_footprints.dxf",
+      "sha256": "9118801ab572f2cd30ebc2b83e0ffd638bb32019867968c82094c85efa50b81e",
+      "insunits": 6,
+      "existing_layer": "EG",
+      "proposed_layer": "FG",
+      "expected": {
+        "qualified": false,
+        "cut_m3": null,
+        "fill_m3": null,
+        "net_fill_m3": null,
+        "common_area_m2": "1",
+        "existing_area_m2": "2",
+        "proposed_area_m2": "2",
+        "uncovered_existing_area_m2": "1",
+        "uncovered_proposed_area_m2": "1"
+      },
+      "allow_parse_refusal": false,
+      "analytic_basis": "Only x in [1,2] has paired elevations. Each unmatched strip has area 1. Overlap cut alone would be 2 but whole-site cut/fill must be withheld."
+    },
+    {
+      "id": "coincident_duplicate",
+      "file": "drawings/coincident_duplicate.dxf",
+      "sha256": "f47a0d9982eedd78b0a7c3886326f665edfe3cf31d40334ceab766bf50c4d81c",
+      "insunits": 6,
+      "existing_layer": "EG",
+      "proposed_layer": "FG",
+      "expected": {
+        "qualified": false,
+        "cut_m3": null,
+        "fill_m3": null,
+        "net_fill_m3": null
+      },
+      "allow_parse_refusal": true,
+      "analytic_basis": "One EG triangle occurs twice on a positive-area footprint; source coverage is nonunique."
+    },
+    {
+      "id": "overlap_different_elevation",
+      "file": "drawings/overlap_different_elevation.dxf",
+      "sha256": "e1e67aefe6973089c056fd27c683d8047bc942ce81bfe52ed8c1748e084339ee",
+      "insunits": 6,
+      "existing_layer": "EG",
+      "proposed_layer": "FG",
+      "expected": {
+        "qualified": false,
+        "cut_m3": null,
+        "fill_m3": null,
+        "net_fill_m3": null
+      },
+      "allow_parse_refusal": true,
+      "analytic_basis": "An additional EG triangle gives a different height over one half of the site."
+    },
+    {
+      "id": "paper_decoys",
+      "file": "drawings/paper_decoys.dxf",
+      "sha256": "47f569f963b7793144ac616a72d06cdba6ad9cbaad131fc533edb6ac4de7197c",
+      "insunits": 6,
+      "existing_layer": "EG",
+      "proposed_layer": "FG",
+      "expected": {
+        "qualified": true,
+        "cut_m3": "1/8",
+        "fill_m3": "1/8",
+        "net_fill_m3": "0",
+        "common_area_m2": "1",
+        "existing_area_m2": "1",
+        "proposed_area_m2": "1",
+        "uncovered_existing_area_m2": "0",
+        "uncovered_proposed_area_m2": "0"
+      },
+      "allow_parse_refusal": false,
+      "analytic_basis": "DXF 67=1, layout Layout1 on all decoys; model geometry equals crossing."
+    },
+    {
+      "id": "paper_only",
+      "file": "drawings/paper_only.dxf",
+      "sha256": "d4366fa7ac25a87f8500a092b5c61d93d2203cae63601bc42456c7e1d3797123",
+      "insunits": 6,
+      "existing_layer": "EG",
+      "proposed_layer": "FG",
+      "expected": {
+        "qualified": false,
+        "cut_m3": null,
+        "fill_m3": null,
+        "net_fill_m3": null
+      },
+      "allow_parse_refusal": true,
+      "analytic_basis": "No model-space surface exists."
+    },
+    {
+      "id": "vertical_face",
+      "file": "drawings/vertical_face.dxf",
+      "sha256": "6ae4122c4e6df9e31ec935f09876e823c2941e5a97e1fd264e9fe12c78347fbb",
+      "insunits": 6,
+      "existing_layer": "EG",
+      "proposed_layer": "FG",
+      "expected": {
+        "qualified": false,
+        "cut_m3": null,
+        "fill_m3": null,
+        "net_fill_m3": null
+      },
+      "allow_parse_refusal": true,
+      "analytic_basis": "EG face has positive 3D area and zero XY area."
+    },
+    {
+      "id": "malformed_coordinate",
+      "file": "drawings/malformed_coordinate.dxf",
+      "sha256": "adca6cea31c7020643350f99ca467243df619ba46ca66ff88837f452fb955499",
+      "insunits": 6,
+      "existing_layer": "EG",
+      "proposed_layer": "FG",
+      "expected": {
+        "qualified": false,
+        "cut_m3": null,
+        "fill_m3": null,
+        "net_fill_m3": null
+      },
+      "allow_parse_refusal": true,
+      "analytic_basis": "Required y of the second vertex is nonnumeric; no complete EG surface."
+    },
+    {
+      "id": "unitless",
+      "file": "drawings/unitless.dxf",
+      "sha256": "265aa2f29391c60dce0a61265b8ebfbfac4762d11ab41df51c279033d2df3ee5",
+      "insunits": 0,
+      "existing_layer": "EG",
+      "proposed_layer": "FG",
+      "expected": {
+        "qualified": false,
+        "cut_m3": null,
+        "fill_m3": null,
+        "net_fill_m3": null
+      },
+      "allow_parse_refusal": true,
+      "analytic_basis": "Unitless coordinates cannot give a measured SI volume."
+    },
+    {
+      "id": "unknown_units",
+      "file": "drawings/unknown_units.dxf",
+      "sha256": "0138a94800a86c7f9ebd6d0ffc26e5fc67fe88d406a35df730fc6ce05be9ed21",
+      "insunits": 777,
+      "existing_layer": "EG",
+      "proposed_layer": "FG",
+      "expected": {
+        "qualified": false,
+        "cut_m3": null,
+        "fill_m3": null,
+        "net_fill_m3": null
+      },
+      "allow_parse_refusal": true,
+      "analytic_basis": "Unrecognized INSUNITS code cannot give measured SI volume."
+    }
+  ]
+}
