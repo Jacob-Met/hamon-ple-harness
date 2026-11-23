@@ -7,6 +7,7 @@ symbolic/CAD pre-solve verification) — zero task-ID or filename shortcuts.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -298,12 +299,9 @@ def _wave8_result(req):
     return result
 
 
-def _wave8_certificate(instruction, inventory, mcp_server_count, deliverable_count):
-    """Certify every requested calculation in the original order, or abstain."""
-    if (
-        not isinstance(instruction, str)
-        or len(instruction) > 12000
-        or mcp_server_count
+def _empty_inline_context(inventory, mcp_server_count, deliverable_count):
+    return not (
+        mcp_server_count
         or deliverable_count
         or inventory.get("schema") != "hamon.ple.intake.v1"
         or type(inventory.get("scanned_files")) is not int
@@ -314,7 +312,53 @@ def _wave8_certificate(instruction, inventory, mcp_server_count, deliverable_cou
         or inventory.get("files") != []
         or inventory.get("warnings") != []
         or inventory.get("by_extension") != {}
-    ):
+    )
+
+
+_FIN_NUMBERS = {
+    "k_w_mk", "area_m2", "perimeter_m", "h_w_m2k", "length_m", "t_base_c", "t_inf_c"
+}
+
+
+def _fin_presolve(instruction, inventory, mcp_server_count, deliverable_count):
+    """Check a complete passive-fin request against the independent finite-volume solver."""
+    if not _empty_inline_context(inventory, mcp_server_count, deliverable_count):
+        return None, "additional task inputs or delivery obligations"
+    lines = instruction.strip().splitlines()
+    if len(instruction) > 12000 or len(lines) < 3 or lines[0] != "```wave5_spec" or lines[-1] != "```":
+        return None, "expected one complete wave5_spec fence"
+    try:
+        spec = json.loads("\n".join(lines[1:-1]), object_pairs_hook=_unique_keys)
+        if not isinstance(spec, dict) or spec.get("mode") != "convective_fin_1d":
+            return None, "unsupported structured calculation"
+        if spec.get("tip_bc") not in ("adiabatic", "convective"):
+            return None, "unsupported or missing fin tip boundary"
+        optional = {"x_eval_m"}
+        if spec["tip_bc"] == "convective":
+            optional.add("h_tip_w_m2k")
+        if not _FIN_NUMBERS <= spec.keys() <= _FIN_NUMBERS | optional | {"mode", "tip_bc"}:
+            return None, "unexpected or missing fin input"
+        for key in _FIN_NUMBERS | (optional & spec.keys()):
+            if type(spec[key]) not in (int, float) or not math.isfinite(spec[key]):
+                return None, "expected finite numeric fin inputs"
+        if not 0 <= spec.get("x_eval_m", spec["length_m"]) <= spec["length_m"]:
+            return None, "evaluation point outside fin"
+        result = verify_wave5_engineering(spec)
+        if result.get("passed") is not True:
+            return None, "physical solver or finite-volume cross-check refused"
+        q, fv = result["q_fin_w"], result["q_fvm_w"]
+        # Do not normalize tiny fluxes by the verifier's absolute near-zero floor.
+        if not math.isclose(q, fv, rel_tol=1e-3, abs_tol=0.0):
+            return None, "analytic and finite-volume flux disagree"
+        return json.dumps(result, allow_nan=False, separators=(",", ":")), None
+    except (ArithmeticError, ValueError, KeyError, TypeError, RecursionError):
+        return None, "malformed or numerically unverifiable fin request"
+
+
+def _wave8_certificate(instruction, inventory, mcp_server_count, deliverable_count):
+    """Certify every requested calculation in the original order, or abstain."""
+    if (not isinstance(instruction, str) or len(instruction) > 12000
+            or not _empty_inline_context(inventory, mcp_server_count, deliverable_count)):
         return None
     try:
         request = _wave8_request(instruction)
@@ -368,7 +412,11 @@ def route_from_intake_prompt(
             fcount = rec.get("engineering_file_count")
             if not isinstance(fcount, int) or fcount < 0:
                 fcount = sum(int(v) for v in exts.values()) if exts else len(rec.get("files") or [])
-            certificate = _wave8_certificate(instruction, rec, mcp_server_count, deliverable_count)
+            fin_request = isinstance(instruction, str) and instruction.lstrip().startswith("```wave5_spec")
+            if fin_request:
+                certificate, abstention = _fin_presolve(instruction, rec, mcp_server_count, deliverable_count)
+            else:
+                certificate = _wave8_certificate(instruction, rec, mcp_server_count, deliverable_count)
             # Legacy callers can supply a prior presolve. Live participant requests
             # obtain a certificate from their own inline problem and observed inventory.
             pre_ok = (bool(presolve_verified or rec.get("presolve_verified", False))
@@ -383,6 +431,10 @@ def route_from_intake_prompt(
             )
             if certificate is not None:
                 plan["presolve_result_json"] = certificate
+                if fin_request:
+                    plan["presolve_source_sha256"] = hashlib.sha256(instruction.encode()).hexdigest()
+            elif fin_request:
+                plan["presolve_abstention"] = abstention
             return plan
     return None
 
@@ -451,3 +503,4 @@ from hamon_wave7_engineering_verifiers import (
     dispatch_wave7_verifier,
     infer_wave7_domain,
 )
+
