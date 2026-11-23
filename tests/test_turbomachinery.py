@@ -1,6 +1,7 @@
 """Reference velocity triangles and independent shaft/enthalpy observations."""
 
 import math
+from fractions import Fraction
 
 import pytest
 
@@ -137,3 +138,110 @@ def test_redundant_angles_use_local_swirl_and_preserve_relative_cancellation(swi
     assert verify_turbomachinery(spec)["conservation_verified"]
     station["absolute_flow_angle_deg"] *= -1
     assert not verify_turbomachinery(spec)["conservation_verified"]
+
+
+@pytest.mark.parametrize("direction,kind", [(1, "pump"), (-1, "turbine")])
+def test_small_angular_momentum_change_preserves_torque_and_rothalpy(direction, kind):
+    # One binary64 increment of swirl at fixed radius. At 900 rpm both U*Vtheta
+    # products round to the same value before subtraction.
+    omega = 900 * 2 * math.pi / 60
+    radius = 0.125
+    low, high = 15.0, math.nextafter(15.0, math.inf)
+    inlet, outlet = (low, high) if direction == 1 else (high, low)
+    delta = outlet - inlet
+    torque = 2 * radius * delta
+    # Unchanged meridional velocity and blade speed give dh=(U-mean(Vtheta))*dVtheta.
+    enthalpy = (omega * radius - (inlet + outlet) / 2) * delta
+    spec = {
+        "machine_kind": kind, "rotation_rpm": 900, "mass_flow_kg_s": 2,
+        "inlet": {"radius_m": radius, "meridional_velocity_m_s": 5,
+                  "absolute_tangential_velocity_m_s": inlet},
+        "outlet": {"radius_m": radius, "meridional_velocity_m_s": 5,
+                   "absolute_tangential_velocity_m_s": outlet},
+        "measured_fluid_torque_N_m": torque,
+        "measured_rotor_static_enthalpy_change_J_kg": enthalpy,
+    }
+    result = verify_turbomachinery(spec)
+    assert result["conservation_verified"]
+    assert result["fluid_torque_N_m"] == torque
+    assert result["fluid_power_W"] == pytest.approx(omega * torque, abs=0)
+    assert result["rothalpy_work_J_kg"] == pytest.approx(omega * torque / 2, abs=0)
+    assert not verify_turbomachinery(dict(spec, measured_fluid_torque_N_m=0))["conservation_verified"]
+    spec["machine_kind"] = "turbine" if kind == "pump" else "pump"
+    wrong = verify_turbomachinery(spec)
+    assert not wrong["machine_direction_consistent"]
+    assert not wrong["conservation_verified"]
+
+
+def test_zero_angular_momentum_change_with_unequal_radii():
+    # r1*Vtheta1 = r2*Vtheta2 = 3/8 m²/s, while the static enthalpy changes.
+    spec = {
+        "machine_kind": "pump", "rotation_rpm": 900, "mass_flow_kg_s": 2,
+        "inlet": {"radius_m": 0.125, "meridional_velocity_m_s": 5,
+                  "absolute_tangential_velocity_m_s": 3},
+        "outlet": {"radius_m": 0.375, "meridional_velocity_m_s": 5,
+                   "absolute_tangential_velocity_m_s": 1},
+        "measured_fluid_torque_N_m": 0, "measured_rotor_static_enthalpy_change_J_kg": 4,
+    }
+    result = verify_turbomachinery(spec)
+    assert result["conservation_verified"]
+    assert result["fluid_torque_N_m"] == result["fluid_specific_work_J_kg"] == 0
+    assert result["rotor_static_enthalpy_change_J_kg"] == pytest.approx(4)
+
+
+def test_zero_rothalpy_change_with_reoriented_velocity_triangles():
+    # Equal r*Vtheta = 15/4 and equal C² = 169 give zero work and zero dh.
+    spec = {
+        "machine_kind": "pump", "rotation_rpm": 900, "mass_flow_kg_s": 3,
+        "inlet": {"radius_m": 0.75, "meridional_velocity_m_s": 12,
+                  "absolute_tangential_velocity_m_s": 5},
+        "outlet": {"radius_m": 0.3125, "meridional_velocity_m_s": 5,
+                   "absolute_tangential_velocity_m_s": 12},
+        "measured_rotor_static_enthalpy_change_J_kg": 0,
+    }
+    result = verify_turbomachinery(spec)
+    assert result["conservation_verified"]
+    assert result["fluid_specific_work_J_kg"] == result["rotor_static_enthalpy_change_J_kg"] == 0
+    spec["measured_rotor_static_enthalpy_change_J_kg"] = -(2 ** -42)
+    assert not verify_turbomachinery(spec)["conservation_verified"]
+
+
+def test_direction_and_power_survive_underflow_of_reported_specific_work():
+    spec = {
+        "machine_kind": "pump", "rotation_rpm": 1e-30, "mass_flow_kg_s": 1e300,
+        "inlet": {"radius_m": 1, "meridional_velocity_m_s": 1,
+                  "absolute_tangential_velocity_m_s": 0},
+        "outlet": {"radius_m": 1, "meridional_velocity_m_s": 1,
+                   "absolute_tangential_velocity_m_s": 1e-300},
+        "measured_fluid_torque_N_m": 1,
+    }
+    result = verify_turbomachinery(spec)
+    assert result["conservation_verified"]
+    assert result["fluid_specific_work_J_kg"] == 0
+    assert result["fluid_power_W"] == pytest.approx(1e-30 * math.tau / 60, abs=0)
+    assert not verify_turbomachinery(dict(spec, machine_kind="turbine"))["conservation_verified"]
+
+
+def test_minimum_positive_rpm_retains_representable_power_and_blade_speed():
+    rpm = math.ulp(0.0)
+    mass = 1e300
+    # The rad/s conversion underflows on its own, while torque * omega is representable.
+    omega = Fraction(rpm) * Fraction(math.tau) / 60
+    spec = {
+        "machine_kind": "pump", "rotation_rpm": rpm, "mass_flow_kg_s": mass,
+        "inlet": {"radius_m": 1, "meridional_velocity_m_s": 1,
+                  "absolute_tangential_velocity_m_s": 0},
+        "outlet": {"radius_m": 1, "meridional_velocity_m_s": 1,
+                   "absolute_tangential_velocity_m_s": 1},
+        "measured_fluid_torque_N_m": mass,
+    }
+    result = verify_turbomachinery(spec)
+    assert result["conservation_verified"]
+    assert result["fluid_power_W"] == float(omega * Fraction(mass)) > 0
+    assert not verify_turbomachinery(dict(spec, machine_kind="turbine"))["conservation_verified"]
+    for station in ("inlet", "outlet"):
+        spec[station]["radius_m"] = mass
+    spec["mass_flow_kg_s"] = 1
+    result = verify_turbomachinery(spec)
+    assert result["conservation_verified"]
+    assert result["outlet"]["blade_speed_m_s"] == float(omega * Fraction(mass)) > 0

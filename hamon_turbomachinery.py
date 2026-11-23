@@ -1,6 +1,7 @@
 """Adiabatic Euler rotor work from signed meridional/tangential velocity triangles."""
 
 import math
+from fractions import Fraction
 
 
 def finite(value, field):
@@ -28,7 +29,7 @@ def matches(observed, expected):
 def station(data, omega):
     radius = positive(data, "radius_m")
     meridional = positive(data, "meridional_velocity_m_s")
-    speed = omega * radius
+    speed = float(omega * Fraction(radius))
     alternatives = []
     if "absolute_tangential_velocity_m_s" in data:
         direct = finite(
@@ -112,19 +113,27 @@ def rotor(spec):
     kind = spec["machine_kind"]
     if kind not in ("pump", "compressor", "turbine"):
         raise ValueError("machine_kind must be pump, compressor, or turbine")
-    omega = positive(spec, "rotation_rpm") * 2 * math.pi / 60
+    omega = Fraction(positive(spec, "rotation_rpm")) * Fraction(math.tau) / 60
     inlet, outlet = (station(spec[k], omega) for k in ("inlet", "outlet"))
-    u1, u2 = (s["blade_speed_m_s"] for s in (inlet, outlet))
-    c1, c2 = (s["absolute_speed_m_s"] for s in (inlet, outlet))
-    w1, w2 = (s["relative_speed_m_s"] for s in (inlet, outlet))
-    vt1, vt2 = (s["absolute_tangential_velocity_m_s"] for s in (inlet, outlet))
-    work = math.fsum((u2 * vt2, -u1 * vt1))
-    # Conservation of I = h + W²/2 - U²/2 in the steady adiabatic rotor.
-    # Differences of squares are factored to protect near-zero loading.
-    static_change = 0.5 * math.fsum(((w1 - w2) * (w1 + w2), (u2 - u1) * (u2 + u1)))
-    energy_work = math.fsum((static_change, 0.5 * (c2 - c1) * (c2 + c1)))
+    cm1, cm2 = (Fraction(s["meridional_velocity_m_s"]) for s in (inlet, outlet))
+    vt1, vt2 = (Fraction(s["absolute_tangential_velocity_m_s"]) for s in (inlet, outlet))
+    r1, r2 = (Fraction(float(spec[k]["radius_m"])) for k in ("inlet", "outlet"))
+    # Rounding each r*Vtheta product before subtraction can turn a loaded
+    # rotor into a zero-torque rotor. Round the signed change only at output.
+    angular_momentum_change = r2 * vt2 - r1 * vt1
+    specific_work = omega * angular_momentum_change
+    work = float(specific_work)
+    # Reconstruct energy independently from rothalpy using the components.
+    # A rounded speed norm can conceal changes smaller than its own ulp.
+    u1, u2 = omega * r1, omega * r2
+    wt1, wt2 = vt1 - u1, vt2 - u2
+    meridional_term = (cm2 - cm1) * (cm2 + cm1)
+    relative_term = (wt2 - wt1) * (wt2 + wt1)
+    static_change = float(((u2 - u1) * (u2 + u1) - relative_term - meridional_term) / 2)
+    kinetic_change = float((meridional_term + (vt2 - vt1) * (vt2 + vt1)) / 2)
+    energy_work = math.fsum((static_change, kinetic_change))
     residual = abs(work - energy_work)
-    compatible = work >= 0 if kind in ("pump", "compressor") else work <= 0
+    compatible = angular_momentum_change >= 0 if kind in ("pump", "compressor") else angular_momentum_change <= 0
     out = {
         "ok": True,
         "calculation": "euler_rotor",
@@ -139,7 +148,10 @@ def rotor(spec):
     checks = [compatible, residual < 1e-6]
     if "mass_flow_kg_s" in spec:
         mass = positive(spec, "mass_flow_kg_s")
-        out.update(fluid_power_W=mass * work, fluid_torque_N_m=mass * work / omega)
+        out.update(
+            fluid_power_W=float(Fraction(mass) * specific_work),
+            fluid_torque_N_m=float(Fraction(mass) * angular_momentum_change),
+        )
     if "stage_boundary_speeds_m_s" in spec:
         speeds = spec["stage_boundary_speeds_m_s"]
         v1, v2 = (finite(speeds[k], k) for k in ("inlet", "outlet"))
