@@ -1,6 +1,9 @@
 """Capsule domains retain exact source identity across semicircle subdivisions."""
 from fractions import Fraction as F
 import unittest
+from xml.etree import ElementTree as ET
+
+from hamon_eagle_copper import dimension_records, milling_edges
 
 from shapely.geometry import Point
 from hamon_eagle_material import nominal_board_domain, _outline_cycles, _stadium_geometry
@@ -54,6 +57,28 @@ def partition(edges):
 
 
 class StadiumDimensionTests(unittest.TestCase):
+    def test_ordinary_dimension_parser_admits_half_caps_only_on_layer_twenty(self):
+        for split in (False,True):
+            for frame in (0,1,2):
+                board=ET.fromstring("<board><plain/><libraries/><elements/></board>")
+                for row in rows(OUTER+stadium(split),frame):
+                    attributes=dict(width="0",layer="20",curve=str(row["curve"]))
+                    for suffix,key in (("1","a"),("2","b")):
+                        for axis,value in zip(("x","y"),row[key]):
+                            attributes[axis+suffix]=str(float(value/1_000_000))
+                    ET.SubElement(board.find("plain"),"wire",**attributes)
+                domain,info=nominal_board_domain(dimension_records(board))
+                self.assertEqual(len(domain.interiors),1)
+                self.assertEqual(info["hole_semicircle_count"],2)
+        for sweep in (45,120,270,360):
+            board.find("plain/wire").set("curve",str(sweep))
+            with self.assertRaises(ValueError):
+                dimension_records(board)
+        milling=ET.Element("wire",x1="0",y1="-1",x2="0",y2="1",
+                           width="0",layer="46",curve="180")
+        with self.assertRaises(ValueError):
+            list(milling_edges([(None,[milling])]))
+
     def test_arc_encoding_order_winding_and_bridge_partition_preserve_domain(self):
         for frame in (0,1,2):
             reference,_=nominal_board_domain(rows(OUTER+stadium(),frame))

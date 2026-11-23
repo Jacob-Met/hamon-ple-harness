@@ -289,10 +289,13 @@ def _stadium_domain(source_rows, geometry, *, removed):
         ux, uy = map(float, (cap["a"][0]-cap["center"][0],
                              cap["a"][1]-cap["center"][1]))
         sign = 1 if cap["curve"] > 0 else -1
-        points.append(tuple(map(float, cap["a"])))
+        if not removed:
+            points.append(tuple(map(float, cap["a"])))
         if removed:
             # Each midpoint ray meets the two adjacent circle tangents.
-            # Endpoints and the two straight bridges stay at their authored positions.
+            # Tangent joins lie on the authored bridge support lines. Omit
+            # their redundant collinear endpoints from this numeric polygon;
+            # all authored endpoints remain in the exact source geometry.
             scale = 1/cos(half_step)
             for step in range(2*count):
                 angle = sign*pi*(step+0.5)/(2*count)
@@ -303,7 +306,8 @@ def _stadium_domain(source_rows, geometry, *, removed):
                 angle = sign*pi*step/(2*count)
                 points.append((cx+ux*cos(angle)-uy*sin(angle),
                                cy+ux*sin(angle)+uy*cos(angle)))
-        points.append(tuple(map(float, cap["b"])))
+        if not removed:
+            points.append(tuple(map(float, cap["b"])))
     polygon = Polygon(points)
     if (not polygon.is_valid or not polygon.exterior.is_simple
             or polygon.minimum_clearance <= 4*_GUARD):
@@ -578,6 +582,22 @@ def _inside_chord_loop(point, rows):
     return inside
 
 
+def _convex_enclosures_far(first, second, distance):
+    """A strict exact projection gap lower-bounds every inter-enclosure distance."""
+    for points in (first, second):
+        for a, b in zip(points, points[1:]+points[:1]):
+            nx, ny = a[1]-b[1], b[0]-a[0]
+            norm2 = nx*nx+ny*ny
+            if not norm2:
+                continue
+            p = [nx*x+ny*y for x,y in first]
+            q = [nx*x+ny*y for x,y in second]
+            gap = max(min(p)-max(q), min(q)-max(p))
+            if gap > 0 and gap*gap > distance*distance*norm2:
+                return True
+    return False
+
+
 def _certified_hole_separation(left, right):
     """Prove the strict post-guard clearance using authored coordinates."""
     left, right = _straight_runs(left), _straight_runs(right)
@@ -605,6 +625,8 @@ def _certified_hole_separation(left, right):
             if dx * dx + dy * dy > distance ** 2:
                 continue
             if len(p) == 2 and len(q) == 2 and _segments_far(*p, *q, distance):
+                continue
+            if (len(p) > 2 or len(q) > 2) and _convex_enclosures_far(p, q, distance):
                 continue
             return False
     # Disjoint boundaries can still nest. Replacing an arc by its chord
