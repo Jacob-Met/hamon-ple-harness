@@ -1436,6 +1436,80 @@ def _cstr_stage_roots(inputs, inlet_bounds, refine):
 
 
 
+def _constant_rate_pfr(params, concentration, feed, flow, order, rate, inlet_t, heat_rise):
+    """Integrate dU/dV = -(k*C_in**n/F_in)*U**n for remaining fraction U."""
+    from mpmath import mp
+
+    ctx = mp.clone()
+    ctx.dps = 120
+    if not math.isfinite(rate) or rate <= 0:
+        raise ValueError("PFR kinetic rate must be positive and representable")
+    effective_c = ctx.mpf(concentration.numerator)/concentration.denominator
+    coefficient = ctx.mpf(rate)*ctx.power(effective_c, order)/feed
+    exponent = ctx.mpf(order)-1
+
+    def dose(log_inverse_remaining):
+        if not exponent:
+            return log_inverse_remaining
+        return ctx.expm1(exponent*log_inverse_remaining)/exponent
+
+    def relative(a, b):
+        scale = max(abs(a), abs(b))
+        return abs(a-b)/scale if scale else ctx.zero
+
+    sizing = params.get("conversion") is not None
+    if sizing:
+        x = ctx.mpf(float(params["conversion"]))
+        u = 1-x
+        if x == 1:
+            if exponent >= 0:
+                raise ValueError("complete PFR conversion requires infinite volume for order >= 1")
+            exposure = -1/exponent
+        else:
+            exposure = dose(-ctx.log1p(-x))
+        volume = float(exposure/coefficient)
+    else:
+        volume = float(params["volume"])
+        exposure = ctx.mpf(volume)*coefficient
+        if exponent < 0 and exposure >= -1/exponent:
+            # Positive fractional-order rates vanish at depletion, permitting
+            # downstream volume at zero rate. A nonpositive order cannot do so.
+            if exposure > -1/exponent and order <= 0:
+                raise ValueError("PFR volume exceeds the physical depletion limit")
+            x, u = ctx.one, ctx.zero
+        else:
+            log_inverse = ctx.log1p(exponent*exposure)/exponent if exponent else exposure
+            x, u = -ctx.expm1(-log_inverse), ctx.exp(-log_inverse)
+
+    if not math.isfinite(volume):
+        raise ValueError("PFR volume is not representable")
+    time = ctx.mpf(volume)/flow
+    space_time = float(time)
+    if not math.isfinite(space_time) or (time and space_time == 0):
+        raise ValueError("PFR space time is not representable")
+    conversion, remaining = float(x), float(u)
+    if (x and conversion == 0) or (u and remaining == 0) or (exposure and volume == 0):
+        raise ValueError("PFR state is not representable in conversion, remaining fraction and volume")
+    returned_x, returned_u = ctx.mpf(conversion), ctx.mpf(remaining)
+    reported_exposure = ctx.mpf(volume)*coefficient
+    if remaining == 0:
+        required = -1/exponent
+        closure = (ctx.zero if not sizing and order > 0 and reported_exposure >= required
+                   else relative(required, reported_exposure))
+    else:
+        log_inverse = -ctx.log1p(-returned_x) if conversion <= remaining else -ctx.log(returned_u)
+        closure = relative(dose(log_inverse), reported_exposure)
+    temperature = ctx.mpf(inlet_t) + ctx.mpf(heat_rise)*x
+    exit_t = float(temperature)
+    if not math.isfinite(exit_t) or exit_t <= 0:
+        raise ValueError("PFR exit temperature is not representable")
+    residual = float(max(closure, relative(x, returned_x), relative(u, returned_u),
+                         relative(time, ctx.mpf(space_time)), relative(temperature, ctx.mpf(exit_t))))
+    return {"domain": "reactor_kinetics", "reactor_type": "pfr", "conversion_X": conversion,
+            "unreacted_fraction": remaining, "volume_m3": volume, "space_time_s": space_time,
+            "exit_T_K": exit_t, "k_exit": rate, "residual": residual, "verified": residual < 1e-9}
+
+
 def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
     """Deterministic solver for CSTR, PFR, N-CSTRs, Arrhenius, and adiabatic reactor design."""
     reactor_type = str(params.get("reactor_type", "pfr")).strip().lower()
@@ -1459,6 +1533,29 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
         return float(params["k"])
 
     gas_phase = bool(params.get("gas_phase", abs(eps_a) > 1e-15))
+
+    if reactor_type == "pfr":
+        if not all(map(math.isfinite, (c_a0, v0, f_a0, order_n, t0_k, t_op, eps_a, delta_t_ad))):
+            raise ValueError("PFR feed, temperature, order and expansion must be finite")
+        heat_rise = delta_t_ad if abs(delta_t_ad) > 1e-15 else 0.
+        inlet_t = t0_k if heat_rise else t_op
+        if min(c_a0, v0, f_a0, t0_k, inlet_t, inlet_t+heat_rise) <= 0 or eps_a <= -1:
+            raise ValueError("PFR requires positive feed and temperature and epsilon_A > -1")
+        if params.get("conversion") is not None:
+            if not 0 <= float(params["conversion"]) <= 1:
+                raise ValueError("PFR conversion must lie in [0, 1]")
+        elif params.get("volume") is None:
+            raise ValueError("PFR requires a conversion or a volume")
+        elif not math.isfinite(float(params["volume"])) or float(params["volume"]) < 0:
+            raise ValueError("PFR volume must be finite and nonnegative")
+        arrhenius = (("A_preexp" in params or ("k_ref" in params and "T_ref" in params))
+                     and float(params.get("E_a", 0)) != 0)
+        if eps_a == 0 and (not heat_rise or (not gas_phase and not arrhenius)):
+            concentration = Fraction(c_a0)
+            if gas_phase:
+                concentration *= Fraction(t0_k)/Fraction(inlet_t)
+            return _constant_rate_pfr(params, concentration, f_a0, v0, order_n,
+                                      k_at_temp(inlet_t), inlet_t, heat_rise)
 
     def rate_minus_ra(x_conv: float) -> float:
         temp_x = (t0_k + delta_t_ad * x_conv) if abs(delta_t_ad) > 1e-15 else t_op
@@ -1508,17 +1605,6 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
         x_out = float(params["conversion"])
         vol_m3 = volume_for_conversion(x_out)
         residual = abs(volume_for_conversion(x_out) - vol_m3) / max(vol_m3, 1e-15)
-        if reactor_type == "pfr" and abs(delta_t_ad) <= 1e-15 and abs(eps_a) <= 1e-15 and not gas_phase:
-            k_iso = k_at_temp(t_op)
-            if abs(order_n - 1.0) < 1e-12:
-                v_exact = (f_a0 / (k_iso * c_a0)) * (-math.log(1.0 - x_out))
-            elif abs(order_n - 2.0) < 1e-12:
-                v_exact = (f_a0 / (k_iso * c_a0 * c_a0)) * (x_out / (1.0 - x_out))
-            elif abs(order_n) < 1e-12:
-                v_exact = f_a0 * x_out / k_iso
-            else:
-                v_exact = (f_a0 / (k_iso * (c_a0 ** order_n) * (order_n - 1.0))) * (((1.0 - x_out) ** (1.0 - order_n)) - 1.0)
-            residual = abs(vol_m3 - v_exact) / max(abs(v_exact), 1e-15)
     elif "volume" in params and params["volume"] is not None:
         vol_m3 = float(params["volume"])
         if reactor_type in ("cstr", "cstr_series"):
@@ -1621,8 +1707,12 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
                 gap *= 0.5
                 x_hi = 1.0 - gap
             x_out = float(optimize.brentq(fn_v, 0.0, x_hi, xtol=1e-13, rtol=1e-13))
-        residual = (cstr_branches[branch]["residual"] if cstr_branches is not None else
-                    abs(volume_for_conversion(x_out) - vol_m3) / max(vol_m3, 1e-15))
+        if cstr_branches is not None:
+            residual = cstr_branches[branch]["residual"]
+        else:
+            replay = volume_for_conversion(x_out)
+            scale = max(abs(replay), abs(vol_m3))
+            residual = abs(replay-vol_m3)/scale if scale else 0.0
     else:
         raise ValueError("reactor_kinetics requires either 'conversion' or 'volume'")
 
@@ -1753,4 +1843,3 @@ def prune_deterministic_fast_path(
         "cost_saved_usd": 0.0,
         "fast_path_pruned": False,
     }
-
