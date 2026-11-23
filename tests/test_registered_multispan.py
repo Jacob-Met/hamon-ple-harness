@@ -15,7 +15,9 @@ import register from './task-tools.ts';
 const tools = new Map();
 register({ on() {}, registerTool(x) { tools.set(x.name, x); } });
 const beam = tools.get('hamon_conservation_cad_verifier');
-assert.ok(beam.description.includes('continuous_beam_multispan'));
+assert.ok(beam.description.includes('mode=reference'));
+const help = await beam.execute('help', {mode:'reference'});
+assert.ok(help.content.some(item => item.text?.includes('continuous_beam_multispan')));
 const spec = { calculation:'continuous_beam_multispan',spans_m:[1,1,1],udl_N_m:[0,2,0],
                span_EI_Nm2:[1,1,1],support_conditions:{A:'compression_only',D:'compression_only'} };
 for (const mode of ['structural','auto']) {
