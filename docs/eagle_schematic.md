@@ -209,7 +209,7 @@ The output's `board_domain` distinguishes three states:
   explicitly about nominal artwork without an established physical board.
 - `unresolved`: an outline was declared but could not be qualified. This
   includes open or branched boundaries, disjoint boards, touching or crossing
-  contours, more than one inner loop, curved inner contours, circles,
+  contours, more than one inner loop, multiple inner curves, circles,
   unsupported curves or placements, degenerate geometry and a missing backend.
 
 Layer-20 drawings in actually placed packages participate in the domain.
@@ -225,15 +225,25 @@ the entire returned path, contact disks and terminal collars in the corner's
 local coordinate system, using exact rational arithmetic on their serialized
 coordinates.
 
-One strictly contained, simple straight-edged Dimension loop can define an
-internal hole. Winding and XML order do not assign which side is board
+One strictly contained, simple Dimension loop with straight edges and at most
+one isolated tangent quarter can define an internal hole. Winding and XML order do not assign which side is board
 material. The checker validates the outer outline, expands the closed hole
 outward by the 2 nm construction guard, and requires the whole expansion to
 lie strictly inside the guarded outer board. It subtracts the expanded hole
 before computing contacts, planar paths or plated collars. The bounded report
 identifies every outer and inner wire and lists the hole sources separately.
 The same rule accepts a concave straight hole and a qualified curved outer
-boundary. Ambiguous contour arrangements remain unresolved.
+boundary. For a convex quarter on the hole, intersecting tangents enclose the
+removed arc. A reflex corner reverses the choice and uses chords. The report
+identifies the curved source wire, the radial error bound (at most 1 nm before
+the guard), and the upper bound on removed area. Ambiguous contour arrangements
+remain unresolved.
+
+Run `python ship/verify_eagle_rounded_hole.py --repo . --out rounded-hole`
+to reproduce 16 drawings. The course checks crossings on both sides of the arc,
+exact tangency, partial overlap, and routes that skirt or cross the cut. Each
+reported disk and path segment is checked against the analytic circular arc in
+its local coordinates after either the identity or a rigid 3–4–5 rotation.
 
 Run `python ship/verify_eagle_dimension_hole.py --repo . --out dimension-hole`
 to replay 14 ordinary CLI layouts with axis-aligned and oblique cutouts. The

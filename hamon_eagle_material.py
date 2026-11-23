@@ -135,8 +135,10 @@ def _outline_cycles(records):
     return cycles
 
 
-def _outer_domain(ordered):
-    """Build the conservatively inset outer contour, with validated tangent quarters."""
+def _contour_domain(ordered, *, removed=False):
+    """Enclose removed material, or inset retained material, at validated quarters."""
+    if removed and sum(bool(row["curve"]) for row in ordered) > 1:
+        raise ValueError("inner layer 20 loops support at most one isolated tangent quarter")
     start = ordered[0]["a"]
 
     def sub(a, b):
@@ -221,12 +223,15 @@ def _outer_domain(ordered):
             radius = float(radius)
             # R*theta^2/(8*n^2) bounds the circular sagitta without cancellation.
             count = max(1, ceil((pi/2)*sqrt(radius/8)))
+            # A convex removed corner needs circumscribed tangents. At a
+            # reflex corner the interior side reverses, as it does on an outer rim.
+            use_tangents = (index in reflex) != removed
             while True:
                 if count > 4096 or len(points)+count+1 > 32768:
                     raise ValueError("layer 20 arc exceeds the bounded approximation")
                 half_step = pi/(4*count)
                 error = radius*half_step**2/2
-                if index in reflex:
+                if use_tangents:
                     error /= cos(half_step)
                 if error <= 1:
                     break
@@ -235,7 +240,7 @@ def _outer_domain(ordered):
             sign = 1 if row["curve"] > 0 else -1
             cx, cy = map(float, center)
             ux, uy = map(float, radial)
-            if index in reflex:
+            if use_tangents:
                 # The adjacent tangent intersection lies on the angular bisector
                 # at radius R / cos(half_step). Each polygon edge is tangent.
                 scale = 1/cos(half_step)
@@ -251,9 +256,20 @@ def _outer_domain(ordered):
         points.append(tuple(map(float, row["b"])))
     polygon = Polygon(points)
     envelope = sharp.union(unary_union(list(reflex.values()))) if reflex else sharp
-    if not polygon.is_valid or not envelope.covers(polygon):
+    if not polygon.is_valid:
+        raise ValueError("invalid layer 20 polygon")
+    if removed and not envelope.covers(polygon):
+        # A tangent intersection can round just outside an oblique straight side.
+        # The independently validated sharp envelope contains the real cutout,
+        # so clipping to it preserves the removal bound before the outward guard.
+        polygon = polygon.intersection(envelope)
+        if polygon.geom_type != "Polygon" or not polygon.is_valid or polygon.is_empty:
+            raise ValueError("unresolved enclosed layer 20 polygon")
+    elif not envelope.covers(polygon):
         raise ValueError("unresolved inner layer 20 polygon")
-    domain = polygon.buffer(-_GUARD, join_style="mitre")
+    domain = polygon.buffer(_GUARD if removed else -_GUARD, join_style="mitre")
+    if removed and not domain.covers(polygon):
+        raise ValueError("unresolved outward layer 20 guard")
     if domain.is_empty or not domain.is_valid:
         raise ValueError("layer 20 interior is unresolved at the numeric guard")
     return domain, {
@@ -264,47 +280,45 @@ def _outer_domain(ordered):
         "wire_count": len(ordered), "quarter_count": len(corners),
         "arc_sagitta_upper_bound_nm": largest_error,
         "boundary_guard_nm": _GUARD,
-        "interior_area_lower_bound_mm2": domain.area/1e12,
+        ("removed_area_upper_bound_mm2" if removed else "interior_area_lower_bound_mm2"): domain.area/1e12,
     }
 
 
 
 def nominal_board_domain(records):
-    """Intersect retained copper with one outer boundary and an optional straight hole."""
+    """Qualify one outer boundary and at most one strictly nested removed contour."""
     if not records:
         return None, {"status": "unbounded_artwork", "reason": "no_layer_20_outline"}
     if len(records) > 2048:
         raise ValueError("layer 20 outline exceeds the supported edge count")
     cycles = _outline_cycles(records)
     if len(cycles) == 1:
-        return _outer_domain(cycles[0])
+        return _contour_domain(cycles[0])
 
-    # With one curved contour it can only qualify as the outer board. For two
-    # straight contours the enclosing polygon must have the larger exact area.
-    def outer_order(rows):
-        curved = any(row["curve"] for row in rows)
-        area2 = sum(a[0]*b[1] - a[1]*b[0] for a,b in
-                    ((row["a"], row["b"]) for row in rows))
-        return curved, abs(area2)
-
-    outer, inner = sorted(cycles, key=outer_order, reverse=True)
-    if len(inner) < 3 or any(row["curve"] for row in inner):
-        raise ValueError("inner layer 20 loop must be a simple straight polygon")
-    hole = Polygon([tuple(map(float, row["a"])) for row in inner])
-    if not hole.is_valid or hole.area <= 0 or hole.minimum_clearance <= 4*_GUARD:
-        raise ValueError("invalid or numerically unresolved inner layer 20 loop")
-    domain, info = _outer_domain(outer)
-    # Guard outward on the removed material, inward on the retained board.
-    # Test the entire closed hole, including its interior and every edge.
-    removed = hole.buffer(_GUARD, join_style="mitre")
-    if not removed.is_valid or not removed.covers(hole) or not domain.contains_properly(removed):
+    # A qualified outer inset strictly contains the entire inner enclosure.
+    # Its area must therefore exceed the inner inset's area. This ordering is
+    # independent of traversal direction, wire order and which contour is curved.
+    candidates = [(_contour_domain(rows), rows) for rows in cycles]
+    candidates.sort(key=lambda candidate: candidate[0][0].area, reverse=True)
+    (domain, info), _ = candidates[0]
+    inner = candidates[1][1]
+    removed, hole_info = _contour_domain(inner, removed=True)
+    if not domain.contains_properly(removed):
         raise ValueError("layer 20 hole crosses, touches, or lies outside the guarded board")
     result = domain.difference(removed)
     if result.geom_type != "Polygon" or not result.is_valid or len(result.interiors) != 1:
         raise ValueError("unresolved layer 20 board-with-hole topology")
     hole_sources = [list(row["source"]) for row in inner]
+    hole_model = "outer_outline_with_one_straight_dimension_hole"
+    if hole_info["quarter_count"]:
+        hole_model = "outer_outline_with_one_tangent_quarter_dimension_hole"
+        curve = next(row for row in inner if row["curve"])
+        info = dict(info, hole_quarter_count=hole_info["quarter_count"],
+                    hole_quarter_source=list(curve["source"]),
+                    hole_arc_error_upper_bound_nm=hole_info["arc_sagitta_upper_bound_nm"],
+                    removed_area_upper_bound_mm2=hole_info["removed_area_upper_bound_mm2"])
     return result, dict(info,
-        model="outer_outline_with_one_straight_dimension_hole",
+        model=hole_model,
         outer_model=info["model"], hole_sources=hole_sources,
         sources=info["sources"]+hole_sources, wire_count=len(records),
         hole_wire_count=len(inner), interior_area_lower_bound_mm2=result.area/1e12)
