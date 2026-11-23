@@ -95,7 +95,8 @@ class RepairStream:
 
 @unittest.skipUnless(Path(harness.PI).is_file(), 'actual installed Pi CLI required')
 class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
-    async def course(self, extension, *, cancel=False):
+    async def course(self, extension, *, cancel=False, stream_factory=RepairStream,
+                     max_steps=None, expected_requests=3):
         # CI provisions this empty task root, separate from the harness.
         with (tempfile.TemporaryDirectory(prefix='ple-recovery-', dir='/filesystem') as directory,
               tempfile.TemporaryDirectory(prefix='ple-home-') as home):
@@ -107,7 +108,7 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                 prompt += '\nWrite a first complete version, then improve it. Produce exactly these six files at the archive root:\n' + '\n'.join(
                     f'{i}. `{name}`' for i, name in enumerate(MEMBERS, 1))
                 self.assertEqual(sorted(archive_contract.member_names(prompt)), sorted(MEMBERS))
-            stream = MockStream() if cancel else RepairStream(script)
+            stream = MockStream() if cancel else stream_factory(script)
             writes, materializations, children = [], [], []
             spawn = asyncio.create_subprocess_exec
             loop = asyncio.get_running_loop()
@@ -139,7 +140,7 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                         port = server.sockets[0].getsockname()[1]
                         async with connect(f'ws://127.0.0.1:{port}') as socket:
                             await socket.send(json.dumps({'type': 'task', 'instruction': prompt, 'workdir': str(root),
-                                                          'limits': {'agent_timeout_sec': 150}}))
+                                                          'limits': {'agent_timeout_sec': 150, **({'max_steps': max_steps} if max_steps is not None else {})}}))
                             async def stop():
                                 await stream.started.wait()
                                 await socket.send(json.dumps({'type': 'cancel'}))
@@ -155,7 +156,11 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                                         if 'id' not in message:
                                             continue
                                         result = {'type': 'result', 'id': message['id'], 'ok': True}
-                                        if message['type'] == 'write_file':
+                                        if message['type'] == 'read_file':
+                                            self.assertEqual(message['path'], str(root / 'input.json'))
+                                            data = (root / 'input.json').read_bytes()
+                                            result.update(content_b64=base64.b64encode(data).decode(), size=len(data), truncated=False)
+                                        elif message['type'] == 'write_file':
                                             self.assertEqual(message['path'], str(script))
                                             self.assertFalse(message.get('append'))
                                             data = base64.b64decode(message['content_b64'])
@@ -200,7 +205,7 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('could not be verified', summary)
             else:
                 self.assertIn('write', stream.tools)
-                self.assertEqual(stream.requests, 3)
+                self.assertEqual(len(stream.requests) if isinstance(stream.requests, list) else stream.requests, expected_requests)
                 self.assertEqual(writes, [str(script)])
                 self.assertEqual(len(materializations), 1)
                 self.assertNotIn('Incomplete', summary)
