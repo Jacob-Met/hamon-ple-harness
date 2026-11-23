@@ -7,7 +7,7 @@ inside the guarded polygons has at least 1 nm nominal in-plane clearance.
 
 from collections import Counter, defaultdict, deque
 from fractions import Fraction
-from math import floor, ceil, cos, hypot, pi, radians, sin, sqrt
+from math import floor, ceil, cos, hypot, isqrt, pi, radians, sin, sqrt
 
 from shapely import constrained_delaunay_triangles
 from shapely.geometry import LineString, Point, Polygon, box
@@ -243,11 +243,13 @@ def _circular_contour(rows, removed):
             raise ValueError("circular opening arcs do not share a center")
         center = cx, cy
     # Adjacent arcs share endpoints. Equal centers therefore imply equal radii.
+    radius_squared = (ax - cx)**2 + (ay - cy)**2
     radius = hypot(ax - cx, ay - cy)
     if radius <= 4 * _GUARD:
         raise ValueError("circular opening radius is unresolved")
     domain, error = _guarded_round_boundary(Point(float(cx), float(cy)), radius, removed)
     return domain, {"model": "circle", "center_nm": [str(cx), str(cy)],
+                    "radius_squared_nm2": str(radius_squared),
                     "sweeps_deg": sweeps, "sources": [list(row["source"]) for row in rows],
                     "wire_count": len(rows), "quarter_count": 0, "boundary_guard_nm": _GUARD,
                     "arc_sagitta_upper_bound_nm": error,
@@ -534,6 +536,23 @@ def _certified_hole_separation(left, right):
     return not (_inside_chord_loop(left[0]["a"], right) or _inside_chord_loop(right[0]["a"], left))
 
 
+def _certified_circle_separation(first, second):
+    """Bound both complete removed disks from their authored circle data."""
+    centers = [tuple(map(Fraction, info["center_nm"])) for info in (first, second)]
+    radius_upper = 0
+    for info in (first, second):
+        squared = Fraction(info["radius_squared_nm2"])
+        lower = isqrt(squared.numerator // squared.denominator)
+        radius_upper += lower if lower * lower == squared else lower + 1
+    # At each vertex the circumscribed polygon extends by at most 1 nm.
+    # The radial mitre length is guard/cos(half_step); half_step <= pi/4,
+    # so 3*guard/2 strictly bounds it. Keep the usual two-guard free gap.
+    guard = Fraction(_GUARD)
+    clearance = 2 * guard + 2 * (1 + 3 * guard / 2)
+    distance_squared = sum((a - b)**2 for a, b in zip(*centers))
+    return distance_squared > (radius_upper + clearance)**2
+
+
 def nominal_board_domain(records):
     """Qualify one outer boundary and up to two disjoint, strictly interior removed contours."""
     if not records:
@@ -553,7 +572,9 @@ def nominal_board_domain(records):
     candidates = [(_contour_domain(rows), rows) for rows in cycles]
     candidates.sort(key=lambda candidate: candidate[0][0].area, reverse=True)
     (domain, info), _ = candidates[0]
-    if info["model"] in {"stadium", "circle"} or (len(cycles) > 2 and any(
+    paired_circles = len(candidates) == 3 and all(
+        candidate[0][1]["model"] == "circle" for candidate in candidates[1:])
+    if info["model"] in {"stadium", "circle"} or (len(cycles) > 2 and not paired_circles and any(
             candidate[0][1]["model"] in {"stadium", "circle"} for candidate in candidates)):
         raise ValueError("round contour supported only as an isolated interior opening")
     cutouts = []
@@ -563,8 +584,10 @@ def nominal_board_domain(records):
         removed, cut_info = _contour_domain(rows, removed=True)
         if not domain.contains_properly(removed):
             raise ValueError("layer 20 hole crosses, touches, or lies outside the guarded board")
-        for other, _ in cutouts:
-            if removed.distance(other) <= 2 * _GUARD or not _certified_hole_separation(inner_rows[0], rows):
+        for other, other_info in cutouts:
+            separated = (_certified_circle_separation(other_info, cut_info) if paired_circles
+                         else _certified_hole_separation(inner_rows[0], rows))
+            if removed.distance(other) <= 2 * _GUARD or not separated:
                 raise ValueError("layer 20 holes intersect, nest, touch, or have unresolved separation")
         if cut_info["quarter_count"]:
             sources = [list(row["source"]) for row in rows if row["curve"]]
