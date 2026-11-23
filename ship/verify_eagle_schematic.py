@@ -90,11 +90,72 @@ def check_quarter_turns(pdf, original):
             print(json.dumps({"rotation_degrees": turn * 90, "covariant": True}))
 
 
+def check_power_junction_controls(pdf, original):
+    """Remove one physical feature at a time from the hash-verified manufacturer PDF."""
+    from pypdf import PdfWriter
+    from pypdf.generic import NumberObject
+
+    old = original["document_wire_groups"][0]
+    require(len({old[i] for i in range(147, 153)}) == 1, "Intact rail did not join both islands")
+    reference_pairs = {(i, j) for i in range(len(old)) for j in range(i) if old[i] == old[j]}
+    junctions = [w for w in original["pages"][0]["wire_end_label_witnesses"] if "junction" in w]
+    require(len(junctions) == 1 and (junctions[0]["name"], junctions[0]["wire_index"],
+            junctions[0]["stem_wire_index"]) == ("+3V3", 151, 150), "Unexpected physical junction")
+    reference_pairs = {(i, j) for i in range(len(old)) for j in range(i) if old[i] == old[j]}
+    junctions = [w for w in original["pages"][0]["wire_end_label_witnesses"] if "junction" in w]
+    require(len(junctions) == 1 and (junctions[0]["name"], junctions[0]["wire_index"],
+            junctions[0]["stem_wire_index"]) == ("+3V3", 151, 150), "Unexpected physical junction")
+    with tempfile.TemporaryDirectory() as tmp:
+        for edit in ("side_label", "stem_label", "stem_gap"):
+            writer = PdfWriter(clone_from=pdf)
+            page = writer.pages[0]
+            contents = page.get_contents()
+            ops = contents.operations
+            if edit == "stem_gap":
+                # First half of the T to capacitor lead; leave both label runs alone.
+                moves = [i for i, (args, op) in enumerate(ops[:-1])
+                         if op == b"m" and list(args) == [7919, 11600]
+                         and ops[i+1] == ([7919, 11960], b"l")]
+                require(len(moves) == 1, "Cannot localize the manufacturer branch")
+                ops[moves[0]][0][1] = NumberObject(11630)
+            else:
+                # EAGLE emits one PDF text-show operation per glyph. These two
+                # independent +3V3 runs are the capacitor lead and the open arm.
+                glyphs = [i for i, (_, op) in enumerate(ops) if op == b"Tj"]
+                start = 2842 if edit == "side_label" else 2838
+                remove = glyphs[start:start+4]
+                require(len(remove) == 4, "Cannot localize the manufacturer label")
+                ops = [row for i, row in enumerate(ops) if i not in remove]
+            contents.operations = ops
+            page.replace_contents(contents)
+            edited = Path(tmp) / f"{edit}.pdf"
+            writer.write(edited)
+            actual = json.loads(subprocess.check_output([
+                sys.executable, str(REPO / "engineering_toolkit.py"), "pdf-eagle-connectivity",
+                str(edited), "--flat-document",
+            ]))
+            require(actual["status"] == "candidate_evidence", "Edited PDF fell outside the supported profile")
+            groups = actual["document_wire_groups"][0]
+            actual_pairs = {(i, j) for i in range(len(groups)) for j in range(i) if groups[i] == groups[j]}
+            withdrawn = {(i, j) for i in range(150, 153) for j in range(147, 150)}
+            if edit == "stem_gap":
+                withdrawn.update(((151, 150), (152, 150)))
+            require(actual_pairs == reference_pairs - withdrawn, f"{edit} changed an unexpected connection")
+            printed = actual["pages"][0]["wire_end_label_witnesses"]
+            require(not any("junction" in w for w in printed), f"{edit} kept the junction witness")
+            wires = actual["pages"][0]["wires"]
+            stock = original["pages"][0]["wires"]
+            changed = [i for i, (a, b) in enumerate(zip(wires, stock, strict=True)) if a != b]
+            require(changed == ([150] if edit == "stem_gap" else []), "Unrelated native wire geometry changed")
+            print(json.dumps({"power_junction_edit": edit, "join_withdrawn": True}))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pdf", type=Path)
     parser.add_argument("vendor_archive", type=Path)
     parser.add_argument("--quarter-turns", action="store_true", help="Also replay all quarter-turn rotations using pypdf")
+    parser.add_argument("--junction-controls", action="store_true", help="Erase either power label or disconnect the tee in the original PDF")
     args = parser.parse_args()
     require(sha256(args.pdf.read_bytes()).hexdigest() == PDF_SHA, "Unexpected vendor PDF")
     predictions = []
@@ -123,6 +184,8 @@ def main():
             and len(terminal["supporting_wire_islands"]) == 2
             and terminal["incidental_singletons"] == ["D1"],
             "Numbered terminal and independent text witnesses differ")
+    if args.junction_controls:
+        check_power_junction_controls(args.pdf, flat)
     if args.quarter_turns:
         check_quarter_turns(args.pdf, flat)
     require(sha256(args.vendor_archive.read_bytes()).hexdigest() == ZIP_SHA, "Unexpected vendor archive")
@@ -134,7 +197,7 @@ def main():
     document = []
     flat_rows = []
     for page, ((wires, groups), sheet, expected) in enumerate(
-            zip(predictions, sheets, ((86, 85, 0, 9), (31, 31, 0, 0))), 1):
+            zip(predictions, sheets, ((86, 86, 0, 0), (31, 31, 0, 0))), 1):
         names = align(wires, sheet)
         rows = list(zip(names, [(page, group) for group in groups]))
         observed = counts(rows)
@@ -146,18 +209,18 @@ def main():
         require(len(stitched) == len(names), "Document memberships omit wires")
         flat_rows.extend(zip(names, stitched))
     result = counts(document)
-    require(result == {"nets": 111, "exact": 104, "false_connected": 0, "false_separated": 1975},
+    require(result == {"nets": 111, "exact": 105, "false_connected": 0, "false_separated": 1966},
             "Complete document differs from the independent recount")
     print(json.dumps({"combined_pages_without_inter_sheet_stitching": result}))
     result = counts(flat_rows)
-    require(result == {"nets": 111, "exact": 110, "false_connected": 0, "false_separated": 9},
+    require(result == {"nets": 111, "exact": 111, "false_connected": 0, "false_separated": 0},
             f"Flat-document comparison differs: {result}")
     pairs_by_name = defaultdict(list)
     for name, group in flat_rows:
         pairs_by_name[name].append((name, group))
     missing = {name: total for name, rows in pairs_by_name.items()
                if (total := counts(rows)["false_separated"])}
-    require(missing == {"+3V3": 9},
+    require(not missing,
             f"Remaining per-net separations differ: {missing}")
     print(json.dumps({"flat_document": result, "anchors": flat["inter_sheet_anchors"], "missing_by_net": missing}))
 

@@ -491,6 +491,97 @@ def _corroborated_bank_label(witness, root, target, words, anchors, label_words,
     return True
 
 
+def _junction_power_labels(wires, roots, endpoints, lines, obstacles, words, supplies, label_words):
+    """Recognize two independently printed values on perpendicular arms of a signal tee."""
+    extra_lines, bounds = obstacles
+    if None in bounds:
+        return []
+    # Canvas proximity alone cannot distinguish a device pin name from a signal.
+    # Require consecutive native runs plus a third copy anchored on another island.
+    starts = {w["glyph_span"][0]: i for i, w in enumerate(words)
+              if "glyph_span" in w and w["text"] in supplies and _POWER_NAME.fullmatch(w["text"])}
+    ends = {words[i]["glyph_span"][1]: i for i in starts.values()}
+
+    def sole_wire(point, index):
+        return (set(endpoints.near(point)) == {index}
+                and not any(j != index and _touches_segment(point, wire, .12)
+                            for j, wire in enumerate(wires)))
+
+    def on_ink(point):
+        x, y = point
+        return (any(_touches_segment(point, line, .13) for line in (*lines, *extra_lines))
+                or any(x0-.13 <= x <= x1+.13 and y0-.13 <= y <= y1+.13
+                       for x0, y0, x1, y1 in bounds))
+
+    candidates = []
+    for index in starts.values():
+        stem_word = words[index]
+        direction = stem_word["baseline_direction"]
+        origin = stem_word["baseline_origin"]
+        left, right = stem_word["glyph_span"]
+        neighbors = [i for i in (ends.get(left), starts.get(right)) if i is not None
+                     and words[i]["text"] == stem_word["text"]]
+        for side_index in neighbors:
+            side = words[side_index]
+            across = side["baseline_direction"]
+            if direction[0]*across[0] + direction[1]*across[1] != 0:
+                continue
+            lo = min(left, side["glyph_span"][0])
+            hi = max(right, side["glyph_span"][1])
+            support = [i for i in (ends.get(lo), starts.get(hi)) if i in label_words
+                       and words[i]["text"] == stem_word["text"]]
+            if len(support) != 1:
+                continue
+            touching = [line for line in lines if any(math.dist(origin, p) <= .13 for p in line)]
+            # The origin may also touch the body of a symbol. Exactly one red
+            # lead must run toward the green wire in the direction of the text.
+            leads = []
+            for line in touching:
+                tip = max(line, key=lambda p: math.dist(p, origin))
+                run, offset = _label_frame((tip[0]-origin[0], tip[1]-origin[1]), direction)
+                if run > .13 and abs(offset) <= .13:
+                    leads.append(tip)
+            if len(leads) != 1:
+                continue
+            tip, = leads
+            attached = list(endpoints.near(tip))
+            if len(attached) != 1 or not sole_wire(tip, attached[0]):
+                continue
+            stem = attached[0]
+            junction = max(wires[stem], key=lambda p: math.dist(p, tip))
+            along, offset = _label_frame((junction[0]-tip[0], junction[1]-tip[1]), direction)
+            incident = set(endpoints.near(junction))
+            if along <= .13 or abs(offset) > .13 or len(incident) != 3 or on_ink(junction):
+                continue
+            if any(i not in incident and _touches_segment(junction, wire, .12) for i, wire in enumerate(wires)):
+                continue
+            branch = []
+            for i in incident - {stem}:
+                end = max(wires[i], key=lambda p: math.dist(p, junction))
+                length, offset = _label_frame((end[0]-junction[0], end[1]-junction[1]), across)
+                if abs(offset) <= .13 and abs(length) > .13:
+                    branch.append((length, i, end))
+            if len(branch) != 2 or min(branch)[0] >= 0 or max(branch)[0] <= 0:
+                continue
+            _, wire, free = max(branch)
+            if not sole_wire(free, wire) or on_ink(free):
+                continue
+            x, y, u, v = side["page_bbox_pt"]
+            a, b = _label_frame((x, y), across), _label_frame((u, v), across)
+            height = abs(a[1] - b[1])
+            start, base = _label_frame(junction, across)
+            end, _ = _label_frame(free, across)
+            _, text_base = _label_frame(side["baseline_origin"], across)
+            if (min(a[0], b[0]) < start or not 0 <= end-max(a[0], b[0]) <= height
+                    or min(a[1], b[1]) <= base <= max(a[1], b[1]) or abs(base-text_base) > height):
+                continue
+            candidates.append((roots[wire], {"name": side["text"], "wire_index": wire,
+                "junction": junction, "stem_wire_index": stem, "red_endpoint": origin, "endpoint": free,
+                "label_spans": [stem_word["glyph_span"], side["glyph_span"]],
+                "_word_index": side_index, "_stem_word": index, "_support_word": support[0]}))
+    return candidates
+
+
 def _graph(wires, lines, words, *, wire_end_witnesses=None, symbol_obstacles=((), ())):
     groups, endpoints = Groups(len(wires)), Points(.12)
     for i, (a, b) in enumerate(wires):
@@ -516,7 +607,9 @@ def _graph(wires, lines, words, *, wire_end_witnesses=None, symbol_obstacles=(()
     extra_lines, symbol_bounds = symbol_obstacles
     clearance_lines = [*lines, *extra_lines] if extra_lines else lines
     candidates = (_wire_end_labels(wires, roots, endpoints, clearance_lines, words, symbol_bounds, lines)
-                  + _side_supply_labels(all_glyphs, words))
+                  + _side_supply_labels(all_glyphs, words)
+                  + _junction_power_labels(wires, roots, endpoints, lines, symbol_obstacles,
+                                           words, supplies, label_words))
     # An ordinary glyph and a proposed wire end can overlap the same printed
     # occurrence. Track its actual island for every role before admitting joins.
     for glyph in all_glyphs:
@@ -524,6 +617,8 @@ def _graph(wires, lines, words, *, wire_end_witnesses=None, symbol_obstacles=(()
             word_roots[index].add(glyph["wire_index"])
     for root, witness in candidates:
         word_roots[witness["_word_index"]].add(root)
+        if "_stem_word" in witness:
+            word_roots[witness["_stem_word"]].add(root)
     label_roots = defaultdict(lambda: defaultdict(set))
     occurrences = defaultdict(set)
     for name, hits in anchors.items():
@@ -545,6 +640,11 @@ def _graph(wires, lines, words, *, wire_end_witnesses=None, symbol_obstacles=(()
         word_index = witness["_word_index"]
         if len(word_roots[word_index]) != 1:
             continue
+        if "_stem_word" in witness:
+            supporting = word_roots[witness["_support_word"]]
+            if (len(word_roots[witness["_stem_word"]]) != 1 or len(supporting) != 1
+                    or root in supporting):
+                continue
         if witness.get("label_placement") == "side":
             if not witness["_admissible"] or word_index in label_words:
                 continue
