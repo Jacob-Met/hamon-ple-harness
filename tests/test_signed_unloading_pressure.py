@@ -57,3 +57,24 @@ class SignedUnloadingPressure(unittest.TestCase):
                             {**spec, "proposed_mean_excess_pore_pressure_Pa": claimed})
                         with self.subTest(claim=claimed):
                             self.assertEqual(result["conservation_verified"], accepted, result)
+
+    def test_small_alternating_load_pulse_resolves_final_magnitude(self):
+        # Reflected heat-kernel convolution of four signed steps, evaluated at
+        # 100 decimal places using the exact binary64 loads.
+        scale = 2**100
+        for pulse, expected in ((9.306062719201122e-11, 187.58480875252147),
+                                (9.306062719201123e-11, -219.30324540224566)):
+            history = [(0, pulse), (.125, pulse), (.125, 0), (.25, 0),
+                       (.25, 100000), (.5, 100000), (.5, 46036.15931923853)]
+            spec = {"H_clay_m": 1, "cv_m2_s": 1, "mv_per_Pa": 1e-7 / scale,
+                    "drainage": "single", "time_s": 1,
+                    "load_history": [{"time_s": time, "surcharge_Pa": load * scale}
+                                     for time, load in history]}
+            with self.subTest(pulse=pulse):
+                answer = verify_consolidation_history(
+                    {**spec, "proposed_mean_excess_pore_pressure_Pa": expected})
+                self.assertTrue(answer["conservation_verified"], answer)
+                self.assertEqual(answer["mean_excess_pore_pressure_Pa"], expected)
+                wrong = verify_consolidation_history(
+                    {**spec, "proposed_mean_excess_pore_pressure_Pa": expected + .01})
+                self.assertFalse(wrong["conservation_verified"], wrong)

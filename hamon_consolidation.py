@@ -283,7 +283,8 @@ def _resolved_history_pressure(history, elapsed, height, cv, drainage, scale):
     ctx.prec = 120
     # At this precision even an error proportional to the entire surcharge
     # is below the binary64 subnormal range.
-    max_bits = max(ctx.prec, math.frexp(scale)[1] + 1160)
+    max_bits = max(2 * ctx.prec, math.frexp(scale)[1] + 1160)
+    previous = None
 
     def retention(young, span):
         old = young + span
@@ -330,9 +331,19 @@ def _resolved_history_pressure(history, elapsed, height, cv, drainage, scale):
                 terms.append(change * retention((time-end)*factor, (end-start)*factor))
                 variation += abs(change)
         pressure = ctx.fsum(terms)
-        if abs(pressure) > 32 * ctx.eps * variation or ctx.prec >= max_bits:
-            return float(pressure)
-        ctx.prec = min(2 * ctx.prec, max_bits)
+        rounded = float(pressure)
+        if not math.isfinite(rounded):
+            raise ValueError("Nonfinite signed unloading pressure")
+        # Resolve the returned component, even when the pressure is much
+        # smaller than the individual load changes. Allow for accumulation
+        # and verify that precision refinement preserves the rounded value.
+        uncertainty = (ctx.prec + 24)**2 * ctx.eps * variation
+        if rounded == previous and uncertainty < ctx.mpf(math.ulp(rounded)) / 16:
+            return rounded
+        if ctx.prec >= max_bits + 64:
+            raise ValueError("Signed unloading pressure did not converge")
+        previous = rounded
+        ctx.prec = min(2 * ctx.prec, max_bits if ctx.prec < max_bits else max_bits + 64)
 
 
 def _diffusion_history(segments, factor, cells):
