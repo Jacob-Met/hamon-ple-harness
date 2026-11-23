@@ -288,7 +288,7 @@ async def provision_engineering_cli(session: Any) -> str:
             session.write_file("/tmp/hamon_dxf.py", dxf_bytes), timeout=12)
         if dxf_size != len(dxf_bytes):
             return ""
-        for filename in ("office_package.py", "hamon_consolidation.py", "hamon_pipe_network.py", "hamon_diaphragm.py", "hamon_diaphragm_modes.py", "hamon_diaphragm_compensated.py", "hamon_turbomachinery.py", "hamon_ac_power_flow.py", "hamon_bearing_capacity.py"):
+        for filename in ("office_package.py", "hamon_eagle_netlist.py", "hamon_consolidation.py", "hamon_pipe_network.py", "hamon_diaphragm.py", "hamon_diaphragm_modes.py", "hamon_diaphragm_compensated.py", "hamon_turbomachinery.py", "hamon_ac_power_flow.py", "hamon_bearing_capacity.py"):
             module = pathlib.Path(__file__).with_name(filename).read_bytes()
             copied = await asyncio.wait_for(
                 session.write_file("/tmp/" + filename, module), timeout=12)
@@ -319,6 +319,8 @@ async def provision_engineering_cli(session: Any) -> str:
         "\n  python3 /tmp/hamon-engineering-toolkit.py xlsx-audit FILE.xlsx"
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-words DRAWING.pdf --page 1"
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-vector DRAWING.pdf --from-page 1 --to-page 3"
+        "\n  python3 /tmp/hamon-engineering-toolkit.py eagle-netlist SCHEMATIC.sch [--board LAYOUT.brd]"
+        "\nRead exact native EAGLE pin, package pad and net mappings. Inspect board_comparison.agreement and mismatches when a layout is supplied."
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-eagle-connectivity SCHEMATIC.pdf --page 1"
         "\nRead page-local wire-group and supply-glyph evidence. Device pins and cross-sheet connectivity require independent evidence."
         "\n  python3 /tmp/hamon-engineering-toolkit.py pdf-detail-links DRAWING.pdf [--target-sheet S4]"
