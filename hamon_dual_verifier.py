@@ -643,6 +643,156 @@ def dual_solve_scalar_root(
 # MULTI-DISCIPLINE GENERAL SOLVERS & CONSERVATION VERIFIERS
 # ==============================================================================
 
+def _beam_bernstein(coefficients):
+    """Power-basis polynomial on [0, 1] in Bernstein form."""
+    n = len(coefficients)-1
+    return tuple(sum(coefficients[j]*math.comb(i,j)/math.comb(n,j) for j in range(i+1))
+                 for i in range(n+1))
+
+
+def _beam_bisect(control):
+    left, right = [control[0]], [control[-1]]
+    while len(control) > 1:
+        control = tuple((a+b)/2 for a,b in zip(control, control[1:]))
+        left.append(control[0])
+        right.append(control[-1])
+    return tuple(left), tuple(reversed(right))
+
+
+def _beam_nonnegative(polynomial):
+    """Exact contact decision for a polynomial whose signed peak straddles a limit."""
+    def trim(p):
+        while p and p[-1] == 0:
+            p.pop()
+        return p
+
+    def divide(a, b):
+        remainder = a[:]
+        quot = [0] * max(0, len(a)-len(b)+1)
+        while len(remainder) >= len(b):
+            k = len(remainder)-len(b)
+            quot[k] = remainder[-1]/b[-1]
+            for i, value in enumerate(b):
+                remainder[i+k] -= quot[k]*value
+            trim(remainder)
+        return quot, remainder
+
+    def gcd(a, b):
+        while b:
+            a, b = b, divide(a, b)[1]
+        return a
+
+    p = trim(polynomial)
+    if not p:
+        return True
+    # Divide out repeated square factors. A tangential zero then cannot
+    # keep a Bernstein lower bound negative through infinite subdivision.
+    while len(p) > 1:
+        common = gcd(p, [i*c for i,c in enumerate(p) if i])
+        square = gcd(common, divide(p, common)[0])
+        if len(square) <= 1:
+            break
+        p = divide(divide(p, square)[0], square)[0]
+    pending = [_beam_bernstein(p)]
+    while pending:
+        control = pending.pop()
+        if min(control[0], control[-1]) < 0:
+            return False
+        if min(control) < 0:
+            pending.extend(_beam_bisect(control))
+    return True
+
+
+def _beam_interval_peak(polynomial, limit):
+    """Enclose the continuous quartic peak; use exact signs for marginal demand."""
+    import heapq
+    control = _beam_bernstein(polynomial)
+    lower = max(abs(control[0]), abs(control[-1]))
+    pending = [(-max(map(abs,control)), control)]
+    while pending:
+        negative_upper, current = heapq.heappop(pending)
+        upper = -negative_upper
+        if upper <= lower or upper-lower <= lower / (1 << 72):
+            break
+        for child in _beam_bisect(current):
+            lower = max(lower, abs(child[0]), abs(child[-1]))
+            child_upper = max(map(abs, child))
+            if child_upper > lower:
+                heapq.heappush(pending, (-child_upper, child))
+    else:
+        upper = lower
+    if limit is None or upper <= limit:
+        return lower, True
+    if lower > limit:
+        return lower, False
+    passes = all(_beam_nonnegative([limit-sign*polynomial[0],
+                                    *(-sign*c for c in polynomial[1:])]) for sign in (-1,1))
+    return lower, passes
+
+
+def _beam_deflections(support, span, rigidity, uniform, point_loads, limit_ratio):
+    """Integrate EI v'' = M on each uninterrupted load interval of the beam."""
+    length, ei, q = map(Fraction, (span, rigidity, uniform))
+    if length <= 0 or ei <= 0:
+        raise ValueError("Beam length and flexural rigidity must be positive")
+    loads = {}
+    for magnitude, position in point_loads:
+        x = Fraction(position)
+        loads[x] = loads.get(x, 0) + Fraction(magnitude)
+    # Successive right-end integrals of the prescribed loads. The constants
+    # below enforce M=0 at a hinge, v'=0 at a clamp, and M=V=0 at a free tip.
+    end = [q*length**k/math.factorial(k) +
+           sum(p*(length-x)**(k-1)/math.factorial(k-1) for x, p in loads.items())
+           for k in range(1, 5)]
+    slope = Fraction(0)
+    if support == "simply_supported":
+        moment = Fraction(0)
+        reaction = end[1]/length
+        slope = (end[3] - reaction*length**3/6)/length
+    elif support == "cantilever":
+        reaction = end[0]
+        moment = end[1] - reaction*length
+    elif support == "propped_cantilever":
+        reaction = 3*(end[1]/2 - end[3]/length**2)/length
+        moment = end[1] - reaction*length
+    else:  # fixed_fixed
+        reaction = 6*(end[2]/length - 2*end[3]/length**2)/length
+        moment = 2*end[3]/length**2 - reaction*length/3
+
+    # All local polynomials use t=(x-left)/(right-left), so a short loaded
+    # interval retains its local displacement even when endpoint DOFs vanish.
+    peak = Fraction(0)
+    limit = length/Fraction(limit_ratio) if limit_ratio is not None else None
+    passes = True
+    midpoint = displacement = Fraction(0)
+    shear = reaction
+    external_work = curvature_work = Fraction(0)
+    cuts = sorted({Fraction(0), length, *loads})
+    for left, right in zip(cuts, cuts[1:]):
+        h = right-left
+        shear -= loads.get(left, 0)
+        poly = [displacement/ei, slope*h/ei, moment*h*h/(2*ei),
+                shear*h**3/(6*ei), -q*h**4/(24*ei)]
+        local_peak, within_limit = _beam_interval_peak(poly, limit if passes else None)
+        peak = max(peak, local_peak)
+        passes = passes and within_limit
+        if left <= length/2 <= right:
+            t = (length/2-left)/h
+            midpoint = sum(c*t**i for i,c in enumerate(poly))
+        curvature = (moment, shear*h, -q*h*h/2)
+        curvature_work += h/ei*sum(a*b/(i+j+1) for i,a in enumerate(curvature)
+                                   for j,b in enumerate(curvature))
+        external_work -= loads.get(left, 0)*poly[0] + q*h*sum(c/(i+1) for i,c in enumerate(poly))
+        displacement = sum(poly)*ei
+        slope = sum(i*c for i,c in enumerate(poly))*ei/h
+        moment += shear*h-q*h*h/2
+        shear -= q*h
+    external_work -= loads.get(length, 0)*displacement/ei
+    if curvature_work != external_work:
+        raise ValueError("Continuous beam displacement fails bending-energy balance")
+    return float(peak), float(abs(midpoint)), passes
+
+
 def solve_beam_dual(spec: dict[str, Any]) -> dict[str, Any]:
     """Dual-solve prismatic Euler-Bernoulli beam:
     Path A: Symbolic piecewise/Macaulay integration (`sympy`)
@@ -751,14 +901,10 @@ def solve_beam_dual(spec: dict[str, Any]) -> dict[str, Any]:
             if left < turning < right:
                 max_M_fem = max(max_M_fem, abs(section_moment(turning)))
     M_mid_fem = abs(section_moment(L / 2))
-    max_delta_fem = 0.0
-    for e in range(n_nd - 1):
-        length = nodes[e + 1] - nodes[e]
-        local_displacement = u[2 * e:2 * e + 4]
-        for sample in range(9):
-            weights = hermite(sample / 8.0, length)
-            deflection = sum(w * v for w, v in zip(weights, local_displacement))
-            max_delta_fem = max(max_delta_fem, abs(deflection))
+    ratio = float(spec["deflection_limit_ratio"]) if "deflection_limit_ratio" in spec else None
+    if ratio is not None and not (math.isfinite(ratio) and ratio > 0):
+        raise ValueError("Beam deflection limit ratio must be finite and positive")
+    max_delta, mid_delta, deflection_ok = _beam_deflections(support, L, Fraction(E)*Fraction(I), q_udl, point_loads, ratio)
 
     # --- Path A: Independent Symbolic Boundary-Value Integration (`sympy`) ---
     if HAS_SYMPY:
@@ -788,7 +934,6 @@ def solve_beam_dual(spec: dict[str, Any]) -> dict[str, Any]:
         disc = max(_rel_diff(RA_sym, R_A_fem), _rel_diff(M_mid_sym, M_mid_fem) if M_mid_sym > 1e-6 else 0.0)
     else:
         RA_sym = R_A_fem
-        v_mid_sym = max_delta_fem
         disc = 0.0
 
     if disc > 1e-6:
@@ -801,7 +946,8 @@ def solve_beam_dual(spec: dict[str, Any]) -> dict[str, Any]:
         "M_mid_Nm": M_mid_fem,
         "M_max_Nm": max_M_fem,
         "V_max_N": max_V_fem,
-        "delta_max_m": max_delta_fem,
+        "delta_max_m": max_delta,
+        "delta_mid_m": mid_delta,
         "dual_rel_discrepancy": disc,
         "equilibrium_residual_N": abs(R_A_fem + R_B_fem - (q_udl * L + sum(p for p, _ in point_loads))) if support != "cantilever" else 0.0,
         "dual_verified": True,
@@ -814,8 +960,7 @@ def solve_beam_dual(spec: dict[str, Any]) -> dict[str, Any]:
         out["phi_Mn_Nm"] = phi_Mn
         out["bending_ok"] = max_M_fem <= phi_Mn
     if "deflection_limit_ratio" in spec:
-        ratio = float(spec["deflection_limit_ratio"])
-        out["deflection_ok"] = max_delta_fem <= (L / ratio)
+        out["deflection_ok"] = deflection_ok
     return out
 
 
@@ -2503,7 +2648,6 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
             spec_norm["support"] = "fixed_fixed"
         res = solve_beam_dual(spec_norm)
         res["R_end_N"] = res["R_A_N"]
-        res["delta_mid_m"] = res["delta_max_m"]
         return res
     if kind == "static_equilibrium_2d":
         return solve_static_equilibrium_2d(spec)
