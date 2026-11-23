@@ -1883,6 +1883,10 @@ def solve_electrochem_or_separation(params: Mapping[str, Any]) -> Dict[str, Any]
         params.get("subkind") or ("distillation" if "alpha" in params else "electrochemistry")
     ).strip().lower()
 
+    if subkind == "equilibrium_flash":
+        from hamon_fixed_k_flash import fixed_k_flash
+        return fixed_k_flash(params)
+
     if subkind == "electrochemistry":
         return _electrochemistry(params)
 
@@ -2012,7 +2016,7 @@ def infer_wave7_domain(text_or_domain: str) -> Optional[str]:
         return "exchangers_radiation"
     if any(k in s for k in ("euler_rigid_body", "rigid body", "principal inertia", "lagrangian", "eigenmode", "natural frequenc", "hohmann", "vis-viva", "orbital_transfer")):
         return "lagrangian_orbital"
-    if any(k in s for k in ("nernst", "faraday", "overpotential", "electrochem", "mccabe-thiele", "mccabe", "fenske", "underwood", "distillation")):
+    if any(k in s for k in ("nernst", "faraday", "overpotential", "electrochem", "mccabe-thiele", "mccabe", "fenske", "underwood", "distillation", "equilibrium_flash")):
         return "electrochem_separations"
     return None
 
