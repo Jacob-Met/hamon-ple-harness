@@ -1501,7 +1501,8 @@ def _constant_rate_pfr(params, concentration, feed, flow, order, rate, inlet_t, 
     else:
         log_inverse = -ctx.log1p(-returned_x) if conversion <= remaining else -ctx.log(returned_u)
         closure = relative(dose(log_inverse), reported_exposure)
-    temperature = ctx.mpf(inlet_t) + ctx.mpf(heat_rise)*x
+    temperature = (ctx.mpf(inlet_t) + ctx.mpf(heat_rise)*x if x <= u else
+                   (ctx.mpf(inlet_t) + heat_rise) - ctx.mpf(heat_rise)*u)
     exit_t = float(temperature)
     if not math.isfinite(exit_t) or exit_t <= 0:
         raise ValueError("PFR exit temperature is not representable")
@@ -1541,23 +1542,39 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
             raise ValueError("PFR feed, temperature, order and expansion must be finite")
         heat_rise = delta_t_ad if abs(delta_t_ad) > 1e-15 else 0.
         inlet_t = t0_k if heat_rise else t_op
-        if min(c_a0, v0, f_a0, t0_k, inlet_t, inlet_t+heat_rise) <= 0 or eps_a <= -1:
-            raise ValueError("PFR requires positive feed and temperature and epsilon_A > -1")
+        if min(c_a0, v0, f_a0, t0_k, inlet_t) <= 0:
+            raise ValueError("PFR requires positive feed and inlet temperature")
         if params.get("conversion") is not None:
-            if not 0 <= float(params["conversion"]) <= 1:
+            target_x = float(params["conversion"])
+            if not 0 <= target_x <= 1:
                 raise ValueError("PFR conversion must lie in [0, 1]")
+            if target_x == 1 and order_n >= 1:
+                raise ValueError("complete PFR conversion requires infinite volume for order >= 1")
+            target = Fraction(target_x)
+            if Fraction(inlet_t) + Fraction(heat_rise)*target <= 0 or 1 + Fraction(eps_a)*target <= 0:
+                raise ValueError("PFR exit temperature and volumetric flow must remain positive")
         elif params.get("volume") is None:
             raise ValueError("PFR requires a conversion or a volume")
         elif not math.isfinite(float(params["volume"])) or float(params["volume"]) < 0:
             raise ValueError("PFR volume must be finite and nonnegative")
-        arrhenius = (("A_preexp" in params or ("k_ref" in params and "T_ref" in params))
-                     and float(params.get("E_a", 0)) != 0)
+        if "A_preexp" in params and "E_a" in params:
+            prefactor, reference, activation = float(params["A_preexp"]), 1., float(params["E_a"])
+        elif all(key in params for key in ("k_ref", "T_ref", "E_a")):
+            prefactor, reference, activation = map(float, (params["k_ref"], params["T_ref"], params["E_a"]))
+        else:
+            prefactor, reference, activation = float(params["k"]), 1., 0.
+        if min(prefactor, reference) <= 0 or not all(map(math.isfinite, (prefactor, reference, activation))):
+            raise ValueError("PFR kinetic rate and reference temperature must be finite and positive")
+        arrhenius = activation != 0
         if eps_a == 0 and (not heat_rise or (not gas_phase and not arrhenius)):
             concentration = Fraction(c_a0)
             if gas_phase:
                 concentration *= Fraction(t0_k)/Fraction(inlet_t)
             return _constant_rate_pfr(params, concentration, f_a0, v0, order_n,
                                       k_at_temp(inlet_t), inlet_t, heat_rise)
+
+    elif reactor_type not in ("cstr", "cstr_series"):
+        raise ValueError(f"Unsupported reactor_type: {reactor_type}")
 
     def rate_minus_ra(x_conv: float) -> float:
         temp_x = (t0_k + delta_t_ad * x_conv) if abs(delta_t_ad) > 1e-15 else t_op
@@ -1701,13 +1718,26 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
             x_out = 0.0
         else:
             fn_v = lambda x: volume_for_conversion(x) - vol_m3
-            gap = 0.5
-            x_hi = 1.0 - gap
+            limit = Fraction(1)
+            if heat_rise < 0:
+                limit = min(limit, -Fraction(inlet_t)/Fraction(heat_rise))
+            if eps_a < 0:
+                limit = min(limit, -1/Fraction(eps_a))
+            # Search only through the actual physical domain. A temperature
+            # or expansion singularity beyond the outlet is not traversed.
+            largest = float(limit)
+            closed = (limit == 1 and order_n == 0 and 1+Fraction(eps_a) > 0 and
+                      Fraction(inlet_t)+Fraction(heat_rise) > 0)
+            if not closed and Fraction(largest) >= limit:
+                largest = math.nextafter(largest, 0.)
+            gap = float(limit)
             for _ in range(60):
-                if fn_v(x_hi) > 0.0:
+                gap *= .5
+                x_hi = min(float(limit)-gap, largest)
+                if fn_v(x_hi) >= 0.0:
                     break
-                gap *= 0.5
-                x_hi = 1.0 - gap
+                if x_hi == largest:
+                    raise ValueError("no representable PFR outlet in the physical integration interval")
             x_out = float(optimize.brentq(fn_v, 0.0, x_hi, xtol=1e-13, rtol=1e-13))
         if cstr_branches is not None:
             residual = cstr_branches[branch]["residual"]

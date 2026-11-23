@@ -73,8 +73,8 @@ class PowerLawPfr(unittest.TestCase):
 
     def test_invalid_or_unrepresentable_states_do_not_certify(self):
         for params in (dict(order=0.,conversion=1.2), dict(conversion=-.1),
-                       dict(volume=-1.), dict(volume=1.,epsilon_A=-1.),
-                       dict(volume=1.,delta_T_adiabatic=-310.),
+                       dict(volume=-1.), dict(conversion=.5,epsilon_A=-2.),
+                       dict(conversion=.8,delta_T_adiabatic=-400.),
                        dict(conversion=1.,order=1.), dict(conversion=1.,order=2.),
                        dict(volume=750.), dict(volume=2.,k=0.)):
             with self.subTest(params=params), self.assertRaises(ValueError):
@@ -88,6 +88,26 @@ class PowerLawPfr(unittest.TestCase):
         self.assertFalse(solve(order=.5, conversion=1., F_A0=3*smallest, k=4.)["verified"])
         with self.assertRaisesRegex(ValueError, "space time"):
             solve(volume=1e-250, v0=1e150, F_A0=1.)
+
+    def test_cooling_and_contraction_only_through_the_reached_outlet(self):
+        for rise, x in ((-400.,.2), (-300.,.5)):
+            sized = solve(conversion=x, T0=300., delta_T_adiabatic=rise)
+            inverse = solve(volume=sized["volume_m3"], T0=300., delta_T_adiabatic=rise)
+            for r in (sized, inverse):
+                self.assertTrue(r["verified"],r)
+                self.assertAlmostEqual(r["exit_T_K"],300.+rise*x)
+        tail = solve(volume=400., T0=300., delta_T_adiabatic=-300.)
+        self.assertTrue(tail["verified"],tail)
+        self.assertAlmostEqual(tail["exit_T_K"]/(300*math.exp(-400)),1.,delta=2e-15)
+        with self.assertRaisesRegex(ValueError,"temperature"):
+            solve(order=0.,volume=.75,T0=300.,delta_T_adiabatic=-400.)
+        # Contracting gas stops having positive bulk volume at X=.5.
+        # Its first-quarter design is valid and reversible on the numeric route.
+        mixed = dict(k_ref=1., T_ref=300., E_a=5000., delta_T_adiabatic=-350., epsilon_A=-2.)
+        r = solve(conversion=.25, **mixed)
+        inv = solve(volume=r["volume_m3"], **mixed)
+        self.assertTrue(r["verified"] and inv["verified"], (r,inv))
+        self.assertAlmostEqual(inv["conversion_X"],.25)
 
     def test_numerical_variable_rate_route_cannot_certify_zero_consumption(self):
         # Heating changes this Arrhenius rate, retaining the quadrature route.
