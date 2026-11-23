@@ -2043,14 +2043,29 @@ def _mix_air_streams(spec, pressure, model, states):
             if (lo < switch <= hi and balance(switch, frozen, ice_limit=True)[0] <= 0
                     < balance(switch, frozen)[0]):
                 raise ValueError("Energy balance falls in the saturation-correlation phase gap")
-            for _ in range(1200):
-                if float(lo) == float(hi):
+            low_gap, low_vapor = balance(lo, frozen)
+            high_gap, high_vapor = balance(hi, frozen)
+            # Condensate can be representable even when its temperature rise
+            # is below one dry-bulb ulp. Resolve the water difference as well.
+            for step in range(4096):
+                if (float(lo) == float(hi)
+                        and float(w-low_vapor) == float(w-high_vapor)):
                     break
                 mid = (lo+hi)/2
-                if balance(mid, frozen)[0] < 0:
-                    lo = mid
+                if step % 2 == 0 and low_gap < 0 < high_gap:
+                    trial = lo + (hi-lo)*(-low_gap)/(high_gap-low_gap)
+                    if lo < trial < hi:
+                        mid = trial
+                if mid == lo or mid == hi:
+                    break
+                gap, mid_vapor = balance(mid, frozen)
+                if gap == 0:
+                    lo = hi = mid
+                    break
+                if gap < 0:
+                    lo, low_gap, low_vapor = mid, gap, mid_vapor
                 else:
-                    hi = mid
+                    hi, high_gap, high_vapor = mid, gap, mid_vapor
             t = (lo+hi)/2
             vapor = min(w, saturation(t))
             if frozen:
@@ -2058,6 +2073,8 @@ def _mix_air_streams(spec, pressure, model, states):
             else:
                 liquid = w-vapor
     rh = (D(1) if fog else min(D(1), p*w/(vapor_ratio+w)/_pws_ashrae_pa(t, ice_below_c=switch)))
+    if any(value != 0 and float(value) == 0 for value in (t, ice, liquid)):
+        raise ValueError("Nonzero mixed temperature or phase fraction is below the finite output range")
     res = {"m_da_total_kg_s": float(mass), "t_db_mix_c": float(t), "w_mix_kg_per_kgda": float(w),
            "w_vapor_kg_per_kgda": float(vapor), "w_condensate_kg_per_kgda": float(ice+liquid),
            "h_mix_kj_per_kgda": float(total_h), "rh_mix": float(rh), "fog_saturated": fog}
@@ -2095,7 +2112,15 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
             return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": "Invalid inlet stream state"}
         try:
             with localcontext() as ctx:
-                ctx.prec = 80
+                flow_orders = []
+                for row, state in ((spec["stream1"], s1), (spec["stream2"], s2)):
+                    if "m_da_kg_s" in row:
+                        order = Decimal.from_float(float(row["m_da_kg_s"])).adjusted()
+                    else:
+                        order = (Decimal.from_float(float(row["v_dot_m3_s"])).adjusted()
+                                 - Decimal.from_float(state["v_m3_per_kgda"]).adjusted())
+                    flow_orders.append(order)
+                ctx.prec = 80 + abs(flow_orders[0]-flow_orders[1])
                 res = _mix_air_streams(spec, p_atm, model, (s1, s2))
         except (KeyError, ValueError, ArithmeticError) as exc:
             return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": str(exc)}

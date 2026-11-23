@@ -91,3 +91,17 @@ class MixingBoundaries(unittest.TestCase):
         out = mix(cold, warm, "equilibrium_ice")
         self.assertFalse(out["passed"], out)
         self.assertIn("correlation phase gap", out["reason"])
+
+    def test_trace_warm_stream_has_resolvable_liquid_despite_rounded_temperature(self):
+        # Independent 210-digit saturation and total-enthalpy root, identical
+        # geometry at both inlet orderings. The emitted temperature rounds to 10 C.
+        cold = {"t_db_c": 10., "rh": 1., "m_da_kg_s": 1.}
+        for flow, condensate in ((1e-25, 6.791051465742896e-28), (1e-90, 6.791051465742896e-93)):
+            warm = {"t_db_c": 35., "rh": 1., "m_da_kg_s": flow}
+            for inputs in ((cold, warm), (warm, cold)):
+                with self.subTest(flow=flow, first=inputs[0]["t_db_c"]):
+                    out = mix(*inputs, "liquid")
+                    self.assertTrue(out["passed"], out)
+                    self.assertTrue(out["fog_saturated"])
+                    self.assertEqual(out["t_db_mix_c"], 10.)
+                    self.assertEqual(out["w_condensate_kg_per_kgda"], condensate)
