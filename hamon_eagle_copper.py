@@ -245,6 +245,112 @@ def rooted_tree(edges, root):
     return previous
 
 
+def material_fallback(result, board, signal, terminals, elements, footprints, bores):
+    """Prove additional routes using a conservative subset of finite copper."""
+    try:
+        from hamon_eagle_material import material_continuity
+        from shapely.errors import ShapelyError
+    except ImportError:
+        result["material"] = {"reason": "finite_width_geometry_dependency_unavailable"}
+        return result
+    primitives, approximations = [], []
+    rules = {p.get("name"): p.get("value") for p in board.findall("designrules/param")}
+
+    def omitted(ref, why):
+        entry = dict(source=ref, reason=str(why))
+        if entry not in result["unsupported"]:
+            result["unsupported"].append(entry)
+
+    def zero_rule(name):
+        value = rules.get(name, "0")
+        match = re.fullmatch(r"\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(?:mm|mil)?\s*", value)
+        return bool(match and Decimal(match[1]) == 0)
+
+    for terminal in terminals:
+        _, part, pin = terminal
+        ref = ("terminal", part, pin)
+        try:
+            element = elements[part]
+            pad = footprints[element.attrib["library"], element.attrib["package"]][pin]
+            nodes = pad_nodes(element, pad)
+            primitive = dict(source=ref, terminal=terminal, center=nodes[0][2:],
+                             layers=tuple(node[1] for node in nodes))
+            if pad.tag == "smd":
+                dx, dy = nm(pad.get("dx")), nm(pad.get("dy"))
+                roundness = Decimal(pad.get("roundness", "0"))
+                rotation = re.fullmatch(r"R(-?\d+(?:\.\d+)?)", pad.get("rot", "R0"))
+                if not rotation or not roundness.is_finite() or not 0 <= roundness <= 100:
+                    raise ValueError("unsupported surface-pad shape or rotation")
+                angle = Decimal(rotation[1])
+                square = (roundness == 0 and angle % 90 == 0
+                          and all(zero_rule(key) for key in
+                                  ("srRoundness", "srMinRoundness", "srMaxRoundness")))
+                if square:
+                    placement = re.fullmatch(r"S?(M?)R(-?\d+(?:\.\d+)?)", element.get("rot", "R0"))
+                    turns = int(Decimal(placement[2]) + angle) // 90
+                    primitive.update(shape="rectangle", size=(dy, dx) if turns % 2 else (dx, dy))
+                else:
+                    # All rounded rectangular pads contain this centered disk.
+                    # It also remains a subset under arbitrary local rotation.
+                    primitive.update(shape="disk", diameter=min(dx, dy))
+                    approximations.append(dict(source=ref, shape="inscribed_surface_pad_disk"))
+            else:
+                diameter = nm(pad.get("diameter", "0"))
+                if (diameter <= 0 or pad.get("shape", "round") != "round"
+                        or any(rules.get(k, "-1") != "-1" for k in ("psTop", "psBottom", "psFirst"))):
+                    raise ValueError("material proof requires an explicit round plated-pad annulus")
+                primitive.update(shape="disk", diameter=diameter, plated=True)
+            primitives.append(primitive)
+        except (KeyError, ValueError, InvalidOperation) as exc:
+            omitted(ref, exc)
+
+    ordinal = defaultdict(int)
+    for row in signal:
+        kind = row.tag
+        if kind == "contactref":
+            continue
+        ref = (kind, ordinal[kind])
+        ordinal[kind] += 1
+        try:
+            if kind == "wire":
+                layer, width = int(row.attrib["layer"]), nm(row.get("width"))
+                cap = row.get("cap", "round")
+                if (layer not in FACES or width <= 0 or cap not in ("round", "flat")
+                        or row.get("style", "continuous") != "continuous"
+                        or Decimal(row.get("curve", "0")) != 0):
+                    raise ValueError("requires a straight positive-width outer-layer trace")
+                a, b = position(layer, row, "1")[2:], position(layer, row, "2")[2:]
+                if a == b:
+                    raise ValueError("zero-length trace")
+                primitives.append(dict(source=ref, layers=(layer,), shape="segment",
+                                       a=a, b=b, width=width, cap=cap))
+            elif kind == "via":
+                plating(row)
+                diameter = nm(row.get("diameter", "0"))
+                if row.get("extent") != "1-16" or row.get("shape", "round") != "round" or diameter <= 0:
+                    raise ValueError("material proof requires an explicit round full-span via annulus")
+                primitives.append(dict(source=ref, layers=FACES, shape="disk",
+                                       center=position(1, row)[2:], diameter=diameter, plated=True))
+            else:
+                raise ValueError("artwork excluded from this witness")
+        except (KeyError, ValueError, InvalidOperation) as exc:
+            omitted(ref, exc)
+    try:
+        proof = material_continuity(terminals, primitives, bores)
+    except (ShapelyError, ValueError, OverflowError) as exc:
+        result["material"] = {"reason": "finite_width_geometry_unresolved", "detail": str(exc)}
+        return result
+    result["material"] = proof["material"]
+    if approximations:
+        result["material"]["conservative_shapes"] = approximations
+    if proof["witnesses"] and not proof["unreachable"]:
+        result.update(status="witnessed", witnesses=proof["witnesses"],
+                      scope="Finite outer-layer copper regions minus all known drill voids")
+        result.pop("reason", None)
+        result.pop("unreachable", None)
+    return result
+
+
 def routed_continuity(prediction, board_path, signal_name):
     """Find source-addressed walks without using any board contactref as evidence."""
     board, digest = _read(board_path, "board")
@@ -326,6 +432,7 @@ def routed_continuity(prediction, board_path, signal_name):
                     layer not in FACES
                     or nm(row.get("width")) <= 0
                     or Decimal(row.get("curve", "0")) != 0
+                    or row.get("cap", "round") != "round"
                 ):
                     raise ValueError(
                         "requires a straight positive-width outer-layer trace"
@@ -376,7 +483,7 @@ def routed_continuity(prediction, board_path, signal_name):
     if missing:
         reason = "trace_does_not_demonstrably_reach_plating" if blocked_terminal else "no_supported_copper_path"
         result.update(reason=reason, unreachable=missing)
-        return result
+        return material_fallback(result, board, signal, terminals, elements, footprints, bores)
     witnesses = []
     for destination in terminals[1:]:
         current = destination
