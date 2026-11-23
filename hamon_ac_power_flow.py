@@ -1,7 +1,6 @@
 """Balanced AC load flow and terminal faults of three-sequence Thevenin equivalents."""
 
 import cmath
-from collections import OrderedDict, deque
 import math
 
 import numpy as np
@@ -31,25 +30,7 @@ def names(rows, label):
     return ids
 
 
-def _slack_components(adjacency, slack):
-    """Unknown-voltage groups coupled after the prescribed slack is removed."""
-    remaining = set(range(len(adjacency))) - {slack}
-    components = []
-    while remaining:
-        first = min(remaining)
-        remaining.remove(first)
-        component = {first}
-        stack = [first]
-        while stack:
-            neighbors = adjacency[stack.pop()] & remaining
-            remaining.difference_update(neighbors)
-            component.update(neighbors)
-            stack.extend(neighbors)
-        components.append(component)
-    return components
-
-
-def network(spec, *, _search_budget=None):
+def network(spec):
     buses, branches = spec["buses"], spec["lines"]
     ids = names(buses, "buses")
     line_ids = names(branches, "lines")
@@ -236,222 +217,168 @@ def network(spec, *, _search_budget=None):
         roundoff = 16 * np.finfo(float).eps * max(magnitude, vset[idx])
         return excess if excess > roundoff else 0.0
 
-    original_bus_types = bus_types.copy()
-    original_q = q.copy()
+    def coupled_regulation():
+        """Solve Q limits and voltage targets as one complementarity system.
 
-    def apply_regime(state):
-        bus_types[:] = original_bus_types
-        q[:] = original_q
-        for idx, bound in state:
+        Q = clip(Q + k*(Vset - |V|), Qmin, Qmax) expresses free regulation,
+        lower saturation and upper saturation without enumerating bus types.
+        A generalized Jacobian chooses the derivative of the current face.
+        """
+        slope = np.maximum(np.abs(np.diag(ybus)) * vset, 1e-12)
+        pq_original = bus_types == "PQ"
+
+        def terms(v, derivative=False):
+            current = ybus @ v
+            injection = v * np.conj(current)
+            magnitude = np.abs(v)
+            second = injection.imag - q
+            fixed_q = pq_original.copy()
+            bounds = {}
+            for idx in nonslack:
+                if pq_original[idx]:
+                    continue
+                if idx in limits:
+                    lower, upper = limits[idx]
+                    trial = injection[idx].imag + slope[idx] * (vset[idx] - magnitude[idx])
+                    if trial <= lower or trial >= upper:
+                        bound = lower if trial <= lower else upper
+                        bounds[idx] = bound
+                        fixed_q[idx] = True
+                        second[idx] = injection[idx].imag - bound
+                        continue
+                second[idx] = slope[idx] * (magnitude[idx] - vset[idx])
+            residual = np.r_[injection.real[nonslack] - p[nonslack], second[nonslack]]
+            rounding = power_roundoff(v)
+            qtol = power_tolerances(v, q, nonslack)
+            for position, idx in enumerate(nonslack):
+                if idx in bounds:
+                    qtol[position] = min(1e-11, rounding[idx] + 4 * math.ulp(bounds[idx]))
+                elif not pq_original[idx]:
+                    qtol[position] = slope[idx] * 16 * np.finfo(float).eps * max(magnitude[idx], vset[idx])
+            tolerance = np.r_[power_tolerances(v, p, nonslack), qtol]
+            if not derivative:
+                return residual, tolerance, bounds
+            vd = np.diag(v)
+            da = 1j * vd @ np.conj(np.diag(current) - ybus @ vd)
+            unit = np.diag(v / magnitude)
+            dm = vd @ np.conj(ybus @ unit) + np.conj(np.diag(current)) @ unit
+            qa, qm = da.imag.copy(), dm.imag.copy()
+            for idx in nonslack:
+                if not fixed_q[idx]:
+                    qa[idx] = 0
+                    qm[idx] = 0
+                    qm[idx, idx] = slope[idx]
+            jacobian = np.block([
+                [da.real[np.ix_(nonslack, nonslack)], dm.real[np.ix_(nonslack, nonslack)]],
+                [qa[np.ix_(nonslack, nonslack)], qm[np.ix_(nonslack, nonslack)]],
+            ])
+            return residual, tolerance, bounds, jacobian
+
+        iterations = 0
+
+        def solve(seed):
+            nonlocal iterations
+            v = seed.copy()
+            for _ in range(80):
+                iterations += 1
+                residual, tolerance, bounds, jacobian = terms(v, True)
+                norm = np.linalg.norm(residual, np.inf)
+                if norm < 1e-11 and np.all(np.abs(residual) <= tolerance):
+                    return v, bounds
+                try:
+                    correction = np.linalg.solve(jacobian, residual)
+                except np.linalg.LinAlgError:
+                    correction = np.linalg.lstsq(jacobian, residual, rcond=None)[0]
+                angles, magnitudes = np.angle(v), np.abs(v)
+                for step in range(24):
+                    updated_angles, updated_magnitudes = angles.copy(), magnitudes.copy()
+                    updated_angles[nonslack] -= correction[:len(nonslack)] / 2**step
+                    updated_magnitudes[nonslack] -= correction[len(nonslack):] / 2**step
+                    if (updated_magnitudes <= 0).any():
+                        continue
+                    updated = updated_magnitudes * np.exp(1j * updated_angles)
+                    if np.linalg.norm(terms(updated)[0], np.inf) < norm:
+                        v = updated
+                        break
+                else:
+                    raise ValueError("Coupled AC regulator step did not reduce residual")
+            raise ValueError("Coupled AC regulation did not converge")
+
+        # A global phase rotation must not select a different derivative at Q=0.
+        flat = np.asarray(vset, dtype=complex)
+        try:
+            voltage, bounds = solve(flat)
+            return voltage * np.exp(1j * reference), bounds, iterations
+        except ValueError:
+            pass
+
+        # A physical PQ start permits voltage movement before reimposing the
+        # generator targets. It does not assume those provisional Q values solve
+        # the original constrained problem.
+        saved_q = q.copy()
+        try:
+            for idx, (lower, upper) in limits.items():
+                q[idx] = np.clip(0.0, lower, upper)
+            pq_seed = np.asarray([idx for idx in nonslack
+                                  if pq_original[idx] or idx in limits], dtype=int)
+            seed = polar(pq_seed, flat.copy())
+        except (ValueError, np.linalg.LinAlgError):
+            seed = None
+        finally:
+            q[:] = saved_q
+        if seed is not None:
+            try:
+                voltage, bounds = solve(seed)
+                return voltage * np.exp(1j * reference), bounds, iterations
+            except ValueError:
+                pass
+
+        # Complementarity Newton is local: a small ill-conditioned network may
+        # need another equilibrium branch. Exhaust only <=4 regulator states,
+        # never a truncated exponential search of the full coupled network.
+        if len(limits) <= 4:
+            from itertools import product
+            ordered = sorted(limits, key=lambda idx: ids[idx])
+            choices = [(None, *dict.fromkeys(limits[idx])) for idx in ordered]
+            for values in product(*choices):
+                bounds = {idx: value for idx, value in zip(ordered, values)
+                          if value is not None}
+                try:
+                    q[:] = saved_q
+                    for idx, bound in bounds.items():
+                        q[idx] = bound
+                    pq_trial = np.asarray([idx for idx in nonslack
+                                           if pq_original[idx] or idx in bounds], dtype=int)
+                    voltage = polar(pq_trial, flat.copy())
+                    power = voltage * np.conj(ybus @ voltage)
+                    rounding = power_roundoff(voltage)
+                    if any(
+                        reactive_violation(power[idx].imag, *limit, rounding[idx]) is not None
+                        or (idx in bounds and voltage_violation(idx, bounds[idx], abs(voltage[idx])))
+                        for idx, limit in limits.items()
+                    ):
+                        continue
+                    return voltage * np.exp(1j * reference), bounds, iterations
+                except (ValueError, np.linalg.LinAlgError):
+                    continue
+                finally:
+                    q[:] = saved_q
+        raise ValueError("Coupled AC regulation did not converge; feasibility undetermined")
+
+    regulation_iterations = 0
+    if limits:
+        voltage, limited, regulation_iterations = coupled_regulation()
+        for idx, bound in limited.items():
             bus_types[idx] = "PQ"
             q[idx] = bound
-        return dict(state), np.flatnonzero(bus_types == "PQ")
-
-    def independent_spoke_pivot():
-        # A fixed slack separates these one-bus branches electrically. Only
-        # prioritize the proposed regime; the full two-formulation solver
-        # still decides whether its voltages and all limits agree.
-        chosen = []
-        seed = initial.copy()
-        for idx, bounds in limits.items():
-            if adjacency[idx] != {slack}:
-                continue
-            y = ybus[idx, idx]
-            c = ybus[idx, slack] * initial[slack]
-            v = vset[idx]
-            if c == 0 or abs(p[idx] - y.real * v**2) <= abs(c) * v:
-                continue
-            options = []
-            for bound in dict.fromkeys(bounds):
-                power = complex(p[idx], bound)
-                scale = max(abs(y), abs(c), abs(power))
-                a, b, target = y / scale, c / scale, power / scale
-                if b == 0:
-                    continue
-                # From S=conj(Y)*z + V*conj(C), solve the real quadratic
-                # in z=|V|². np.roots also handles zero leading coefficients.
-                roots = np.roots([abs(a)**2,
-                                  -(2 * (target * a).real + abs(b)**2),
-                                  abs(target)**2])
-                for z in roots:
-                    if z.real <= 0 or abs(z.imag) > 1e-10 * z.real:
-                        continue
-                    phasor = (target - a.conjugate() * z.real) / b.conjugate()
-                    calculated = phasor * (a * phasor + b).conjugate()
-                    residual_scale = abs(target) + abs(phasor) * (abs(a * phasor) + abs(b))
-                    if (abs(abs(phasor)**2 - z.real) <= 1e-10 * z.real
-                            and abs(calculated - target) <= 1e-10 * residual_scale
-                            and not voltage_violation(idx, bound, abs(phasor))):
-                        options.append((abs(phasor - seed[idx]), bound, phasor))
-            if options:
-                _, bound, seed[idx] = min(options, key=lambda row: (row[0], row[1]))
-                chosen.append((idx, bound))
-        return tuple(sorted(chosen)), seed
-
-    def independent_component_pivot():
-        components = _slack_components(adjacency, slack)
-        if len(components) < 2 or all(len(group) == 1 for group in components):
-            return None
-        # Components without bounded regulators have no regime to choose.
-        # Leave them to the original global solve instead of spending the
-        # search allowance repeatedly solving their PQ/unbounded-PV states.
-        components = [group for group in components if any(idx in limits for idx in group)]
-        if not components:
-            return None
-        if _search_budget[0] <= len(components):
-            return None
-        chosen = {}
-        seed = initial.copy()
-        # Reserve one attempt to recheck the composed state on the original
-        # network. Local searches share, rather than multiply, its total budget.
-        _search_budget[0] -= 1
-        try:
-            for component in components:
-                if _search_budget[0] <= 0:
-                    return None
-                positions = component | {slack}
-                members = {ids[idx] for idx in positions}
-                # Deliberately omit proposed_voltages: local solutions are a
-                # seed, while the original whole-network claim is checked below.
-                part = {
-                    "buses": [bus for idx, bus in enumerate(buses) if idx in positions],
-                    "lines": [line for line in branches
-                              if line["from"] in members and line["to"] in members],
-                }
-                result = network(part, _search_budget=_search_budget)
-                if not result.get("conservation_verified"):
-                    return None
-                for idx in component:
-                    value = result["voltages"][ids[idx]]
-                    seed[idx] = cmath.rect(value["vm_pu"], math.radians(value["va_deg"]))
-                chosen.update((index[name], bound)
-                              for name, bound in result["clamped_pv_q_pu"].items())
-        except (ValueError, FloatingPointError, OverflowError, np.linalg.LinAlgError):
-            return None
-        finally:
-            _search_budget[0] += 1
-        return tuple(sorted(chosen.items())), seed
-
-    pending = deque([((), initial)])
-    failed_pivots = OrderedDict()
-    component_trial = None
-    component_attempted = False
-    component_due = False
-    seen = set()
-    last_solved = None
-    first_error = None
-    # Try the strongest correction first. Retain competing regulator choices
-    # if that intermediate power flow has no reachable physical solution.
-    # Four bounded regulators have at most 3**4 possible states. For larger
-    # networks keep the fallback work proportional to the number of regulators.
-    regime_budget = max(81, 4 * len(limits) + 1)
-    if _search_budget is None:
-        _search_budget = [regime_budget]
-    starting_budget = _search_budget[0]
-    attempts = 0
-    while ((component_due or component_trial is not None or pending or failed_pivots)
-           and attempts < regime_budget and _search_budget[0] > 0):
-        # Preserve cheap ordinary spoke/joint-bound recovery before spending
-        # attempts on independent local searches.
-        if component_due and not pending and (attempts >= 3 or not failed_pivots):
-            component_due = False
-            component_trial = independent_component_pivot()
-            continue
-        # A locally certified composite may retry the same regime once with a
-        # different, independently solved seed. It still spends a global attempt.
-        composite = component_trial is not None
-        # Exhaust pivots justified by a solved state's violations first.
-        if composite:
-            state, seed = component_trial
-            component_trial = None
-        elif pending:
-            state, seed = pending.popleft()
-        else:
-            state, seed = failed_pivots.popitem(last=False)
-        if state in seen and not composite:
-            continue
-        seen.add(state)
-        attempts += 1
-        _search_budget[0] -= 1
-        limited, pq = apply_regime(state)
-        voltage = seed.copy()
-        regulating = np.flatnonzero(bus_types == "PV")
-        voltage[regulating] *= vset[regulating] / np.abs(voltage[regulating])
-        try:
-            voltage = polar(pq, voltage)
-        except (ValueError, np.linalg.LinAlgError) as exc:
-            if first_error is None:
-                first_error = exc
-            # A voltage setpoint can be unreachable at the specified P even
-            # though a reactive limit admits a physical PQ solution. No Q
-            # mismatch exists to select a bound in this failed regime.
-            if not state:
-                if not component_attempted:
-                    component_attempted = True
-                    component_due = True
-                try:
-                    spoke_state, spoke_seed = independent_spoke_pivot()
-                except (FloatingPointError, OverflowError, np.linalg.LinAlgError):
-                    # A numerically unresolved optional seed leaves the ordinary
-                    # bounded search and its acceptance checks available.
-                    spoke_state = ()
-                if spoke_state:
-                    pending.append((spoke_state, spoke_seed))
-            free = [(idx, bounds) for idx, bounds in limits.items() if idx not in limited]
-            pivots = [((idx, bound),) for idx, bounds in free for bound in bounds]
-            # Several regulators may have to leave their setpoints together.
-            # Try both common bound directions before all single-bus subsets
-            # consume the budget. Each trial still needs independent validation.
-            if len(free) > 1:
-                pivots[:0] = [tuple((idx, bounds[side]) for idx, bounds in free)
-                              for side in (0, 1)]
-            for additions in pivots:
-                key = tuple(sorted(state + additions))
-                if key not in seen:
-                    failed_pivots.setdefault(key, seed)
-            continue
-        injection = voltage * np.conj(ybus @ voltage)
-        residual_floor = power_roundoff(voltage)
-        changes = []
-        for idx, (lower, upper) in limits.items():
-            if idx in limited:
-                excess = voltage_violation(idx, limited[idx], abs(voltage[idx]))
-                if excess:
-                    changes.append((0, excess, idx, None))
-            else:
-                bound = reactive_violation(injection[idx].imag, lower, upper, residual_floor[idx])
-                if bound is not None:
-                    changes.append((1, abs(injection[idx].imag - bound), idx, bound))
-        if not changes:
-            break
-        last_solved = (state, voltage)
-        children = []
-        for _, _, idx, bound in sorted(changes, reverse=True):
-            child = limited.copy()
-            if bound is None:
-                del child[idx]
-            else:
-                child[idx] = bound
-            key = tuple(sorted(child.items()))
-            if key not in seen:
-                children.append((key, voltage))
-        if children:
-            pending.appendleft(children[0])
-            pending.extend(children[1:])
+        pq = np.flatnonzero(bus_types == "PQ")
+        # Polish the selected physical equations at their original strict tolerances.
+        voltage = polar(pq, voltage)
     else:
-        untried = component_due or component_trial is not None or any(key not in seen for key, _ in pending) or any(
-            key not in seen for key in failed_pivots
-        )
-        if untried:
-            return {"ok": False, "calculation": "ac_power_flow",
-                    "conservation_verified": False, "regime_search_budget_exhausted": True,
-                    "regimes_tried": starting_budget - _search_budget[0],
-                    "reason": "AC regulator search budget exhausted; feasibility undetermined"}
-        if last_solved is None:
-            raise first_error or ValueError("No converged AC regulator state")
-        state, voltage = last_solved
-        limited, pq = apply_regime(state)
-        injection = voltage * np.conj(ybus @ voltage)
+        limited = {}
+        pq = np.flatnonzero(bus_types == "PQ")
+        voltage = polar(pq, initial.copy())
+    injection = voltage * np.conj(ybus @ voltage)
     pv = np.flatnonzero(bus_types == "PV")
 
     # Independent rectangular current-balance solve. Form the currents at each
@@ -488,8 +415,12 @@ def network(spec, *, _search_budget=None):
         for idx, (lower, upper) in limits.items():
             if reactive_violation(s[idx].imag, lower, upper, rounding[idx]) is not None:
                 return False
-            if idx in limited and voltage_violation(idx, limited[idx], abs(v[idx])):
-                return False
+            if idx in limited:
+                bound = limited[idx]
+                tolerance = min(1e-6, rounding[idx] + 4 * math.ulp(bound))
+                if (abs(s[idx].imag - bound) > tolerance
+                        or voltage_violation(idx, bound, abs(v[idx]))):
+                    return False
         return True
 
     complementarity = regulated_state(voltage, injection)
@@ -558,6 +489,7 @@ def network(spec, *, _search_budget=None):
         "pv_limits_consistent": bool(complementarity),
         "proposed_pv_limits_consistent": proposed_limits,
         "clamped_pv_q_pu": {ids[i]: x for i, x in limited.items()},
+        "complementarity_iterations": regulation_iterations,
         "max_rectangular_mismatch_pu": independent_res,
         "max_voltage_disagreement_pu": difference,
         "tellegen_residual_pu": tellegen,
