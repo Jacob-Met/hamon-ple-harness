@@ -6,9 +6,13 @@ Nothing is written to task files or persisted in submission artifacts.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
+from functools import lru_cache
 import json
 import shlex
+import sys
+from pathlib import Path
 from time import monotonic
 from typing import Any
 
@@ -248,11 +252,48 @@ async def intake_for_prompt(session: Any, *, deadline_seconds: int = 19) -> str:
     )
 
 
+# These libraries are supplied by the task runtime when available. All other
+# non-stdlib imports of the standalone CLI must have source in this bundle.
+_TASK_RUNTIME_IMPORTS = {"ifcopenshell", "mpmath", "numpy", "scipy", "shapely", "sympy"}
+
+
+@lru_cache(maxsize=1)
+def _toolkit_sources(root: Path) -> tuple[tuple[str, bytes], ...]:
+    """Snapshot the flat-module closure of this immutable harness checkout."""
+    entry = "engineering_toolkit"
+    pending = [entry]
+    sources = {}
+    while pending:
+        name = pending.pop()
+        if name in sources:
+            continue
+        path = root / (name + ".py")
+        data = path.read_bytes()
+        tree = ast.parse(data, filename=str(path))
+        sources[name] = data
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                if node.level or not node.module:
+                    raise ValueError(f"relative import in task CLI module {path.name}")
+                imports = [node.module]
+            else:
+                continue
+            for imported in imports:
+                base = imported.partition(".")[0]
+                if base not in sys.stdlib_module_names and base not in _TASK_RUNTIME_IMPORTS:
+                    pending.append(base)
+
+    entry_bytes = sources.pop(entry)
+    dependencies = [(name + ".py", sources[name]) for name in sorted(sources)]
+    return (*dependencies, ("hamon-engineering-toolkit.py", entry_bytes))
+
+
 # A deterministic CLI is copied into the task container (not artifacts), so
 # Pi can run it through its ordinary taskbridge-backed bash tool. This is code,
 # not a copy of any task data. A failed install never blocks the starter agent.
 async def provision_engineering_cli(session: Any) -> str:
-    import pathlib
     try:
         budget = _PROVISION_TIMEOUT_SECONDS
         left = getattr(session, "time_left", lambda: None)()
@@ -263,26 +304,17 @@ async def provision_engineering_cli(session: Any) -> str:
         deadline = monotonic() + budget
         # Keep the entry point last and advertise it only after every checked
         # write. One deadline covers the whole install, including local reads.
-        for filename in (
-            "hamon_geometry.py", "hamon_drawing.py", "hamon_eagle_schematic.py",
-            "hamon_scale.py", "hamon_affine_metric.py", "hamon_callout.py",
-            "hamon_dxf.py", "office_package.py", "hamon_eagle_netlist.py", "hamon_eagle_copper.py", "hamon_eagle_material.py",
-            "hamon_consolidation.py", "hamon_pipe_network.py", "hamon_diaphragm.py",
-            "hamon_diaphragm_modes.py", "hamon_diaphragm_compensated.py",
-            "hamon_turbomachinery.py", "hamon_ac_power_flow.py",
-            "hamon_bearing_capacity.py", "hamon_rectangle_contact.py", "hamon_triangle_contact.py", "hamon_polygon_contact.py", "hamon_dual_verifier.py",
-            "hamon_cad_takeoff.py", "hamon_pareto.py", "engineering_toolkit.py",
-        ):
-            module = pathlib.Path(__file__).with_name(filename).read_bytes()
+        async with asyncio.timeout(budget):
+            sources = await asyncio.to_thread(_toolkit_sources, Path(__file__).resolve().parent)
+        for filename, module in sources:
             remaining = deadline - monotonic()
             if remaining <= 0:
                 return ""
-            target = ("/tmp/hamon-engineering-toolkit.py" if filename == "engineering_toolkit.py"
-                      else "/tmp/" + filename)
+            target = "/tmp/" + filename
             copied = await asyncio.wait_for(session.write_file(target, module), timeout=remaining)
             if copied != len(module):
                 return ""
-    except (asyncio.TimeoutError, OSError, RuntimeError, ValueError, KeyError, TaskError):
+    except (asyncio.TimeoutError, OSError, RuntimeError, SyntaxError, ValueError, KeyError, TaskError):
         return ""
     return (
         "\nDETERMINISTIC ENGINEERING TOOLS (in the task container; no internet):"

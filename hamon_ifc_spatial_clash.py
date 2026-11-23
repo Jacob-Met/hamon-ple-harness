@@ -41,19 +41,58 @@ class SolidMesh3D:
     def aabb_max(self) -> np.ndarray:
         return np.max(self.vertices, axis=0) if len(self.vertices) else np.zeros(3)
 
-    def _local_tetrahedra(self):
+    def _local_tetrahedra(self, faces):
         # The tetrahedra share a point on the mesh. Using the global origin
         # makes their signed moments cancel at survey-coordinate magnitudes.
-        origin = self.vertices[self.faces[0, 0]]
-        local = self.vertices - origin
-        a, b, c = (local[self.faces[:, i]] for i in range(3))
+        origin = self.vertices[faces[0, 0]]
+        a, b, c = (self.vertices[faces[:, i]] - origin for i in range(3))
         six_volumes = np.einsum("ij,ij->i", a, np.cross(b, c))
         return origin, a, b, c, six_volumes
 
+    def _compound_moments(self):
+        """Integrate disjoint positive Body items, retaining signed cavities inside each item."""
+        if any(count <= 0 for count in self.material_face_counts) or sum(self.material_face_counts) != len(self.faces):
+            raise UnresolvedMeshMass("Incomplete face ranges for independent Body items")
+        reference = self.vertices[self.faces[0, 0]]
+        volumes = []
+        moments = []
+        bounds = []
+        start = 0
+        for count in self.material_face_counts:
+            faces = self.faces[start:start + count]
+            start += count
+            vertices, local = np.unique(faces, return_inverse=True)
+            points = self.vertices[vertices]
+            _, closed, coherent = _closed_surface_components(points, local.reshape(faces.shape))
+            if len(closed) != count or not coherent:
+                raise UnresolvedMeshMass("A Body item lacks a closed, consistently oriented boundary")
+            low, high = points.min(axis=0), points.max(axis=0)
+            for other_low, other_high in bounds:
+                if np.all(np.minimum(high, other_high) > np.maximum(low, other_low)):
+                    raise UnresolvedMeshMass("Body item bounds overlap, so additive volume is unverified")
+            bounds.append((low, high))
+            origin, a, b, c, signed = self._local_tetrahedra(faces)
+            total = np.sum(signed)
+            if not np.isfinite(total) or total == 0.0:
+                raise UnresolvedMeshMass("A Body item has no finite signed volume")
+            # Reverse the whole item's measure, including inner void shells and
+            # its first moment, if its source winding or placement was reversed.
+            weight = abs(total)
+            local_moment = np.sum((a + b + c) * signed[:, None], axis=0) / 4
+            moments.append(weight * (origin - reference) + np.sign(total) * local_moment)
+            volumes.append(weight)
+        weight = math.fsum(volumes)
+        centroid = reference + np.sum(moments, axis=0) / weight
+        return weight / 6, tuple(float(x) for x in centroid)
+
     def volume_m3(self) -> float:
+        if self.metadata.get("mass_issue"):
+            raise UnresolvedMeshMass(self.metadata["mass_issue"])
         if len(self.faces) == 0:
             return 0.0
-        _, _, _, _, six_volumes = self._local_tetrahedra()
+        if len(self.material_face_counts) > 1:
+            return self._compound_moments()[0]
+        _, _, _, _, six_volumes = self._local_tetrahedra(self.faces)
         return float(abs(np.sum(six_volumes)) / 6.0)
 
     def surface_area_m2(self) -> float:
@@ -66,10 +105,14 @@ class SolidMesh3D:
         return float(np.sum(areas))
 
     def centroid_m(self) -> Tuple[float, float, float]:
+        if self.metadata.get("mass_issue"):
+            raise UnresolvedMeshMass(self.metadata["mass_issue"])
         if len(self.faces) == 0:
             c = np.mean(self.vertices, axis=0) if len(self.vertices) else np.zeros(3)
             return (float(c[0]), float(c[1]), float(c[2]))
-        origin, a, b, c_local, six_volumes = self._local_tetrahedra()
+        if len(self.material_face_counts) > 1:
+            return self._compound_moments()[1]
+        origin, a, b, c_local, six_volumes = self._local_tetrahedra(self.faces)
         total = np.sum(six_volumes)
         if abs(total) < 1e-15:
             c = np.mean(self.vertices, axis=0)
@@ -673,6 +716,10 @@ def _mapped_operator_3d(entities, ref, unit_scale):
     return matrix
 
 
+class UnresolvedMeshMass(ValueError):
+    """Clash geometry is available, but the compound net mass is unresolved."""
+
+
 class UnresolvedSolidGeometry(ValueError):
     """A physical Body was present but could not supply verified solid geometry."""
 
@@ -785,7 +832,8 @@ def _polygonal_solid_mesh(entities, args, unit_scale):
     return [(vertices[used], inverse.reshape(-1, 3).astype(np.int32))]
 
 
-def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, unit_scale: float) -> List[Tuple[np.ndarray, np.ndarray]]:
+def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, unit_scale: float,
+                        mass_issues: Optional[List[str]] = None) -> List[Tuple[np.ndarray, np.ndarray]]:
     if not (isinstance(iref, tuple) and iref[0] == "ref" and iref[1] in entities):
         return []
     itype, args = entities[iref[1]]
@@ -829,7 +877,7 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
                     _, rargs = entities[rep_ref[1]]
                     if len(rargs) >= 4 and isinstance(rargs[3], list):
                         for sub in rargs[3]:
-                            sub_meshes = _extract_solid_item(entities, sub, unit_scale)
+                            sub_meshes = _extract_solid_item(entities, sub, unit_scale, mass_issues)
                             if not sub_meshes:
                                 raise UnresolvedSolidGeometry("unresolved physical item in mapped representation")
                             for (vv, ff) in sub_meshes:
@@ -837,6 +885,8 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
         return out_items
 
     if itype == "IFCTRIANGULATEDFACESET" and len(args) >= 4:
+        if args[2] is False and mass_issues is not None:
+            mass_issues.append("IFC triangulation is explicitly declared open")
         cref = args[0]
         if isinstance(cref, tuple) and cref[0] == "ref" and cref[1] in entities:
             _, cargs = entities[cref[1]]
@@ -1157,6 +1207,7 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
         name = str(args[2] or f"{etype}_{eid}")
         world_mat = _resolve_local_placement(entities, args[5], unit_scale)
 
+        mass_issues = []
         all_verts: List[np.ndarray] = []
         all_faces: List[np.ndarray] = []
         v_offset = 0
@@ -1170,7 +1221,7 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
             if rep_ident in ("AXIS", "FOOTPRINT", "BOX"):
                 continue
             for item_ref in sr_args[3]:
-                item_meshes = _extract_solid_item(entities, item_ref, unit_scale)
+                item_meshes = _extract_solid_item(entities, item_ref, unit_scale, mass_issues)
                 if rep_ident == "BODY" and not item_meshes:
                     raise UnresolvedSolidGeometry(f"unsupported or empty physical Body item on #{eid}")
                 for (v_local, f_local) in item_meshes:
@@ -1187,7 +1238,8 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
                 discipline=_infer_discipline(etype, name),
                 vertices=np.vstack(all_verts),
                 faces=np.vstack(all_faces),
-                metadata={"step_id": eid, "unit_scale_m": unit_scale},
+                metadata={"step_id": eid, "unit_scale_m": unit_scale,
+                          **({"mass_issue": mass_issues[0]} if mass_issues else {})},
                 material_face_counts=tuple(len(faces) for faces in all_faces),
             ))
     return _physical_occurrences(solids,entities,unit_scale,related)
@@ -1665,13 +1717,18 @@ def detect_ifc_clashes(
 
     hard = [r for r in results if r.status == "hard_clash"]
     violations = [r for r in results if r.status == "clearance_violation"]
+    try:
+        quantity = {"total_solid_volume_m3": float(sum(s.volume_m3() for s in solids))}
+    except UnresolvedMeshMass as exc:
+        quantity = {"total_solid_volume_m3": None, "volume_status": "unresolved",
+                    "volume_reason": str(exc)}
     return {
         "solid_count": len(solids),
         "pair_count": len(results),
         "hard_clash_count": len(hard),
         "clearance_violation_count": len(violations),
         "min_clearance_m": float(min_clear) if results else None,
-        "total_solid_volume_m3": float(sum(s.volume_m3() for s in solids)),
+        **quantity,
         "clashes": [r.__dict__ for r in hard + violations],
         "all_pairs": [r.__dict__ for r in results],
     }

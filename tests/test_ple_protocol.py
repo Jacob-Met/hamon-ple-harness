@@ -109,7 +109,11 @@ class OfficialProtocolRoundtrip(unittest.TestCase):
                 self.assertEqual(record["stdin"],b"Determine MEP clashes and stress values")
                 self.assertEqual(len(record["commands"]),1)
                 self.assertIn("python3 -c",record["commands"][0])
-                self.assertEqual(list(record["writes"]),["/tmp/hamon_geometry.py","/tmp/hamon_drawing.py","/tmp/hamon_eagle_schematic.py","/tmp/hamon_scale.py","/tmp/hamon_affine_metric.py","/tmp/hamon_callout.py","/tmp/hamon_dxf.py","/tmp/office_package.py","/tmp/hamon_eagle_netlist.py","/tmp/hamon_eagle_copper.py","/tmp/hamon_eagle_material.py","/tmp/hamon_consolidation.py","/tmp/hamon_pipe_network.py","/tmp/hamon_diaphragm.py","/tmp/hamon_diaphragm_modes.py","/tmp/hamon_diaphragm_compensated.py","/tmp/hamon_turbomachinery.py","/tmp/hamon_ac_power_flow.py","/tmp/hamon_bearing_capacity.py","/tmp/hamon_rectangle_contact.py","/tmp/hamon_triangle_contact.py","/tmp/hamon_polygon_contact.py","/tmp/hamon_dual_verifier.py","/tmp/hamon_cad_takeoff.py","/tmp/hamon_pareto.py","/tmp/hamon-engineering-toolkit.py"])
+                paths = list(record["writes"])
+                self.assertEqual(paths[-1], "/tmp/hamon-engineering-toolkit.py")
+                self.assertEqual(paths[:-1], sorted(paths[:-1]))
+                self.assertIn("/tmp/hamon_passive_heat_exchanger.py", paths)
+                self.assertIn("/tmp/_scipy_compat.py", paths)
                 self.assertEqual(record["writes"]["/tmp/hamon_eagle_schematic.py"],
                                  (Path(engineering_toolkit.__file__).parent/"hamon_eagle_schematic.py").read_bytes())
                 self.assertEqual(record["writes"]["/tmp/hamon_drawing.py"],

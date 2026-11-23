@@ -57,13 +57,14 @@ class Evaluator:
 class OptionalEngineeringPreflight(unittest.IsolatedAsyncioTestCase):
     async def test_local_read_failure_and_short_acknowledgement_are_optional(self):
         original_read = Path.read_bytes
-        for missing in ("hamon_geometry.py", "engineering_toolkit.py"):
+        for missing in ("hamon_geometry.py", "hamon_passive_heat_exchanger.py", "engineering_toolkit.py"):
             with self.subTest(missing=missing):
                 def read(path):
                     if path.name == missing:
                         raise FileNotFoundError(missing)
                     return original_read(path)
 
+                engineering_intake._toolkit_sources.cache_clear()
                 write = mock.AsyncMock(side_effect=lambda path, data: len(data))
                 with mock.patch.object(Path, "read_bytes", new=read):
                     note = await engineering_intake.provision_engineering_cli(
@@ -71,7 +72,7 @@ class OptionalEngineeringPreflight(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(note, "")
                 paths = [call.args[0] for call in write.await_args_list]
                 self.assertNotIn("/tmp/hamon-engineering-toolkit.py", paths)
-                self.assertEqual(bool(paths), missing == "engineering_toolkit.py")
+                self.assertEqual(paths, [])
 
         short = mock.AsyncMock(side_effect=lambda path, data: len(data) - 1)
         note = await engineering_intake.provision_engineering_cli(SimpleNamespace(write_file=short))

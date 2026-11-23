@@ -1,6 +1,6 @@
 """Independent boundary-integral forward loads. The production inverse sweeps material slabs."""
 from fractions import Fraction as F
-from math import comb
+from math import comb, ulp
 import unittest
 import json
 from pathlib import Path
@@ -80,6 +80,85 @@ class PolygonContact(unittest.TestCase):
         self.assertFalse(verify({**base,'proposed_q_max_Pa':.75})['conservation_verified'])
         self.assertFalse(verify({**base,'proposed_contact_area_m2':16})['conservation_verified'])
         self.assertTrue(verify({**base,'proposed_material_area_m2':12})['conservation_verified'])
+
+    def test_full_contact_preserves_material_sections_exactly(self):
+        def intersections(ring, x):
+            ring=[tuple(map(F,p)) for p in ring]
+            return sorted(y+(v-y)*(x-a)/(b-a)
+                          for (a,y),(b,v) in zip(ring,ring[1:]+ring[:1])
+                          if min(a,b)<x<max(a,b))
+
+        def check(rings):
+            n,mx,my,_,_=oracle(rings,(6,0,0))
+            out=verify(spec(rings,n,mx,my))
+            self.assertTrue(out['conservation_verified'],out)
+            self.assertTrue(out['output_geometry_verified'])
+            shapes=[patch['vertices_m'] for patch in out['contact_patches']]
+            for patch in out['contact_patches']:
+                self.assertTrue(all(F(q)>0 for q in patch['vertex_pressure_Pa']))
+            # Between consecutive x events each boundary ordinate is affine.
+            # Equality at two interior sections establishes equality throughout.
+            xs=sorted({F(p[0]) for r in rings+shapes for p in r})
+            for a,b in zip(xs,xs[1:]):
+                for x in ((2*a+b)/3,(a+2*b)/3):
+                    edges=sorted(y for r in rings for y in intersections(r,x))
+                    desired=list(zip(edges[::2],edges[1::2]))
+                    sections=sorted(interval for r in shapes if (interval:=intersections(r,x)))
+                    actual=[]
+                    for lo,hi in sections:
+                        if actual and actual[-1][1]==lo:
+                            actual[-1]=(actual[-1][0],hi)
+                        else:
+                            actual.append((lo,hi))
+                    self.assertEqual(actual,desired)
+
+        outer=[(-4,-4),(1,-5),(4,-4),(4,4),(-4,4)]
+        hole=[(0,0),(3,-1),(3,1)]
+        for sx,dy,winding in [(1,0,1),(1,0,-1),(-1,0,1),(1,4096,1)]:
+            rings=[[(sx*x,dy+y) for x,y in r][::winding] for r in [outer,hole]]
+            with self.subTest(sx=sx,dy=dy,winding=winding):
+                check(rings)
+        for origin in (1,2**32,2**48):
+            gap=ulp(origin)
+            span=max(8,2**28*gap)
+            rings=[[(-4,origin-span),(1,origin-2*span),(4,origin-span),
+                    (4,origin+span),(-4,origin+span)],
+                   [(0,origin),(3,origin),(3,origin+gap)]]
+            with self.subTest(origin=origin):
+                check(rings)
+        control=self.assert_plane([BOX,HOLE],(6,0,0))
+        self.assertTrue(all(p['encoding']=='binary64' for p in control['contact_patches']))
+
+    def test_full_contact_heights_follow_the_reported_plane(self):
+        # A rounded gradient and independently rounded endpoint heights can
+        # pass an aggregate load check while describing two different planes.
+        square=[[(-1,-1),(1,-1),(1,1),(-1,1)]]
+        out=verify(spec(square,12,0.1,0))
+        self.assertTrue(out['output_geometry_verified'])
+        plane=out['pressure_plane']
+        ox,oy=map(F,plane['reference_point_m'])
+        gx,gy=map(F,plane['gradient_Pa_per_m'])
+        for patch in out['contact_patches']:
+            for (x,y),q in zip(patch['vertices_m'],patch['vertex_pressure_Pa']):
+                expected=F(plane['pressure_at_reference_Pa'])+gx*(F(x)-ox)+gy*(F(y)-oy)
+                self.assertEqual(F(q),expected)
+
+    def test_common_field_on_disconnected_positive_islands(self):
+        shape=[(-3,-2),(3,-2),(3,2),(1,2),(1,0),(-1,0),(-1,2),(-3,2)]
+        out=self.assert_plane([shape],(-4,0,8))
+        self.assertEqual(len(out['contact_patches']),2)
+        intervals=[]
+        plane=out['pressure_plane']
+        ox,oy=map(F,plane['reference_point_m'])
+        gx,gy=map(F,plane['gradient_Pa_per_m'])
+        for patch in out['contact_patches']:
+            points=[tuple(map(F,p)) for p in patch['vertices_m']]
+            xs=[p[0] for p in points]
+            intervals.append((min(xs),max(xs)))
+            for (x,y),q in zip(points,patch['vertex_pressure_Pa']):
+                expected=F(plane['pressure_at_reference_Pa'])+gx*(x-ox)+gy*(y-oy)
+                self.assertEqual(F(q),expected)
+        self.assertEqual(sorted(intervals),[(-3,-1),(1,3)])
 
     def test_exposed_planes_and_winding(self):
         shapes=[

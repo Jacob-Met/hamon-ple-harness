@@ -48,6 +48,36 @@ class IntakeContract(unittest.TestCase):
                     self.assertEqual(result.returncode, expected, result.stdout)
                     self.assertEqual(json.loads(result.stdout)["ok"], expected == 0)
 
+    def test_task_directory_runs_transitive_exchanger_and_unit_control(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp)
+
+            class Receiver:
+                async def write_file(self, remote_path, data):
+                    return (task / Path(remote_path).name).write_bytes(data)
+
+            note = asyncio.run(intake.provision_engineering_cli(Receiver()))
+            self.assertIn("dual-verify", note)
+            spec = {
+                "mode": "domain", "kind": "heat_exchanger_ntu", "spec": {
+                    "arrangement": "counterflow", "m_hot_kg_s": 1, "m_cold_kg_s": 1,
+                    "cp_hot_J_kgK": 1000, "cp_cold_J_kgK": 1000, "Th_in_K": 350,
+                    "Tc_in_K": 290, "UA_W_K": 1000,
+                },
+            }
+            (task / "spec.json").write_text(json.dumps(spec))
+            cli = [sys.executable, "-E", "-s", str(task / "hamon-engineering-toolkit.py")]
+            for argv, field, value in [
+                (["dual-verify", "spec.json"], "Q_duty_W", 30000),
+                (["quantity", "1*m", "--to", "cm"], "value", 100),
+            ]:
+                with self.subTest(argv=argv):
+                    result = subprocess.run(cli + argv, cwd=task, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    reply = json.loads(result.stdout)
+                    self.assertTrue(reply["ok"])
+                    self.assertEqual(float(reply[field]), value)
+
     def test_real_task_container_readonly_discovery(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
