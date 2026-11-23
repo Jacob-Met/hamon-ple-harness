@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-BASE = "87b07b563b0297043fbb43e6fe013575454d9644"
+BASE = "33296ae11c2ac136f85cfc04c0ce7d5b8e2ba6eb"
 FULL = "b5be49394186d48bf9640fade7ac0d3ecefc433bcbc66e1b6a1ccde33aac27e1"
 POSITIVE = "synthetic-zinc-cell"
 INCOMPLETE = "synthetic-zinc-incomplete"

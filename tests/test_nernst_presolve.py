@@ -46,6 +46,16 @@ class NernstPresolve(unittest.TestCase):
         self.assertTrue(route(text)["presolve_verified"])
         self.assertFalse(route(text.replace('"activity": 1.0', '"activity": 1.0000000000000001'))["presolve_verified"])
 
+    def test_mixed_activity_and_distillation_requests_keep_their_own_verifiers(self):
+        column = {"mode": "electrochem_separations", "spec": {
+            "subkind": "distillation", "z_F": 0.5, "x_D": 0.95, "x_B": 0.05,
+            "alpha": 2.5, "q": 0.6, "R_mult": 1.3}}
+        result = route(json.dumps([CELL, column]))
+        self.assertTrue(result["presolve_verified"])
+        cell, tower = json.loads(result["presolve_result_json"])
+        self.assertAlmostEqual(cell["E_nernst_V"], .0206753054531724)
+        self.assertEqual(tower["N_stages_integer"], 13)
+
     def test_inconsistent_numeric_certificate(self):
         for k in ("E_nernst_V", "V_cell_V", "ln_Q_reaction", "delta_G_J_mol", "product_moles", "residual"):
             good=router.dispatch_ple_tool("hamon_conservation_cad_verifier", CELL)

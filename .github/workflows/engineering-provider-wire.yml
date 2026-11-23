@@ -31,7 +31,7 @@ jobs:
       - name: Prepare historical source and identical locked Pi runtime
         run: |
           set -euo pipefail
-          git worktree add --detach "$RUNNER_TEMP/stock" 87b07b563b0297043fbb43e6fe013575454d9644
+          git worktree add --detach "$RUNNER_TEMP/stock" 33296ae11c2ac136f85cfc04c0ce7d5b8e2ba6eb
           cmp package-lock.json "$RUNNER_TEMP/stock/package-lock.json"
           cmp package.json "$RUNNER_TEMP/stock/package.json"
           npm ci --no-audit --no-fund
