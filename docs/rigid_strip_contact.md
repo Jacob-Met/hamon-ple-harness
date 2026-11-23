@@ -140,3 +140,13 @@ from the stated compatibility and two integrals. It does not implement
 the manuals' load combinations or acceptance criteria.
 
 A proposed contact interval must have positive ordered span, stay inside the base, and retain the loaded base edge (both edges in full contact). Its span is checked on the contact-width scale, and the proposed coordinates are integrated with the supplied endpoint or peak pressures when present. A coordinate tolerance cannot certify collapsed, reversed, shifted-off-edge or materially shortened contact. Correct representable near-edge intervals remain eligible.
+
+## Why two strip checks do not verify a rectangular contact patch
+
+The strip inputs are normal force and one bending moment **per unit length**. For a rectangular base a positive-affine area pressure has the form `max(0, a + b*x + c*y)`. Its loaded region can have an oblique edge. Its total load and both first moments have units of force and force times length.
+
+On the square `[-1,1] × [-1,1]`, consider the unit-scaled field `p = max(0,x+y)`. Integrating in y gives the line load `(1+x)^2/2`. The total force is 4/3, and symmetry gives both first moments as 2/3. The contact footprint is a triangle of area 2 and the peak pressure is 2.
+
+Two separately equilibrated strip diagrams can give a different area field with exactly those same resultants. Each triangular marginal with centroid 1/2 extends from −1/2 to 1. Their normalized product is `(256/243)*max(0,x+1/2)*max(0,y+1/2)`. Its contact area is 9/4 and its peak pressure is 64/27, 18.52% above the positive-affine solution. At the base center it predicts 64/243 where the prescribed area law gives zero. Reflections of either coordinate preserve the discrepancy for all four moment-sign pairs.
+
+An area-pressure verifier must check the joint contact footprint and integrate the specified area law against 1, x and y. A successful strip certificate establishes only the corresponding one-dimensional equilibrium. This example is a mathematical model qualification.
