@@ -217,18 +217,13 @@ def network(spec):
         roundoff = 16 * np.finfo(float).eps * max(magnitude, vset[idx])
         return excess if excess > roundoff else 0.0
 
-    def coupled_regulation(voltage):
+    def coupled_regulation():
         """Solve Q limits and voltage targets as one complementarity system.
 
         Q = clip(Q + k*(Vset - |V|), Qmin, Qmax) expresses free regulation,
         lower saturation and upper saturation without enumerating bus types.
         A generalized Jacobian chooses the derivative of the current face.
         """
-        # A global phase rotation must not choose a different derivative at Q=0.
-        voltage = np.asarray(vset, dtype=complex)
-        base_power = voltage * np.conj(ybus @ voltage)
-        target_p, target_q = p.copy(), q.copy()
-        active_limits = limits
         slope = np.maximum(np.abs(np.diag(ybus)) * vset, 1e-12)
         pq_original = bus_types == "PQ"
 
@@ -236,14 +231,14 @@ def network(spec):
             current = ybus @ v
             injection = v * np.conj(current)
             magnitude = np.abs(v)
-            second = injection.imag - target_q
+            second = injection.imag - q
             fixed_q = pq_original.copy()
             bounds = {}
             for idx in nonslack:
                 if pq_original[idx]:
                     continue
-                if idx in active_limits:
-                    lower, upper = active_limits[idx]
+                if idx in limits:
+                    lower, upper = limits[idx]
                     trial = injection[idx].imag + slope[idx] * (vset[idx] - magnitude[idx])
                     if trial <= lower or trial >= upper:
                         bound = lower if trial <= lower else upper
@@ -252,15 +247,15 @@ def network(spec):
                         second[idx] = injection[idx].imag - bound
                         continue
                 second[idx] = slope[idx] * (magnitude[idx] - vset[idx])
-            residual = np.r_[injection.real[nonslack] - target_p[nonslack], second[nonslack]]
+            residual = np.r_[injection.real[nonslack] - p[nonslack], second[nonslack]]
             rounding = power_roundoff(v)
-            qtol = power_tolerances(v, target_q, nonslack)
+            qtol = power_tolerances(v, q, nonslack)
             for position, idx in enumerate(nonslack):
                 if idx in bounds:
                     qtol[position] = min(1e-11, rounding[idx] + 4 * math.ulp(bounds[idx]))
                 elif not pq_original[idx]:
                     qtol[position] = slope[idx] * 16 * np.finfo(float).eps * max(magnitude[idx], vset[idx])
-            tolerance = np.r_[power_tolerances(v, target_p, nonslack), qtol]
+            tolerance = np.r_[power_tolerances(v, p, nonslack), qtol]
             if not derivative:
                 return residual, tolerance, bounds
             vd = np.diag(v)
@@ -309,39 +304,70 @@ def network(spec):
                     raise ValueError("Coupled AC regulator step did not reduce residual")
             raise ValueError("Coupled AC regulation did not converge")
 
+        # A global phase rotation must not select a different derivative at Q=0.
+        flat = np.asarray(vset, dtype=complex)
         try:
-            voltage, bounds = solve(voltage)
+            voltage, bounds = solve(flat)
+            return voltage * np.exp(1j * reference), bounds, iterations
         except ValueError:
-            # Continue from exact flat-state powers and limits containing its Q.
-            # Each accepted point seeds a nearby coupled problem.
-            voltage = np.asarray(vset, dtype=complex)
-            fraction, step = 0.0, 0.125
-            for _ in range(80):
-                trial = min(1.0, fraction + step)
-                target_p = base_power.real + trial * (p - base_power.real)
-                target_q = base_power.imag + trial * (q - base_power.imag)
-                active_limits = {
-                    idx: ((1 - trial) * min(lo, base_power[idx].imag) + trial * lo,
-                          (1 - trial) * max(hi, base_power[idx].imag) + trial * hi)
-                    for idx, (lo, hi) in limits.items()
-                }
+            pass
+
+        # A physical PQ start permits voltage movement before reimposing the
+        # generator targets. It does not assume those provisional Q values solve
+        # the original constrained problem.
+        saved_q = q.copy()
+        try:
+            for idx, (lower, upper) in limits.items():
+                q[idx] = np.clip(0.0, lower, upper)
+            pq_seed = np.asarray([idx for idx in nonslack
+                                  if pq_original[idx] or idx in limits], dtype=int)
+            seed = polar(pq_seed, flat.copy())
+        except (ValueError, np.linalg.LinAlgError):
+            seed = None
+        finally:
+            q[:] = saved_q
+        if seed is not None:
+            try:
+                voltage, bounds = solve(seed)
+                return voltage * np.exp(1j * reference), bounds, iterations
+            except ValueError:
+                pass
+
+        # Complementarity Newton is local: a small ill-conditioned network may
+        # need another equilibrium branch. Exhaust only <=4 regulator states,
+        # never a truncated exponential search of the full coupled network.
+        if len(limits) <= 4:
+            from itertools import product
+            ordered = sorted(limits, key=lambda idx: ids[idx])
+            choices = [(None, *dict.fromkeys(limits[idx])) for idx in ordered]
+            for values in product(*choices):
+                bounds = {idx: value for idx, value in zip(ordered, values)
+                          if value is not None}
                 try:
-                    updated, bounds = solve(voltage)
-                except ValueError:
-                    step /= 2
-                    if step < 1 / 4096:
-                        break
-                    continue
-                voltage, fraction = updated, trial
-                if fraction == 1:
+                    q[:] = saved_q
+                    for idx, bound in bounds.items():
+                        q[idx] = bound
+                    pq_trial = np.asarray([idx for idx in nonslack
+                                           if pq_original[idx] or idx in bounds], dtype=int)
+                    voltage = polar(pq_trial, flat.copy())
+                    power = voltage * np.conj(ybus @ voltage)
+                    rounding = power_roundoff(voltage)
+                    if any(
+                        reactive_violation(power[idx].imag, *limit, rounding[idx]) is not None
+                        or (idx in bounds and voltage_violation(idx, bounds[idx], abs(voltage[idx])))
+                        for idx, limit in limits.items()
+                    ):
+                        continue
                     return voltage * np.exp(1j * reference), bounds, iterations
-                step = min(step * 1.5, 1 - fraction)
-            raise ValueError("Coupled AC continuation did not converge; feasibility undetermined")
-        return voltage * np.exp(1j * reference), bounds, iterations
+                except (ValueError, np.linalg.LinAlgError):
+                    continue
+                finally:
+                    q[:] = saved_q
+        raise ValueError("Coupled AC regulation did not converge; feasibility undetermined")
 
     regulation_iterations = 0
     if limits:
-        voltage, limited, regulation_iterations = coupled_regulation(initial.copy())
+        voltage, limited, regulation_iterations = coupled_regulation()
         for idx, bound in limited.items():
             bus_types[idx] = "PQ"
             q[idx] = bound
@@ -459,7 +485,7 @@ def network(spec):
         "pv_limits_consistent": bool(complementarity),
         "proposed_pv_limits_consistent": proposed_limits,
         "clamped_pv_q_pu": {ids[i]: x for i, x in limited.items()},
-        "regulation_iterations": regulation_iterations,
+        "complementarity_iterations": regulation_iterations,
         "max_rectangular_mismatch_pu": independent_res,
         "max_voltage_disagreement_pu": difference,
         "tellegen_residual_pu": tellegen,

@@ -365,3 +365,32 @@ def test_mixed_limits_on_five_independent_resistive_spokes(transformers):
     assert result["clamped_pv_q_pu"] == expected_bounds
     for name, expectation in expected_voltages.items():
         assert result["voltages"][name] == pytest.approx(expectation)
+
+@pytest.mark.parametrize("count", [5, 12, 24])
+def test_mixed_limits_on_one_connected_generator_chain(count):
+    # Each unit resistor to slack supplies V*(V-1). The chain adds the exact
+    # signed terminal powers V_i*(V_i-V_j)/100, including every cross-group tie.
+    magnitudes = [3.0 if i < (3 * count // 5) else 1.0 for i in range(count)]
+    injections = [v * (v - 1) for v in magnitudes]
+    lines = [{"id": f"S{i}", "from": "S", "to": f"G{i}", "r_pu": 1, "x_pu": 0}
+             for i in range(count)]
+    for i in range(count - 1):
+        flow = (magnitudes[i] - magnitudes[i + 1]) / 100
+        injections[i] += magnitudes[i] * flow
+        injections[i + 1] -= magnitudes[i + 1] * flow
+        lines.append({"id": f"T{i}", "from": f"G{i}", "to": f"G{i + 1}",
+                      "r_pu": 100, "x_pu": 0})
+    buses = [{"id": "S", "type": "slack", "vm_pu": 1}]
+    proposed = {"S": {"vm_pu": 1, "va_deg": 0}}
+    for i, (magnitude, power) in enumerate(zip(magnitudes, injections)):
+        high = magnitude > 1
+        buses.append({"id": f"G{i}", "type": "PV", "p_injection_pu": power,
+                      "vm_pu": 1 if high else 2,
+                      "q_min_injection_pu": 0 if high else -1,
+                      "q_max_injection_pu": 3 if high else 0})
+        proposed[f"G{i}"] = {"vm_pu": magnitude, "va_deg": 0}
+    result = verify_ac_power_flow({"buses": buses, "lines": lines, "proposed_voltages": proposed})
+    assert result["conservation_verified"], result
+    assert result["clamped_pv_q_pu"] == {f"G{i}": 0 for i in range(count)}
+    for name, expected in proposed.items():
+        assert result["voltages"][name] == pytest.approx(expected, abs=1e-10)
