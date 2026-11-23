@@ -12,40 +12,54 @@ import tempfile
 import zipfile
 
 
+def verify_typed_members(z, names, max_unpacked_bytes=None):
+    """Validate declared file formats. Return False if the inspection budget is exhausted."""
+    if max_unpacked_bytes is not None:
+        max_unpacked_bytes -= sum(info.file_size for info in z.infolist())
+        if max_unpacked_bytes < 0:
+            return False
+    for name in names:
+        suffix = os.path.splitext(name)[1].lower()
+        if suffix == ".json":
+            with z.open(name) as f:
+                json.load(f)
+        elif suffix in {".xlsx", ".docx"}:
+            key = "xl/workbook.xml" if suffix == ".xlsx" else "word/document.xml"
+            with z.open(name) as f, zipfile.ZipFile(f) as doc:
+                if max_unpacked_bytes is not None:
+                    max_unpacked_bytes -= sum(info.file_size for info in doc.infolist())
+                    if max_unpacked_bytes < 0:
+                        return False
+                if not {"[Content_Types].xml", key}.issubset(doc.namelist()) or doc.testzip():
+                    raise ValueError(f"invalid Office document {name}")
+        elif suffix == ".csv":
+            with z.open(name) as f, io.TextIOWrapper(f, encoding="utf-8-sig") as text:
+                if not next(csv.reader(text), None):
+                    raise ValueError(f"missing CSV header in {name}")
+        elif suffix == ".pdf":
+            with z.open(name) as f:
+                head = f.read(8)
+                if not head.startswith(b"%PDF-"):
+                    raise ValueError(f"invalid PDF header in {name}")
+        elif suffix == ".dxf":
+            with z.open(name) as f:
+                raw = f.read().decode("utf-8", errors="strict")
+                if "EOF" not in raw:
+                    raise ValueError(f"truncated DXF in {name}")
+        elif suffix == ".md":
+            with z.open(name) as f:
+                if not f.read().decode("utf-8", errors="strict").strip():
+                    raise ValueError(f"blank Markdown in {name}")
+    return True
+
+
 def verify(archive: Path, names: list[str]) -> None:
     with zipfile.ZipFile(archive) as z:
         if sorted(z.namelist()) != sorted(names) or any(z.getinfo(n).file_size == 0 for n in names):
             raise ValueError("missing, empty, extra or duplicate ZIP member")
         if z.testzip() is not None:
             raise ValueError("invalid ZIP checksum")
-        for name in names:
-            suffix = Path(name).suffix.lower()
-            if suffix == ".json":
-                with z.open(name) as f:
-                    json.load(f)
-            elif suffix in {".xlsx", ".docx"}:
-                key = "xl/workbook.xml" if suffix == ".xlsx" else "word/document.xml"
-                with z.open(name) as f, zipfile.ZipFile(f) as doc:
-                    if not {"[Content_Types].xml", key}.issubset(doc.namelist()) or doc.testzip():
-                        raise ValueError(f"invalid Office document {name}")
-            elif suffix == ".csv":
-                with z.open(name) as f, io.TextIOWrapper(f, encoding="utf-8-sig") as text:
-                    if not next(csv.reader(text), None):
-                        raise ValueError(f"missing CSV header in {name}")
-            elif suffix == ".pdf":
-                with z.open(name) as f:
-                    head = f.read(8)
-                    if not head.startswith(b"%PDF-"):
-                        raise ValueError(f"invalid PDF header in {name}")
-            elif suffix == ".dxf":
-                with z.open(name) as f:
-                    raw = f.read().decode("utf-8", errors="strict")
-                    if "EOF" not in raw:
-                        raise ValueError(f"truncated DXF in {name}")
-            elif suffix == ".md":
-                with z.open(name) as f:
-                    if not f.read().decode("utf-8", errors="strict").strip():
-                        raise ValueError(f"blank Markdown in {name}")
+        verify_typed_members(z, names)
 
 
 def verify_checkpoint(stage: Path, target: Path, names: list[str]) -> None:

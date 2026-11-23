@@ -9,6 +9,7 @@ is unknown, not evidence that the model failed.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import posixpath
 import re
@@ -16,6 +17,7 @@ import shlex
 from typing import Any
 
 import archive_contract
+from archive_checkpoint import verify_typed_members
 
 FILE = re.compile(
     r"(?<![A-Za-z0-9_.])(?P<path>(?:/(?:filesystem|app)/)?"
@@ -107,12 +109,17 @@ def extract_targets(instruction: str, workdir: str) -> list[dict[str, str]]:
 # Executed in the evaluator's task container. The only transport payload is
 # file status, size and a fingerprint (no task document bodies or metadata).
 REMOTE_PROBE = r'''
+import csv
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import sys
 import zipfile
+import zlib
+
+''' + inspect.getsource(verify_typed_members) + r'''
 
 targets = json.loads(sys.argv[1])
 result = {}
@@ -155,6 +162,11 @@ def scan_file(p, root_members):
                             return {"state":"invalid","reason":"zip_root_members_mismatch"}
                         if any(member.file_size == 0 for member in z.infolist()):
                             return {"state":"invalid","reason":"zip_empty_root_member"}
+                        try:
+                            if st.st_size > 32_000_000 or not verify_typed_members(z, root_members, 32_000_000):
+                                return {"state":"unknown"}
+                        except (ValueError, EOFError, csv.Error, zipfile.BadZipFile, RuntimeError, zlib.error):
+                            return {"state":"invalid","reason":"zip_invalid_member_format"}
                     if ext == ".docx" and "word/document.xml" not in names:
                         return {"state":"invalid","reason":"docx_missing_document"}
                     if ext in (".xlsx",".xlsm") and "xl/workbook.xml" not in names:
