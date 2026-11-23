@@ -38,6 +38,14 @@ ACTION = re.compile(
     r"|expected\s+output\s*submit\b)",
     re.I | re.S,
 )
+# An imperative may name its object without "to"/"as". Anchor the whole
+# clause so an input mentioned later in the sentence cannot inherit the verb.
+DIRECT_FILE = re.compile(
+    r"(?:^|[.!?;]\s+|\n)\s*(?:please\s+)?(?:write|create|save|submit|export)\s+"
+    r"(?:(?:(?:a|the)\s+)?file\s+(?:named|called)\s+"
+    r"|(?:a|the)\s+first\s+complete\s+version\s+of\s+)?[`'\x22*]*$",
+    re.I,
+)
 SCRIPT_DELIVERY = re.compile(
     r"\bexpected\s+output\b[\s:#*-]*(?:one|a single)\s+(?:self[- ]contained\s+)?"
     r"python\s+script\s+at\s+[`'\x22]*(?P<path>[A-Za-z0-9_./+\-]+\.py)"
@@ -89,7 +97,8 @@ def extract_targets(instruction: str, workdir: str) -> list[dict[str, str]]:
             if (re.search(r"\bdefault\s+[`'\x22]*$", context, re.I)
                     or re.search(r"\boptional side file\b", clause, re.I)):
                 continue
-        if not ACTION.search(clause):
+        direct = DIRECT_FILE.search(instruction, max(0, match.start() - 180), match.start())
+        if not (ACTION.search(clause) or direct):
             continue
         path = _safe_path(match.group("path"), workdir)
         if path:

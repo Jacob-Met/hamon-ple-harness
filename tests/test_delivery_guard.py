@@ -22,6 +22,19 @@ class ParseContracts(unittest.TestCase):
     def targets(self, prompt, cwd="/filesystem"):
         return [(t["path"], t["kind"]) for t in guard.extract_targets(prompt, cwd)]
 
+    def test_direct_imperatives_select_only_their_literal_object(self):
+        for instruction in (
+            "Write `output/report.docx` using input/template.docx.",
+            "Read input/template.docx. Please save output/report.docx.",
+            "Create a file named output/report.docx in the current working directory.",
+            "Submit the first complete version of **output/report.docx**.",
+        ):
+            with self.subTest(instruction=instruction):
+                self.assertEqual(self.targets(instruction), [("/filesystem/output/report.docx", "file")])
+        for instruction in ("Do not write output/report.docx.", "Write about output/report.docx.",
+                            "Write /tmp/output/report.docx.", "Write ../../output/report.docx."):
+            self.assertEqual(self.targets(instruction), [])
+
     def test_named_docx(self):
         prompt = ("Prepare the signed engineering response and "
                   "save it as /filesystem/Halbray_Backfeed_Reply.docx.")

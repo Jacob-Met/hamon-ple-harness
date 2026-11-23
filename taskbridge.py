@@ -592,7 +592,7 @@ async def _session(ws: Any, handler: Any) -> None:
     )
     exc = (
         work.exception()
-        if work in done and not work.cancelled()
+        if work in done and not work.cancelled() and not session.cancelled.is_set()
         else Cancelled()
     )
     if exc is None:

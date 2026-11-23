@@ -48,3 +48,23 @@ class DeliveryCancellation(unittest.IsolatedAsyncioTestCase):
                 request.reset_mock()
                 self.assertEqual(await operation(), fallback)
                 request.assert_awaited_once()
+
+    async def test_cancel_wins_when_the_handler_already_failed_during_shutdown(self):
+        import json
+        from unittest.mock import patch
+
+        socket = AsyncMock()
+        socket.recv.return_value = json.dumps({"type": "task", "instruction": "Write output/report.docx."})
+
+        async def cancel(session):
+            session.cancelled.set()
+
+        async def failed_cleanup(session):
+            await session.cancelled.wait()
+            session.fallback_summary = lambda _: "Unverified report after cancellation"
+            raise RuntimeError("stream closed")
+
+        with patch.object(taskbridge.Session, "_read", cancel):
+            await taskbridge._session(socket, failed_cleanup)
+        messages = [json.loads(call.args[0]) for call in socket.send.await_args_list]
+        self.assertEqual(messages, [{"type": "done", "final_message": "Unverified report after cancellation"}])
