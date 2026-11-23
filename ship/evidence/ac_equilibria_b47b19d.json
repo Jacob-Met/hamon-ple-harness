@@ -1,0 +1,872 @@
+{
+  "baseline_commit": "55b10481e28b99fc8e678a077199bf680f0413ec",
+  "candidate_commit": "b47b19d01d3a74418ff3a3684c6631cc81eba0ba",
+  "matpower_commit": "b6c85b0323d20fb801cab3377c803a285d730847",
+  "scope": "Independent physical source qualification, not a hosted contest score",
+  "result": {
+    "witnesses": [
+      {
+        "generators": 6,
+        "upper": false,
+        "heterogeneous": false,
+        "rotation": 0,
+        "reversed": false,
+        "physical_witness_residual": 8.881784197001252e-16,
+        "baseline": {
+          "native_verified": false,
+          "witness_verified": false,
+          "self_claim_verified": null,
+          "wrong_claim_accepted": false,
+          "reason": "Coupled AC regulation did not converge; feasibility undetermined",
+          "rectangular_residual": null
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 1.5634160632771454e-12
+        }
+      },
+      {
+        "generators": 6,
+        "upper": false,
+        "heterogeneous": false,
+        "rotation": 17,
+        "reversed": false,
+        "physical_witness_residual": 6.661338147750939e-16,
+        "baseline": {
+          "native_verified": false,
+          "witness_verified": false,
+          "self_claim_verified": null,
+          "wrong_claim_accepted": false,
+          "reason": "Coupled AC regulation did not converge; feasibility undetermined",
+          "rectangular_residual": null
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 8.246736626915663e-13
+        }
+      },
+      {
+        "generators": 6,
+        "upper": false,
+        "heterogeneous": false,
+        "rotation": 17,
+        "reversed": true,
+        "physical_witness_residual": 6.661338147750939e-16,
+        "baseline": {
+          "native_verified": false,
+          "witness_verified": false,
+          "self_claim_verified": null,
+          "wrong_claim_accepted": false,
+          "reason": "Coupled AC regulation did not converge; feasibility undetermined",
+          "rectangular_residual": null
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 8.245626403891038e-13
+        }
+      },
+      {
+        "generators": 6,
+        "upper": true,
+        "heterogeneous": false,
+        "rotation": 0,
+        "reversed": false,
+        "physical_witness_residual": 0.0,
+        "baseline": {
+          "native_verified": false,
+          "witness_verified": false,
+          "self_claim_verified": null,
+          "wrong_claim_accepted": false,
+          "reason": "Coupled AC regulation did not converge; feasibility undetermined",
+          "rectangular_residual": null
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 4.440892098500626e-16
+        }
+      },
+      {
+        "generators": 6,
+        "upper": true,
+        "heterogeneous": false,
+        "rotation": 17,
+        "reversed": false,
+        "physical_witness_residual": 4.440892098500626e-16,
+        "baseline": {
+          "native_verified": false,
+          "witness_verified": false,
+          "self_claim_verified": null,
+          "wrong_claim_accepted": false,
+          "reason": "Coupled AC regulation did not converge; feasibility undetermined",
+          "rectangular_residual": null
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 7.771561172376096e-15
+        }
+      },
+      {
+        "generators": 6,
+        "upper": true,
+        "heterogeneous": false,
+        "rotation": 17,
+        "reversed": true,
+        "physical_witness_residual": 4.440892098500626e-16,
+        "baseline": {
+          "native_verified": false,
+          "witness_verified": false,
+          "self_claim_verified": null,
+          "wrong_claim_accepted": false,
+          "reason": "Coupled AC regulation did not converge; feasibility undetermined",
+          "rectangular_residual": null
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 7.771561172376096e-15
+        }
+      },
+      {
+        "generators": 12,
+        "upper": false,
+        "heterogeneous": false,
+        "rotation": 0,
+        "reversed": false,
+        "physical_witness_residual": 8.881784197001252e-16,
+        "baseline": {
+          "native_verified": false,
+          "witness_verified": false,
+          "self_claim_verified": null,
+          "wrong_claim_accepted": false,
+          "reason": "Coupled AC regulation did not converge; feasibility undetermined",
+          "rectangular_residual": null
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 1.7611467839628858e-12
+        }
+      },
+      {
+        "generators": 12,
+        "upper": false,
+        "heterogeneous": false,
+        "rotation": 17,
+        "reversed": false,
+        "physical_witness_residual": 6.661338147750939e-16,
+        "baseline": {
+          "native_verified": false,
+          "witness_verified": false,
+          "self_claim_verified": null,
+          "wrong_claim_accepted": false,
+          "reason": "Coupled AC regulation did not converge; feasibility undetermined",
+          "rectangular_residual": null
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 9.701128789174618e-13
+        }
+      },
+      {
+        "generators": 12,
+        "upper": false,
+        "heterogeneous": false,
+        "rotation": 17,
+        "reversed": true,
+        "physical_witness_residual": 6.661338147750939e-16,
+        "baseline": {
+          "native_verified": false,
+          "witness_verified": false,
+          "self_claim_verified": null,
+          "wrong_claim_accepted": false,
+          "reason": "Coupled AC regulation did not converge; feasibility undetermined",
+          "rectangular_residual": null
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 9.700018566149993e-13
+        }
+      },
+      {
+        "generators": 12,
+        "upper": true,
+        "heterogeneous": false,
+        "rotation": 0,
+        "reversed": false,
+        "physical_witness_residual": 0.0,
+        "baseline": {
+          "native_verified": false,
+          "witness_verified": false,
+          "self_claim_verified": null,
+          "wrong_claim_accepted": false,
+          "reason": "Coupled AC regulation did not converge; feasibility undetermined",
+          "rectangular_residual": null
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 3.885780586188048e-16
+        }
+      },
+      {
+        "generators": 12,
+        "upper": true,
+        "heterogeneous": false,
+        "rotation": 17,
+        "reversed": false,
+        "physical_witness_residual": 4.440892098500626e-16,
+        "baseline": {
+          "native_verified": false,
+          "witness_verified": false,
+          "self_claim_verified": null,
+          "wrong_claim_accepted": false,
+          "reason": "Coupled AC regulation did not converge; feasibility undetermined",
+          "rectangular_residual": null
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 2.6645352591003757e-15
+        }
+      },
+      {
+        "generators": 12,
+        "upper": true,
+        "heterogeneous": false,
+        "rotation": 17,
+        "reversed": true,
+        "physical_witness_residual": 4.440892098500626e-16,
+        "baseline": {
+          "native_verified": false,
+          "witness_verified": false,
+          "self_claim_verified": null,
+          "wrong_claim_accepted": false,
+          "reason": "Coupled AC regulation did not converge; feasibility undetermined",
+          "rectangular_residual": null
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 2.4424906541753444e-15
+        }
+      },
+      {
+        "generators": 6,
+        "upper": false,
+        "heterogeneous": true,
+        "rotation": 0,
+        "reversed": false,
+        "physical_witness_residual": 1.1102230246251565e-15,
+        "baseline": {
+          "native_verified": true,
+          "witness_verified": false,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 1.1546319456101628e-14
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": false,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 1.1546319456101628e-14
+        }
+      },
+      {
+        "generators": 6,
+        "upper": false,
+        "heterogeneous": true,
+        "rotation": 17,
+        "reversed": false,
+        "physical_witness_residual": 1.5543122344752192e-15,
+        "baseline": {
+          "native_verified": true,
+          "witness_verified": false,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 7.549516567451064e-15
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": false,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 7.549516567451064e-15
+        }
+      },
+      {
+        "generators": 6,
+        "upper": false,
+        "heterogeneous": true,
+        "rotation": 17,
+        "reversed": true,
+        "physical_witness_residual": 1.5543122344752192e-15,
+        "baseline": {
+          "native_verified": true,
+          "witness_verified": false,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 7.327471962526033e-15
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": false,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 7.327471962526033e-15
+        }
+      },
+      {
+        "generators": 6,
+        "upper": true,
+        "heterogeneous": true,
+        "rotation": 0,
+        "reversed": false,
+        "physical_witness_residual": 1.1102230246251565e-15,
+        "baseline": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 3.552713678800501e-13
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 3.552713678800501e-13
+        }
+      },
+      {
+        "generators": 6,
+        "upper": true,
+        "heterogeneous": true,
+        "rotation": 17,
+        "reversed": false,
+        "physical_witness_residual": 1.4432899320127035e-15,
+        "baseline": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 3.814726312612038e-13
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 3.814726312612038e-13
+        }
+      },
+      {
+        "generators": 6,
+        "upper": true,
+        "heterogeneous": true,
+        "rotation": 17,
+        "reversed": true,
+        "physical_witness_residual": 1.4432899320127035e-15,
+        "baseline": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 3.823608096809039e-13
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 3.823608096809039e-13
+        }
+      },
+      {
+        "generators": 12,
+        "upper": false,
+        "heterogeneous": true,
+        "rotation": 0,
+        "reversed": false,
+        "physical_witness_residual": 1.5543122344752192e-15,
+        "baseline": {
+          "native_verified": true,
+          "witness_verified": false,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 1.0391687510491465e-13
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": false,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 1.0391687510491465e-13
+        }
+      },
+      {
+        "generators": 12,
+        "upper": false,
+        "heterogeneous": true,
+        "rotation": 17,
+        "reversed": false,
+        "physical_witness_residual": 3.1086244689504383e-15,
+        "baseline": {
+          "native_verified": true,
+          "witness_verified": false,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 9.85878045867139e-14
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": false,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 9.85878045867139e-14
+        }
+      },
+      {
+        "generators": 12,
+        "upper": false,
+        "heterogeneous": true,
+        "rotation": 17,
+        "reversed": true,
+        "physical_witness_residual": 3.1086244689504383e-15,
+        "baseline": {
+          "native_verified": true,
+          "witness_verified": false,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 9.814371537686384e-14
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": false,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 9.814371537686384e-14
+        }
+      },
+      {
+        "generators": 12,
+        "upper": true,
+        "heterogeneous": true,
+        "rotation": 0,
+        "reversed": false,
+        "physical_witness_residual": 1.1102230246251565e-15,
+        "baseline": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 2.4158453015843406e-13
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 2.4158453015843406e-13
+        }
+      },
+      {
+        "generators": 12,
+        "upper": true,
+        "heterogeneous": true,
+        "rotation": 17,
+        "reversed": false,
+        "physical_witness_residual": 1.4432899320127035e-15,
+        "baseline": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 1.98507876802978e-13
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 1.98507876802978e-13
+        }
+      },
+      {
+        "generators": 12,
+        "upper": true,
+        "heterogeneous": true,
+        "rotation": 17,
+        "reversed": true,
+        "physical_witness_residual": 1.4432899320127035e-15,
+        "baseline": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 2.0117241206207837e-13
+        },
+        "candidate": {
+          "native_verified": true,
+          "witness_verified": true,
+          "self_claim_verified": true,
+          "wrong_claim_accepted": false,
+          "reason": null,
+          "rectangular_residual": 2.0117241206207837e-13
+        }
+      }
+    ],
+    "public": [
+      {
+        "case": "case14.m",
+        "buses": 14,
+        "rotation": 0,
+        "reversed": false,
+        "baseline": {
+          "verified": true,
+          "rotation_order_error": 0.0,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 2.1817118334177535e-14,
+          "rectangular_residual": 2.879988433366584e-12,
+          "reason": null
+        },
+        "candidate": {
+          "verified": true,
+          "rotation_order_error": 0.0,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 2.1817118334177535e-14,
+          "rectangular_residual": 2.879988433366584e-12,
+          "reason": null
+        }
+      },
+      {
+        "case": "case14.m",
+        "buses": 14,
+        "rotation": 17,
+        "reversed": false,
+        "baseline": {
+          "verified": true,
+          "rotation_order_error": 2.2591401799415137e-16,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 3.7858645837020914e-15,
+          "rectangular_residual": 2.2145540572585967e-12,
+          "reason": null
+        },
+        "candidate": {
+          "verified": true,
+          "rotation_order_error": 2.2591401799415137e-16,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 3.7858645837020914e-15,
+          "rectangular_residual": 2.2145540572585967e-12,
+          "reason": null
+        }
+      },
+      {
+        "case": "case14.m",
+        "buses": 14,
+        "rotation": 17,
+        "reversed": true,
+        "baseline": {
+          "verified": true,
+          "rotation_order_error": 8.800708858935621e-16,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 1.3741280652820943e-14,
+          "rectangular_residual": 2.2145609961525006e-12,
+          "reason": null
+        },
+        "candidate": {
+          "verified": true,
+          "rotation_order_error": 8.800708858935621e-16,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 1.3741280652820943e-14,
+          "rectangular_residual": 2.2145609961525006e-12,
+          "reason": null
+        }
+      },
+      {
+        "case": "case30.m",
+        "buses": 30,
+        "rotation": 0,
+        "reversed": false,
+        "baseline": {
+          "verified": true,
+          "rotation_order_error": 0.0,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 5.924963205613361e-15,
+          "rectangular_residual": 2.0314028237322646e-12,
+          "reason": null
+        },
+        "candidate": {
+          "verified": true,
+          "rotation_order_error": 0.0,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 5.924963205613361e-15,
+          "rectangular_residual": 2.0314028237322646e-12,
+          "reason": null
+        }
+      },
+      {
+        "case": "case30.m",
+        "buses": 30,
+        "rotation": 17,
+        "reversed": false,
+        "baseline": {
+          "verified": true,
+          "rotation_order_error": 2.2887833992611187e-16,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 3.197170665326625e-14,
+          "rectangular_residual": 2.0896895325250853e-12,
+          "reason": null
+        },
+        "candidate": {
+          "verified": true,
+          "rotation_order_error": 2.2887833992611187e-16,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 3.197170665326625e-14,
+          "rectangular_residual": 2.0896895325250853e-12,
+          "reason": null
+        }
+      },
+      {
+        "case": "case30.m",
+        "buses": 30,
+        "rotation": 17,
+        "reversed": true,
+        "baseline": {
+          "verified": true,
+          "rotation_order_error": 1.8619006149354546e-15,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 2.8710678195115874e-14,
+          "rectangular_residual": 2.089856065978779e-12,
+          "reason": null
+        },
+        "candidate": {
+          "verified": true,
+          "rotation_order_error": 1.8619006149354546e-15,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 2.8710678195115874e-14,
+          "rectangular_residual": 2.089856065978779e-12,
+          "reason": null
+        }
+      },
+      {
+        "case": "case57.m",
+        "buses": 57,
+        "rotation": 0,
+        "reversed": false,
+        "baseline": {
+          "verified": true,
+          "rotation_order_error": 0.0,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 1.28192604770611e-14,
+          "rectangular_residual": 1.583575284791472e-12,
+          "reason": null
+        },
+        "candidate": {
+          "verified": true,
+          "rotation_order_error": 0.0,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 1.28192604770611e-14,
+          "rectangular_residual": 1.583575284791472e-12,
+          "reason": null
+        }
+      },
+      {
+        "case": "case57.m",
+        "buses": 57,
+        "rotation": 17,
+        "reversed": false,
+        "baseline": {
+          "verified": true,
+          "rotation_order_error": 3.3422138886441676e-16,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 3.85517351908282e-14,
+          "rectangular_residual": 5.9245497396887e-11,
+          "reason": null
+        },
+        "candidate": {
+          "verified": true,
+          "rotation_order_error": 3.3422138886441676e-16,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 3.85517351908282e-14,
+          "rectangular_residual": 5.9245497396887e-11,
+          "reason": null
+        }
+      },
+      {
+        "case": "case57.m",
+        "buses": 57,
+        "rotation": 17,
+        "reversed": true,
+        "baseline": {
+          "verified": true,
+          "rotation_order_error": 3.0054964086199082e-15,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 1.120778941525847e-14,
+          "rectangular_residual": 5.924527535228208e-11,
+          "reason": null
+        },
+        "candidate": {
+          "verified": true,
+          "rotation_order_error": 3.0054964086199082e-15,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 1.120778941525847e-14,
+          "rectangular_residual": 5.924527535228208e-11,
+          "reason": null
+        }
+      },
+      {
+        "case": "case118.m",
+        "buses": 118,
+        "rotation": 0,
+        "reversed": false,
+        "baseline": {
+          "verified": true,
+          "rotation_order_error": 0.0,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 2.8267115440514556e-14,
+          "rectangular_residual": 5.989042595189176e-11,
+          "reason": null
+        },
+        "candidate": {
+          "verified": true,
+          "rotation_order_error": 0.0,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 2.8267115440514556e-14,
+          "rectangular_residual": 5.989042595189176e-11,
+          "reason": null
+        }
+      },
+      {
+        "case": "case118.m",
+        "buses": 118,
+        "rotation": 17,
+        "reversed": false,
+        "baseline": {
+          "verified": true,
+          "rotation_order_error": 3.1401849173675503e-16,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 1.6300251950192426e-14,
+          "rectangular_residual": 1.3680390154036104e-11,
+          "reason": null
+        },
+        "candidate": {
+          "verified": true,
+          "rotation_order_error": 3.1401849173675503e-16,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 1.6300251950192426e-14,
+          "rectangular_residual": 1.3680390154036104e-11,
+          "reason": null
+        }
+      },
+      {
+        "case": "case118.m",
+        "buses": 118,
+        "rotation": 17,
+        "reversed": true,
+        "baseline": {
+          "verified": true,
+          "rotation_order_error": 5.313145090513748e-15,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 4.7004802776996363e-14,
+          "rectangular_residual": 1.3669843035302165e-11,
+          "reason": null
+        },
+        "candidate": {
+          "verified": true,
+          "rotation_order_error": 5.313145090513748e-15,
+          "wrong_claim_accepted": false,
+          "terminal_residual": 4.7004802776996363e-14,
+          "rectangular_residual": 1.3669843035302165e-11,
+          "reason": null
+        }
+      }
+    ],
+    "summary": {
+      "baseline": {
+        "witnesses": 6,
+        "native_equilibria": 12,
+        "self_claims_verified": 12,
+        "witness_total": 24,
+        "public_verified": 12,
+        "public_total": 12,
+        "wrong_claims_accepted": 0
+      },
+      "candidate": {
+        "witnesses": 18,
+        "native_equilibria": 24,
+        "self_claims_verified": 24,
+        "witness_total": 24,
+        "public_verified": 12,
+        "public_total": 12,
+        "wrong_claims_accepted": 0
+      }
+    }
+  }
+}
