@@ -319,6 +319,8 @@ def routed_continuity(prediction, board_path, signal_name):
         ordinal[kind] += 1
         try:
             if kind == "wire":
+                if row.get("style", "continuous") != "continuous":
+                    raise ValueError("wire style does not establish a continuous centerline")
                 layer = int(row.attrib["layer"])
                 if (
                     layer not in FACES
