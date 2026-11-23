@@ -7,6 +7,7 @@ import asyncio
 import json
 import shlex
 import unittest
+from unittest import mock
 import delivery_materialize as m
 
 
@@ -127,6 +128,30 @@ class CandidateContracts(unittest.TestCase):
 
 
 class RemoteProtocol(unittest.IsolatedAsyncioTestCase):
+    async def test_final_pass_reserves_verification_and_transport_time(self):
+        session = mock.Mock(time_left=lambda: 90)
+        session.exec = mock.AsyncMock(return_value={"exit_code": 0, "output": '{"state":"executed"}'})
+        item = {"script": "/filesystem/work/generate.py", "target": "/filesystem/work/result.json"}
+        with mock.patch.object(m, "monotonic", return_value=100):
+            await m.materialize(session, [item], reserve_sec=10, deadline=145)
+        command = session.exec.await_args.args[0]
+        self.assertEqual(json.loads(shlex.split(command)[3])["timeout"], 22)
+        self.assertEqual(session.exec.await_args.kwargs["timeout_sec"], 30)
+
+    async def test_shared_deadline_stops_following_generators(self):
+        clock = 100
+        async def execute(command, timeout_sec):
+            nonlocal clock
+            clock += 60
+            return {"exit_code": 0, "output": '{"state":"executed"}'}
+        session = mock.Mock(time_left=lambda: None)
+        session.exec = mock.AsyncMock(side_effect=execute)
+        items = [{"script": f"/filesystem/{i}/generate.py", "target": f"/filesystem/{i}/result.json"} for i in range(2)]
+        with mock.patch.object(m, "monotonic", side_effect=lambda: clock):
+            observed = await m.materialize(session, items, reserve_sec=10, deadline=170)
+        self.assertEqual(len(observed), 1)
+        session.exec.assert_awaited_once()
+
     async def test_uses_task_exec_not_host_subprocess(self):
         class FakeSession:
             def __init__(self):
@@ -176,3 +201,4 @@ class RemoteProtocol(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
