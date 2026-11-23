@@ -17,6 +17,17 @@ ZERO = Fraction(0)
 NAMES = ("A", "B", "C")
 
 
+def _reported(value):
+    """Keep every signed nonzero force, gap and moment nonzero on the wire."""
+    try:
+        shown = float(value)
+    except OverflowError as exc:
+        raise ValueError("two-span result exceeds the finite reporting range") from exc
+    if value and shown == 0:
+        raise ValueError("two-span nonzero result is below the reporting range")
+    return shown
+
+
 def _reactions(x, loads, active):
     l1, l2 = x[1], x[2] - x[1]
     q1, q2 = loads
@@ -133,14 +144,15 @@ def two_span_beam(l1, l2, q1, q2, ei, conditions):
                     state = "lifted" if gaps[i] > 0 else "touching"
                 states[name] = state
             return {
-                **{f"R_{name}_N": float(r) for name, r in zip(NAMES, reactions)},
-                "M_B_Nm": float(middle),
-                "M_B_sagging_Nm": float(max(ZERO, middle)),
-                "M_B_hogging_Nm": float(max(ZERO, -middle)),
-                "M_max_sagging_Nm": float(sagging),
-                "M_max_hogging_Nm": float(hogging),
-                "M_max_Nm": float(max(sagging, hogging)),
-                "support_displacements_m": dict(zip(NAMES, map(float, gaps))),
+                **{f"R_{name}_N": _reported(r) for name, r in zip(NAMES, reactions)},
+                "M_B_Nm": _reported(middle),
+                "M_B_abs_Nm": _reported(abs(middle)),
+                "M_B_sagging_Nm": _reported(max(ZERO, middle)),
+                "M_B_hogging_Nm": _reported(max(ZERO, -middle)),
+                "M_max_sagging_Nm": _reported(sagging),
+                "M_max_hogging_Nm": _reported(hogging),
+                "M_max_Nm": _reported(max(sagging, hogging)),
+                "support_displacements_m": dict(zip(NAMES, map(_reported, gaps))),
                 "support_states": states,
                 "equilibrium_residual_N": float(abs(sum(reactions) - q1 * l1 - q2 * l2)),
                 "dual_rel_discrepancy": 0.0,

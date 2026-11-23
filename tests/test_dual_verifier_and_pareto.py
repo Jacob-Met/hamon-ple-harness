@@ -23,7 +23,9 @@ class DualSolverVerifierTests(unittest.TestCase):
         result = dv.solve_continuous_beam_2span_dual({
             "span1": "8*m", "span2": "8*m", "udl1": "-32*N/m", "udl2": "0*N/m",
         })
-        self.assertAlmostEqual(result["M_B_hogging_Nm"], 128.0)
+        self.assertAlmostEqual(result["M_B_abs_Nm"], 128.0)
+        self.assertAlmostEqual(result["M_B_sagging_Nm"], 128.0)
+        self.assertEqual(result["M_B_hogging_Nm"], 0.0)
         self.assertAlmostEqual(result["M_max_Nm"], 196.0)
 
     def test_bolt_group_is_translation_invariant(self):
