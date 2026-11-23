@@ -75,15 +75,28 @@ def _strain_rows(spec, xy, springs):
     return shape, np.array(weights, dtype=object)
 
 
-def solve_compensated(spec, nodes, springs, exact_force, bar_checks):
+def solve_compensated(spec, nodes, springs, exact_force, bar_checks, pinned_bars=False):
     with localcontext() as context:
         context.prec = 60
         xy = np.array([[_fraction(x), _fraction(y)] for x, y in nodes], dtype=object)
         exact_shape, exact_weights = _strain_rows(spec, xy, springs)
         to_decimal = np.vectorize(_decimal_ratio, otypes=[object])
-        shape = to_decimal(exact_shape)
+        transform = None
+        if pinned_bars:
+            from hamon_diaphragm_modes import _cardinal_exact
+            # Use independent physical strains as unknowns. The appended
+            # identity recovers the exact map from those strains to nodes.
+            ndof = len(exact_force)
+            strains_and_nodes = np.vstack((exact_shape, np.eye(ndof, dtype=int)))
+            measurements, _ = _cardinal_exact(
+                strains_and_nodes, [*exact_weights, *([0] * ndof)])
+            transform = measurements[-ndof:]
+            shape = to_decimal(measurements[:-ndof])
+            force = to_decimal(transform.T @ exact_force)
+        else:
+            shape = to_decimal(exact_shape)
+            force = to_decimal(exact_force)
         weights = to_decimal(exact_weights)
-        force = to_decimal(exact_force)
         weighted = shape.astype(float) * np.sqrt(weights.astype(float))[:, None]
         norms = np.linalg.norm(weighted, axis=0)
         if not np.isfinite(norms).all() or np.any(norms == 0):
@@ -103,6 +116,8 @@ def solve_compensated(spec, nodes, springs, exact_force, bar_checks):
             motion[order] += [_decimal(v) for v in scale[order] * increment]
             residual = force - shape.T @ (weights * (shape @ motion))
 
+        if transform is not None:
+            motion = to_decimal(transform) @ motion
         primary = np.array([_finite(v) for v in motion])
         tail = np.array([_finite(v - _decimal(h), allow_underflow=True) for v, h in zip(motion, primary)])
         # The replay uses exact sums and products of the wire values and
