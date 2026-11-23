@@ -410,7 +410,7 @@ def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, densi
     }
 
 
-def _rectangular_sweep(entities, et, args, unit_scale, frame=None):
+def _rectangular_sweep(entities, et, args, unit_scale, frame=None, magnification=1.):
     prof_id = _ref_id(args[0] if et == "IFCEXTRUDEDAREASOLID" else args[1])
     pos_id = _ref_id(args[1] if et == "IFCEXTRUDEDAREASOLID" else args[2])
     depth = float(args[3]) * unit_scale
@@ -431,11 +431,20 @@ def _rectangular_sweep(entities, et, args, unit_scale, frame=None):
                 direction = local[0] * x_ax + local[1] * y_ax + local[2] * z_ax
                 normal = local[2]
             vertices, faces = _extrude_polygon_2d(poly, origin, x_ax, y_ax, direction, depth)
-            return vertices, faces if normal > 0 else faces[:, ::-1], lx * ly * depth * abs(normal)
+            # Keep the scale product exact until physical volume is rounded.
+            volume = float(Fraction(lx) * Fraction(ly) * Fraction(depth) * Fraction(abs(normal))
+                           * Fraction(magnification) ** 3)
+            return vertices, faces if normal > 0 else faces[:, ::-1], volume
 
 
 def _ifc_mass_mapped_body(entities, product, unit_scale):
-    """Resolve one complete rectangular occurrence, including nested reusable maps."""
+    """Resolve one complete rectangular occurrence, including nested reusable maps.
+
+    The qualified map has an identity source origin, finite positive uniform
+    scale, and either three orthogonal target axes or the default axes. Each
+    Body resolves to one rectangular extrusion; map cycles and partial Bodies
+    are refused. Reusing a definition does not merge distinct product instances.
+    """
     from hamon_ifc_spatial_clash import _required_ifc_entity, _rigid_ifc_frame
 
     def required(ref, kind):
@@ -544,6 +553,8 @@ def _ifc_product_properties(typed, raw, unit_scale, density):
         return None
     if not math.isfinite(density) or density <= 0:
         raise ValueError("IFC product mass requires a positive finite density")
+    if not math.isfinite(unit_scale) or unit_scale <= 0:
+        raise ValueError("IFC product mass requires a positive finite length unit")
     if any(kind == "IFCRELVOIDSELEMENT" for kind, _ in typed.values()):
         raise ValueError("IFC products with opening subtraction are unsupported")
 
@@ -562,11 +573,10 @@ def _ifc_product_properties(typed, raw, unit_scale, density):
         rotation, origin = world[:3, :3], world[:3, 3]
         # Integrate in world-axis directions about the body's origin. This keeps
         # survey-scale translation out of the local mesh and its central moments.
-        swept = _rectangular_sweep(raw, *raw[item], unit_scale, (np.zeros(3), *rotation.T))
+        swept = _rectangular_sweep(raw, *raw[item], unit_scale, (np.zeros(3), *rotation.T), magnification)
         if swept is None:
             raise ValueError(f"Expected a rectangular swept IFC Body on #{eid}")
         vertices, faces, analytic = swept
-        analytic *= magnification ** 3
         if not math.isfinite(analytic) or analytic <= 0:
             raise ValueError("Mapped IFC volume is outside the representable range")
         props = _compute_mesh_mass_properties(vertices, faces, density)
