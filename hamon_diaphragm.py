@@ -10,7 +10,7 @@ import math
 
 import numpy as np
 from scipy.sparse import bmat, coo_matrix, diags, eye
-from hamon_diaphragm_modes import diaphragm_coordinates
+from hamon_diaphragm_modes import DiaphragmBasis, diaphragm_coordinates
 from scipy.sparse.linalg import splu
 
 
@@ -198,7 +198,7 @@ def solve_diaphragm(spec):
         raise ValueError("nonfinite assembled spring stiffness")
     basis = diaphragm_coordinates(xy, panel_nodes, bars, ground)
     if precision == "compensated":
-        result = solve_compensated(spec, xy, springs, exact_force, _bar_checks)
+        result = solve_compensated(spec, xy, springs, exact_force, _bar_checks, bool(basis.pinned_rows))
         result["stations"] = _recover_stations(spec.get("stations", []), spec["panels"],
                                               xy, result["panel_center_shear_N_m"])
         return result
@@ -212,8 +212,9 @@ def solve_diaphragm(spec):
             # when reconstructed from rigid and elastic coordinates. In nodal
             # coordinates every spring acts on its own displacement directly.
             active = np.ones(ndof, dtype=bool)
-            basis = eye(ndof, format="csc"), active, active, np.ones(len(bars), dtype=bool)
-        result = _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, basis, use_nodal)
+            basis = DiaphragmBasis(eye(ndof, format="csc"), active, active,
+                                   np.ones(len(bars), dtype=bool), [], [])
+        result = _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, basis, use_nodal, exact_force)
         if result is not None:
             return result
     raise ValueError("diaphragm failed local/global equilibrium or work-energy balance")
@@ -299,9 +300,9 @@ def _equilibrium_estimates(stiffness, rhs, bar_map, axial_k, cross_patch, use_no
         yield x, None
 
 
-def _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, basis, use_nodal):
+def _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, basis, use_nodal, exact_force):
     ndof = len(force)
-    transform, elastic, bar_free, elastic_only_bars = basis
+    transform, elastic, bar_free, elastic_only_bars, pinned_rows, pinned_motion = basis
     projection = diags(elastic.astype(float))
     stiffness = (projection @ membrane @ projection + transform.T @ diags(ground) @ transform).tocsc()
     bar_map, axial_k = None, None
@@ -316,13 +317,37 @@ def _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, ba
         # Cross-patch bars retain exactly the straining patch coordinates.
         relative = diags((~elastic & ~bar_free).astype(float))
         connector_axes = diags((~elastic_only_bars).astype(float)) @ bar_axes
-        bar_map = bar_axes @ projection + connector_axes @ transform @ relative
+        patch_map = connector_axes @ transform @ relative
+        if pinned_rows:
+            patch_map = patch_map.tolil()
+            for index, columns, extensions in pinned_rows:
+                nonzero = np.flatnonzero(extensions)
+                patch_map.rows[index] = columns[nonzero].tolist()
+                patch_map.data[index] = extensions[nonzero].tolist()
+        bar_map = (bar_axes @ projection + patch_map).tocsr()
         axial_k = np.array([k for _, _, k in bars])
-    estimates = _equilibrium_estimates(stiffness, transform.T @ force, bar_map, axial_k,
+    rhs = transform.T @ force
+    for nodes, anchors, modes in pinned_motion:
+        rhs[anchors] = (modes.T @ exact_force[nodes]).astype(float)
+    estimates = _equilibrium_estimates(stiffness, rhs, bar_map, axial_k,
                                       np.any(~elastic_only_bars), use_nodal, force, ground, panels, bars)
     for coordinates, mixed_tensions in estimates:
         deformation = elastic * coordinates
         u = transform @ coordinates
+        if pinned_motion:
+            if not np.isfinite(u).all():
+                raise ValueError("nonfinite diaphragm displacement")
+            # Reconstruct the physical nodal state and its external work before
+            # rounding the primary displacement output. Compensated mode has a
+            # separate replay of the actual serialized primary and remainder.
+            state = np.array([Fraction(float(v)) for v in u], dtype=object)
+            for nodes, anchors, modes in pinned_motion:
+                amplitudes = [Fraction(float(v)) for v in coordinates[anchors]]
+                state[nodes] = modes @ amplitudes + [Fraction(float(v)) for v in deformation[nodes]]
+            u = state.astype(float)
+            work = float(exact_force @ state)
+        else:
+            work = float(force @ u)
 
         if not np.isfinite(u).all():
             raise ValueError("nonfinite diaphragm displacement")
@@ -365,7 +390,6 @@ def _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, ba
         moment_error = float(arms[:, 0] @ balance[:, 1] - arms[:, 1] @ balance[:, 0])
         load_scale = max(np.linalg.norm(force, 1) + np.linalg.norm(reactions, 1), 1e-30)
         span = np.max(np.ptp(xy, axis=0))
-        work = float(force @ u)
         energy = math.fsum(double_energy)
         errors = [constitutive_error, np.linalg.norm(internal_force + reactions - force, np.inf) / load_scale,
                   np.linalg.norm(force_error, 1) / load_scale,
