@@ -9,17 +9,23 @@ is unknown, not evidence that the model failed.
 from __future__ import annotations
 
 import asyncio
+import csv
 import inspect
+import io
 import json
 import posixpath
 import re
 import shlex
 from time import monotonic
 from typing import Any
+from xml.etree.ElementTree import ParseError
+import zipfile
+import zlib
 
 import archive_contract
 import office_package
 from archive_checkpoint import verify_typed_members
+from office_package import check_office_package
 from taskbridge import Cancelled
 
 FILE = re.compile(
@@ -215,6 +221,56 @@ class TerminalDelivery:
         return "\n".join(notes)
 
 
+
+def file_format_state(p, size, root_members=None):
+    """Apply the same physical format checks to live and archived deliverables."""
+    if size == 0:
+        return {"state": "empty"}
+    ext = p.suffix.lower()
+    if ext in (".zip",".docx",".xlsx",".xlsm"):
+        zip_errors = (OSError, ValueError, EOFError, RuntimeError, zipfile.BadZipFile, zlib.error)
+        try:
+            from lzma import LZMAError
+        except ImportError:
+            pass  # Python can run without the optional LZMA codec.
+        else:
+            zip_errors += (LZMAError,)
+        try:
+            with zipfile.ZipFile(p) as z:
+                names = z.namelist()
+                if not names:
+                    return {"state":"invalid","reason":"zip_empty"}
+                if root_members:
+                    if sorted(names) != sorted(root_members):
+                        return {"state":"invalid","reason":"zip_root_members_mismatch"}
+                    if any(member.file_size == 0 for member in z.infolist()):
+                        return {"state":"invalid","reason":"zip_empty_root_member"}
+                    try:
+                        if size > 32_000_000 or not verify_typed_members(z, root_members, 32_000_000):
+                            return {"state":"unknown"}
+                    except (ValueError, EOFError, csv.Error, zipfile.BadZipFile, RuntimeError, zlib.error):
+                        return {"state":"invalid","reason":"zip_invalid_member_format"}
+                if ext in (".docx", ".xlsx", ".xlsm"):
+                    if size > 32_000_000 or sum(m.file_size for m in z.infolist()) > 32_000_000:
+                        return {"state":"unknown"}
+                    try:
+                        check_office_package(z, ext)
+                    except (ValueError, ParseError, LookupError):
+                        return {"state":"invalid","reason":"office_invalid_package"}
+                if size <= 32_000_000 and z.testzip() is not None:
+                    return {"state":"invalid","reason":"zip_crc"}
+        except zip_errors:
+            return {"state":"invalid","reason":"zip_invalid"}
+    elif ext == ".pdf":
+        with p.open("rb") as f:
+            if f.read(5) != b"%PDF-":
+                return {"state":"invalid","reason":"pdf_header"}
+    elif ext == ".ifc":
+        with p.open("rb") as f:
+            if b"ISO-10303-21;" not in f.read(512):
+                return {"state":"invalid","reason":"ifc_header"}
+    return {"state": "ready"}
+
 # Executed in the evaluator's task container. The only transport payload is
 # file status, size and a fingerprint (no task document bodies or metadata).
 REMOTE_PROBE = r'''
@@ -230,7 +286,7 @@ import zlib
 
 from xml.etree.ElementTree import ParseError
 
-''' + inspect.getsource(office_package) + '\n' + inspect.getsource(verify_typed_members) + r'''
+''' + inspect.getsource(office_package) + '\n' + inspect.getsource(verify_typed_members) + '\n' + inspect.getsource(file_format_state) + r'''
 
 targets = json.loads(sys.argv[1])
 result = {}
@@ -272,42 +328,9 @@ def scan_file(p, root_members, observe_loose_baseline=False):
         with p.open("rb") as f:
             while block := f.read(1_048_576):
                 h.update(block)
-        ext = p.suffix.lower()
-        if ext in (".zip",".docx",".xlsx",".xlsm"):
-            try:
-                with zipfile.ZipFile(p) as z:
-                    names = z.namelist()
-                    if not names:
-                        return {"state":"invalid","reason":"zip_empty"}
-                    if root_members:
-                        if sorted(names) != sorted(root_members):
-                            return {"state":"invalid","reason":"zip_root_members_mismatch"}
-                        if any(member.file_size == 0 for member in z.infolist()):
-                            return {"state":"invalid","reason":"zip_empty_root_member"}
-                        try:
-                            if st.st_size > 32_000_000 or not verify_typed_members(z, root_members, 32_000_000):
-                                return {"state":"unknown"}
-                        except (ValueError, EOFError, csv.Error, zipfile.BadZipFile, RuntimeError, zlib.error):
-                            return {"state":"invalid","reason":"zip_invalid_member_format"}
-                    if ext in (".docx", ".xlsx", ".xlsm"):
-                        if st.st_size > 32_000_000 or sum(m.file_size for m in z.infolist()) > 32_000_000:
-                            return {"state":"unknown"}
-                        try:
-                            check_office_package(z, ext)
-                        except (ValueError, ParseError, LookupError):
-                            return {"state":"invalid","reason":"office_invalid_package"}
-                    if st.st_size <= 32_000_000 and z.testzip() is not None:
-                        return {"state":"invalid","reason":"zip_crc"}
-            except (OSError,ValueError,zipfile.BadZipFile,RuntimeError):
-                return {"state":"invalid","reason":"zip_invalid"}
-        elif ext == ".pdf":
-            with p.open("rb") as f:
-                if f.read(5) != b"%PDF-":
-                    return {"state":"invalid","reason":"pdf_header"}
-        elif ext == ".ifc":
-            with p.open("rb") as f:
-                if b"ISO-10303-21;" not in f.read(512):
-                    return {"state":"invalid","reason":"ifc_header"}
+        shape = file_format_state(p, st.st_size, root_members)
+        if shape["state"] != "ready":
+            return shape
         return {"state":"ready","fingerprint":h.hexdigest(),"size":st.st_size}
     except (OSError,ValueError):
         return {"state":"unknown"}
