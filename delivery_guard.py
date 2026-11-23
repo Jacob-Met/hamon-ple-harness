@@ -228,6 +228,13 @@ def file_format_state(p, size, root_members=None):
         return {"state": "empty"}
     ext = p.suffix.lower()
     if ext in (".zip",".docx",".xlsx",".xlsm"):
+        zip_errors = (OSError, ValueError, EOFError, RuntimeError, zipfile.BadZipFile, zlib.error)
+        try:
+            from lzma import LZMAError
+        except ImportError:
+            pass  # Python can run without the optional LZMA codec.
+        else:
+            zip_errors += (LZMAError,)
         try:
             with zipfile.ZipFile(p) as z:
                 names = z.namelist()
@@ -252,7 +259,7 @@ def file_format_state(p, size, root_members=None):
                         return {"state":"invalid","reason":"office_invalid_package"}
                 if size <= 32_000_000 and z.testzip() is not None:
                     return {"state":"invalid","reason":"zip_crc"}
-        except (OSError, ValueError, EOFError, RuntimeError, zipfile.BadZipFile, zlib.error):
+        except zip_errors:
             return {"state":"invalid","reason":"zip_invalid"}
     elif ext == ".pdf":
         with p.open("rb") as f:

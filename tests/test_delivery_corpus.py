@@ -134,6 +134,22 @@ class ArchivedFormatTests(unittest.TestCase):
         self.assertEqual(row["custody"][0]["exports"][0]["format"],
                          {"state": "invalid", "reason": "zip_invalid"})
 
+    def test_optional_lzma_decoder_error_is_contained(self):
+        import io
+        import zipfile
+        from unittest.mock import patch
+        try:
+            from lzma import LZMAError
+        except ImportError:
+            self.skipTest("Python lacks an LZMA codec")
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_LZMA) as archive:
+            archive.writestr("report.txt", "An ordinary report.")
+        with patch.object(zipfile.LZMADecompressor, "decompress", side_effect=LZMAError("damaged")):
+            row = self.observe("Write the final deliverable to /filesystem/site/output/submission.zip.",
+                               {"filesystem/site/output/submission.zip": buffer.getvalue()})
+        self.assertEqual(row["delivery_status"], "incomplete")
+
     def test_complete_typed_archive_matches_the_live_gate(self):
         prompt = ("Write the final deliverable to /filesystem/site/output/submission.zip. "
                   "Create a complete submission early, then improve it in place. "
