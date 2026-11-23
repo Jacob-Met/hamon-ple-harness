@@ -1,5 +1,7 @@
 """Material balances and finite-stage limits for the registered binary column."""
+from decimal import Decimal, localcontext
 from fractions import Fraction
+import math
 import unittest
 
 from hamon_wave7_engineering_verifiers import dispatch_wave7_verifier
@@ -10,6 +12,25 @@ class DistillationLimits(unittest.TestCase):
         spec = {"subkind": "distillation", "alpha": 2, "x_D": 0.6, "x_B": 0.4,
                 "z_F": 0.5, "q": 1, "F_mol_s": 100, **overrides}
         return dispatch_wave7_verifier("McCabe-Thiele binary distillation", spec)
+
+    def test_underwood_root_across_saturated_liquid_feed(self):
+        # Independent bisection of the rational equation between its poles.
+        for q in (-0.5, 0.0, 0.5, 0.75, 1 - 1e-9, math.nextafter(1.0, 0.0),
+                  1.0, math.nextafter(1.0, 2.0), 1 + 1e-9, 2.0):
+            with self.subTest(q=q), localcontext() as ctx:
+                ctx.prec = 80
+                result = self.solve(q=q, z_F=0.4, x_D=0.9, x_B=0.1, alpha=2.5, R=4)
+                self.assertTrue(result["verified"])
+                alpha, z, quality = map(Decimal.from_float, (2.5, 0.4, q))
+                lo, hi = Decimal(1), alpha
+                for _ in range(240):
+                    mid = (lo + hi) / 2
+                    if alpha * z / (alpha - mid) + (1 - z) / (1 - mid) < 1 - quality:
+                        lo = mid
+                    else:
+                        hi = mid
+                self.assertAlmostEqual(result["underwood_theta"], float((lo + hi) / 2), delta=2e-14)
+                self.assertLess(result["residual"], 2e-14)
 
     def test_negative_rectifying_or_stripping_flow(self):
         for q, reflux, field, flow in (
