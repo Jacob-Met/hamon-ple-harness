@@ -73,6 +73,26 @@ exceeds that allowance. A zero demand is recorded as null. A flat or
 reversed component still fails the direction check for a nonzero demand.
 This is a numerical acceptance bound for the reported field.
 
+For partial contact, each proposed pressure field is integrated only over
+the loaded polygon. A corner-only claim supplies pressure at loaded base
+corners. The reference release intersections retain zero pressure. A polygon
+claim supplies its own coordinates and vertex pressures. Both use the same
+per-component reference residual and pressure allowance described above.
+For the polygon, moving a displayed coordinate by one binary64 ULP also
+perturbs triangle areas and lever arms. The bound sums those changes over
+the contact triangles, including products of coordinate errors and pressure
+rounding. The corner-only calculation uses fixed reference geometry.
+`clipped_contact_moment_resolution` reports resolution for each axis and
+claim type. The resolution flags describe numeric scale; the certificate
+also requires the existing force, area, component-direction and field checks.
+
+On a 2 m square, the field `1.5 * max(0, x + e*y)` with `e=2**-42`
+has weak first moment `e`. Replacing the tilt by `1024*e` retains the
+contact regime and the sign but gives a weak moment of `1024*e`.
+Changing only the two loaded vertex pressures on the original footprint
+gives `512.5*e` for the submitted triangular interpolant. Both exceed the
+component allowance.
+
 `ship/verify_rectangular_contact.py` supplies an independent forward oracle:
 rational vertical cross-sections integrated by Simpson 3/8, exact for the
 piecewise cubic integrands. It does not import the solver's clipping or

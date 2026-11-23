@@ -161,6 +161,37 @@ def _displayed_moment_limits(actual, target, radii, area, pressures):
                  for a,t,r in zip(actual,target,radii))
 
 
+def _clipped_boundary_allowance(points, pressures, center):
+    """Bound moment error from a one-ULP displacement of each displayed vertex."""
+    vertices = [tuple(map(Fraction, point)) for point in points]
+    ulps = [tuple(Fraction(math.ulp(float(v))) for v in point) for point in points]
+    allowance = [Fraction(0), Fraction(0)]
+    for i in range(1, len(vertices)-1):
+        ids = (0, i, i+1)
+        a,b,c = (vertices[j] for j in ids)
+        da,db,dc = (ulps[j] for j in ids)
+        u,v = [b[k]-a[k] for k in (0,1)], [c[k]-a[k] for k in (0,1)]
+        du,dv = [da[k]+db[k] for k in (0,1)], [da[k]+dc[k] for k in (0,1)]
+        area = abs(u[0]*v[1]-u[1]*v[0])/2
+        # Expand det(u+du,v+dv), retaining the cross terms.
+        area_error = sum(abs(u[k])*dv[1-k]+du[k]*abs(v[1-k])+du[k]*dv[1-k]
+                         for k in (0,1))/2
+        # Barycentric vertex interpolation preserves the pressure and
+        # coordinate envelopes, including the joint pressure/geometry error.
+        peak = max(Fraction(pressures[j])+Fraction(math.ulp(float(pressures[j])))
+                   for j in ids)
+        for k in (0,1):
+            step = max(ulps[j][k] for j in ids)
+            radius = max(abs(vertices[j][k]-center[k]) for j in ids)
+            allowance[k] += peak*(area*step + area_error*(radius+step))
+    return allowance
+
+
+def _clipped_corner_field(corners, indices):
+    # Off-base-edge intersections lie on the zero-pressure release boundary.
+    return [Fraction(0) if index is None else corners[index] for index in indices]
+
+
 def _preserves_corner_slopes(corners, normal, demands, center):
     # Traverse both parallel edges of the clipped affine field, in increasing
     # x or y. At least one edge rises for any nonzero eccentricity.
@@ -285,6 +316,24 @@ def _solve_rectangle(b,l,n,mx,my,cx,cy):
         out['full_contact_moment_resolution'] = {
             name: [None if not t else abs(t)>limit for t,limit in zip(target,limits)]
             for name,limits in [('polygon',polygon_limits),('corners',corner_limits)]}
+    else:
+        # A clipped corner sample is not a bilinear field on the full base.
+        # Reconstruct only the loaded vertices; release intersections stay zero.
+        corner_index = {(_render(cx+x*b/2,'corner'),_render(cy+y*l/2,'corner')):i
+                        for i,(x,y) in enumerate([(-1,-1),(1,-1),(1,1),(-1,1)])}
+        indices = [corner_index[tuple(point)] if p else None for point,p in zip(points,pressures)]
+        ref_corner_field = _clipped_corner_field(corners,indices)
+        _,cf,cmx,cmy = _integrate_displayed(points,ref_corner_field)
+        radii = [max(abs(Fraction(v[k])-c) for v in points) for k,c in enumerate((cx,cy))]
+        corner_limits = _displayed_moment_limits(_centered_moments(cf,(cmx,cmy),(cx,cy)),
+                                                 target,radii,area,ref_corner_field)
+        fixed_limits = _displayed_moment_limits(actual,target,radii,area,pressures)
+        boundary = _clipped_boundary_allowance(points,pressures,(cx,cy))
+        polygon_limits = tuple(f+d for f,d in zip(fixed_limits,boundary))
+        exact['clipped_moment_limits'] = (target,polygon_limits,corner_limits,indices)
+        out['clipped_contact_moment_resolution'] = {
+            name: [None if not t else abs(t)>limit for t,limit in zip(target,limits)]
+            for name,limits in [('polygon',polygon_limits),('corners',corner_limits)]}
     return out,exact
 
 
@@ -312,6 +361,12 @@ def _claim_checks(spec,out,exact,dimensions,normal,moments,center=None):
                     targets,_,limits = exact['full_contact_moment_limits']
                     checks[key] = checks[key] and _moments_agree(
                         _full_corner_moments(corners,dimensions),targets,limits)
+                elif 'clipped_moment_limits' in exact:
+                    targets,_,limits,indices = exact['clipped_moment_limits']
+                    field = _clipped_corner_field(corners,indices)
+                    _,force,mx,my = _integrate_displayed(out['contact_polygon_m'],field)
+                    checks[key] = checks[key] and _moments_agree(
+                        _centered_moments(force,(mx,my),center),targets,limits)
     key = 'proposed_contact_polygon_m'
     if key in spec:
         if out['contact_polygon_m'] is None:
@@ -367,6 +422,9 @@ def _polygon_claim(spec,out,exact,dimensions,normal,moments,center):
         if not _preserves_eccentricity(actual,target): return False
         if 'full_contact_moment_limits' in exact:
             _,limits,_ = exact['full_contact_moment_limits']
+            if not _moments_agree(actual,target,limits): return False
+        elif 'clipped_moment_limits' in exact:
+            _,limits,_,_ = exact['clipped_moment_limits']
             if not _moments_agree(actual,target,limits): return False
     return (_close(area,exact['contact_area_m2']) and abs(f-normal)<=abs(normal)/10**9
             and _moments_agree(actual,target,[abs(normal*d)/10**9 for d in dimensions]))
