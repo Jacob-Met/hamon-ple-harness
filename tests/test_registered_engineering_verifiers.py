@@ -359,6 +359,12 @@ def routed(tmp_path_factory):
             {"id": "unknown-input-" + family, "mode": family,
              "spec": {selector: spec[selector], "typo_parameter": 1}},
         ])
+    refrigerator = {"subkind": "vapor_compression", "h1": 250000., "h2s": 280000.,
+                    "h3": 100000., "eta_c": .75}
+    for name, data in (("specific", {}), ("measured", {"Q_evap_W": 75000.}),
+                       ("contradictory", {"Q_evap_W": 75000., "W_comp_W": 99999.})):
+        calls.append({"id": "refrigerator-" + name, "mode": "thermo_cycles",
+                      "spec": {**refrigerator, **data}})
     cstr = {"reactor_type":"cstr","order":1,"C_A0":1,"v0":1,"T0":300,"delta_T_adiabatic":200,"k_ref":1,"T_ref":350,"E_a":80000,"gas_phase":False,"volume":1}
     calls.extend([
         {"id": "cstr-all-branches", "mode": "reactor_kinetics", "spec": {**cstr, "steady_state_branch": "all"}},
@@ -1334,6 +1340,22 @@ class RegisteredEngineeringVerifiersUnittest(unittest.TestCase):
         for args in BODE_RANGE_CASES:
             with self.subTest(case=args[0]):
                 test_registered_bode_frequency_range(self.routed_data, *args)
+
+    def test_registered_refrigeration_capacity(self):
+        specific, measured, contradictory = (
+            self.routed_data["refrigerator-" + name] for name in
+            ("specific", "measured", "contradictory")
+        )
+        self.assertTrue(all(call["completed"] for call in (specific, measured, contradictory)))
+        specific, measured, contradictory = (call["details"] for call in
+                                             (specific, measured, contradictory))
+        self.assertTrue(specific["verified"])
+        self.assertEqual(specific["COP_R"], 3.75)
+        self.assertIsNone(specific["Q_evap_W"])
+        self.assertTrue(measured["verified"])
+        self.assertEqual((measured["m_dot_kg_s"], measured["W_comp_W"], measured["Q_cond_W"]),
+                         (.5, 20000., 95000.))
+        self.assertFalse(contradictory["verified"])
 
     def test_registered_dc_gain_range(self):
         for args in DC_RANGE_CASES:
