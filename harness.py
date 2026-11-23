@@ -455,6 +455,7 @@ async def solve(session: taskbridge.Session) -> str:
         tool_session = acknowledged_tool_session(
             session_dir, run.tool_turn, run.observed_results, run.expected_calls, run.history)
       can_continue = run.tool_turn is None or tool_session is not None
+      participant_followup = False
       if delivery_targets and before_delivery is not None:
         after_delivery = await delivery_guard.snapshot(session, delivery_targets)
         issues = delivery_guard.compare(before_delivery, after_delivery)
@@ -482,6 +483,7 @@ async def solve(session: taskbridge.Session) -> str:
               "\nIf there is no validated improvement, leave the complete version in place.")
           if not resume:
             refine = session.instruction + "\n\n" + refine
+          participant_followup = True
           await taskbridge.run_process(
               [*argv, "--continue"] if resume else argv, session, env=env, cwd=str(work),
               on_line=run.on_line, stdin=refine.encode(), stop_before_sec=STOP_BEFORE_SEC,
@@ -519,6 +521,7 @@ async def solve(session: taskbridge.Session) -> str:
               instruction += archive_contract.first_instruction(*archive_plan)
             if not resume:
               instruction = session.instruction + instruction
+            participant_followup = True
             await taskbridge.run_process(
                 [*argv, "--continue"] if resume else argv,
                 session,
@@ -534,7 +537,9 @@ async def solve(session: taskbridge.Session) -> str:
             await session.log(
                 "delivery_gate: residual=" + str(len(still_missing))
             )
-      elif tool_session is not None:
+      # A complete deliverable still needs a final reply after an acknowledged
+      # tool turn. Its history proof cannot be reused after another model run.
+      if tool_session is not None and not participant_followup:
         remaining = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC)
         if remaining is None or remaining >= MIN_DELIVERY_RUN_SEC:
           await session.log("delivery_gate: continuing acknowledged tool results")
