@@ -1618,19 +1618,24 @@ def _distillation_trays(xd, xb, alpha, intersection, rect_slope, strip_slope, on
                     distance = candidate
             return steps+1, start-distance, start-advance(matrix, distance)
 
-        previous = top
-        current = top/(volatility-(volatility-one)*top)
+        first = xd/(alpha-(alpha-1)*xd)
+        previous, current = top, number(first)
         count = 1
-        feed_stage = 1 if not less(contact, current) and less(contact, previous) else None
+        feed_stage = 1 if first <= intersection < xd else None
         if one_stage:
             return 1, 1., 1
-        if less(bottom, current) and less(contact, current):
-            target = contact if less(bottom, contact) else bottom
+        reached_bottom = first <= xb
+        if not reached_bottom and first > intersection:
+            # A zero-boilup section meets the rectifier exactly at xB. Use
+            # input-rational endpoint identities before interval conversion.
+            feed_before_product = intersection > xb
+            target = contact if feed_before_product else bottom
             steps, previous, current = cross(current, target, rect, (one-rect)*top)
             count += steps
-            if not less(contact, current) and less(contact, previous):
+            if intersection >= xb:
                 feed_stage = count
-        if less(bottom, current):
+            reached_bottom = not feed_before_product or not less(bottom, current)
+        if not reached_bottom:
             slope, intercept = ((rect,(one-rect)*top) if strip is None else (strip,(one-strip)*bottom))
             steps, previous, current = cross(current, bottom, slope, intercept)
             count += steps

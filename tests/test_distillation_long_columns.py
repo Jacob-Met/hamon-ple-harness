@@ -8,27 +8,34 @@ from hamon_wave7_engineering_verifiers import dispatch_wave7_verifier
 
 def column(alpha, reflux, **changes):
     p = dict(subkind="distillation", z_F=.5, x_D=.9, x_B=.1, q=1.,
-             alpha=float(alpha), R=float(reflux), **changes)
+             alpha=float(alpha), R=float(reflux))
+    p.update(changes)
     return dispatch_wave7_verifier("electrochem_separations", p)
 
 
-def replay(alpha, reflux):
-    # Equimolar saturated-liquid feed; D=B=F/2. The stripping operating
-    # line follows directly from V' y = L' x - B xB.
+def replay(alpha, reflux, quality=1):
+    # Equimolar feed with D=B=F/2. Section flows follow from the liquid
+    # and vapor contributions qF and (1-q)F at the feed.
     with localcontext() as ctx:
         ctx.prec = 85
         a, r = D(str(alpha)), D(str(reflux))
         xd, xb, z = D(".9"), D(".1"), D(".5")
+        q = D(str(quality))
+        distillate = bottoms = D(".5")
+        lr, vr = r*distillate, (r+1)*distillate
+        ls, vs = lr+q, vr-(1-q)
+        contact = ((distillate*xd/vr+bottoms*xb/vs)/(ls/vs-lr/vr) if vs else xb)
         vapor, previous, feed = xd, xd, None
         for tray in range(1, 20000):
             liquid = vapor/(a-(a-1)*vapor)
-            if liquid <= z and feed is None:
+            if liquid <= contact and feed is None:
                 feed = tray
             if liquid <= xb:
                 final = (tray-1)+(previous-xb)/(previous-liquid)
                 return tray, float(final), feed
             previous = liquid
-            vapor = (r*liquid+xd)/(r+1) if liquid>z else ((r+2)*liquid-xb)/(r+1)
+            vapor = ((lr*liquid+distillate*xd)/vr if liquid>contact or not vs
+                     else (ls*liquid-bottoms*xb)/vs)
         raise AssertionError("independent short replay did not reach bottoms")
 
 
@@ -67,6 +74,20 @@ class LongDistillationColumns(unittest.TestCase):
                 self.assertEqual(result["N_stages_integer"],integer)
                 self.assertEqual(result["N_theoretical"],fractional)
                 self.assertEqual(result["feed_stage"],feed)
+
+    def test_long_rectifying_only_and_stripping_only_sections(self):
+        for alpha, reflux, q, count, mode in (
+                (1.01, 1000, -499.5, 699, "rectifying_only"),
+                (1.0004, 30000, -14999.5, 14960, "rectifying_only"),
+                (1.002, 0, 10000, 2350, "stripping_only")):
+            with self.subTest(mode=mode, alpha=alpha):
+                expected = replay(alpha,reflux,q)
+                self.assertEqual(expected[0],count)
+                result = column(alpha,reflux,q=q)
+                self.assertTrue(result["verified"],result)
+                self.assertEqual(result["section_mode"],mode)
+                self.assertEqual((result["N_stages_integer"],result["N_theoretical"],result["feed_stage"]),
+                                 expected)
 
     def test_true_feed_pinch_and_adjacent_finite_reflux(self):
         for reflux in (1.4, math.nextafter(1.4,0.)):
