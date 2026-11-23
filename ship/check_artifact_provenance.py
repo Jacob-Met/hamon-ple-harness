@@ -22,7 +22,7 @@ import sys
 # Each file below ships in the evaluator's serve image or is loaded/invoked by
 # the runtime. Additional top-level .py files are discovered automatically.
 FIXED_RUNTIME = {
-    "harness.py","serve.py","taskbridge.py","task-tools.ts",
+    "harness.py","serve.py","taskbridge.py","task-tools.ts","delivery-budget.ts",
     "package.json","package-lock.json","requirements.txt","submission.yaml",
 }
 SHA_RE = re.compile(r"^(?:100644|100755|100664) ([0-9a-f]{40})$")
