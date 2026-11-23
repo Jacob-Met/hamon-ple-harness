@@ -112,7 +112,97 @@ def _nozzle_brackets(mach, predicted, target, relation, increasing):
     return min(predicted, adjacent) <= target <= max(predicted, adjacent)
 
 
+def _joint_nozzle_mach(mach, area, pressure, gamma, regime):
+    """Find a single continuous nozzle state that rounds to every supplied coordinate."""
+    gm1 = gamma - 1
+    one = Decimal(1)
+
+    def cell(value):
+        wire = float(value)
+        down = Decimal.from_float(math.nextafter(wire, 0.))
+        above = math.nextafter(wire, math.inf)
+        up = Decimal.from_float(above) if math.isfinite(above) else value + (value-down)
+        return (value+down)/2, (value+up)/2
+
+    def inverse_pressure(value):
+        return (2*((value.ln()*gm1/gamma).exp()-1)/gm1).sqrt()
+
+    if pressure is not None:
+        p_low, p_high = cell(pressure)
+        # Finite slow flow can have a stagnation ratio that rounds to unity.
+        # Other observations still locate its positive Mach within that cell.
+        lo = max(inverse_pressure(max(one, p_low)), Decimal.from_float(math.ulp(0.))/2)
+        hi = inverse_pressure(p_high)
+        preferred = inverse_pressure(pressure)
+    else:
+        lo, hi = cell(mach)
+        preferred = mach
+    if mach is not None:
+        ml, mh = cell(mach)
+        lo, hi = max(lo, ml), min(hi, mh)
+        preferred = mach
+    if lo > hi:
+        return None
+
+    def log_matches(log_value, observation):
+        low, high = cell(observation)
+        return (low.ln() <= log_value <= high.ln()
+                and float(log_value.exp()) == float(observation))
+
+    def matches(candidate):
+        if float(candidate) == 0 or (mach is not None and float(candidate) != float(mach)):
+            return False
+        if pressure is not None:
+            log_pressure = (1+gm1*candidate**2/2).ln()*gamma/gm1
+            if not log_matches(log_pressure, pressure):
+                return False
+        return area is None or log_matches(_isentropic_log_area(candidate, gamma), area)
+
+    for sub in ([regime in ("sub", "subsonic")] if regime else [False, True]):
+        left, right = (lo, min(hi, one)) if sub else (max(lo, one), hi)
+        if left > right:
+            continue
+        candidate = min(max(preferred, left), right)
+        if matches(candidate):
+            return candidate
+        if area is None:
+            midpoint = (left+right)/2
+            if matches(midpoint):
+                return midpoint
+            continue
+        # Clip the area observation to this monotone branch of the same
+        # pressure/Mach interval before choosing their shared state.
+        al, ah = cell(area)
+        ends = [_isentropic_log_area(m, gamma) for m in (left, right)]
+        lower, upper = max(min(ends), max(one, al).ln()), min(max(ends), ah.ln())
+        if lower > upper:
+            continue
+        target = (lower+upper)/2
+        while left < right:
+            middle = (left*right).sqrt() if right > 2*left else (left+right)/2
+            if middle in (left, right):
+                break
+            observed = _isentropic_log_area(middle, gamma)
+            if matches(middle):
+                return middle
+            if (observed > target) == sub:
+                left = middle
+            else:
+                right = middle
+        for endpoint in (left, right):
+            if matches(endpoint):
+                return endpoint
+    return None
+
+
 def _isentropic_nozzle(params, gamma_value, gas_constant):
+    """One isentropic state must satisfy all supplied nozzle observations.
+
+    Mach, A/A* and P0/P can each supply the operating coordinate. When supplied
+    together they denote independently rounded measurements of the same state.
+    A stated regime constrains that state. Area-only inversion defaults to the
+    supersonic branch.
+    """
     def positive(value, name):
         value = float(value)
         if not math.isfinite(value) or value <= 0:
@@ -137,21 +227,31 @@ def _isentropic_nozzle(params, gamma_value, gas_constant):
         # Preserve its excess above unity, including when gamma is near one.
         ctx.prec = 80 + max(0, gamma.adjusted())
         gm1 = gamma - 1
-        area = pressure = None
-        if params.get("mach") is not None:
-            mach = positive(params["mach"], "Mach number")
-        elif params.get("area_ratio") is not None:
-            area = positive(params["area_ratio"], "area ratio")
-            regime = str(params.get("regime", "supersonic")).strip().lower()
+        mach, area, pressure = (positive(params[key], label) if params.get(key) is not None else None
+                                for key, label in (("mach", "Mach number"), ("area_ratio", "area ratio"),
+                                                   ("p0_over_p", "stagnation pressure ratio")))
+        regime = str(params["regime"]).strip().lower() if "regime" in params else None
+        if regime is not None and regime not in ("sub", "subsonic", "sup", "supersonic"):
+            raise ValueError("Nozzle regime must be subsonic or supersonic")
+        if area is not None and area < 1:
+            raise ValueError("Isentropic A/A* must be at least one")
+        supplied = sum(value is not None for value in (mach, area, pressure))
+        if pressure is not None and (pressure < 1 or (pressure == 1 and supplied == 1)):
+            raise ValueError("A pressure-only flowing nozzle requires P0/P greater than one and joint ratios must be at least one")
+        if supplied == 0:
+            raise ValueError("isentropic requires 'mach', 'area_ratio', or 'p0_over_p'")
+        joint = supplied > 1
+        if joint:
+            mach = _joint_nozzle_mach(mach, area, pressure, gamma, regime)
+            if mach is None:
+                return {"domain": "compressible_acoustics", "subkind": "isentropic", "verified": False,
+                        "reason": "No common nozzle state matches the supplied Mach, area, pressure and regime"}
+        elif mach is None and area is not None:
+            regime = regime or "supersonic"
             mach = Decimal.from_float(_nozzle_area_mach(area, gamma, regime))
-        elif params.get("p0_over_p") is not None:
-            pressure = positive(params["p0_over_p"], "stagnation pressure ratio")
-            if pressure <= 1:
-                raise ValueError("A finite-area flowing nozzle requires P0/P greater than one")
+        elif mach is None:
             m = (2 * ((pressure.ln()*gm1/gamma).exp() - 1) / gm1).sqrt()
             mach = Decimal.from_float(publish(m, "Mach number"))
-        else:
-            raise ValueError("isentropic requires 'mach', 'area_ratio', or 'p0_over_p'")
 
         t_ratio = 1 + gm1*mach**2/2
         log_p_ratio = t_ratio.ln() * gamma/gm1
@@ -183,7 +283,10 @@ def _isentropic_nozzle(params, gamma_value, gas_constant):
         energy_error = abs((ts + speed**2 * gm1/(2*gamma*gas)) / t0 - 1)
         pressure_error = abs(p0 / (ps*pressure) - 1) if pressure is not None else 0
         input_resolved = True
-        if area is not None:
+        if joint:
+            input_resolved = ((area is None or float(area) == result["A_over_Astar"])
+                              and (pressure is None or float(pressure) == result["P0_over_P"]))
+        elif area is not None:
             subsonic = regime in ("sub", "subsonic")
             on_branch = mach == 1 if area == 1 else (mach < 1 if subsonic else mach > 1)
             input_resolved = on_branch and _nozzle_brackets(
@@ -191,6 +294,8 @@ def _isentropic_nozzle(params, gamma_value, gas_constant):
         elif pressure is not None:
             input_resolved = _nozzle_brackets(
                 mach, log_p_ratio, pressure.ln(), lambda m: (1 + gm1*m*m/2).ln()*gamma/gm1, True)
+        if regime and mach != 1:
+            input_resolved = input_resolved and ((mach < 1) == (regime in ("sub", "subsonic")))
         residual = float(max(mass_error, energy_error, pressure_error))
         return {"domain": "compressible_acoustics", "subkind": "isentropic", **result,
                 "residual": residual, "verified": input_resolved and residual < 1e-10}
