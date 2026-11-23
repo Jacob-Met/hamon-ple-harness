@@ -1,9 +1,10 @@
 """Sufficient EAGLE routed-copper witnesses for explicit outer-layer artwork."""
 
-from collections import defaultdict, deque
+from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 import re
 
+from hamon_eagle_walk import plated_walk, rooted_tree
 from hamon_eagle_netlist import _named, _physical_pads, _read
 
 
@@ -75,32 +76,6 @@ def on_segment(point, left, right):
         and min(ay, by) <= y <= max(ay, by)
         and (x - ax) * (by - ay) == (y - ay) * (bx - ax)
     )
-
-
-def reaches_plating(steps, drills):
-    """Each used face must reach past the drilled void on this actual walk."""
-    for i, step in enumerate(steps):
-        diameter = drills.get(tuple(step["source"]))
-        if diameter is None:
-            continue
-        for center, direction in ((step["start"], -1), (step["end"], 1)):
-            if center[0] != "copper":
-                continue
-            j = i + direction
-            outside = False
-            while 0 <= j < len(steps):
-                edge = steps[j]
-                if edge["source"][0] != "wire":
-                    break
-                far = edge["start"] if direction < 0 else edge["end"]
-                dx, dy = far[2] - center[2], far[3] - center[3]
-                if 4 * (dx * dx + dy * dy) > diameter * diameter:
-                    outside = True
-                    break
-                j += direction
-            if not outside:
-                return False
-    return True
 
 
 def routed_continuity(prediction, board_path, signal_name):
@@ -201,29 +176,19 @@ def routed_continuity(prediction, board_path, signal_name):
         for a, b in zip(on_line, on_line[1:]):
             join(a, b, ref)
     root = terminals[0]
-    previous = {root: None}
-    queue = deque([root])
-    while queue:
-        a = queue.popleft()
-        for b, ref in edges[a]:
-            if b not in previous:
-                previous[b] = (a, ref)
-                queue.append(b)
+    previous = rooted_tree(edges, root)
     missing = [list(t) for t in terminals if t not in previous]
     if missing:
         result.update(reason="no_supported_copper_path", unreachable=missing)
         return result
     witnesses = []
+    # Only ambiguous plated landings trigger alternative graph searches.
+    remaining = 1_000_000
     for destination in terminals[1:]:
-        current = destination
-        steps = []
-        while current != root:
-            parent, ref = previous[current]
-            steps.append(dict(source=list(ref), start=list(parent), end=list(current)))
-            current = parent
-        steps.reverse()
-        if not reaches_plating(steps, drills):
-            result["reason"] = "trace_does_not_demonstrably_reach_plating"
+        steps, remaining, exhausted = plated_walk(edges, previous, root, destination, drills, remaining)
+        if steps is None:
+            result["reason"] = ("plated_route_search_budget_exhausted" if exhausted
+                                else "trace_does_not_demonstrably_reach_plating")
             return result
         witnesses.append(dict(start=list(root), end=list(destination), steps=steps))
     result.update(status="witnessed", witnesses=witnesses)
