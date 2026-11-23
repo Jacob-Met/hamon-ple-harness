@@ -40,6 +40,23 @@ class ArchiveInterruption(unittest.TestCase):
             self.assertFalse(archive_checkpoint.verify_typed_members(archive, ["memo.docx"], needed - 1))
             self.assertTrue(archive_checkpoint.verify_typed_members(archive, ["memo.docx"], needed))
 
+    def test_late_members_preserve_concurrent_archive_and_reject_invalid_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "submission.zip"
+            names = ["result.json"]
+            (root / names[0]).write_text("{invalid")
+            with self.assertRaises(ValueError):
+                archive_checkpoint.publish(root, target, names, prior_members={"result.json": None})
+            self.assertFalse(target.exists())
+            (root / names[0]).write_text('{"answer": 10}')
+            def competing_writer(candidate, destination):
+                destination.write_bytes(b"participant's own archive")
+                raise FileExistsError(str(destination))
+            with mock.patch.object(os, "link", side_effect=competing_writer), self.assertRaises(FileExistsError):
+                archive_checkpoint.publish(root, target, names, prior_members={"result.json": None})
+            self.assertEqual(target.read_bytes(), b"participant's own archive")
+
     def test_raw_foundation_contract_and_ambiguity(self):
         text = public_task("foundation-strategy")
         names = archive_contract.member_names(text)
