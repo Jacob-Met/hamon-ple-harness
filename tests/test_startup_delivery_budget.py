@@ -96,6 +96,22 @@ class StartupDeliveryBudget(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await self.first_run(task), share)
                 self.assertEqual(task.calls, expected)
 
+    async def test_pause_after_session_clock_sample_spends_the_startup_allowance(self):
+        task = TaskProtocol(IFC, 30, (30,))
+        task.deadline = task.origin + 30
+
+        def sampled_time_left():
+            left = taskbridge.Session.time_left(task)
+            if task.now == task.origin:
+                task.now += 5  # Resume after the session has sampled the clock.
+            return left
+
+        with mock.patch.object(taskbridge, "time", SimpleNamespace(monotonic=lambda: task.now)), \
+             mock.patch.object(task, "time_left", sampled_time_left):
+            self.assertEqual(await self.first_run(task), 9)
+        self.assertEqual(task.calls, [("graded", 13, 13)])
+        self.assertEqual(task.deadline - task.now, 12)
+
     async def test_unknown_clock_shares_one_29_second_allowance(self):
         task = TaskProtocol(ARCHIVE, None, (19, 9.5, 50))
         self.assertIsNone(await self.first_run(task))

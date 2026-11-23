@@ -364,11 +364,12 @@ async def solve(session: taskbridge.Session) -> str:
       )
       # Share one observation allowance before the participant starts. Later
       # delivery verification retains its own existing per-operation limits.
+      observation_start = monotonic()
       observation_budget = STARTUP_OBSERVATION_SECONDS
       left = session.time_left()
       if left is not None:
         observation_budget = min(observation_budget, max(0, left - STARTUP_TASK_RESERVE_SECONDS))
-      observation_deadline = monotonic() + observation_budget
+      observation_deadline = observation_start + observation_budget
       before_delivery = await delivery_guard.snapshot(
           session, delivery_targets, deadline=observation_deadline
       )
