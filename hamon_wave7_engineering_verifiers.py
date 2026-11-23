@@ -180,20 +180,22 @@ def _vapor_compression_cycle(params: Mapping[str, Any]) -> Dict[str, Any]:
 
     try:
         h1, h2s, h3 = (quantity(key) for key in ("h1", "h2s", "h3"))
-        eta, flow = quantity("eta_c", 1), quantity("m_dot", 1)
-        if h2s <= h1 or h1 <= h3 or not (0 < eta <= 1) or flow <= 0:
+        eta = quantity("eta_c", 1)
+        if h2s <= h1 or h1 <= h3 or not (0 < eta <= 1):
             raise ValueError
     except (TypeError, ValueError, OverflowError):
         return dict(result, error="invalid_vcr_enthalpies")
 
-    # These extensive differences are invariant to a common enthalpy datum.
+    # These specific enthalpy differences are invariant to a common enthalpy datum.
     isentropic_rise = h2s - h1
     work = isentropic_rise / eta
     cold = h1 - h3
     hot = cold + work
     cop_r = cold / work
     cop_hp = hot / work
-    carnot_checked = "T_L" in params and "T_H" in params
+    if ("T_L" in params) != ("T_H" in params):
+        return dict(result, error="incomplete_vcr_reservoir_pair")
+    carnot_checked = "T_L" in params
     carnot_ok = True
     if carnot_checked:
         try:
@@ -204,13 +206,38 @@ def _vapor_compression_cycle(params: Mapping[str, Any]) -> Dict[str, Any]:
             return dict(result, error="invalid_vcr_reservoirs")
         carnot_ok = cop_r <= low / (high - low) + Fraction.from_float(1e-9)
 
+    # Specific differences determine the COP, but power also needs a mass flow.
+    # A measured energy rate independently fixes flow through its component.
+    specific = {"Q_evap_W": cold, "W_comp_W": work, "Q_cond_W": hot}
+    try:
+        flows = {}
+        if "m_dot" in params:
+            flows["m_dot"] = quantity("m_dot")
+        for field, per_kg in specific.items():
+            if field in params:
+                flows[field] = quantity(field) / per_kg
+        if any(value <= 0 for value in flows.values()):
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        return dict(result, error="invalid_vcr_mass_flow_or_power")
+
+    source = next(iter(flows), None)
+    flow = flows[source] if source is not None else None
+    observation_residual = max((abs(value-flow) / max(value, flow) for value in flows.values()),
+                               default=Fraction(0))
+    if observation_residual >= Fraction(1, 10**11):
+        return dict(result, error="inconsistent_vcr_mass_flow_and_power",
+                    rate_observation_residual=float(observation_residual))
+
     try:
         h2 = h1 + work
         primary = float(h2)
         correction = float(h2 - Fraction(primary))
         exact_values = {"q_evap": cold, "q_cond": hot, "w_comp": work,
-                        "Q_evap_W": flow * cold, "W_comp_W": flow * work,
                         "COP_R": cop_r, "COP_HP": cop_hp}
+        if flow is not None:
+            exact_values["m_dot_kg_s"] = flow
+            exact_values.update({name: flow * value for name, value in specific.items()})
         wire = {name: float(value) for name, value in exact_values.items()}
     except (OverflowError, ValueError):
         return dict(result, error="vcr_result_outside_numeric_range")
@@ -226,8 +253,10 @@ def _vapor_compression_cycle(params: Mapping[str, Any]) -> Dict[str, Any]:
         abs(decoded["q_evap"] + decoded["w_comp"] - decoded["q_cond"]) / hot,
         abs((decoded["COP_HP"] - decoded["COP_R"]) - 1),
     ))
-    residual = max(residuals)
-    result.update(wire, h2=primary, h2_correction=correction, h4=float(h3),
+    residual = max(*residuals, observation_residual)
+    if flow is None:
+        wire.update({key: None for key in ("m_dot_kg_s", *specific)})
+    result.update(wire, rate_basis=source, rates_identified=flow is not None, h2=primary, h2_correction=correction, h4=float(h3),
                   carnot_checked=carnot_checked, residual=float(residual),
                   verified=bool(carnot_ok and residual < 1e-11))
     return result
