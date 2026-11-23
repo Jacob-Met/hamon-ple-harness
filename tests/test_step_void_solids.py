@@ -119,7 +119,7 @@ class StepVoidSolidTests(unittest.TestCase):
     def test_concave_outer_and_through_hole_use_solid_membership(self):
         lshape = prism_step([(0.,0.),(4.,0.),(4.,1.),(1.,1.),(1.,4.),(0.,4.)],height=4.)
         ring = prism_step([(0.,0.),(4.,0.),(4.,4.),(0.,4.)],
-                          [[(1.,1.),(1.,3.),(3.,3.),(3.,1.)]],height=4.)
+                          [[(1.,1.),(3.,1.),(3.,3.),(1.,3.)]],height=4.)
         for outer, origin, expected in ((lshape,(.25,2.,1.),27.875),
                                         (ring,(.25,.25,1.),47.875)):
             got = self.verify(with_voids(outer,box(origin,(.5,.5,.5))))
