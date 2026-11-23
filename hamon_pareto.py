@@ -140,6 +140,10 @@ _WAVE8_INPUTS = {
         "machine_kind rotation_rpm inlet outlet mass_flow_kg_s measured_fluid_torque_N_m measured_rotor_static_enthalpy_change_J_kg isentropic_specific_work_J_kg stage_boundary_speeds_m_s suction_flange",
         "energy_residual_J_kg",
     ),
+    "layered_footing_settlement": (
+        "civil_geotech", "settlement_column rectangular_loads settlement_layers proposed_settlement_m",
+        "dual_solver_rel_residual",
+    ),
     "consolidation_1d": (
         "civil_geotech",
         "H_clay_m e0 Cc sigma_v0_eff_Pa delta_sigma_v_Pa cv_m2_s time_s drainage sigma_preconsolidation_Pa Cr",
@@ -163,6 +167,8 @@ _WAVE8_INPUTS = {
 }
 _RANKINE_LAYER_KEYS = "thickness_m phi_deg gamma_above_water_N_m3 gamma_submerged_N_m3 gamma_saturated_N_m3"
 _WAVE8_ROW_KEYS = {
+    "rectangular_loads": "center_x_m center_y_m width_m length_m net_pressure_Pa",
+    "settlement_layers": "top_depth_m bottom_depth_m e0 Cc Cr sigma_v0_eff_Pa sigma_preconsolidation_Pa",
     "load_history": "time_s surcharge_Pa",
     "nodes": "id demand_m3_s fixed_head_m",
     "pipes": "id from to length_m diameter_m roughness_m minor_loss_K",
@@ -173,6 +179,7 @@ _WAVE8_ROW_KEYS = {
 }
 _STATION_KEYS = "radius_m meridional_velocity_m_s absolute_tangential_velocity_m_s absolute_flow_angle_deg relative_flow_angle_deg blade_metal_angle_deg"
 _WAVE8_RECORD_KEYS = {
+    "settlement_column": "x_m y_m",
     "inlet": _STATION_KEYS,
     "outlet": _STATION_KEYS,
     "stage_boundary_speeds_m_s": "inlet outlet",

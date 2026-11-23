@@ -3106,6 +3106,22 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
         result = verify_bearing_capacity(spec, legacy_rectangle=("B_m" in spec or "L_m" in spec))
         return {**result, "kind": kind, "dual_verified": result["conservation_verified"]}
     if kind == "consolidation_settlement":
+        if "settlement_layers" in spec or "settlement_column" in spec:
+            from hamon_footing_settlement import verify_finite_layer_settlement
+            result = verify_finite_layer_settlement(spec)
+            try:
+                limit = float(spec["max_settlement_m"])
+                if not math.isfinite(limit):
+                    raise ValueError("Require a finite settlement limit")
+                if result["ok"]:
+                    settlement = result["primary_consolidation_settlement_m"]
+                    passed = settlement <= limit
+                    consistent = passed == (result["corner_settlement_m"] <= limit)
+                    return {**result, "settlement_m": settlement, "passes_limit": passed,
+                            "dual_verified": result["conservation_verified"] and consistent}
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                result["reason"] = str(exc)
+            return {**result, "passes_limit": False, "dual_verified": False}
         from hamon_consolidation import consolidation_load, primary_settlement, settlement_from_void_loss
         try:
             h, e0, cc, cr = (float(spec[k]) for k in ("H_m", "e0", "Cc", "Cr"))
