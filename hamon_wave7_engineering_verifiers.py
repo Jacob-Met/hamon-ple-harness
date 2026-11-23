@@ -821,6 +821,26 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
         t_ho = t_hi if arr == "condenser" else (t_hi - q_actual / c_h)
         t_co = t_ci if arr == "boiler" else (t_ci + q_actual / c_c)
 
+        if arr == "counterflow" and q_actual / c_h > 0.5 * (t_hi - t_ci):
+            # Once the hot stream traverses most of the inlet span, its
+            # remaining approach can be smaller than an ulp of the inlet.
+            # Compute 1-epsilon (or 1-Cr*epsilon) before rounding the outlet.
+            with localcontext() as ctx:
+                ctx.prec = 80
+                cm, cx = Decimal(c_min), Decimal(max(c_h, c_c))
+                n = Decimal(ua) / cm
+                if cm == cx:
+                    remaining = 1 / (1 + n)
+                else:
+                    d = (cx - cm) / cx
+                    decay = (-n * d).exp()
+                    denominator = d + (cm / cx) * (1 - decay)
+                    remaining = d / denominator
+                    if c_h == c_min:
+                        remaining *= decay
+                cold, hot = Decimal(t_ci), Decimal(t_hi)
+                t_ho = float(cold + (hot - cold) * remaining)
+
         second_law_ok = bool((t_ho >= t_ci - 1e-9) and (t_co <= t_hi + 1e-9))
         if arr == "parallel":
             second_law_ok = bool(second_law_ok and (t_ho >= t_co - 1e-9))
@@ -872,6 +892,10 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
             value = expected[key]
             reference = inlet.get(key, 0.0)
             scale = max(abs(value - reference), abs(measured - reference))
+            if arr == "counterflow" and key in inlet:
+                other_inlet = t_ci if key == "T_h_out" else t_hi
+                approach = max(abs(value - other_inlet), abs(measured - other_inlet))
+                scale = min(scale, approach)
             roundoff = 2 * max(math.ulp(value), math.ulp(measured)) if key in inlet else 0.0
             difference = max(0.0, abs(value - measured) - roundoff)
             observation_residuals[key] = difference / scale if scale else 0.0
