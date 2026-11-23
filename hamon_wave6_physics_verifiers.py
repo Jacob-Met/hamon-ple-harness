@@ -1424,43 +1424,8 @@ def solve_mohr_vessel_buckling(params: Mapping[str, Any]) -> Dict[str, Any]:
         return _lame_stress(params)
 
     if subkind == "column_buckling":
-        e_mod = float(params["E"])
-        sy = float(params["sigma_y"])
-        length = float(params["L"])
-        area = float(params["A"])
-        i_min = float(params["I"])
-        k_eff = float(params.get("K", 1.0))
-
-        r_gyr = math.sqrt(i_min / area)
-        slenderness = k_eff * length / r_gyr
-        c_c = math.sqrt(2.0 * (math.pi ** 2) * e_mod / sy)
-        if slenderness >= c_c:
-            regime = "euler_elastic"
-            sigma_cr = (math.pi ** 2) * e_mod / (slenderness ** 2)
-        else:
-            regime = "johnson_inelastic"
-            sigma_cr = sy * (1.0 - (sy * (slenderness ** 2)) / (4.0 * (math.pi ** 2) * e_mod))
-        p_cr = sigma_cr * area
-
-        if HAS_SYMPY:
-            s_sym = sp.Symbol("lam", positive=True)
-            euler_at_cc = float(((sp.pi ** 2) * e_mod / (s_sym ** 2)).subs(s_sym, c_c).evalf())
-            johnson_at_cc = float((sy * (1 - sy * (s_sym ** 2) / (4 * (sp.pi ** 2) * e_mod))).subs(s_sym, c_c).evalf())
-        else:
-            euler_at_cc = float((math.pi ** 2) * e_mod / (c_c ** 2))
-            johnson_at_cc = float(sy * (1.0 - sy * (c_c ** 2) / (4.0 * (math.pi ** 2) * e_mod)))
-        residual = abs(euler_at_cc - johnson_at_cc) / sy
-        return {
-            "domain": "solid_mohr_vessel_buckling",
-            "subkind": subkind,
-            "regime": regime,
-            "slenderness_ratio": slenderness,
-            "transition_Cc": c_c,
-            "sigma_cr": sigma_cr,
-            "P_cr_N": p_cr,
-            "residual": residual,
-            "verified": residual < 1e-11,
-        }
+        from hamon_column_buckling import column_buckling
+        return column_buckling(params)
 
     raise ValueError(f"Unsupported solid_mohr_vessel_buckling subkind: {subkind}")
 
