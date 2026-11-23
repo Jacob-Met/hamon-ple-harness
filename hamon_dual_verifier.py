@@ -2984,6 +2984,10 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
         from hamon_turbomachinery import verify_turbomachinery
         result = verify_turbomachinery(spec)
         return {**result, "kind": kind, "dual_verified": result["conservation_verified"]}
+    if kind == "pump_duty":
+        from hamon_pipe_network import verify_pump_duty
+        result = verify_pump_duty(spec)
+        return {**result, "kind": kind, "dual_verified": result["duty_verified"]}
     if kind == "pipe_network":
         from hamon_pipe_network import verify_pipe_network
         result = verify_pipe_network(spec)
