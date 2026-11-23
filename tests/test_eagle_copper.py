@@ -153,6 +153,23 @@ class CopperWitnessTests(unittest.TestCase):
                 nodes = [tuple(steps[0]["start"])] + [tuple(s["end"]) for s in steps]
                 self.assertEqual(len(nodes), len(set(nodes)))
 
+    def test_unsupported_geometry_runtime_remains_unresolved(self):
+        from unittest.mock import patch
+        from shapely.errors import UnsupportedGEOSVersionError
+
+        direct = wire(0, 0, 4, 0)
+        with patch("hamon_eagle_material.constrained_delaunay_triangles",
+                   side_effect=UnsupportedGEOSVersionError("GEOS 3.10 required")) as backend:
+            out = self.routed(direct, end=(4, 0),
+                              plain='<hole x="2" y="0" drill=".05"/>')
+            self.assertEqual(out["status"], "unresolved")
+            self.assertFalse(out["witnesses"])
+            self.assertEqual(out["material"]["reason"], "finite_width_geometry_unresolved")
+            backend.assert_called_once()
+            backend.reset_mock()
+            self.assertEqual(self.routed(direct, end=(4, 0))["status"], "witnessed")
+            backend.assert_not_called()
+
     def test_finite_width_bore_threshold_and_placed_cut(self):
         direct = wire(0, 0, 4, 0).replace('width=".1"', 'width=".254"')
         for diameter, expected in [(".127", "witnessed"), (".254", "unresolved"),

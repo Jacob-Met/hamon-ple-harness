@@ -249,7 +249,7 @@ def material_fallback(result, board, signal, terminals, elements, footprints, bo
     """Prove additional routes using a conservative subset of finite copper."""
     try:
         from hamon_eagle_material import material_continuity
-        from shapely.errors import GEOSException
+        from shapely.errors import ShapelyError
     except ImportError:
         result["material"] = {"reason": "finite_width_geometry_dependency_unavailable"}
         return result
@@ -337,7 +337,7 @@ def material_fallback(result, board, signal, terminals, elements, footprints, bo
             omitted(ref, exc)
     try:
         proof = material_continuity(terminals, primitives, bores)
-    except (GEOSException, ValueError, OverflowError) as exc:
+    except (ShapelyError, ValueError, OverflowError) as exc:
         result["material"] = {"reason": "finite_width_geometry_unresolved", "detail": str(exc)}
         return result
     result["material"] = proof["material"]
