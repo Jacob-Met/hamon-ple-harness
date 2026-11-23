@@ -1,6 +1,6 @@
 # Stress on a specified plane
 
-The registered `hamon_conservation_cad_verifier` accepts a symmetric Cartesian stress tensor in `solid_mohr_vessel_buckling` mode with `subkind: "mohr_stress"`. Specify the tensor or the existing normal and shear component fields. When both forms are present their values must agree. Tensor entries use the same stress unit throughout. The optional `plane_normal` is a nonzero three-component direction in the tensor’s Cartesian frame. The solver normalizes it.
+The registered `hamon_conservation_cad_verifier` accepts a symmetric Cartesian stress tensor in `solid_mohr_vessel_buckling` mode with `subkind: "mohr_stress"`. Specify the tensor or the existing normal and shear component fields. When both forms are present their values must agree. Supply JSON numbers for every tensor entry and direction component, including any duplicate components accompanying a tensor. Tensor entries use the same stress unit throughout. The optional `plane_normal` is a nonzero three-component direction in the tensor’s Cartesian frame. The solver normalizes it.
 
 ```json
 {"mode":"solid_mohr_vessel_buckling","spec":{"subkind":"mohr_stress","stress_tensor":[[120,0,0],[0,0,0],[0,0,0]],"plane_normal":[1,1,1]}}

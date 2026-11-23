@@ -1256,8 +1256,9 @@ def _rounded_stress_root(compare):
     return sign*value(chosen)
 
 
-def _stress_number(value):
-    if isinstance(value, (bool, np.bool_)):
+def _stress_number(value, *, legacy_text=False):
+    numeric = isinstance(value, (int, float, np.integer, np.floating))
+    if isinstance(value, (bool, np.bool_)) or not (numeric or (legacy_text and isinstance(value, str))):
         raise ValueError("Stress and direction inputs must be finite real numbers")
     if isinstance(value, (int, np.integer)):
         return Fraction(int(value))
@@ -1272,7 +1273,7 @@ def _cauchy_tensor(params):
             ("tau_xy", "sigma_y", "tau_yz"),
             ("tau_xz", "tau_yz", "sigma_z"))
     if "stress_tensor" not in params:
-        return [[_stress_number(params.get(key, 0)) for key in row] for row in keys]
+        return [[_stress_number(params.get(key, 0), legacy_text=True) for key in row] for row in keys]
     matrix = np.asarray(params["stress_tensor"], dtype=object)
     if matrix.shape != (3, 3):
         raise ValueError("stress_tensor must be a symmetric 3 by 3 array")
@@ -1338,7 +1339,7 @@ def _mohr_stress(params):
         stress = _cauchy_tensor(params)
         x, y, z = (stress[i][i] for i in range(3))
         xy, xz, yz = stress[0][1], stress[0][2], stress[1][2]
-        strength = _stress_number(params["sigma_yield"]) if params.get("sigma_yield") is not None else None
+        strength = _stress_number(params["sigma_yield"], legacy_text=True) if params.get("sigma_yield") is not None else None
         plane = _plane_traction(stress,params["plane_normal"]) if "plane_normal" in params else None
         if strength is not None and strength < 0:
             raise ValueError("Yield strength must be nonnegative")

@@ -64,8 +64,13 @@ class MohrTractions(unittest.TestCase):
         for bad in ([[1,2],[2,1]], [[0,1,0],[0,0,0],[0,0,0]],
                     [[False,0,0],[0,1,0],[0,0,1]], [[float('inf'),0,0],[0,1,0],[0,0,1]]):
             self.assertFalse(solve(stress_tensor=bad)["verified"])
-        for normal in ([0,0,0],[1,0],[0,None,1],[True,0,1]):
+        for normal in ([0,0,0],[1,0],[0,None,1],[True,0,1],["1",0,0]):
             self.assertFalse(solve(sigma_x=1,plane_normal=normal)["verified"])
+        self.assertFalse(solve(stress_tensor=[["9007199254740993",0,0],[0,0,0],[0,0,0]],
+                               sigma_x=9007199254740992)["verified"])
+        self.assertFalse(solve(stress_tensor=[[2**53,0,0],[0,0,0],[0,0,0]],
+                               sigma_x="9007199254740993")["verified"])
+        self.assertTrue(solve(sigma_x="120")["verified"])
         matching=dict(stress_tensor=[[1,2,0],[2,3,0],[0,0,4]],tau_xy=2)
         self.assertTrue(solve(**matching)["verified"])
         matching["tau_xy"]=3
