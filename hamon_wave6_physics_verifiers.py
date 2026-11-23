@@ -1075,7 +1075,12 @@ def _transmission_port(params):
         return_loss, loss_status = None, "infinite"
         if gamma:
             try:
-                return_loss = wire(-20*ctx.log10(gamma))
+                # 1-|Gamma|² equals the normalized real load-wave power.
+                # Its zero and sign survive a purely reactive termination.
+                power_fraction = power/plus**2
+                loss_db = (-10*ctx.log1p(-power_fraction)/ctx.log(10)
+                           if abs(power_fraction) <= .5 else -20*ctx.log10(gamma))
+                return_loss = wire(loss_db)
                 loss_status = "finite"
             except ArithmeticError:
                 loss_status = "outside_numeric_range"

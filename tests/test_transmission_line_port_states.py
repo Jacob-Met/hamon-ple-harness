@@ -62,6 +62,15 @@ class TransmissionPortStates(unittest.TestCase):
             self.assertEqual(r["VSWR_status"], "outside_numeric_range")
             json.dumps(r, allow_nan=False)
 
+    def test_purely_reactive_reflection_has_exact_zero_return_loss(self):
+        for impedance, reactance in [(50,19), (37,1), (50,-19)]:
+            r = run_router_conservation_cad_verifier(dict(mode="rf_transmission_rlc", spec=dict(
+                subkind="transmission_line", Z0=impedance, R_L=0, X_L=reactance, length_wavelengths=.17)))
+            self.assertTrue(r["verified"],r)
+            self.assertEqual(r["VSWR_status"], "unbounded")
+            self.assertEqual(r["gamma_load_mag"], 1.)
+            self.assertEqual(r["return_loss_dB"], 0.)
+
     def test_reflection_and_admittance_of_matched_line(self):
         spec = dict(subkind="transmission_line", Z0=50, R_L=50, alpha_np_m=.01,
                     length_m=1, length_wavelengths=.317)
