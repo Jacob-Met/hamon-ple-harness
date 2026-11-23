@@ -1907,66 +1907,8 @@ def solve_continuous_beam_2span_dual(spec: dict[str, Any]) -> dict[str, Any]:
     if min(L1, L2, E, I) <= 0:
         raise ValueError("two-span beam requires positive span lengths, modulus and inertia")
 
-    # Path A: Clapeyron's three-moment relation for pinned outer ends.
-    middle_moment = -(q1 * L1**3 + q2 * L2**3) / (8 * (L1 + L2))
-    left = q1 * L1 / 2 + middle_moment / L1
-    right = q2 * L2 / 2 + middle_moment / L2
-    middle = q1 * L1 + q2 * L2 - left - right
-
-    # Path B: all three transverse displacements are prescribed. For constant EI
-    # and uniform load in each span, cubic Hermite stiffness plus consistent
-    # nodal loads gives exact end forces. The quartic load field missing inside
-    # the element has zero displacement AND rotation at both ends.
-    spans = ((L1, q1), (L2, q2))
-    diagonal = [Fraction(0) for _ in range(3)]
-    off_diagonal = []
-    moments = [Fraction(0) for _ in range(3)]
-    for i, (length, load) in enumerate(spans):
-        stiffness = E * I / length
-        diagonal[i] += 4 * stiffness
-        diagonal[i + 1] += 4 * stiffness
-        off_diagonal.append(2 * stiffness)
-        end_load = load * length**2 / 12
-        moments[i] -= end_load
-        moments[i + 1] += end_load
-
-    # Solve the symmetric positive-definite tridiagonal rotation equations.
-    # Keeping the three unknowns rational also preserves vanishing end forces.
-    for i in range(2):
-        factor = off_diagonal[i] / diagonal[i]
-        diagonal[i + 1] -= factor * off_diagonal[i]
-        moments[i + 1] -= factor * moments[i]
-    rotation = [Fraction(0) for _ in range(3)]
-    rotation[2] = moments[2] / diagonal[2]
-    for i in (1, 0):
-        rotation[i] = (moments[i] - off_diagonal[i] * rotation[i + 1]) / diagonal[i]
-
-    reactions = [Fraction(0) for _ in range(3)]
-    for i, (length, load) in enumerate(spans):
-        shear = 6 * E * I * (rotation[i] + rotation[i + 1]) / length**2
-        reactions[i] += load * length / 2 + shear
-        reactions[i + 1] += load * length / 2 - shear
-    end_moment = (2 * rotation[0] + 4 * rotation[1]) * E * I / L1 - q1 * L1**2 / 12
-    if reactions != [left, middle, right] or end_moment != middle_moment:
-        raise ValueError("2-span continuous beam Three-Moment vs FEM discrepancy")
-
-    # Check the middle support and all interior zero-shear sections, including uplift.
-    peak_moment = abs(middle_moment)
-    for length, reaction, load in ((L1, left, q1), (L2, right, q2)):
-        if load:
-            x = reaction / load
-            if 0 < x < length:
-                peak_moment = max(peak_moment, abs(reaction * x / 2))
-    return {
-        "R_A_N": float(left),
-        "R_B_N": float(middle),
-        "R_C_N": float(right),
-        "M_B_hogging_Nm": float(abs(middle_moment)),
-        "M_max_Nm": float(peak_moment),
-        "equilibrium_residual_N": float(abs(sum(reactions) - q1 * L1 - q2 * L2)),
-        "dual_rel_discrepancy": 0.0,
-        "dual_verified": True,
-    }
+    from hamon_two_span_beam import two_span_beam
+    return two_span_beam(L1, L2, q1, q2, E * I, spec.get("support_conditions", {}))
 
 
 def solve_bolt_group_eccentric_dual(spec: dict[str, Any]) -> dict[str, Any]:
