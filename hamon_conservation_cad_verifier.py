@@ -1078,7 +1078,121 @@ def _thin_tube_properties(spec):
     return radius, area, inertia
 
 
-def _tube_stress_bounds(boundary, moment, shear, torque, axial, radius, area, inertia):
+def _beam_column_response(boundary, span, modulus, inertia, compression, point, distributed):
+    """Stable small-slope beam-column under constant centroidal dead compression.
+
+    Let theta=y', M=EI*theta', and S be the global transverse resultant.
+    The material-section shear is -M'=S+N*theta. With a uniform lateral load,
+    EI*theta''+N*theta=-S0+q*x on the full cantilever or symmetric half-span.
+    """
+    from fractions import Fraction
+    from mpmath import mp
+    from mpmath.ctx_iv import MPIntervalContext
+
+    cantilever = boundary.startswith("cantilever")
+    fixed_pair = boundary == "fixed_fixed_udl"
+    length = Fraction(span) if cantilever else Fraction(span)/2
+    rigidity = Fraction(modulus)*Fraction(inertia)
+    load_ratio = Fraction(compression)*length**2/rigidity
+    ctx = mp.clone()
+    # The finite N->0 solution cancels inverse powers of the dimensionless
+    # compression. Preserve those digits rather than dropping that load.
+    missing = max(0, load_ratio.denominator.bit_length()-load_ratio.numerator.bit_length())
+    ctx.prec = 180 + 2*missing
+    def num(q):
+        return ctx.mpf(q.numerator)/q.denominator
+    # Prove the sign of the first tangent-stiffness eigenvalue against the
+    # actual ideal support, independently of the optional design K. Carry the
+    # resolved spectral gap's precision into the near-critical trig functions.
+    intervals = MPIntervalContext()
+    divisor = 1 if fixed_pair else 2
+    for bits in (160, 320, 640, 1280):
+        intervals.prec = bits
+        gap = (intervals.pi/divisor)**2 - intervals.mpf(load_ratio.numerator)/load_ratio.denominator
+        if gap.a > 0 or gap.b < 0:
+            break
+    else:
+        raise ValueError("unresolved in-plane Euler stability boundary")
+    stable = gap.a > 0
+    if stable:
+        _, exponent = ctx.frexp(ctx.mpf(gap.a))
+        ctx.prec += max(0, -exponent)
+    ell, ei = num(length), num(rigidity)
+    n, q, force = map(ctx.mpf, (compression, abs(distributed), abs(point)))
+    phase = ctx.sqrt(num(load_ratio))
+    critical_phase = ctx.pi/divisor
+    stability = {"in_plane_euler_critical_load_N": float(ei*(critical_phase/ell)**2)}
+    if not stable:
+        return {**stability, "stable": False}
+
+    k = phase/ell
+    end_force = force if cantilever else force/2
+    root_force = end_force+q*ell
+    # theta(x) = A sin(kx) + B cos(kx) - S0/N + q*x/N.
+    if cantilever or fixed_pair:
+        b = root_force/n                       # theta(0)=0
+        a = ((b*ctx.sin(phase)-q/(n*k))/ctx.cos(phase) if cantilever  # M(ell)=0
+             else (end_force/n-b*ctx.cos(phase))/ctx.sin(phase))      # theta(ell)=0
+    else:
+        a = -q/(n*k)                           # M(0)=0
+        b = (end_force/n-a*ctx.sin(phase))/ctx.cos(phase)             # theta(ell)=0
+
+    def displacement(x):
+        angle = k*x
+        return (2*a*ctx.sin(angle/2)**2+b*ctx.sin(angle))/k - root_force*x/n + q*x*x/(2*n)
+
+    def moment(x):
+        angle = k*x
+        return ei*(k*(a*ctx.cos(angle)-b*ctx.sin(angle))+q/n)
+
+    def shear(x):
+        angle = k*x
+        return n*(a*ctx.sin(angle)+b*ctx.cos(angle))
+
+    def checked_float(value):
+        result = float(value)
+        if not math.isfinite(result) or (value and not result):
+            raise ValueError("beam-column response exceeds representable range")
+        return result
+
+    # Both moment and material shear are sinusoidal plus a constant.
+    # Splitting at every stationary point bounds their magnitude in each
+    # interval by its endpoint magnitudes, including for tube stress recovery.
+    xs = [ell*i/128 for i in range(129)]
+    for angle in (ctx.atan2(a,b), ctx.atan2(-b,a)):
+        turn = angle % ctx.pi
+        if 0 < turn < phase:
+            xs.append(turn/k)
+    xs = sorted(xs)
+    moments = [float(abs(moment(x))) for x in xs]
+    shears = [float(abs(shear(x))) for x in xs]
+    for peak in (max(moments), max(shears)):
+        if not math.isfinite(peak) or peak == 0:
+            raise ValueError("beam-column section demand exceeds representable range")
+    deflection = displacement(ell)
+
+    # Kinematic unit-load identity using the first-order signed virtual
+    # moment for a unit force at the required tip or midpoint.
+    roots, weights = np.polynomial.legendre.leggauss(20)
+    virtual = ctx.zero
+    for root, weight in zip(roots,weights):
+        x = ell*(1+ctx.mpf(float(root)))/2
+        unit = ell-x if cantilever else (ell/4-x/2 if fixed_pair else -x/2)
+        virtual += ctx.mpf(float(weight))*moment(x)*unit
+    virtual *= ell/(2*ei) if cantilever else ell/ei
+    # Section-cut moment equilibrium includes the moment of the axial force.
+    root_moment = (force*ell+q*ell**2/2+n*deflection if cantilever else
+                   moment(ctx.zero) if fixed_pair else ctx.zero)
+    moment_scale = max(map(abs,(moment(x) for x in xs)))
+    equilibrium = max(abs(moment(x)-(root_moment-root_force*x+q*x*x/2-n*displacement(x)))
+                      for x in (ctx.zero,ell/3,ell/2,ell))/moment_scale
+    return {**stability, "stable": True, "deflection": checked_float(deflection),
+            "virtual": checked_float(virtual), "moments": moments, "shears": shears,
+            "transverse_resultant": checked_float(root_force), "equilibrium": float(equilibrium)}
+
+
+def _tube_stress_bounds(boundary, moment, shear, torque, axial, radius, area, inertia,
+                        profile=None):
     """Enclose peak von Mises over each span cell and circumferential cell.
 
     Opposite quadrants permit both membrane terms to have reinforcing signs.
@@ -1094,7 +1208,13 @@ def _tube_stress_bounds(boundary, moment, shear, torque, axial, radius, area, in
     def stress(m, v, sn, cs):
         return np.hypot(axial_stress + m * sn, math.sqrt(3) * (torsion_stress + v * cs))
 
-    if boundary == "simply_supported_udl":
+    if profile is not None:
+        m = np.asarray(profile["moments"])[:,None] * radius/inertia
+        v = np.asarray(profile["shears"])[:,None] * 2/area
+        sample = stress(m, v, sin_theta, cos_theta)
+        enclosure = stress(np.maximum(m[:-1],m[1:]), np.maximum(v[:-1],v[1:]),
+                           sin_theta[1:], cos_theta[:-1])
+    elif boundary == "simply_supported_udl":
         # u ranges from midspan to support. |M|=Mmax*(1-u²), |V|=Vmax*u.
         u = np.linspace(0, 1, 129)[:, None]
         m = bending * (1 - u * u)
@@ -1121,6 +1241,10 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
     virtual-work consistency are reported separately by conservation_verified.
     Euler buckling uses the declared ideal end restraints in the bending plane.
     An explicit K_buckling supplies the effective-length factor for that check.
+    Combined lateral load and compression use the declared in-plane restraints
+    for the small-slope beam-column equilibrium. Its section shear includes the
+    axial force projected by the local rotation; transverse support reactions
+    follow global force equilibrium.
     """
     def unsupported(message):
         return {"ok": False, "mode": "structural", "tool": "hamon_conservation_cad_verifier",
@@ -1191,17 +1315,39 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
         m_fn = lambda x: -w * L * L / 12.0 + 0.5 * w * L * x - 0.5 * w * x * x
         m_u = lambda x: -L / 8.0 + (0.5 * x if x <= 0.5 * L else 0.5 * (L - x))
 
-    n_p = 200
-    xs = np.linspace(0.0, L, n_p + 1)
-    wts = np.ones(n_p + 1); wts[1:-1:2] = 4.0; wts[2:-2:2] = 2.0
-    defl_vw = abs(float(np.sum(wts * np.array([m_fn(float(x)) * m_u(float(x)) / (E * I) for x in xs])) * (L / (3.0 * n_p))))
-    dual_err = abs(defl_a - defl_vw) / max(defl_a, 1e-30)
+    p_cr = (math.pi ** 2) * E * I / ((K_eff * L) ** 2)
+    profile = None
+    response = {}
+    if axial_comp and (P or w):
+        try:
+            profile = _beam_column_response(bc, L, E, I, axial_comp, P, w)
+        except (ValueError, OverflowError) as exc:
+            return unsupported(str(exc))
+        response = {"transverse_model": "elastic_small_slope_beam_column",
+                    "in_plane_euler_critical_load_N": profile["in_plane_euler_critical_load_N"]}
+        if not profile["stable"]:
+            return {**unsupported("no stable combined-load response at or above the in-plane Euler load"),
+                    **response, "euler_critical_load_N": p_cr, "passes_buckling": False,
+                    "buckling_effective_length_factor": K_eff,
+                    "buckling_effective_length_source": "K_buckling" if "K_buckling" in spec else "boundary",
+                    "passes_deflection": None, "passes_stress": None}
+        m_max, v_max = max(profile["moments"]), max(profile["shears"])
+        defl_a, defl_vw = profile["deflection"], profile["virtual"]
+        dual_err = abs(defl_a-defl_vw)/max(defl_a,defl_vw)
+        response.update(max_transverse_resultant_N=profile["transverse_resultant"],
+                        section_moment_equilibrium_rel_error=profile["equilibrium"])
+    else:
+        n_p = 200
+        xs = np.linspace(0.0, L, n_p + 1)
+        wts = np.ones(n_p + 1); wts[1:-1:2] = 4.0; wts[2:-2:2] = 2.0
+        defl_vw = abs(float(np.sum(wts * np.array([m_fn(float(x)) * m_u(float(x)) / (E * I) for x in xs])) * (L / (3.0 * n_p))))
+        dual_err = abs(defl_a - defl_vw) / max(defl_a, 1e-30)
     fy_res = abs((r_l + r_r) - (w * L + P))
     allow = fy / fs_req
     limit = allow * (1.0 + 1e-9)
     stress_bounds = None
     if tube:
-        lower, upper = _tube_stress_bounds(bc, m_max, v_max, torque, axial_comp, *tube)
+        lower, upper = _tube_stress_bounds(bc, m_max, v_max, torque, axial_comp, *tube, profile=profile)
         stress_bounds = {"lower": lower, "upper": upper}
         vm = upper
         passes_stress = True if upper <= limit else False if lower > limit else None
@@ -1215,12 +1361,12 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
         vm = math.hypot(sigma_b, math.sqrt(3) * shear_stress)
         passes_stress = vm <= limit
         assessment = "legacy_scalar_section_screen"
-    p_cr = (math.pi ** 2) * E * I / ((K_eff * L) ** 2)
     d_lim = L / defl_ratio
     return {
         "ok": True,
         "tool": "hamon_conservation_cad_verifier",
         "mode": "structural",
+        **response,
         "force_equilibrium_residual_N": fy_res,
         "max_moment_Nm": abs(m_max),
         "max_shear_N": v_max,
@@ -1237,7 +1383,8 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
         "von_mises_bounds_Pa": stress_bounds,
         "passes_deflection": defl_a <= d_lim * (1.0 + 1e-9),
         "passes_buckling": axial_comp <= (p_cr / fs_req) if axial_comp > 0 else True,
-        "conservation_verified": bool(fy_res <= 1e-7 * max(abs(w * L + P), 1.0) and dual_err <= 1e-5),
+        "conservation_verified": bool(fy_res <= 1e-7 * max(abs(w * L + P), 1.0) and dual_err <= 1e-5
+                                      and (profile is None or profile["equilibrium"] <= 1e-9)),
     }
 
 
