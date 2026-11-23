@@ -515,11 +515,47 @@ def verify_rigid_strip_contact(spec):
             if interval is None:
                 checks["proposed_contact_interval_m"] = value is None
             else:
-                checks["proposed_contact_interval_m"] = (
-                    isinstance(value, (list, tuple)) and len(value) == 2
-                    and all(claim_matches(v, expected, "contact_width_m")
-                            for v, expected in zip(value, interval))
-                )
+                valid = isinstance(value, (list, tuple)) and len(value) == 2
+                if valid:
+                    a, z = (Fraction(_strip_quantity(
+                        v, "proposed_contact_interval_m", "m")) for v in value)
+                    valid = -half <= a < z <= half
+                    valid = valid and all(
+                        claim_matches(v, expected, "contact_width_m")
+                        for v, expected in zip(value, interval))
+                    # A narrow contact cannot inherit an absolute-position
+                    # tolerance larger than its span. Its loaded edge also
+                    # stays attached to the actual base boundary.
+                    if regime == "full_contact":
+                        valid = valid and a == -half and z == half
+                    elif moment > 0:
+                        valid = valid and z == half
+                    else:
+                        valid = valid and a == -half
+                    span = z - a
+                    span_tolerance = abs(width)/10**9 + 8*Fraction(math.ulp(out["contact_width_m"]))
+                    valid = valid and abs(span-width) <= span_tolerance
+                    if "proposed_contact_width_m" in spec:
+                        valid = valid and claim_matches(
+                            spec["proposed_contact_width_m"], span, "contact_width_m")
+                    proposed_pressures = []
+                    for index, key in enumerate(("q_left_Pa", "q_right_Pa")):
+                        extreme = ("q_min_Pa" if contact_pressures[index] < contact_pressures[1-index]
+                                   else "q_max_Pa")
+                        pressure = spec.get("proposed_" + key,
+                            spec.get("proposed_" + extreme, out["contact_edge_pressure_Pa"][index]))
+                        proposed_pressures.append(Fraction(_strip_quantity(
+                            pressure, "proposed_" + key, "Pa")))
+                    pa, pz = proposed_pressures
+                    valid = valid and pa >= 0 and pz >= 0
+                    if regime == "partial_contact":
+                        valid = valid and (pa == 0 if moment > 0 else pz == 0)
+                    proposed_force = span*(pa+pz)/2
+                    proposed_moment = span*((2*a+z)*pa+(a+2*z)*pz)/6
+                    valid = valid and (
+                        abs(proposed_force-normal) <= abs(normal)/10**9
+                        and abs(proposed_moment-moment) <= abs(normal*b)/10**9)
+                checks["proposed_contact_interval_m"] = valid
         if "proposed_contact_regime" in spec:
             checks["proposed_contact_regime"] = spec["proposed_contact_regime"] == regime
         out["claim_checks"] = checks

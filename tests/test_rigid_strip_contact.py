@@ -168,6 +168,53 @@ class RigidStripContact(unittest.TestCase):
             out = verify_rigid_strip_contact({**BASE, key: value})
             self.assertFalse(out["conservation_verified"], out)
 
+
+    def test_near_edge_proposed_intervals_preserve_their_own_geometry(self):
+        # Independent review: absolute position tolerance had swallowed an
+        # entire contact span. The three bad spans carry 0, -1/3 and 1/6
+        # of the required force under the returned triangular pressures.
+        gap = 2.0**-34
+        good = [1 - 3*gap, 1.]
+        bad = [[1., 1.], [1., 1-gap], [1-gap/2, 1.],
+               [good[0]-gap, 1-gap], [good[0]+gap, 1+gap]]
+        for sign in (-1, 1):
+            spec = {**BASE, "base_width_m": 2, "vertical_resultant_N_m": 1,
+                    "moment_Nm_m": sign*(1-gap)}
+            reflect = lambda pair: pair if sign > 0 else [-pair[1], -pair[0]]
+            solved = verify_rigid_strip_contact(spec)
+            self.assertTrue(solved["output_geometry_verified"], solved)
+            valid = verify_rigid_strip_contact({
+                **spec, "proposed_contact_interval_m": reflect(good),
+                "proposed_contact_width_m": 3*gap,
+                "proposed_q_max_Pa": solved["q_max_Pa"]})
+            self.assertTrue(valid["conservation_verified"], valid)
+            for pair in bad:
+                with self.subTest(sign=sign, proposed=pair):
+                    out = verify_rigid_strip_contact({
+                        **spec, "proposed_contact_interval_m": reflect(pair)})
+                    self.assertTrue(out["ok"], out)
+                    self.assertFalse(out["claim_checks"]["proposed_contact_interval_m"], out)
+                    self.assertFalse(out["conservation_verified"], out)
+
+    def test_certified_returned_intervals_remain_valid_claims(self):
+        count = 0
+        for exponent in range(20, 51):
+            for sign in (-1, 1):
+                spec = {**BASE, "base_width_m": 2, "vertical_resultant_N_m": 1,
+                        "moment_Nm_m": sign*(1-2.0**-exponent)}
+                solved = verify_rigid_strip_contact(spec)
+                self.assertTrue(solved["output_geometry_verified"], solved)
+                out = verify_rigid_strip_contact({
+                    **spec,
+                    "proposed_contact_interval_m": solved["contact_interval_m"],
+                    "proposed_contact_width_m": solved["contact_width_m"],
+                    "proposed_q_left_Pa": solved["q_left_Pa"],
+                    "proposed_q_right_Pa": solved["q_right_Pa"],
+                    "proposed_q_max_Pa": solved["q_max_Pa"]})
+                self.assertTrue(out["conservation_verified"], out)
+                count += 1
+        self.assertEqual(count, 62)
+
     def test_model_domain_and_nonfinite_inputs(self):
         for key, value in (("base_width_m", 0), ("base_width_m", -3),
                            ("base_width_m", True), ("moment_Nm_m", math.nan),
@@ -234,7 +281,11 @@ print(json.dumps(run_router_conservation_cad_verifier(bundle['payload']),allow_n
         cases = [BASE, {**BASE, "moment_Nm_m": -144000},
                  {**BASE, "moment_Nm_m": 0}, {**BASE, "moment_Nm_m": 150000},
                  {**BASE, "base_width_m": "3000*mm"},
-                 {**BASE, "proposed_contact_width_m": .12}]
+                 {**BASE, "proposed_contact_width_m": .12},
+                 {**BASE, "base_width_m": 2, "vertical_resultant_N_m": 1,
+                  "moment_Nm_m": 1-2.0**-34, "proposed_contact_interval_m": [1., 1.]},
+                 {**BASE, "base_width_m": 2, "vertical_resultant_N_m": 1,
+                  "moment_Nm_m": -(1-2.0**-34), "proposed_contact_interval_m": [-1., -1.]}]
         script = """
 import registerTaskTools from './task-tools.ts';
 const tools=new Map();

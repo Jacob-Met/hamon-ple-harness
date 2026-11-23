@@ -112,3 +112,5 @@ states the no-tension interface assumption when the resultant leaves the
 middle third. This implementation derives its contact regime and pressure
 from the stated compatibility and two integrals. It does not implement
 the manuals' load combinations or acceptance criteria.
+
+A proposed contact interval must have positive ordered span, stay inside the base, and retain the loaded base edge (both edges in full contact). Its span is checked on the contact-width scale, and the proposed coordinates are integrated with the supplied endpoint or peak pressures when present. A coordinate tolerance cannot certify collapsed, reversed, shifted-off-edge or materially shortened contact. Correct representable near-edge intervals remain eligible.
