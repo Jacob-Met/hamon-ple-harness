@@ -36,7 +36,7 @@ def _safe_absolute(path: Any) -> bool:
     )
 
 
-def candidates(targets: list[dict[str, str]]) -> list[dict[str, str]]:
+def candidates(targets: list[dict[str, str]]) -> list[dict[str, Any]]:
     """One execution candidate per (output directory, generator convention).
 
     Prefer .ifc (the published cold failure), then other exact target formats.
@@ -55,23 +55,24 @@ def candidates(targets: list[dict[str, str]]) -> list[dict[str, str]]:
     # target cap. Allocate the first convention across all target directories
     # before spending probe slots on alternative script conventions.
     result = []
-    firsts = {
-        folder: sorted(outputs, key=lambda p: (
+    grouped_outputs = {
+        folder: sorted(set(outputs), key=lambda p: (
             0 if p.lower().endswith(".ifc") else 1, p
-        ))[0]
+        ))
         for folder, outputs in groups.items()
     }
     for name in GENERATOR_NAMES:
-        for folder, target in firsts.items():
+        for folder, outputs in grouped_outputs.items():
             if len(result) >= 24:
                 return result
             result.append({
-                "script": posixpath.join(folder, name), "target": target,
+                "script": posixpath.join(folder, name),
+                "target": outputs[0], "outputs": outputs,
             })
     return result
 
 
-def snapshot_targets(items: list[dict[str, str]]) -> list[dict[str, str]]:
+def snapshot_targets(items: list[dict[str, Any]]) -> list[dict[str, str]]:
     """Use delivery_guard.snapshot for pre- and post-run code fingerprints."""
     return [
         {"path": path, "kind": "file"}
@@ -98,16 +99,20 @@ def newly_written(before: dict | None, after: dict | None,
     return initial.get("state") in ("missing", "empty")
 
 
-def plan(items: list[dict[str, str]], issues: list[dict[str, str]],
-         before: dict | None, after: dict | None) -> list[dict[str, str]]:
+def plan(items: list[dict[str, Any]], issues: list[dict[str, str]],
+         before: dict | None, after: dict | None) -> list[dict[str, Any]]:
     """Select new generators only for still-failed user-declared outputs."""
     failed = {i["path"] for i in issues}
-    chosen: list[dict[str, str]] = []
+    chosen: list[dict[str, Any]] = []
     folders = set()
     for item in items:
         path, script = item["target"], item["script"]
         folder = posixpath.dirname(script)
-        if (path not in failed or folder in folders
+        # A generator can have completed its preferred target before stopping
+        # short of a sibling. Keep the original invocation target, but consider
+        # every declared output in that directory when deciding to rerun it.
+        if (not any(output in failed for output in item.get("outputs", [path]))
+                or folder in folders
                 or not _safe_absolute(path) or not _safe_absolute(script)):
             continue
         if newly_written(before, after, script):
@@ -180,7 +185,7 @@ print(json.dumps(result, separators=(",",":")))
 '''
 
 
-async def materialize(session: Any, selected: list[dict[str, str]]) -> list[dict]:
+async def materialize(session: Any, selected: list[dict[str, Any]]) -> list[dict]:
     """Bounded task-native executions. Never assert engineering validity.
 
     session.exec is the competition action protocol, not host subprocesses.
