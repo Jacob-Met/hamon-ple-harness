@@ -101,3 +101,11 @@ python3 ship/verify_eagle_uno.py UNO-TH_Rev3e_sch.pdf UNO-TH_Rev3e-reference.zip
 ```
 
 These are measured visible-wire connectivity results on the named drawings. They do not establish device-pin connectivity, support for another export profile, or a PLE competition score.
+
+### Paired power labels at a dotted T-junction
+
+A filled green dot where three wire ends meet can provide an additional on-page witness. The reader requires two distinct, natively oriented occurrences of the same printed power name. One sits beside a free wire arm and ends near its tip. The other spans the perpendicular arm's transition from green wire to a single collinear red symbol stroke. A separate, complete supply glyph must already establish the power name on that page.
+
+The page records the junction, both arm endpoints, wire indices and printed boxes in `junction_label_witnesses`. A competing eligible wire or net name, an unoriented competing word, multiple candidate junctions on the island, or reuse of a printed occurrence on another island prevents the proposed join. Later non-green vector ink with overlapping paint bounds can also disqualify the dot. The reader uses supported Cairo vector geometry and native PDF text.
+
+The development replay for the previously inspected Mega 2560 Rev3e checks all 483 wire sections. The paired +3V3 evidence brings the expected result to 110 of 111 exact native nets, with zero false joins and eight missed wire pairs on VIN. The Uno TH Rev3e control checks all 61 native nets across its 447 wire sections. Each receiver can also check the complete page and document partitions at all four quarter-turn orientations.

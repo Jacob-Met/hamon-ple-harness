@@ -125,7 +125,7 @@ def main():
     document = []
     flat_rows = []
     for page, ((wires, groups), sheet, expected) in enumerate(
-            zip(predictions, sheets, ((86, 84, 0, 17), (31, 31, 0, 0))), 1):
+            zip(predictions, sheets, ((86, 85, 0, 8), (31, 31, 0, 0))), 1):
         names = align(wires, sheet)
         rows = list(zip(names, [(page, group) for group in groups]))
         observed = counts(rows)
@@ -137,18 +137,18 @@ def main():
         require(len(stitched) == len(names), "Document memberships omit wires")
         flat_rows.extend(zip(names, stitched))
     result = counts(document)
-    require(result == {"nets": 111, "exact": 103, "false_connected": 0, "false_separated": 1983},
+    require(result == {"nets": 111, "exact": 104, "false_connected": 0, "false_separated": 1974},
             "Complete document differs from the independent recount")
     print(json.dumps({"combined_pages_without_inter_sheet_stitching": result}))
     result = counts(flat_rows)
-    require(result == {"nets": 111, "exact": 109, "false_connected": 0, "false_separated": 17},
+    require(result == {"nets": 111, "exact": 110, "false_connected": 0, "false_separated": 8},
             f"Flat-document comparison differs: {result}")
     pairs_by_name = defaultdict(list)
     for name, group in flat_rows:
         pairs_by_name[name].append((name, group))
     missing = {name: total for name, rows in pairs_by_name.items()
                if (total := counts(rows)["false_separated"])}
-    require(missing == {"+3V3": 9, "VIN": 8},
+    require(missing == {"VIN": 8},
             f"Remaining per-net separations differ: {missing}")
     print(json.dumps({"flat_document": result, "anchors": flat["inter_sheet_anchors"], "missing_by_net": missing}))
 
