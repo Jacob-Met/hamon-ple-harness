@@ -29,6 +29,43 @@ def segment_distance(a, b, center):
 
 
 class FiniteCopperTests(unittest.TestCase):
+    def test_curved_trace_follows_signed_circular_sweep(self):
+        # The exact semicircle from left to right runs below its chord for +180°.
+        for angle in (-180, 180):
+            sign = 1 if angle > 0 else -1
+            wire_arc = dict(wire(0, (-1_000_000, 0), (1_000_000, 0), 100_000),
+                            shape="arc", curve=angle)
+            pads = [pad("A", -1_000_000, 0), pad("B", 1_000_000, 0)]
+            result = assess(pads + [wire_arc], [(0, sign * 1_000_000, 140_000, None)])
+            self.assertFalse(result["unreachable"])
+            arc_step = next(step for step in result["witnesses"][0]["steps"]
+                            if step["source"] == ["wire", 0])
+            path = arc_step["material"]["path_nm"]
+            # Independently bound radial extrema along each complete witness segment.
+            for a, b in zip(path, path[1:]):
+                self.assertGreater(segment_distance(a, b, (0, 0)), 950_000)
+                self.assertLess(max(math.hypot(*a), math.hypot(*b)), 1_050_000)
+            self.assertGreater(max(-sign * p[1] for p in path), 945_000)
+            self.assertTrue(assess(pads + [wire_arc],
+                                   [(0, -sign * 1_000_000, 140_000, None)])["unreachable"])
+            self.assertTrue(assess(pads + [dict(wire_arc, cap="flat")])["unreachable"])
+            # A pad on the chord cannot touch this arc.
+            self.assertTrue(assess([pads[0], pad("C", 0, 0), wire_arc])["unreachable"])
+
+    def test_major_curves_reach_the_far_side_under_rotation(self):
+        for sign in (-1, 1):
+            for quarter_turn in (0, 1):
+                def rotate(point):
+                    x, y = point
+                    return (-y, x) if quarter_turn else point
+
+                a, b = rotate((1_000_000, 0)), rotate((0, -sign * 1_000_000))
+                on_arc = rotate((-1_000_000, 0))
+                on_chord = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+                trace = dict(wire(0, a, b, 60_000), shape="arc", curve=sign * 270)
+                self.assertFalse(assess([pad("A", *a), pad("B", *on_arc), trace])["unreachable"])
+                self.assertTrue(assess([pad("A", *a), pad("B", *on_chord), trace])["unreachable"])
+
     def test_small_centered_bore_has_a_real_nonstraight_route(self):
         boards = [pad("A", 0, 0), wire(0, (0, 0), (1_000_000, 0), 254_000),
                   pad("B", 1_000_000, 0)]

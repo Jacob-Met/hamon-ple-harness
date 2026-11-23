@@ -6,7 +6,7 @@ inside the guarded polygons has at least 1 nm nominal in-plane clearance.
 """
 
 from collections import defaultdict, deque
-from math import cos, pi
+from math import ceil, cos, hypot, pi, radians, sin, sqrt
 
 from shapely import constrained_delaunay_triangles
 from shapely.geometry import LineString, Point, box
@@ -31,6 +31,37 @@ def _polygons(geometry):
             yield from _polygons(part)
 
 
+def _arc_copper(primitive):
+    """An inner tube around a chordal approximation of a round-capped EAGLE arc."""
+    a, b = primitive["a"], primitive["b"]
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    chord = hypot(dx, dy)
+    half = radians(primitive["curve"]) / 2
+    width = float(primitive["width"])
+    if (primitive.get("cap", "round") != "round" or
+            not (chord > 0 and width > 2 * _GUARD and 0 < abs(half) < pi)):
+        return None
+    radius = chord / (2 * sin(half))
+    if abs(radius) > 1e13:
+        return None
+    # Bound centerline error by one sixteenth of the nominal trace width.
+    # 2 R sin(step/4)^2 is the maximum distance from chord to circular arc.
+    steps = max(1, ceil(abs(half) * sqrt(2 * abs(radius) / (width / 16))))
+    if steps > 4096:
+        return None
+    error = 2 * abs(radius) * sin(half / (2 * steps)) ** 2
+    tube_radius = width / 2 - error
+    pts = [a]
+    for i in range(1, steps):
+        q = (2 * i / steps - 1) * half
+        along = 0.5 + radius * sin(q) / chord
+        normal = -2 * radius * sin((half + q) / 2) * sin((half - q) / 2) / chord
+        pts.append((a[0] + along * dx - normal * dy, a[1] + along * dy + normal * dx))
+    pts.append(b)
+    # Rounded joins and caps stay inside the union of disks swept by these chords.
+    return LineString(pts).buffer(tube_radius, quad_segs=_QUADS)
+
+
 def _inner_copper(primitive):
     shape = primitive["shape"]
     if shape == "segment":
@@ -40,6 +71,10 @@ def _inner_copper(primitive):
             return None
         copper = LineString([a, b]).buffer(float(primitive["width"]) / 2,
                                            quad_segs=_QUADS, cap_style=cap)
+    elif shape == "arc":
+        copper = _arc_copper(primitive)
+        if copper is None:
+            return None
     elif shape == "rectangle":
         x, y = map(float, primitive["center"])
         w, h = map(float, primitive["size"])
@@ -281,7 +316,7 @@ def _witness(pieces, labels, parents, end_node, start, end):
 def material_continuity(terminals, primitives, bores):
     """Return finite-area witnesses for already parsed, source-addressed artwork.
 
-    A primitive describes one segment (a, b, width, optional round/flat cap),
+    A primitive describes a straight segment or round-capped circular arc,
     axis-aligned rectangle (center, size) or disk (center, diameter), its source
     tuple and outer layers. An optional terminal names its physical pad. Plated
     pieces bridge layers only at their own independently approved drill collar.

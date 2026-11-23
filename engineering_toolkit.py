@@ -792,6 +792,8 @@ def run(argv=None):
     native.add_argument("file")
     native.add_argument("--board",help="Compare predicted pad nets with an EAGLE XML PCB")
     native.add_argument("--routed-net",help="Check a named signal for copper paths between schematic terminals")
+    native.add_argument("--routed-pads",nargs=4,metavar=("PART1","PAD1","PART2","PAD2"),
+                        help="Check only this pair of schematic pads on the selected net")
     eagle=sub.add_parser("pdf-eagle-connectivity",help="Read wire connectivity evidence from a two-color EAGLE schematic")
     eagle.add_argument("file")
     scope=eagle.add_mutually_exclusive_group()
@@ -857,11 +859,13 @@ def run(argv=None):
             out=schematic_netlist(args.file)
             if args.board:
                 out["board_comparison"]=compare_board(out,args.board)
+            if args.routed_pads is not None and args.routed_net is None:
+                raise ValueError("--routed-pads requires --routed-net")
             if args.routed_net is not None:
                 if not args.board:
                     raise ValueError("--routed-net requires --board")
                 from hamon_eagle_copper import routed_continuity
-                out["routed_continuity"]=routed_continuity(out,args.board,args.routed_net)
+                out["routed_continuity"]=routed_continuity(out,args.board,args.routed_net,pad_pair=args.routed_pads)
         elif args.cmd=="pdf-eagle-connectivity":
             import hamon_eagle_schematic
             if args.flat_document:
