@@ -2232,6 +2232,30 @@ def solve_pile_group_dual(spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _oversize_compaction_reference(record, number):
+    """Combine compacted fine-fraction volume and oven-dry coarse particle volume."""
+    required = {
+        "coarse_dry_mass_pct", "fine_gamma_d_max", "fine_w_opt_pct",
+        "coarse_particle_dry_density", "coarse_w_pct",
+    }
+    if not isinstance(record, dict) or set(record) != required:
+        raise ValueError("Oversize reference requires exactly " + ", ".join(sorted(required)))
+    coarse_pct = number(record, "coarse_dry_mass_pct")
+    fine_density = number(record, "fine_gamma_d_max")
+    coarse_density = number(record, "coarse_particle_dry_density")
+    fine_water = number(record, "fine_w_opt_pct")
+    coarse_water = number(record, "coarse_w_pct")
+    # WSDOT M 46-01.48, T 99/T 180 Annex A and the January 2026 errata.
+    if not 5 < coarse_pct <= 30:
+        raise ValueError("Oversize correction requires more than 5 and at most 30 percent retained by dry mass")
+    if min(fine_density, coarse_density) <= 0 or min(fine_water, coarse_water) < 0:
+        raise ValueError("Oversize densities must be positive and moisture contents nonnegative")
+    fine_pct = 100 - coarse_pct
+    maximum = 100 / (fine_pct / fine_density + coarse_pct / coarse_density)
+    optimum = (fine_pct * fine_water + coarse_pct * coarse_water) / 100
+    return maximum, optimum
+
+
 def verify_compaction_lot(spec):
     """Compare measured gravimetric moisture and field density with the supplied reference."""
     def number(record, key):
@@ -2247,8 +2271,17 @@ def verify_compaction_lot(spec):
         return Fraction(decimal)
 
     try:
-        reference = number(spec, "gamma_d_max")
-        optimum = number(spec, "w_opt_pct")
+        derived = {}
+        if "oversize_reference" in spec:
+            if "gamma_d_max" in spec or "w_opt_pct" in spec:
+                raise ValueError("Supply either a direct reference or an oversize reference")
+            reference, optimum = _oversize_compaction_reference(spec["oversize_reference"], number)
+            derived["derived_reference"] = {
+                "gamma_d_max": float(reference), "w_opt_pct": float(optimum),
+            }
+        else:
+            reference = number(spec, "gamma_d_max")
+            optimum = number(spec, "w_opt_pct")
         minimum = number(spec, "min_rc")
         if reference <= 0 or optimum < 0 or minimum <= 0:
             raise ValueError("Invalid maximum dry density, optimum moisture or relative compaction")
@@ -2291,7 +2324,7 @@ def verify_compaction_lot(spec):
                          "density_passes": density_ok, "moisture_passes": moisture_ok})
             if density_ok and moisture_ok:
                 passed.append(test_id)
-        return {**ratios, "passed_ids": passed, "test_results": rows,
+        return {**ratios, **derived, "passed_ids": passed, "test_results": rows,
                 "dry_density_minimum": float(dry_limit), "moisture_range_pct": [float(low), float(high)],
                 "lot_accepted": len(passed) == len(rows), "dual_verified": True,
                 "basis": "Numerical comparison of the supplied tests and reference only."}
