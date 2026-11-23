@@ -8,7 +8,23 @@ python3 /tmp/hamon-engineering-toolkit.py pdf-eagle-connectivity SCHEMATIC.pdf -
 
 Each entry in `wires` has two endpoints in the rotated CropBox SVG frame. Equal values at corresponding indices in `wire_groups` identify a proposed sheet-local connection. `supply_glyphs` records the printed name, stem and glyph geometry. Each integer under `printed_equivalence_anchors` indexes a wire in a geometrically connected component. A wire crossing in the interiors of two strokes does not contribute a connection. Coincident endpoints, signal labels with glyph baselines aligned to their wires and visibly terminated supply symbols can connect components. A supply name observed on a grounded bar or supply arrow requires that glyph to join separated wires.
 
-The supported export uses green linework for wires, red linework for symbols and native PDF text. Inspect the returned evidence before using a proposed connection. The page may contain ambiguous labels, invisible or unrecognized wires, split paths, different symbol conventions, or signals that continue on other sheets. The command returns `unresolved_profile` when required ink, recognized PDF creator or complete supported geometry is unavailable. Its group identifiers are local to a page. It does not identify device pins or certify a complete electrical netlist.
+The native-text profile uses green linework for wires, red linework for symbols and native PDF text. The outlined profile below obtains its wire layer from visible junction geometry. Inspect the returned evidence before using a proposed connection. The page may contain ambiguous labels, invisible or unrecognized wires, split paths, different symbol conventions, or signals that continue on other sheets. The command returns `unresolved_profile` when neither profile supplies the required evidence. Its group identifiers are local to a page. It does not identify device pins or certify a complete electrical netlist.
+
+## Geometry of outlined electrical sheets
+
+The outlined profile looks for a single stroke ink with consistently sized, filled circular junctions. Their centers must establish a regular grid along both page axes. At least six distinct centers must coincide with three or more wire ends in multiple directions. Straight strokes need both ends on that grid. Same-ink strokes used for outlined lettering can fall outside it. Two coincident ends can form a corner or continue a wire. A site with three or more incident ends needs a visible junction dot. The reader reports the selected stroke, measured grid pitch, marked branch count and number of excluded off-grid strokes. It does not assign names to outlined labels.
+
+The Arduino Due PDF contains two electrical sheets followed by a Creative Commons notice. The notice has native text, a white background and no schematic geometry. A recognized text-only notice contributes an empty wire list. A graphical or unrecognized sheet still leaves document membership unresolved.
+
+| Due V02g | Visible wires matched to native CAD | Exact native nets | Fragmented nets | False joined pairs | Separated native pairs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Sheet 1 | 468 | 128/138 | 10 | 0 | 8,411 |
+| Sheet 2 | 407 | 108/125 | 17 | 0 | 6,587 |
+| Whole drawing | 875 | 77/176 | 99 | 0 | 29,874 |
+
+The flat-document CLI recovers 2,987 of the 32,861 native same-net wire pairs. Its memberships use page-local electrical geometry. Signal identity across sheets and across separate label-only islands remains unresolved. The comparison covers visible wire sections. It does not measure device-pin connectivity or an organizer score.
+
+Run `python ship/verify_eagle_outlined.py DUE.pdf DUE.zip --controls` with Poppler and pypdf. The receiver runs the maintained CLI and freezes every prediction before opening the paired native schematic. It checks each wire section against the manufacturer's schematic geometry and tests recoloring the wire layer, deleting a three-arm junction, deleting a terminal mark, deleting all junctions, and adding graphical ink to the legal notice. [Arduino Due schematic PDF](https://docs.arduino.cc/resources/schematics/A000056-schematics.pdf) and [CAD archive](https://docs.arduino.cc/static/f051671bbed80ddf7352991d62cb0d5c/A000056-cad-files.zip).
 
 ## External comparison
 
@@ -112,7 +128,7 @@ On the Mega drawing, sheet 1's POWER connector pin 8 satisfies these conditions 
 
 A three-arm junction can carry a supply name twice. The reader checks for one native label starting at the end of a red component lead and a second, perpendicular copy beside the open green branch. The two runs must be consecutive in the PDF paint order, with a third consecutive copy independently anchored on another wire island and a same-name supply glyph on the sheet. A crossing, an occupied open endpoint or an ambiguous occurrence withholds the join.
 
-On the Mega, the regulator output and capacitor branch supply this evidence for +3V3. Joining the two three-wire islands recovers the final nine pairs. The flat-document result is 111 of 111 complete nets and 5,846 of 5,846 true pairs across 483 visible wire sections, with zero false joins. Erasing either printed value or moving the capacitor branch endpoint off the junction withdraws the join. The UNO remains at 61 of 61 nets and the Due remains unresolved. Replay the physical edits by adding `--junction-controls` to the Mega verification command above.
+On the Mega, the regulator output and capacitor branch supply this evidence for +3V3. Joining the two three-wire islands recovers the final nine pairs. The flat-document result is 111 of 111 complete nets and 5,846 of 5,846 true pairs across 483 visible wire sections, with zero false joins. Erasing either printed value or moving the capacitor branch endpoint off the junction withdraws the join. At that stage the UNO remained at 61 of 61 nets and the Due still returned an unresolved document. Replay the physical edits by adding `--junction-controls` to the Mega verification command above.
 
 ## Native EAGLE schematic and PCB
 
