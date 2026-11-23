@@ -186,6 +186,34 @@ class StepUnitContextTests(unittest.TestCase):
             with self.subTest(scale=scale):
                 self.assert_withheld(unitless, unit_scale_m=scale)
 
+    def test_unrelated_ifc_records_cannot_choose_units_for_a_step_definition(self):
+        text = with_context(model(), prefix=".MILLI.")
+        solid = int(re.search(r"#(\d+)=MANIFOLD_SOLID_BREP", text)[1])
+        for records in (["#999001=IFCCARTESIANPOINT((6.,8.,3.));"],
+                        ["#999001=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);",
+                         "#999002=IFCUNITASSIGNMENT((#999001));"]):
+            for selection in ({}, {"solid_entity_id": solid}):
+                with self.subTest(records=records, selection=selection):
+                    self.assert_cube(self.verify(add_records(text, records), **selection), .001)
+        ifc = [
+            "#999001=IFCCARTESIANPOINT((0.,0.,0.));",
+            "#999002=IFCAXIS2PLACEMENT3D(#999001,$,$);",
+            "#999003=IFCLOCALPLACEMENT($,#999002);",
+            "#999004=IFCCARTESIANPOINT((0.,0.));",
+            "#999005=IFCAXIS2PLACEMENT2D(#999004,$);",
+            "#999006=IFCRECTANGLEPROFILEDEF(.AREA.,$,#999005,1.,1.);",
+            "#999007=IFCDIRECTION((0.,0.,1.));",
+            "#999008=IFCEXTRUDEDAREASOLID(#999006,#999002,#999007,1.);",
+            "#999009=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#999008));",
+            "#999010=IFCPRODUCTDEFINITIONSHAPE($,$,(#999009));",
+            "#999011=IFCBUILDINGELEMENTPROXY('foreign',$,$,$,$,#999003,#999010,$,$);",
+        ]
+        self.assert_cube(self.verify(add_records(text, ifc), solid_entity_id=solid), .001)
+        primitive = "DATA;#1=CARTESIAN_POINT('',(0.,0.,0.));#2=AXIS2_PLACEMENT_3D('',#1,$,$);" \
+                    "#3=BLOCK('',#2,2.,2.,2.);#4=SI_UNIT(.MILLI.,.METRE.);" \
+                    "#5=IFCCARTESIANPOINT((6.,8.,3.));ENDSEC;"
+        self.assert_withheld(primitive)
+
 
 if __name__ == "__main__":
     unittest.main()
