@@ -42,10 +42,15 @@ refinement per layer.
 
 Both effective stress and pore pressure are compared in every layer. The
 largest method disagreement must be strictly below `1e-6` of the largest
-applied surcharge up to the observation time. Inversion and load-balance
+applied surcharge up to the observation time. Each component must also agree
+to `1e-6` relative to its own magnitude; a tiny response cannot disappear
+under the peak-load tolerance. Inversion and load-balance
 disagreements must each be below `1e-9` on that scale. Unresolved inputs are
 refused. These are numerical agreement checks, normalized by applied load,
-not by a potentially tiny residual pore pressure.
+while the additional component gate resolves small residual responses.
+Collapsed pulse intervals and underflowed normalized components are refused.
+Dimensional products and sums are accumulated exactly before final rounding,
+so a subnormal compliance cannot corrupt a representable settlement.
 
 `mean_excess_pore_pressure_Pa` is the depth average. The separate
 `storage_weighted_excess_pore_pressure_Pa` weights by `mv * thickness`; only

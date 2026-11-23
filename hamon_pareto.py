@@ -153,7 +153,7 @@ _WAVE8_INPUTS = {
     "layered_consolidation_1d": (
         "civil_geotech",
         "consolidation_layers time_s drainage load_history proposed_settlement_m proposed_mean_excess_pore_pressure_Pa",
-        "dual_solver_rel_residual inversion_rel_residual load_balance_rel_residual",
+        "dual_solver_rel_residual component_rel_residual inversion_rel_residual load_balance_rel_residual",
     ),
     "consolidation_history_1d": (
         "civil_geotech",

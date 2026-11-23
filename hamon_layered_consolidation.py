@@ -8,6 +8,7 @@ Laplace-domain solution which solves each layer analytically in space.
 from __future__ import annotations
 
 import math
+from fractions import Fraction
 
 import numpy as np
 from scipy.linalg import eigh_tridiagonal
@@ -19,6 +20,13 @@ _FIELDS = frozenset({"calculation", "mode", "consolidation_layers", "time_s", "d
                      "load_history", "proposed_settlement_m",
                      "proposed_mean_excess_pore_pressure_Pa"})
 _LAYER_FIELDS = {"thickness_m", "cv_m2_s", "mv_per_Pa"}
+
+
+def _rounded_dimension(exact):
+    value = float(exact)
+    if not math.isfinite(value) or (exact and value == 0):
+        raise ValueError("A dimensional result is outside the finite nonzero output range")
+    return value
 
 
 def _finite_volume(layers, segments, factor, drainage, cells):
@@ -140,6 +148,12 @@ def _laplace_history(layers, history, elapsed, factor, scale, drainage, degree):
     diffusion_factor = ctx.mpf(factor)
     answer = []
     segments = _history_segments(history, time, ctx.mpf)
+    for start, end, first, last in segments:
+        if end > start and (first or last):
+            young = (time - end) * diffusion_factor
+            span = (end - start) * diffusion_factor
+            if young + span == young:
+                raise ValueError("Loading interval is unresolved at the independent inversion precision")
     for pressure in (False, True):
         terms = [[] for _ in rows]
         for start, end, first, last in segments:
@@ -148,6 +162,8 @@ def _laplace_history(layers, history, elapsed, factor, scale, drainage, degree):
                 continue
             young = (time - end) * diffusion_factor
             span = (end - start) * diffusion_factor
+            if span and young + span == young:
+                raise ValueError("Loading interval is unresolved at the independent inversion precision")
             if not span:
                 response = kernel(young, False, pressure)
             else:
@@ -156,7 +172,10 @@ def _laplace_history(layers, history, elapsed, factor, scale, drainage, degree):
                 response = [(a - b) / span for a, b in zip(before, after)]
             for j, value in enumerate(response):
                 terms[j].append(change * value)
-        answer.append([float(ctx.fsum(values)) for values in terms])
+        summed = [ctx.fsum(values) for values in terms]
+        if any(value and float(value) == 0 for value in summed):
+            raise ValueError("A normalized pressure component underflows the independent solver")
+        answer.append([float(value) for value in summed])
     return np.array(answer)
 
 
@@ -202,9 +221,9 @@ def verify_layered_consolidation(spec):
             raise ValueError("Layer property ratios underflow the numerical representation")
         current = segments[-1][3]
         if scale == 0 or elapsed == 0:
-            result = np.array([[0.] * len(layers), [current] * len(layers)])
+            result = np.array([[0.] * len(layers), [current / scale if scale else 0.] * len(layers)])
             finite_volume = result.copy()
-            inversion_residual = dual_residual = balance_residual = 0.
+            inversion_residual = dual_residual = balance_residual = component_residual = 0.
         else:
             normalized_history = [(a, b, c / scale, d / scale) for a, b, c, d in segments]
             coarse = _finite_volume(normalized, normalized_history, factor, drainage, 64)
@@ -214,34 +233,51 @@ def verify_layered_consolidation(spec):
             result = _laplace_history(normalized, history, elapsed, factor, scale, drainage, 36)
             inversion_residual = float(np.max(np.abs(result - first)))
             dual_residual = float(np.max(np.abs(result - finite_volume)))
+            component_scale = np.maximum(np.abs(result), np.abs(finite_volume))
+            component_error = np.divide(np.abs(result - finite_volume), component_scale,
+                                        out=np.zeros_like(result), where=component_scale > 0)
+            component_residual = float(np.max(component_error))
             balance_residual = float(np.max(np.abs(result.sum(axis=0) - current / scale)))
             if (not np.all(np.isfinite(result)) or not np.all(np.isfinite(finite_volume))
-                    or inversion_residual >= 1e-9 or dual_residual >= 1e-6
+                    or inversion_residual >= 1e-9 or dual_residual >= 1e-6 or component_residual >= 1e-6
                     or balance_residual >= 1e-9 or np.min(result[0]) < -1e-10
                     or np.max(result[0]) > 1 + 1e-10 or np.max(np.abs(result[1])) > 1 + 1e-10):
                 raise ValueError("Independent layer solutions or physical bounds did not converge below the residual gate")
-            result *= scale
-            finite_volume *= scale
-        settlements = [h * mv * float(e) for (h, _, mv), e in zip(layers, result[0])]
-        settlement = math.fsum(settlements)
-        mean_pressure = math.fsum(h / height * float(p) for (h, _, _), p in zip(layers, result[1]))
-        capacity = math.fsum(h * mv for h, _, mv in layers)
-        stored_pressure = math.fsum(h * mv / capacity * float(p) for (h, _, mv), p in zip(layers, result[1]))
-        values = [settlement, mean_pressure, capacity, stored_pressure, *settlements]
-        if not all(math.isfinite(value) for value in values):
-            raise ValueError("The dimensional result overflows the numerical representation")
+            nonzero_duration_load = any(b > a and (first > 0 or last > 0)
+                                        for a, b, first, last in segments)
+            increasing_load = all(last >= first for _, _, first, last in segments)
+            if ((nonzero_duration_load and np.any(result[0] <= 0))
+                    or (increasing_load and np.any(result[1] <= 0))):
+                raise ValueError("A strictly positive finite-time response is not numerically resolved")
+        # Keep every binary64 factor exact until the final dimensional rounding.
+        # A small strain or compliance may underflow even when h*mv*q is finite.
+        F = lambda x: Fraction(float(x))
+        load = F(scale)
+        capacities = [F(h) * F(mv) for h, _, mv in layers]
+        capacity = sum(capacities)
+        settlement_terms = [c * load * F(e) for c, e in zip(capacities, result[0])]
+        settlements = [_rounded_dimension(value) for value in settlement_terms]
+        settlement = _rounded_dimension(sum(settlement_terms))
+        layer_pressure = [_rounded_dimension(load * F(p)) for p in result[1]]
+        layer_effective = [_rounded_dimension(load * F(e)) for e in result[0]]
+        mean_pressure = _rounded_dimension(sum(F(h) * load * F(p) for (h, _, _), p in zip(layers, result[1]))
+                                           / sum(F(h) for h, _, _ in layers))
+        stored_pressure = _rounded_dimension(sum(c * load * F(p) for c, p in zip(capacities, result[1])) / capacity)
+        ultimate = _rounded_dimension(capacity * F(current))
+        fv_pressure = [_rounded_dimension(load * F(p)) for p in finite_volume[1]]
         for key, value in (("proposed_settlement_m", settlement),
                            ("proposed_mean_excess_pore_pressure_Pa", mean_pressure)):
             if key in spec and not math.isclose(_number(spec, key), value, rel_tol=1e-6, abs_tol=0.):
                 raise ValueError("Proposed value disagrees with the independently checked layered solution")
         out.update(ok=True, conservation_verified=True, drainage=drainage, time_s=elapsed,
-                   settlement_at_time_m=settlement, ultimate_settlement_at_current_load_m=capacity * current,
+                   settlement_at_time_m=settlement, ultimate_settlement_at_current_load_m=ultimate,
                    mean_excess_pore_pressure_Pa=mean_pressure,
                    storage_weighted_excess_pore_pressure_Pa=stored_pressure,
-                   layer_mean_excess_pore_pressure_Pa=result[1].tolist(),
-                   layer_mean_effective_increment_Pa=result[0].tolist(), layer_settlement_m=settlements,
-                   finite_volume_layer_mean_excess_pore_pressure_Pa=finite_volume[1].tolist(),
+                   layer_mean_excess_pore_pressure_Pa=layer_pressure,
+                   layer_mean_effective_increment_Pa=layer_effective, layer_settlement_m=settlements,
+                   finite_volume_layer_mean_excess_pore_pressure_Pa=fv_pressure,
                    dual_solver_rel_residual=dual_residual, inversion_rel_residual=inversion_residual,
+                   component_rel_residual=component_residual,
                    load_balance_rel_residual=balance_residual, residual_load_scale_Pa=scale,
                    model="constant mv and cv, uniform loading, perfect hydraulic contact, outer-face drainage",
                    methods=["analytic layer transfer and de Hoog Laplace inversion",

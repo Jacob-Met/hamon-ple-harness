@@ -74,7 +74,7 @@ class LayeredConsolidationTests(unittest.TestCase):
     def assert_verified(self, result):
         self.assertTrue(result["ok"], result)
         self.assertTrue(result["conservation_verified"], result)
-        for key in ("dual_solver_rel_residual", "inversion_rel_residual", "load_balance_rel_residual"):
+        for key in ("dual_solver_rel_residual", "component_rel_residual", "inversion_rel_residual", "load_balance_rel_residual"):
             self.assertLess(result[key], 1e-6, result)
 
     def test_coupled_layers_match_analytic_coordinate_solution(self):
@@ -184,6 +184,48 @@ class LayeredConsolidationTests(unittest.TestCase):
         with patch("hamon_layered_consolidation._finite_volume", return_value=np.zeros((2, 2))):
             self.assertFalse(verify_layered_consolidation(self.base)["conservation_verified"])
 
+    def test_unresolved_short_pulse_cannot_erase_dimensional_settlement(self):
+        spec = specification()
+        spec.update(consolidation_layers=[dict(thickness_m=1e80, cv_m2_s=1e160, mv_per_Pa=1e-6)],
+                    time_s=1., load_history=[dict(time_s=0., surcharge_Pa=1e5),
+                                            dict(time_s=1e-80, surcharge_Pa=1e5),
+                                            dict(time_s=1e-80, surcharge_Pa=0.)])
+        # q*duration*U'(1), then h*mv: a finite 0.01696099454 m response.
+        reference = .2 * sum(math.exp(-(math.pi*(n+.5))**2) for n in range(20))
+        self.assertGreater(reference, .016)
+        result = solve(spec)
+        self.assertFalse(result["conservation_verified"], result)
+        self.assertIn("unresolved", result["reason"])
+
+    def test_dimensional_reconstruction_does_not_round_compliance_first(self):
+        spec = specification()
+        spec.update(consolidation_layers=[dict(thickness_m=1e-100, cv_m2_s=1e-200, mv_per_Pa=1e-220)],
+                    time_s=4., load_history=[dict(time_s=0., surcharge_Pa=1e218)])
+        remaining = sum(8/(math.pi*k)**2 * math.exp(-(math.pi*k)**2)
+                        for k in range(1, 101, 2))
+        expected = 1e-100 * (1e-220 * 1e218) * (1-remaining)
+        result = solve(dict(spec, proposed_settlement_m=expected))
+        self.assert_verified(result)
+        self.assertTrue(math.isclose(result["settlement_at_time_m"], expected, rel_tol=1e-12))
+
+    def test_tiny_component_disagreement_cannot_hide_below_peak_load_scale(self):
+        spec = dict(self.base, time_s=20., load_history=[dict(time_s=0., surcharge_Pa=10000.),
+                    dict(time_s=10., surcharge_Pa=10000.), dict(time_s=10., surcharge_Pa=0.)])
+        tiny = np.array([[1e-80, 1e-80], [-1e-80, -1e-80]])
+        with patch("hamon_layered_consolidation._finite_volume", return_value=tiny), \
+                patch("hamon_layered_consolidation._laplace_history", return_value=np.zeros((2, 2))):
+            result = verify_layered_consolidation(spec)
+        self.assertFalse(result["conservation_verified"], result)
+        self.assertIn("Independent layer solutions", result["reason"])
+
+    def test_unrepresentable_dimensional_settlement_abstains(self):
+        spec = specification()
+        spec.update(consolidation_layers=[dict(thickness_m=1., cv_m2_s=1., mv_per_Pa=1e-300)],
+                    time_s=1., load_history=[dict(time_s=0., surcharge_Pa=1e-50)])
+        result = solve(spec)
+        self.assertFalse(result["conservation_verified"], result)
+        self.assertIn("output range", result["reason"])
+
     def test_inline_route_requires_all_residuals_and_no_extra_work(self):
         import hamon_pareto
         empty = dict(schema="hamon.ple.intake.v1", scanned_files=0, engineering_file_count=0,
@@ -200,7 +242,7 @@ class LayeredConsolidationTests(unittest.TestCase):
             for extra in (dict(deliverable_count=1), dict(mcp_server_count=1)):
                 self.assertFalse(hamon_pareto.route_from_intake_prompt(
                     json.dumps(empty), instruction=instruction, **extra)["presolve_verified"])
-        for field in ("dual_solver_rel_residual", "inversion_rel_residual", "load_balance_rel_residual"):
+        for field in ("dual_solver_rel_residual", "component_rel_residual", "inversion_rel_residual", "load_balance_rel_residual"):
             for value in (1e-6, float("nan"), True):
                 with patch.object(hamon_pareto, "dispatch_ple_tool", return_value={**self.result, field: value}):
                     self.assertFalse(hamon_pareto.route_from_intake_prompt(
