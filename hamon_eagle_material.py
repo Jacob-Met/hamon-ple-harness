@@ -108,8 +108,8 @@ def _outline_cycles(records):
     unused_vertices = set(adjacent)
     used_edges = set()
     while unused_vertices:
-        if len(cycles) == 2:
-            raise ValueError("more than two layer 20 contours are unresolved")
+        if len(cycles) == 3:
+            raise ValueError("more than three layer 20 contours are unresolved")
         start = current = min(unused_vertices)
         ordered = []
         while True:
@@ -286,7 +286,7 @@ def _contour_domain(ordered, *, removed=False):
 
 
 def nominal_board_domain(records):
-    """Qualify one outer boundary and at most one strictly nested removed contour."""
+    """Qualify one outer boundary and up to two disjoint, strictly interior removed contours."""
     if not records:
         return None, {"status": "unbounded_artwork", "reason": "no_layer_20_outline"}
     if len(records) > 2048:
@@ -301,27 +301,45 @@ def nominal_board_domain(records):
     candidates = [(_contour_domain(rows), rows) for rows in cycles]
     candidates.sort(key=lambda candidate: candidate[0][0].area, reverse=True)
     (domain, info), _ = candidates[0]
-    inner = candidates[1][1]
-    removed, hole_info = _contour_domain(inner, removed=True)
-    if not domain.contains_properly(removed):
-        raise ValueError("layer 20 hole crosses, touches, or lies outside the guarded board")
+    cutouts = []
+    # Order by physical position so swapping loops of equal area preserves their roles.
+    for rows in sorted((candidate[1] for candidate in candidates[1:]), key=lambda rows: rows[0]["a"]):
+        removed, cut_info = _contour_domain(rows, removed=True)
+        if not domain.contains_properly(removed):
+            raise ValueError("layer 20 hole crosses, touches, or lies outside the guarded board")
+        for other, _ in cutouts:
+            if removed.distance(other) <= 2 * _GUARD:
+                raise ValueError("layer 20 holes intersect, nest, touch, or have unresolved separation")
+        if cut_info["quarter_count"]:
+            curve = next(row for row in rows if row["curve"])
+            cut_info["quarter_source"] = list(curve["source"])
+        cutouts.append((removed, cut_info))
+
+    removed = cutouts[0][0] if len(cutouts) == 1 else unary_union([geometry for geometry, _ in cutouts])
     result = domain.difference(removed)
-    if result.geom_type != "Polygon" or not result.is_valid or len(result.interiors) != 1:
+    if (result.geom_type != "Polygon" or not result.is_valid
+            or len(result.interiors) != len(cutouts)):
         raise ValueError("unresolved layer 20 board-with-hole topology")
-    hole_sources = [list(row["source"]) for row in inner]
-    hole_model = "outer_outline_with_one_straight_dimension_hole"
-    if hole_info["quarter_count"]:
-        hole_model = "outer_outline_with_one_tangent_quarter_dimension_hole"
-        curve = next(row for row in inner if row["curve"])
-        info = dict(info, hole_quarter_count=hole_info["quarter_count"],
-                    hole_quarter_source=list(curve["source"]),
-                    hole_arc_error_upper_bound_nm=hole_info["arc_sagitta_upper_bound_nm"],
-                    removed_area_upper_bound_mm2=hole_info["removed_area_upper_bound_mm2"])
+    holes = [cut_info for _, cut_info in cutouts]
+    hole_sources = [source for cut_info in holes for source in cut_info["sources"]]
+    if len(holes) == 1:
+        hole_info = holes[0]
+        hole_model = "outer_outline_with_one_straight_dimension_hole"
+        if hole_info["quarter_count"]:
+            hole_model = "outer_outline_with_one_tangent_quarter_dimension_hole"
+            info = dict(info, hole_quarter_count=hole_info["quarter_count"],
+                        hole_quarter_source=hole_info["quarter_source"],
+                        hole_arc_error_upper_bound_nm=hole_info["arc_sagitta_upper_bound_nm"],
+                        removed_area_upper_bound_mm2=hole_info["removed_area_upper_bound_mm2"])
+    else:
+        hole_model = "outer_outline_with_two_disjoint_dimension_holes"
+        info = dict(info, dimension_holes=holes, hole_count=len(holes),
+                    guarded_hole_separation_nm=cutouts[0][0].distance(cutouts[1][0]))
     return result, dict(info,
         model=hole_model,
         outer_model=info["model"], hole_sources=hole_sources,
         sources=info["sources"]+hole_sources, wire_count=len(records),
-        hole_wire_count=len(inner), interior_area_lower_bound_mm2=result.area/1e12)
+        hole_wire_count=len(hole_sources), interior_area_lower_bound_mm2=result.area/1e12)
 
 
 def _milling_capsule_bounds(edges):
