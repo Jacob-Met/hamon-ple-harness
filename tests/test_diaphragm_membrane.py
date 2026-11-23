@@ -158,6 +158,33 @@ class DiaphragmTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": spec})
 
+    def test_slender_panel_with_mixed_spring_restraints(self):
+        # Reference from 80-decimal integration of the Q4 polynomial using
+        # tensor Simpson quadrature and a direct nodal equilibrium solve.
+        stiffness = [[.001, 1e6], [.001, 100], [0, 1e8], [1e14, 10]]
+        spec = {"nodes_m": [[0, 0], [.01, 0], [.01, 100], [0, 100]],
+                "panels": [{"nodes": [0, 1, 2, 3], "Dx_N_m": 100,
+                            "Dy_N_m": 100, "G_N_m": 10}],
+                "springs": [{"node": i, "axis": axis, "k_N_m": k}
+                            for i, pair in enumerate(stiffness)
+                            for axis, k in zip(("x", "y"), pair) if k],
+                "loads": [{"node": 0, "force_N": [1e-8, 0]}]}
+        result = run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": spec})
+        self.assertTrue(result["dual_verified"])
+        assert_allclose(result["displacements_m"][0][0], 4.997260573849208e-6, rtol=1e-7)
+        assert_allclose(result["panel_center_shear_N_m"], [-5.478872307062616e-10], rtol=1e-7)
+        assert_allclose(result["strain_energy_J"], 2.498630286924604e-14, rtol=1e-7)
+
+        spec["bars"] = [{"nodes": [0, 1], "EA_N": 1e5, "demand_factor": 1.35,
+                         "allowable_tension_N": 1e-9, "allowable_compression_N": 1e-8}]
+        for sign in (-1, 1):
+            with self.subTest(load_sign=sign):
+                spec["loads"][0]["force_N"][0] = sign * 1e-8
+                result = run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": spec})
+                assert_allclose(result["bar_tension_N"], [-sign * 4.8793850904796265e-9], rtol=1e-7)
+                self.assertEqual(result["bar_capacity_checks"][0]["passes"], sign > 0)
+                assert_allclose(result["strain_energy_J"], 2.4986302820438824e-14, rtol=1e-7)
+
     def test_center_shear_sign_and_reaction_moment_for_pure_shear_patch(self):
         spec = {"nodes_m": [[0, 0], [1, 0], [1, 1], [0, 1]],
                 "panels": [{"nodes": [0, 1, 2, 3], "Dx_N_m": 450, "Dy_N_m": 700,
