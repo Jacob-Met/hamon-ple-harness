@@ -472,7 +472,9 @@ async def solve(session: taskbridge.Session) -> str:
             and all(row.get("state") != "unknown" for row in before_delivery.values())
             and after_delivery and all(row.get("state") == "ready" for row in after_delivery.values())
             and (refinement_time is None or refinement_time >= MIN_DELIVERY_RUN_SEC)
-            and await archive_contract.run_command(session, archive_plan[1] + " --verify")):
+            and await archive_contract.run_command(session, archive_plan[1] + " --checkpoint")
+            and ((refinement_time := taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC)) is None
+                 or refinement_time >= MIN_DELIVERY_RUN_SEC)):
           stage, command = archive_plan
           await session.log("delivery_gate: complete archive precedes optional refinement")
           resume = any(session_dir.glob("*.jsonl"))
@@ -484,10 +486,25 @@ async def solve(session: taskbridge.Session) -> str:
           if not resume:
             refine = session.instruction + "\n\n" + refine
           participant_followup = True
-          await taskbridge.run_process(
-              [*argv, "--continue"] if resume else argv, session, env=env, cwd=str(work),
-              on_line=run.on_line, stdin=refine.encode(), stop_before_sec=STOP_BEFORE_SEC,
-              log_prefix="pi-archive-refine: ")
+          try:
+            await taskbridge.run_process(
+                [*argv, "--continue"] if resume else argv, session, env=env, cwd=str(work),
+                on_line=run.on_line, stdin=refine.encode(), stop_before_sec=STOP_BEFORE_SEC,
+                log_prefix="pi-archive-refine: ")
+          except taskbridge.Cancelled:
+            raise
+          except Exception as exc:
+            await session.log("pi-archive-refine: stopped with " + type(exc).__name__)
+          recovered = await archive_contract.recover_after_refinement(session, command)
+          await session.log("delivery_gate: archive_after_refinement=" + (recovered or "unverified"))
+          if recovered in {"published", "restored"}:
+            detail = ("The saved complete version was restored." if recovered == "restored"
+                      else "The complete staged version was published.")
+            session.final_message = (f"Recovered a complete archive at {delivery_targets[0]['path']}. "
+                                     + detail + " Required members and supported format checks passed.")
+          elif recovered is None:
+            session.final_message = (f"The archive at {delivery_targets[0]['path']} could not be "
+                                     "verified after the refinement attempt.")
         if issues:
           await session.log("delivery_gate: incomplete=" + str(len(issues)))
           # A cheap task-native deterministic pass precedes another model call.

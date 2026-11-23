@@ -69,7 +69,7 @@ def verify(archive: Path, names: list[str]) -> None:
 
 
 def verify_checkpoint(stage: Path, target: Path, names: list[str]) -> None:
-    """Confirm that the graded archive is the exact first version this session staged."""
+    """Confirm that the archive matches the current staged member bytes."""
     verify(target, names)
     with zipfile.ZipFile(target) as archive:
         for name in names:
@@ -100,6 +100,56 @@ def _hydrate_stage_from_output_dir(stage: Path, output_dir: Path, names: list[st
             shutil.copy2(src, dst)
 
 
+def _replace_synced(candidate: Path, target: Path) -> None:
+    with candidate.open("rb") as f:
+        os.fsync(f.fileno())
+    os.replace(candidate, target)
+    directory_fd = os.open(target.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _copy_verified(source: Path, target: Path, names: list[str], *, staged: Path | None = None) -> None:
+    if not _valid_regular_file(source):
+        raise ValueError("missing regular archive checkpoint")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".ple-copy-", delete=False) as f:
+        candidate = Path(f.name)
+    try:
+        shutil.copyfile(source, candidate)
+        if staged is None:
+            verify(candidate, names)
+        else:
+            verify_checkpoint(staged, candidate, names)
+        _replace_synced(candidate, target)
+    finally:
+        candidate.unlink(missing_ok=True)
+
+
+def checkpoint(stage: Path, target: Path, names: list[str]) -> None:
+    """Save a verified complete version outside the members being refined."""
+    _copy_verified(target, stage.with_name(stage.name + ".checkpoint.zip"), names, staged=stage)
+
+
+def recover(stage: Path, target: Path, names: list[str]) -> str:
+    """Keep a complete result, publish complete staging, or restore the saved copy."""
+    invalid = (ValueError, OSError, zipfile.BadZipFile, EOFError, RuntimeError, csv.Error)
+    try:
+        verify(target, names)
+    except invalid:
+        pass
+    else:
+        return "kept"
+    try:
+        publish(stage, target, names)
+    except invalid:
+        _copy_verified(stage.with_name(stage.name + ".checkpoint.zip"), target, names)
+        return "restored"
+    return "published"
+
+
 def publish(stage: Path, target: Path, names: list[str]) -> None:
     if not names or len(names) != len(set(names)) or any(
         not n or n in {".", ".."} or "/" in n or "\\" in n for n in names
@@ -124,14 +174,7 @@ def publish(stage: Path, target: Path, names: list[str]) -> None:
         verify(candidate, names)
         if initial != [stamp(p) for p in sources]:
             raise ValueError("staged members changed during publication")
-        with candidate.open("rb") as f:
-            os.fsync(f.fileno())
-        os.replace(candidate, target)
-        directory_fd = os.open(target.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        _replace_synced(candidate, target)
     finally:
         candidate.unlink(missing_ok=True)
 
@@ -141,5 +184,11 @@ if __name__ == "__main__":
     stage, target, members = json.loads(sys.argv[1])
     if sys.argv[2:] == ["--verify"]:
         verify_checkpoint(Path(stage), Path(target), members)
-    else:
+    elif sys.argv[2:] == ["--checkpoint"]:
+        checkpoint(Path(stage), Path(target), members)
+    elif sys.argv[2:] == ["--recover"]:
+        print(json.dumps({"action": recover(Path(stage), Path(target), members)}))
+    elif not sys.argv[2:]:
         publish(Path(stage), Path(target), members)
+    else:
+        raise ValueError("unknown archive operation")
