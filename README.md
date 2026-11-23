@@ -74,6 +74,11 @@ The live budget router can certify a complete inline calculation in an empty tas
 
 For a list, every case must pass its existing physical checks before the participant receives the low-effort tier. It receives the original instruction and the complete ordered result, including repeated cases. A missing result, an added output-unit or comparison requirement, a local deliverable, an external tool, an inventory warning, or a combined result over 12,000 characters keeps the ordinary route. These tests measure the selected tier and what reaches the participant. Financial savings require a usage-metered model run.
 
+The civil verifier also supports [coupled transient layered consolidation](docs/layered_consolidation.md)
+through `layered_consolidation_1d`. It conserves hydraulic flux across unlike
+layers and checks an analytic Laplace-domain solution against conservative
+finite volumes before allowing the bounded inline budget route.
+
 ## Files
 
 | File | Purpose |
