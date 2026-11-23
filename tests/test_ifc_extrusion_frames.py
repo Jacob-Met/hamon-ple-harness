@@ -1,8 +1,9 @@
 """World-space clash and clearance witnesses for positioned IFC extrusions."""
 import math
+from decimal import Decimal, localcontext
 import unittest
 
-from hamon_ifc_spatial_clash import run_router_ifc_clash
+from hamon_ifc_spatial_clash import _axis2placement3d_matrix, run_router_ifc_clash
 
 
 def scene(probe, *, sign=1, hollow=False, rotated=True, scale=1.0):
@@ -156,3 +157,29 @@ class ExtrusionFrames(unittest.TestCase):
                 result = run_router_ifc_clash({"ifc_text": model})
                 self.assertEqual(result["status"], "unresolved_solid_geometry")
                 self.assertFalse(result["ok"])
+
+    def test_nonaxial_projected_reference_matches_decimal_projection(self):
+        z = (3., 4., 12.)
+        for gap in (1e-5, 1e-6, 1e-7, 1e-8):
+            with self.subTest(gap=gap):
+                x = (3. - 4. * gap, 4. + 3. * gap, 12.)
+                def ref(i):
+                    return ("ref", i)
+                entities = {
+                    1: ("IFCAXIS2PLACEMENT3D", [ref(2), ref(3), ref(4)]),
+                    2: ("IFCCARTESIANPOINT", [[0., 0., 0.]]),
+                    3: ("IFCDIRECTION", [list(z)]),
+                    4: ("IFCDIRECTION", [list(x)]),
+                }
+                frame = _axis2placement3d_matrix(entities, ref(1), 1.)
+                # Independently project the actual submitted binary64 reference
+                # onto the plane before reducing the result to a unit vector.
+                with localcontext() as ctx:
+                    ctx.prec = 120
+                    raw, normal = list(map(Decimal.from_float, x)), list(map(Decimal.from_float, z))
+                    along = sum(i * j for i, j in zip(raw, normal)) / sum(j * j for j in normal)
+                    projected = [i - along * j for i, j in zip(raw, normal)]
+                    length = sum(v * v for v in projected).sqrt()
+                    expected_x = [float(v / length) for v in projected]
+                for got, expected in zip(frame[:3, 0], expected_x):
+                    self.assertAlmostEqual(got, expected, delta=4e-16)

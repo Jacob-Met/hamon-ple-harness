@@ -364,23 +364,25 @@ def _unit_ratios(ratios):
 
 def _placement_normal(z, x):
     """Return the positive local Y axis or None for exactly parallel directions."""
-    normal = np.cross(_unit_ratios(z), _unit_ratios(x))
-    if math.hypot(*normal) < math.sqrt(np.finfo(float).eps):
-        # Near parallel axes can lose their azimuth in a difference of products.
-        # Recover the plane of the input ratios before reducing to unit length.
-        from fractions import Fraction
-        a = [Fraction(float(v)) for v in z]
-        b = [Fraction(float(v)) for v in x]
-        cross = [
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ]
-        size = max(map(abs, cross))
-        if size == 0:
-            return None
-        normal = np.array([float(v / size) for v in cross])
-    return _unit_ratios(normal)
+    # Every binary64 denominator is a power of two. A common denominator
+    # per direction gives integer coordinates for the same two directions.
+    def integer_ratios(ratios):
+        parts = [float(value).as_integer_ratio() for value in ratios]
+        common = max(denominator for _, denominator in parts)
+        return [numerator * (common // denominator) for numerator, denominator in parts]
+
+    a = integer_ratios(z)
+    b = integer_ratios(x)
+    cross = [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+    size = max(map(abs, cross))
+    if size == 0:
+        return None
+    scaled = np.array([v / size for v in cross])
+    return scaled / math.hypot(*scaled)
 
 
 def _axis2placement3d_matrix(entities: Dict[int, Tuple[str, List[Any]]], ref: Any, unit_scale: float) -> np.ndarray:
