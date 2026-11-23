@@ -233,75 +233,137 @@ def _vapor_compression_cycle(params: Mapping[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _brayton_rational_power(base, exponent):
+    """Return the exact rational power if its reduced root is rational."""
+    def root(value, degree):
+        if value == 1 or degree == 1:
+            return value
+        if degree >= value.bit_length():
+            return None
+        lo, hi = 1, 1 << ((value.bit_length() + degree - 1) // degree)
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if mid ** degree <= value:
+                lo = mid
+            else:
+                hi = mid
+        for trial in (lo, hi):
+            if trial ** degree == value:
+                return trial
+        return None
+
+    n = root(base.numerator, exponent.denominator)
+    d = root(base.denominator, exponent.denominator)
+    if n is None or d is None:
+        return None
+    return Fraction(n, d) ** exponent.numerator
+
+
+def _brayton_cycle(params):
+    result = {"domain": "thermo_cycles", "subkind": "brayton", "verified": False}
+    try:
+        def number(name, default=None):
+            return Decimal.from_float(float(params.get(name, default)))
+
+        t1, t3, rp = number("T1"), number("T3"), number("r_p")
+        gamma, cp = number("gamma", 1.4), number("cp", 1005)
+        ec, et, eff = number("eta_c", 1), number("eta_t", 1), number("regenerator_eff", 0)
+        if not all(x.is_finite() for x in (t1,t3,rp,gamma,cp,ec,et,eff)):
+            raise ValueError
+        if not (0 < t1 < t3 and rp > 1 and gamma > 1 and cp > 0):
+            raise ValueError
+    except (TypeError, ValueError, ArithmeticError):
+        return dict(result, error="invalid_brayton_parameters")
+    if not (0 < ec <= 1 and 0 < et <= 1 and 0 <= eff <= 1):
+        return dict(result, error="invalid_brayton_efficiencies")
+
+    with localcontext() as ctx:
+        ctx.prec = 110
+        exact_exponent = (Fraction(gamma) - 1) / Fraction(gamma)
+        exponent = Decimal(exact_exponent.numerator) / Decimal(exact_exponent.denominator)
+        tau = ctx.power(rp, exponent)
+        rise_factor = tau - 1
+        work_left, work_right = ec*et*t3, t1*tau
+        margin = work_left - work_right
+        # A tiny signed residual near an algebraic boundary needs an exact
+        # comparison. A positive rational has a rational p/q power precisely
+        # when both numerator and denominator are perfect q-th powers.
+        def decimal(q):
+            return Decimal(q.numerator) / Decimal(q.denominator)
+
+        def uncertain(value, scale):
+            return abs(value) <= scale * Decimal("1e-85")
+
+        if uncertain(margin, work_left + work_right):
+            exact_tau = _brayton_rational_power(Fraction(rp), exact_exponent)
+            if exact_tau is None:
+                return dict(result, error="unresolved_brayton_work_boundary")
+            margin = decimal(Fraction(ec)*Fraction(et)*Fraction(t3) - Fraction(t1)*exact_tau)
+        if margin <= 0:
+            return dict(result, error="non_positive_net_work")
+
+        dc = t1 * rise_factor / ec
+        dt = t3 * et * rise_factor / tau
+        t2 = t1 + dc
+        t4 = t3 * ((1-et) + et/tau)
+        gap = t4 - t2
+        if eff and uncertain(gap, t4+t2):
+            # For ideal machines the gap is (T3 - T1*tau**2)/tau,
+            # which also resolves an irrational tau with rational square.
+            if ec == et == 1:
+                square = _brayton_rational_power(Fraction(rp), 2*exact_exponent)
+                if square is None:
+                    return dict(result, error="unresolved_brayton_regenerator_boundary")
+                gap = decimal(Fraction(t3)-Fraction(t1)*square) / tau
+            else:
+                exact_tau = _brayton_rational_power(Fraction(rp), exact_exponent)
+                if exact_tau is None:
+                    return dict(result, error="unresolved_brayton_regenerator_boundary")
+                h = Fraction(t3)*(1-Fraction(et)+Fraction(et)/exact_tau)
+                c = Fraction(t1)*(1+(exact_tau-1)/Fraction(ec))
+                gap = decimal(h-c)
+        if eff and gap < 0:
+            return dict(result, error="regenerator_temperature_crossover")
+
+        # With positive net work these two bypass temperature changes are
+        # positive sums. Avoid subtracting nearly equal station temperatures.
+        hot_bypass = (margin + ec*(1-et)*t3 + (1-ec)*t1) / ec
+        cold_bypass = (margin + t3*(1-ec*et) + t3*(1-et)*rise_factor) / tau
+        net = cp * rise_factor * margin / (ec*tau)
+        heat_in = cp * ((1-eff)*hot_bypass + eff*dt)
+        heat_out = cp * ((1-eff)*cold_bypass + eff*dc)
+        regen_heat = cp * eff * gap
+        def log_one_plus(x):
+            # This branch retains tiny positive entropy productions even when
+            # adding one would round them away at the working precision.
+            return x if x < Decimal("1e-60") else (1+x).ln()
+
+        entropy = cp * (log_one_plus((1-ec)*rise_factor/(ec*tau))
+                        + log_one_plus((1-et)*rise_factor)
+                        + log_one_plus(eff*(1-eff)*gap*gap/(t2*t4)))
+        physical = dict(T2_K=t2, T4_K=t4, T2x_K=(1-eff)*t2+eff*t4, T4y_K=(1-eff)*t4+eff*t2,
+                        compressor_temperature_rise_K=dc, turbine_temperature_drop_K=dt,
+                        q_regenerated_J_kg=regen_heat, w_compressor_J_kg=cp*dc, w_turbine_J_kg=cp*dt,
+                        w_net_J_kg=net, q_in_J_kg=heat_in, q_out_J_kg=heat_out,
+                        back_work_ratio=dc/dt, eta_thermal=net/heat_in,
+                        eta_carnot=(t3-t1)/t3, s_gen_J_kgK=entropy)
+        wire = {key:float(value) for key,value in physical.items()}
+        if any(not math.isfinite(wire[k]) or (v and not wire[k]) for k,v in physical.items()):
+            return dict(result, error="brayton_result_outside_numeric_range")
+        decoded = {k:Decimal.from_float(v) for k,v in wire.items()}
+        balance = abs(decoded["q_in_J_kg"] - decoded["q_out_J_kg"] - decoded["w_net_J_kg"])/heat_in
+        wire_error = max(abs(decoded[k]-v)/abs(v) for k,v in physical.items() if v)
+        verified = (max(balance, wire_error) < Decimal("1e-10")
+                    and physical["eta_thermal"] <= physical["eta_carnot"] + Decimal("1e-30"))
+        return dict(result, **wire, residual=float(balance), max_relative_publication_error=float(wire_error),
+                    verified=bool(verified))
+
+
 def solve_thermodynamic_cycle(params: Mapping[str, Any]) -> Dict[str, Any]:
     subkind = str(params.get("subkind") or params.get("cycle_type") or "brayton").strip().lower()
 
     if subkind == "brayton":
-        t1 = float(params["T1"])
-        t3 = float(params["T3"])
-        r_p = float(params["r_p"])
-        gamma = float(params.get("gamma", 1.4))
-        cp = float(params.get("cp", 1005.0))
-        eta_c = float(params.get("eta_c", 1.0))
-        eta_t = float(params.get("eta_t", 1.0))
-        eps_reg = float(params.get("regenerator_eff", 0.0))
-
-        if t1 <= 0.0 or t3 <= t1 or r_p <= 1.0 or gamma <= 1.0 or cp <= 0.0:
-            return {"domain": "thermo_cycles", "subkind": subkind, "verified": False, "error": "invalid_brayton_parameters"}
-        if not (0.0 < eta_c <= 1.0 and 0.0 < eta_t <= 1.0 and 0.0 <= eps_reg <= 1.0):
-            return {"domain": "thermo_cycles", "subkind": subkind, "verified": False, "error": "invalid_brayton_efficiencies"}
-
-        r_spec = cp * (gamma - 1.0) / gamma
-        tau_s = r_p ** ((gamma - 1.0) / gamma)
-        t2s = t1 * tau_s
-        t2 = t1 + (t2s - t1) / eta_c
-        t4s = t3 / tau_s
-        t4 = t3 - eta_t * (t3 - t4s)
-
-        if eps_reg > 0.0 and t4 <= t2:
-            return {"domain": "thermo_cycles", "subkind": subkind, "verified": False, "error": "regenerator_temperature_crossover"}
-
-        t2x = t2 + eps_reg * (t4 - t2) if eps_reg > 0.0 else t2
-        t4y = t4 - (t2x - t2)
-
-        w_c = cp * (t2 - t1)
-        w_t = cp * (t3 - t4)
-        w_net = w_t - w_c
-        if w_net <= 0.0:
-            return {"domain": "thermo_cycles", "subkind": subkind, "verified": False, "error": "non_positive_net_work"}
-
-        q_in = cp * (t3 - t2x)
-        q_out = cp * (t4y - t1)
-        eta_th = w_net / q_in
-        bwr = w_c / w_t
-        eta_carnot = 1.0 - t1 / t3
-
-        ds_c = cp * math.log(t2 / t1) - r_spec * math.log(r_p)
-        ds_t = cp * math.log(t4 / t3) + r_spec * math.log(r_p)
-        ds_reg = (cp * math.log(t2x / t2) + cp * math.log(t4y / t4)) if eps_reg > 0.0 else 0.0
-        s_gen = ds_c + ds_t + ds_reg
-
-        first_law_res = float(abs((q_in - q_out) - w_net) / max(abs(q_in), 1e-12))
-        second_law_ok = bool((ds_c >= -1e-11) and (ds_t >= -1e-11) and (ds_reg >= -1e-11) and (eta_th <= eta_carnot + 1e-11))
-        return {
-            "domain": "thermo_cycles",
-            "subkind": subkind,
-            "T2_K": float(t2),
-            "T2x_K": float(t2x),
-            "T4_K": float(t4),
-            "T4y_K": float(t4y),
-            "w_compressor_J_kg": float(w_c),
-            "w_turbine_J_kg": float(w_t),
-            "w_net_J_kg": float(w_net),
-            "q_in_J_kg": float(q_in),
-            "q_out_J_kg": float(q_out),
-            "back_work_ratio": float(bwr),
-            "eta_thermal": float(eta_th),
-            "eta_carnot": float(eta_carnot),
-            "s_gen_J_kgK": float(s_gen),
-            "residual": first_law_res,
-            "verified": bool(second_law_ok and first_law_res < 1e-10),
-        }
+        return _brayton_cycle(params)
 
     if subkind == "rankine":
         return _rankine_cycle(params)
