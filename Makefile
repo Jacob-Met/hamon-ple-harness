@@ -10,3 +10,7 @@ verify-distillation:
 .PHONY: verify-witness-equipment
 verify-witness-equipment:
 	$(PYTHON) -m unittest discover -s tests -p 'test_witness_equipment.py' -v
+
+.PHONY: verify-pipe-meshes
+verify-pipe-meshes:
+	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m pytest -q tests/test_pipe_network.py tests/test_pipe_sparse_loops.py
