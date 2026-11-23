@@ -39,10 +39,22 @@ convex hulls overlap, survey coordinates, declared metre/millimetre units,
 shear, exact contact and a one-step gap. A cavity that crosses a concave exterior
 is rejected even when all of its vertices are individually inside.
 
-The maintained tests also export/reopen the two concave models through
-IfcOpenShell and compare its independent geometry volume. Those cases require
-the repository's pinned geometry dependencies; they are not silently reported
-as executed when the optional local installation is absent.
+The maintained tests export/reopen the two original concave IFC models through
+IfcOpenShell and run the public router on those files. The IfcOpenShell
+0.9.0.post1 wheel rejects direct geometry conversion of these multi-shell
+solids, including a rectangular-cavity control: OpenCASCADE reports an
+unexpected subshape configuration, and CGAL reports that multiple shells in a
+solid are unsupported. Direct kernel conversion of this representation is
+therefore not claimed.
+
+For an independent material check, a separate copy of each reopened model
+expresses the same parsed boundaries as ordinary Breps and a Boolean
+difference. Reversing the cavity bounds makes each subtraction operand an
+outward solid. OpenCASCADE then computes 130 and 62 cubic metres and 214 and
+194 square metres, respectively, after a second export/reopen. The original
+files retain their `IfcFacetedBrepWithVoids` representation. These checks
+require the repository's geometry dependencies; a missing local dependency
+is reported as a skip, not a kernel success.
 
 The source semantics follow buildingSMART's
 [IFC4 IfcFacetedBrepWithVoids definition](https://standards.buildingsmart.org/IFC/RELEASE/IFC4/ADD1/HTML/schema/ifcgeometricmodelresource/lexical/ifcfacetedbrepwithvoids.htm):

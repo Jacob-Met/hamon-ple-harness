@@ -117,24 +117,57 @@ class ConcaveVoidShells(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "budget"):
             certify_void_shells(shells, max_checks=10)
 
-    def test_independent_ifc_kernel_export_and_reopen(self):
+    def test_ifc_round_trip_and_independent_boolean_kernel_measures(self):
         if importlib.util.find_spec("ifcopenshell") is None:
             self.skipTest("IfcOpenShell is installed by the full CI requirements")
         import ifcopenshell
         import ifcopenshell.geom
         import ifcopenshell.util.shape
-        for scene, volume in [(cavity_scene(), 130.), (cavity_scene(L_OUTER, [(L_INNER, 1., 3.)]), 62.)]:
+        for scene, volume, area in [(cavity_scene(), 130., 214.),
+                                   (cavity_scene(L_OUTER, [(L_INNER, 1., 3.)]), 62., 194.)]:
             model = ifcopenshell.file.from_string(scene.text())
             with tempfile.TemporaryDirectory() as folder:
                 path = Path(folder) / "concave-cavity.ifc"
                 model.write(str(path))
                 reopened = ifcopenshell.open(str(path))
-                product, = reopened.by_type("IfcBeam")
-                shape = ifcopenshell.geom.create_shape(ifcopenshell.geom.settings(), product)
-                self.assertAlmostEqual(ifcopenshell.util.shape.get_volume(shape.geometry), volume)
+                brep, = reopened.by_type("IfcFacetedBrepWithVoids")
+                self.assertEqual(len(brep.Voids), 1)
                 report = run_router_ifc_clash({"path": str(path)})
                 self.assertTrue(report["ok"], report)
                 self.assertAlmostEqual(report["total_solid_volume_m3"], volume)
+                host, = load_ifc_solids(path.read_text())
+
+                # The 0.9.0.post1 wheel rejects multiple shells in a solid even
+                # for a rectangular cavity. Keep the original export above;
+                # in a separate model, ask OpenCASCADE to subtract the same
+                # independently parsed shell boundaries as ordinary Breps.
+                # This verifies the material measures, not direct kernel
+                # support for IfcFacetedBrepWithVoids.
+                oracle = ifcopenshell.file.from_string(reopened.to_string())
+                oracle_brep, = oracle.by_type("IfcFacetedBrepWithVoids")
+                material = oracle.create_entity("IfcFacetedBrep", Outer=oracle_brep.Outer)
+                for shell in oracle_brep.Voids:
+                    for face in shell.CfsFaces:
+                        for bound in face.Bounds:
+                            bound.Orientation = not bound.Orientation
+                    cavity = oracle.create_entity("IfcFacetedBrep", Outer=shell)
+                    material = oracle.create_entity("IfcBooleanResult", Operator="DIFFERENCE",
+                                                    FirstOperand=material, SecondOperand=cavity)
+                product, = oracle.by_type("IfcBeam")
+                representation, = product.Representation.Representations
+                representation.Items = (material,)
+                representation.RepresentationType = "CSG"
+                oracle_path = Path(folder) / "independent-boolean-oracle.ifc"
+                oracle.write(str(oracle_path))
+                oracle_reopened = ifcopenshell.open(str(oracle_path))
+                oracle_product, = oracle_reopened.by_type("IfcBeam")
+                shape = ifcopenshell.geom.create_shape(ifcopenshell.geom.settings(), oracle_product)
+                kernel_volume = ifcopenshell.util.shape.get_volume(shape.geometry)
+                kernel_area = ifcopenshell.util.shape.get_area(shape.geometry)
+                self.assertAlmostEqual(kernel_volume, volume)
+                self.assertAlmostEqual(kernel_area, area)
+                self.assertAlmostEqual(host.volume_m3(), kernel_volume)
+                self.assertAlmostEqual(host.surface_area_m2(), kernel_area)
 
     def test_actual_registered_tool_reads_and_qualifies_cavity_files(self):
         root = Path(__file__).resolve().parent.parent
