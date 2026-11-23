@@ -2996,6 +2996,10 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
             "clearance_satisfied": (not intersects) and (dist >= float(spec["min_clearance_m"]) - 1e-12),
             "dual_verified": True,
         }
+    if kind == "rigid_rectangle_contact":
+        from hamon_rectangle_contact import verify_rigid_rectangle_contact
+        result = verify_rigid_rectangle_contact(spec)
+        return {**result, "kind": kind, "dual_verified": result["conservation_verified"]}
     if kind == "rigid_strip_contact":
         from hamon_bearing_capacity import verify_rigid_strip_contact
         result = verify_rigid_strip_contact(spec)
