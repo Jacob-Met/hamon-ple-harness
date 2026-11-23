@@ -5,6 +5,8 @@ from mpmath import mp
 
 
 def rc_precharge_state(spec):
+    publication_errors = []
+
     def quantity(key):
         raw = spec[key]
         if isinstance(raw, bool):
@@ -21,6 +23,9 @@ def rc_precharge_state(spec):
             raise ValueError("RC result lies outside the finite output range") from exc
         if not math.isfinite(value) or (x and not value):
             raise ValueError("RC result lies outside the finite output range")
+        if x:
+            reference = real(x) if isinstance(x, Fraction) else x
+            publication_errors.append(abs(ctx.mpf(value)/reference-1))
         return value
 
     bus, microfarads, resistance, f = map(quantity, (
@@ -75,6 +80,6 @@ def rc_precharge_state(spec):
         elapsed = ctx.mpf(time_s)/real(tau)
         errors.extend((rel(-ctx.expm1(-elapsed),real(f)), rel(ctx.exp(-elapsed),real(remaining)),
                        rel(-real(full_energy)*ctx.expm1(-2*elapsed),real(H))))
-    error = max(map(float, errors))
+    error = max(map(float, errors+publication_errors))
     result.update(dual_rel_discrepancy=error, dual_verified=error < 1e-10)
     return result
