@@ -110,12 +110,16 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
             stream = MockStream() if cancel else RepairStream(script)
             writes, materializations, children = [], [], []
             spawn = asyncio.create_subprocess_exec
+            loop = asyncio.get_running_loop()
+            spawn_transport = loop.subprocess_exec
 
             async def record_spawn(*args, **kwargs):
-                child = await spawn(*args, **kwargs)
-                if str(args[0]) == harness.PI:
-                    children.append(child)
-                return child
+                # run_process uses a custom SubprocessStreamProtocol so leader
+                # exit is observable even if a descendant holds an output pipe.
+                transport, protocol = await spawn_transport(*args, **kwargs)
+                if str(args[1]) == harness.PI:
+                    children.append(transport)
+                return transport, protocol
 
             async def entry(socket):
                 await harness.taskbridge._session(socket, harness.solve)
@@ -127,7 +131,7 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                        'ANTHROPIC_BASE_URL': url, 'ANTHROPIC_API_KEY': 'fixture',
                        'MODEL_BASE_URL': url + '/v1', 'MODEL_API_KEY': 'fixture'}
                 with (mock.patch.dict(os.environ, env, clear=True),
-                      mock.patch.object(asyncio, 'create_subprocess_exec', side_effect=record_spawn),
+                      mock.patch.object(loop, 'subprocess_exec', side_effect=record_spawn),
                       mock.patch.object(harness.engineering_intake, 'intake_for_prompt', mock.AsyncMock(return_value='')),
                       mock.patch.object(harness.engineering_intake, 'provision_engineering_cli', mock.AsyncMock(return_value='')),
                       mock.patch.object(harness.archive_contract, 'provision', mock.AsyncMock(return_value=None))):
@@ -186,7 +190,7 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                                     stopper.cancel()
                                     await asyncio.gather(stopper, return_exceptions=True)
             self.assertTrue(children)
-            self.assertTrue(all(child.returncode is not None for child in children))
+            self.assertTrue(all(child.get_returncode() is not None for child in children))
             self.assertFalse(list(Path(home).glob('pi-*')))
             if cancel:
                 await asyncio.wait_for(stream.disconnected.wait(), 3)
