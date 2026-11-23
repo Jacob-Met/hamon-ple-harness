@@ -1,4 +1,5 @@
 """Axial member forces can be unique even when a linear truss has a free mechanism."""
+import math
 import unittest
 
 from hamon_dual_verifier import run_dual_verify_spec
@@ -14,6 +15,40 @@ def bar(label, i, j, ea=1e6):
 
 
 class AxialObservableTests(unittest.TestCase):
+    def test_material_factors_preserve_thermal_self_stress_on_free_axis(self):
+        nodes = {"A": {"x": 0, "y": 0, "fix_x": True, "fix_y": True}, "B": {"x": 3, "y": 4}}
+        members = [{"id": "warm", "n1": "A", "n2": "B", "E_pa": 40e6, "A_m2": .01,
+                    "alpha_per_K": 1e-5, "dT_K": 100},
+                   {"id": "cold", "n1": "B", "n2": "A", "E_pa": 20e6, "A_m2": .01}]
+        result = solve(nodes, members)
+        self.assertTrue(result["dual_verified"])
+        self.assertEqual(result["free_mechanism_count"], 1)
+        self.assertAlmostEqual(result["N_warm_N"], -400 / 3)
+        self.assertAlmostEqual(result["N_cold_N"], 400 / 3)
+
+    def test_material_pair_and_binary64_alias(self):
+        nodes = {"A": {"x": 0, "y": 0, "fix_x": True, "fix_y": True},
+                 "B": {"x": 2, "y": 0, "fix_x": True, "fix_y": True, "ux_m": .001}}
+        def force(**material):
+            return solve(nodes, [dict(id="x", n1="A", n2="B", **material)])["N_x_N"]
+
+        self.assertEqual(force(), 100000)
+        self.assertEqual(force(EA=200000), 100)
+        self.assertEqual(force(E_pa=2e8, A_m2=.001), 100)
+        self.assertEqual(force(E_pa=2e8, A_m2=.001, EA=200000), 100)
+        for invalid in ({"E_pa": 2e8}, {"A_m2": .001}, {"E_pa": 2e8, "EA": 200000},
+                        {"E_pa": 2e8, "A_m2": 0}, {"E_pa": -1, "A_m2": .001},
+                        {"E_pa": 2e8, "A_m2": .001, "EA": math.nextafter(200000., math.inf)}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                force(**invalid)
+
+    def test_finite_thermal_force_with_unrepresentable_intermediate_rigidity(self):
+        nodes = {"A": {"x": 0, "y": 0, "fix_x": True, "fix_y": True},
+                 "B": {"x": 1, "y": 0, "fix_x": True, "fix_y": True}}
+        member = {"id": "x", "n1": "A", "n2": "B", "E_pa": 2.0**800, "A_m2": 2.0**400,
+                  "alpha_per_K": 2.0**-250, "dT_K": 1}
+        self.assertEqual(solve(nodes, [member])["N_x_N"], -2.0**950)
+
     def test_rotated_frame_has_axial_forces_and_two_free_transverse_motions(self):
         nodes = {"A": {"x": 0, "y": 0, "fix_x": True, "fix_y": True},
                  "B": {"x": 3, "y": 4}, "C": {"x": 6, "y": 8, "Fx": 60, "Fy": 80}}
