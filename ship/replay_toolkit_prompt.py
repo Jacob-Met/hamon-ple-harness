@@ -168,7 +168,7 @@ async def main():
     args = parser.parse_args()
     root = args.root.resolve()
     sys.path[:0] = [str(root), str(root / "tests")]
-    tasks = json.loads((root / "artifacts/manifest.json").read_bytes())["tasks"]
+    tasks = list(json.loads((root / "artifacts/manifest.json").read_bytes())["tasks"])
     if args.task and set(args.task) - set(tasks):
         parser.error("Unknown public task")
     if args.compare:
