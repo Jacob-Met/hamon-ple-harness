@@ -726,21 +726,14 @@ class UnresolvedSolidGeometry(ValueError):
 
 
 def _boolean_meshes(meshes, operator="UNION"):
-    """Combine closed polyhedral material with double-precision mesh Booleans.
+    """Combine closed material, retaining exact rectilinear source planes.
 
     Input triangles are the geometry being combined. A polygonal approximation
     of a curved profile does not become an analytic curved solid. The shared
     local frame avoids cancellation at survey coordinates. Exact-position
     welding preserves distinct walls and gaps; no approximate repair is used.
     """
-    try:
-        import manifold3d
-    except ImportError as exc:
-        raise UnresolvedSolidGeometry("polyhedral Boolean requires manifold3d") from exc
-    operations = {"UNION": manifold3d.OpType.Add,
-                  "INTERSECTION": manifold3d.OpType.Intersect,
-                  "DIFFERENCE": manifold3d.OpType.Subtract}
-    if operator not in operations or len(meshes) < 2:
+    if operator not in {"UNION", "INTERSECTION", "DIFFERENCE"} or len(meshes) < 2:
         raise UnresolvedSolidGeometry("invalid polyhedral Boolean operands")
     if sum(len(f) for _, f in meshes) > 50000:
         raise UnresolvedSolidGeometry("polyhedral Boolean exceeds 50000 source triangles")
@@ -753,6 +746,24 @@ def _boolean_meshes(meshes, operator="UNION"):
         _, closed, coherent = _closed_surface_components(vertices, faces)
         if len(closed) != len(faces) or not coherent:
             raise UnresolvedSolidGeometry("Boolean operand is not closed and consistently oriented")
+    from hamon_rectilinear_boolean import rectilinear_boolean
+    try:
+        exact = rectilinear_boolean(meshes, operator)
+    except ValueError as exc:
+        raise UnresolvedSolidGeometry(str(exc)) from exc
+    if exact is not None:
+        vertices, faces = exact
+        _, closed, coherent = _closed_surface_components(vertices, faces)
+        if len(closed) != len(faces) or not coherent:
+            raise UnresolvedSolidGeometry("rectilinear Boolean has a nonmanifold material contact")
+        return vertices, faces
+    try:
+        import manifold3d
+    except ImportError as exc:
+        raise UnresolvedSolidGeometry("polyhedral Boolean requires manifold3d") from exc
+    operations = {"UNION": manifold3d.OpType.Add,
+                  "INTERSECTION": manifold3d.OpType.Intersect,
+                  "DIFFERENCE": manifold3d.OpType.Subtract}
     low = np.min([v.min(axis=0) for v, _ in meshes], axis=0)
     high = np.max([v.max(axis=0) for v, _ in meshes], axis=0)
     scale = float(np.max(high - low))
@@ -2159,5 +2170,6 @@ if __name__ == "__main__" and "--json-stdin" in __import__("sys").argv:
         _resp = run_router_ifc_clash(_req)
     print(_cli_json.dumps(_wave3_to_jsonable(_resp)))
     raise SystemExit(0)
+
 
 
