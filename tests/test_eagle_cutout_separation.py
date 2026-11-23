@@ -1,6 +1,10 @@
 """Source-exact controls for the strict separation of two guarded Dimension cutouts."""
+import subprocess
+import sys
+import tempfile
 import unittest
 from fractions import Fraction as F
+from pathlib import Path
 
 from hamon_eagle_material import nominal_board_domain
 
@@ -55,3 +59,9 @@ class ExactHoleSeparationTests(unittest.TestCase):
         nested = [(-360, -60), (-240, -60), (-240, 60), (-360, 60)]
         with self.assertRaisesRegex(ValueError, "unresolved separation"):
             nominal_board_domain(records([outside, left, nested]))
+
+    def test_registered_cli_strict_clearance_course(self):
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run([sys.executable, str(repo / "ship" / "verify_eagle_strict_hole_clearance.py"),
+                            "--repo", str(repo), "--out", directory], check=True)
