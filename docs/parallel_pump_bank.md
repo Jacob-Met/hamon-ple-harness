@@ -1,0 +1,9 @@
+# Fixed-speed pumps with independent curves on a common header
+
+Use `calculation="pump_operating_point"` with `pump_curves` for parallel pumps that have separate head–flow tables. Each list element is one pump's table of `flow_m3_s` and `head_m` records. Its first point must be zero flow at shutoff head. Flow increases and head decreases strictly across the rated points. The shared system head is `static_head_m + system_resistance_s2_m5 * total_flow_m3_s**2`.
+
+This mode assumes ideal branch check valves. Set `check_valves=true` to state that assumption explicitly. At positive flow, each open pump develops the shared header head. A pump with shutoff head below the header stays closed with zero flow. Equality is reported as `at_shutoff`. The model does not infer reverse flow, branch losses or operation past the final rated point. The separate `curve` and `identical_pumps` mode retains its equal-sharing and nonmonotone-curve behavior.
+
+Each `operating_points` entry reports the header head, total flow and the per-pump flows and valve states in input order. `shutoff_head_minus_header_m` preserves the signed difference at an opening boundary where the displayed header head may round to the shutoff head. A zero-delivery equilibrium has `delivering_flow=false`. A request outside the measured curves returns no rated intersection.
+
+For example, take two pumps with shutoff heads 32 and 16 m and straight curves with slopes −1024 and −256 m per (m³/s), respectively. At static head 6.9375 m and resistance 4096 s²/m⁵, the header head is 12 m and flows are 0.01953125 and 0.015625 m³/s. At static head 23.75 m with the same resistance, the first pump delivers 0.0078125 m³/s at 24 m and the second is closed. [Hydraulic Institute pump and system curve intersection](https://datatool.pumps.org/pump-fundamentals/combined.html)
