@@ -1,0 +1,13 @@
+# Normal incidence at a passive fluid interface
+
+The registered `compressible_acoustics` calculation with `subkind: "acoustics"` treats two homogeneous, lossless fluids with real positive density and sound speed. For medium 1 the optional `rho1` and `c1` defaults are 1.204 kg/m³ and 343 m/s. For medium 2 the `rho2` and `c2` defaults are 998 kg/m³ and 1481 m/s. The registered tool requires a recognized material input or all three resonator dimensions.
+
+With unit incident pressure amplitude, pressure continuity gives `1 + R = T`. Normal particle-velocity continuity gives `(1 − R)/Z₁ = T/Z₂`, where `Zᵢ = ρᵢ cᵢ` in rayls. `pressure_reflection_R` and `pressure_transmission_T` are the resulting signed pressure coefficients. `intensity_transmission_TI` is `T² Z₁/Z₂`, a nonnegative fraction of incident power. Transmitted pressure amplitude can exceed one when entering the higher-impedance medium. Reversing the media changes the sign of the pressure reflection and preserves transmitted power.
+
+`transmission_loss_dB` is minus ten times the base-ten logarithm of the power fraction. A matched pair gives zero reflection, unit pressure and power transmission, and zero loss. Near a match the loss is evaluated from the squared pressure reflection so that a positive loss can still be reported when the displayed power rounds to one. For high contrasts the calculation uses the unclipped power fraction. For example, impedances of 10⁻¹⁷⁰ and 10¹⁵⁰ rayls give 3193.9794000867205 dB. This pair is a numeric stress test.
+
+The optional lumped Helmholtz model requires positive neck area `A_neck` in m², cavity volume `V_cavity` in m³ and effective neck length `L_eff` in m. It uses the first medium’s sound speed. With no resonator dimensions the frequency field is null. Incomplete geometry, nonpositive or nonfinite physical inputs, and mandatory nonzero outputs outside the returned number representation yield a structured refusal.
+
+The residual is the largest of the pressure-continuity error, the velocity-equation error scaled by `Z₁Z₂/(Z₁+Z₂)`, and the reflected-plus-transmitted power error. All are evaluated on the reported binary coefficients. This model covers a single normal-incidence fluid interface and the optional ideal lumped resonator. Dissipative media, oblique incidence, elastic solids and calibrated resonator measurements require separate models.
+
+The normal-incidence boundary equations and pressure versus intensity convention follow Mark Oelze’s university acoustics notes. [University of Illinois, Reflection and Transmission](https://jontalle.web.engr.illinois.edu/uploads/473.F18/Lectures/Chapter_6a.pdf)
