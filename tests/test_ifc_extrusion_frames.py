@@ -62,10 +62,12 @@ def solid_coordinates(point):
 
 
 class ExtrusionFrames(unittest.TestCase):
-    def physical_pair(self, probe, sign, *, hollow=False, rotated=True, scale=1.0):
-        out = run_router_ifc_clash({"ifc_text": scene(probe, sign=sign, hollow=hollow,
-                                                      rotated=rotated, scale=scale),
-                                   "required_clearance_m": 0.1})
+    def physical_pair(self, probe, sign, *, hollow=False, rotated=True, scale=1.0, axes=()):
+        model = scene(probe, sign=sign, hollow=hollow, rotated=rotated, scale=scale)
+        for old, new in axes:
+            self.assertIn(old, model)
+            model = model.replace(old, new)
+        out = run_router_ifc_clash({"ifc_text": model, "required_clearance_m": 0.1})
         self.assertTrue(out["ok"])
         self.assertEqual((out["solid_count"], out["pair_count"]), (2, 1))
         (pair,) = out["all_pairs"]
@@ -126,3 +128,31 @@ class ExtrusionFrames(unittest.TestCase):
                 })
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["status"], "unresolved_solid_geometry")
+
+    def test_equivalent_placement_directions_preserve_contact_and_clearance(self):
+        changes = [
+            ("#19=IFCDIRECTION((0.,1.))", "#19=IFCDIRECTION((0.,1.E-250))"),  # profile
+            ("#19=IFCDIRECTION((0.,1.))", "#19=IFCDIRECTION((0.,1.E250))"),
+            ("#6=IFCDIRECTION((0.,1.,0.))", "#6=IFCDIRECTION((0.,1.E-250,0.))"),  # parent X
+            ("#10=IFCDIRECTION((0.,-1.,0.))", "#10=IFCDIRECTION((0.,-1.E250,0.))"),  # child Z
+            ("#15=IFCDIRECTION((0.,0.,-1.))", "#15=IFCDIRECTION((0.,0.,-1.E-250))"),  # solid X
+            # Axis2Placement3D projects RefDirection onto the plane normal to Axis.
+            # The same positive Y reference survives even when its projection
+            # would underflow after normalizing the two raw components together.
+            ("#6=IFCDIRECTION((0.,1.,0.))", "#6=IFCDIRECTION((0.,1.E-250,1.E250))"),
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                embedded = self.physical_pair((2.8, -0.125, 3), 1, axes=[change])
+                self.assertEqual(embedded["status"], "hard_clash")
+                separated = self.physical_pair((0.25, 2.125, -3), -1, axes=[change])
+                self.assertAlmostEqual(separated["min_distance_m"], math.hypot(2., 1.41), places=10)
+
+    def test_invalid_explicit_placement_axes_withhold_geometry(self):
+        base = scene((2.8, -0.125, 3))
+        for replacement in ("(0.,0.,1.)", "(0.,0.,0.)", "(0.,1.)"):
+            with self.subTest(replacement=replacement):
+                model = base.replace("#6=IFCDIRECTION((0.,1.,0.))", f"#6=IFCDIRECTION({replacement})")
+                result = run_router_ifc_clash({"ifc_text": model})
+                self.assertEqual(result["status"], "unresolved_solid_geometry")
+                self.assertFalse(result["ok"])
