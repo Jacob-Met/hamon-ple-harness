@@ -1,5 +1,6 @@
 """Terzaghi primary consolidation for one homogeneous layer."""
 import math
+import sys
 
 
 
@@ -275,15 +276,16 @@ def _interval_response(young, span):
     return older, newer, pressure
 
 
-def _resolved_history_pressure(history, elapsed, height, cv, drainage, scale):
-    """Resolve a signed unload response hidden by cancellation at working precision."""
+def _resolved_history_pressure(history, elapsed, height, cv, drainage, scale, factors=()):
+    """Resolve a signed response, applying component factors before rounding."""
     from mpmath import mp
 
     ctx = mp.clone()
     ctx.prec = 120
     # At this precision even an error proportional to the entire surcharge
     # is below the binary64 subnormal range.
-    max_bits = max(2 * ctx.prec, math.frexp(scale)[1] + 1160)
+    max_bits = max(2 * ctx.prec, math.frexp(scale)[1]
+                   + sum(math.frexp(value)[1] for value in factors) + 1160)
     previous = None
 
     def retention(young, span):
@@ -330,7 +332,9 @@ def _resolved_history_pressure(history, elapsed, height, cv, drainage, scale):
             if change:
                 terms.append(change * retention((time-end)*factor, (end-start)*factor))
                 variation += abs(change)
-        pressure = ctx.fsum(terms)
+        multiplier = ctx.fprod(ctx.mpf(value) for value in factors)
+        pressure = ctx.fsum(terms) * multiplier
+        variation *= abs(multiplier)
         rounded = float(pressure)
         if not math.isfinite(rounded):
             raise ValueError("Nonfinite signed unloading pressure")
@@ -404,11 +408,16 @@ def verify_consolidation_history(spec):
         segments = _history_segments(spec["load_history"], elapsed)
         scale = max(max(initial, final) for _, _, initial, final in segments)
         effective_terms, pressure_terms = [], []
+        subnormal_retention = False
         for start, end, initial, final in segments:
             old, new, retained = _interval_response((elapsed-end)*factor, (end-start)*factor)
             effective_terms.append(initial*old + final*new)
             pressure_terms.append((final-initial)*retained)
+            # A unit-load kernel can lose significand bits or round to zero
+            # before its load multiplier produces a representable pressure.
+            subnormal_retention |= final != initial and retained < sys.float_info.min
         effective, pressure = math.fsum(effective_terms), math.fsum(pressure_terms)
+        resolved_settlement = None
         current = segments[-1][3]
         # Use the positive effective-stress integral to recover near-cancelling
         # negative pore-pressure tails after construction loads are removed.
@@ -416,15 +425,22 @@ def verify_consolidation_history(spec):
         difference_scale = abs(current) + abs(effective)
         if difference_scale < impulse_scale:
             pressure = current-effective
-        if current and abs(pressure) < math.sqrt(math.ulp(1.0)) * min(impulse_scale, difference_scale):
+        cancellation = current and abs(pressure) < math.sqrt(math.ulp(1.0)) * min(impulse_scale, difference_scale)
+        if subnormal_retention or cancellation:
             pressure = _resolved_history_pressure(spec["load_history"], elapsed, h, cv, spec["drainage"], scale)
+            if current == 0:
+                effective = -pressure
+                # Settlement can remain representable even when the pressure
+                # or strain rounds to zero. Scale the original response first.
+                resolved_settlement = _resolved_history_pressure(
+                    spec["load_history"], elapsed, h, cv, spec["drainage"], scale, (-mv, h))
         coarse = _diffusion_history(segments, factor, 96)
         fine = _diffusion_history(segments, factor, 192)
         fv_eff, fv_pressure = (b+(b-a)/3 for a,b in zip(coarse, fine))
         strain = mv*effective
         if not 0 <= strain < 1:
             raise ValueError("Predicted compression exhausts or exceeds the layer thickness")
-        settlement = strain*h
+        settlement = strain*h if resolved_settlement is None else resolved_settlement
         if not all(math.isfinite(x) for x in (effective, pressure, settlement, fv_eff, fv_pressure)):
             raise ValueError("Nonfinite consolidation history response")
         residual = max(abs(effective-fv_eff), abs(pressure-fv_pressure), abs(effective+pressure-current))
