@@ -630,65 +630,146 @@ def pump_curve(curve):
     return flows, heads
 
 
-def verify_pump_duty(spec):
-    """Check fixed-speed duty for identical parallel pumps at their tabulated head.
-
-    Supplying both electrical fields declares a connected input rating per pump
-    and the panel capacity. Positive hydraulic work requires a positive electrical
-    connection. The ratings do not measure the power drawn at the operating point.
-    Omitting both fields requests a hydraulic head check only.
-    """
-    result = {"calculation": "pump_duty", "mode": "thermal_fluid",
-              "tool": "hamon_conservation_cad_verifier", "ok": False, "duty_verified": False}
+def _duty_quantity(result, key, value):
+    """Publish a rounded display value without changing the exact decision."""
     try:
-        fields = {"mode", "calculation", "curve", "total_flow_m3_s", "required_head_m",
-                  "identical_pumps", "per_pump_input_W", "available_panel_W", "equipped_branch"}
+        rounded = float(value)
+    except OverflowError:
+        rounded = math.copysign(math.inf, 1 if value > 0 else -1)
+    if math.isfinite(rounded) and (rounded or not value):
+        result[key] = rounded
+    else:
+        result[key] = None
+        result.setdefault("numeric_range", {})[key] = (
+            "below_binary64" if rounded == 0 else "above_binary64"
+        )
+
+
+def verify_pump_duty(spec):
+    """Check a tabulated fixed-speed duty and its declared power constraints.
+
+    Electrical inputs are connected ratings. With no measured wire-to-fluid
+    efficiency, the ideal first-law limit is a necessary lower bound on draw.
+    No density is assumed. At positive hydraulic duty, a rating yields an
+    inverse limit on density even when the liquid has not been identified.
+    """
+    result = {
+        "calculation": "pump_duty",
+        "mode": "thermal_fluid",
+        "tool": "hamon_conservation_cad_verifier",
+        "ok": False,
+        "duty_verified": False,
+    }
+    try:
+        fields = {
+            "mode",
+            "calculation",
+            "curve",
+            "total_flow_m3_s",
+            "required_head_m",
+            "identical_pumps",
+            "per_pump_input_W",
+            "available_panel_W",
+            "equipped_branch",
+            "gravity_m_s2",
+            "fluid_density_kg_m3",
+            "wire_to_fluid_efficiency",
+        }
         if spec.keys() - fields:
             raise ValueError("Unsupported inputs for fixed-speed identical parallel pump duty")
         count = spec.get("identical_pumps", 1)
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             raise ValueError("identical_pumps must be a positive integer")
-        flow = number(spec["total_flow_m3_s"])
+        flow = Fraction(number(spec["total_flow_m3_s"]))
         if flow < 0:
             raise ValueError("Expected nonnegative design flow")
+        per_pump = flow / count
+        _duty_quantity(result, "flow_per_pump_m3_s", per_pump)
         if ("required_head_m" in spec) == ("equipped_branch" in spec):
             raise ValueError("Supply exactly one of required_head_m and equipped_branch")
-        per_pump = flow / count
-        result["flow_per_pump_m3_s"] = per_pump
+        branch = spec.get("equipped_branch", {})
+        if not isinstance(branch, dict):
+            raise ValueError("equipped_branch must be a hydraulic branch object")
+        gravity = number(spec.get("gravity_m_s2", branch.get("gravity_m_s2", 9.80665)))
+        if gravity <= 0 or ("gravity_m_s2" in branch and number(branch["gravity_m_s2"]) != gravity):
+            raise ValueError("Use one positive site gravity for head losses and power")
         if "equipped_branch" in spec:
-            result.update(equipped_branch_head(spec["equipped_branch"], per_pump))
-            required = result["required_head_m"]
+            result.update(
+                equipped_branch_head({**branch, "gravity_m_s2": gravity}, float(per_pump))
+            )
+            required = Fraction(result["required_head_m"])
         else:
-            required = number(spec["required_head_m"])
+            required = Fraction(number(spec["required_head_m"]))
             if required < 0:
                 raise ValueError("Expected nonnegative required head")
-        flows, heads = pump_curve(spec["curve"])
+
+        density = None
+        if "fluid_density_kg_m3" in spec:
+            density = Fraction(number(spec["fluid_density_kg_m3"]))
+            if density <= 0:
+                raise ValueError("fluid_density_kg_m3 must be positive")
+        efficiency = Fraction(number(spec.get("wire_to_fluid_efficiency", 1)))
+        if not 0 < efficiency <= 1:
+            raise ValueError("wire_to_fluid_efficiency must lie in (0, 1]")
+        rating = None
         checks = {}
         if "per_pump_input_W" in spec or "available_panel_W" in spec:
-            draw = number(spec["per_pump_input_W"])
-            capacity = number(spec["available_panel_W"])
-            if min(draw, capacity) < 0:
+            rating = Fraction(number(spec["per_pump_input_W"]))
+            capacity = Fraction(number(spec["available_panel_W"]))
+            if min(rating, capacity) < 0:
                 raise ValueError("Electrical inputs must be nonnegative")
-            total_draw = count * draw
-            if not math.isfinite(total_draw):
-                raise ValueError("Total electrical draw exceeds the numerical range")
-            result.update(total_input_W=total_draw, panel_margin_W=capacity - total_draw)
-            checks["panel_adequate"] = total_draw <= capacity
+            total_rating = count * rating
+            _duty_quantity(result, "total_input_W", total_rating)
+            _duty_quantity(result, "panel_margin_W", capacity - total_rating)
+            checks["panel_adequate"] = total_rating <= capacity
+        if density is None and rating is None and "wire_to_fluid_efficiency" in spec:
+            raise ValueError("Efficiency needs a fluid density or a connected rating")
+
+        flows, heads = pump_curve(spec["curve"])
         if not flows[0] <= per_pump <= flows[-1]:
             raise ValueError("Flow per pump is outside the tabulated curve")
         i = min(bisect_left(flows, per_pump, lo=1), len(flows) - 1)
-        fraction = (per_pump - flows[i - 1]) / (flows[i] - flows[i - 1])
-        head = (1.0 - fraction) * heads[i - 1] + fraction * heads[i]
-        margin = head - required
-        checks["head_adequate"] = margin >= 0
-        if flow > 0 and head > 0 and result.get("total_input_W") == 0:
-            checks["connected_power_consistent"] = False
-            result["reason"] = (
-                "Positive flow and developed pump head require positive connected "
-                "electrical power for this electrically driven duty"
+        q0, q1 = map(Fraction, flows[i - 1 : i + 1])
+        h0, h1 = map(Fraction, heads[i - 1 : i + 1])
+        head = h0 + (h1 - h0) * (per_pump - q0) / (q1 - q0)
+        _duty_quantity(result, "available_head_m", head)
+        _duty_quantity(result, "head_margin_m", head - required)
+        checks["head_adequate"] = head >= required
+
+        # The pump develops the tabulated head at the stated discharge even
+        # when the stated minimum required head is smaller.
+        specific_power = Fraction(gravity) * per_pump * head
+        if density is not None or rating is not None:
+            result["power_basis"] = (
+                "declared_wire_to_fluid_efficiency"
+                if "wire_to_fluid_efficiency" in spec
+                else "ideal_lower_bound"
             )
-        return {**result, "ok": True, "checks": checks,
-                "available_head_m": head, "head_margin_m": margin, "duty_verified": all(checks.values())}
+            result["hydraulic_rating_verified"] = None
+        if rating is not None and specific_power:
+            _duty_quantity(
+                result, "max_fluid_density_at_rating_kg_m3", efficiency * rating / specific_power
+            )
+            if rating == 0:
+                checks["connected_power_consistent"] = False
+                result["hydraulic_rating_verified"] = False
+                result["reason"] = (
+                    "Positive flow and developed head require positive connected power"
+                )
+        if density is not None:
+            hydraulic = density * specific_power
+            electrical = hydraulic / efficiency
+            _duty_quantity(result, "total_hydraulic_power_W", count * hydraulic)
+            _duty_quantity(result, "required_input_per_pump_W", electrical)
+            _duty_quantity(result, "required_total_input_W", count * electrical)
+            if rating is not None:
+                _duty_quantity(result, "per_pump_power_margin_W", rating - electrical)
+                enough = rating >= electrical
+                checks["connected_power_consistent"] = enough
+                # Passing an ideal bound cannot establish real efficiency.
+                if not enough or "wire_to_fluid_efficiency" in spec:
+                    result["hydraulic_rating_verified"] = enough
+        return {**result, "ok": True, "checks": checks, "duty_verified": all(checks.values())}
     except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
         return {**result, "reason": str(exc)}
 
