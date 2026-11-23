@@ -8,7 +8,7 @@ from functools import lru_cache
 import math
 
 import numpy as np
-from scipy.sparse import coo_matrix, diags, eye
+from scipy.sparse import bmat, coo_matrix, diags, eye
 from hamon_diaphragm_modes import diaphragm_coordinates
 from scipy.sparse.linalg import splu
 
@@ -201,8 +201,68 @@ def solve_diaphragm(spec):
     raise ValueError("diaphragm failed local/global equilibrium or work-energy balance")
 
 
-def _coordinate_estimates(coordinates, use_nodal, force, ground, panels, bars, scale, factor):
-    yield coordinates
+def _factor(scaled):
+    try:
+        factor = splu(scaled)
+    except RuntimeError as exc:
+        raise ValueError("unsupported or singular diaphragm") from exc
+    pivots = np.abs(factor.U.diagonal())
+    if pivots.min() <= 1e-12 * pivots.max():
+        raise ValueError("unsupported or ill-conditioned diaphragm")
+    return factor
+
+
+def _mixed_bar_solution(stiffness, rhs, bar_map, axial_k, bars):
+    # A connector force is its own unknown. This avoids both domination
+    # of B.T K B by the stiffest link and cancellation in force recovery.
+    # Bars sharing both endpoints have identical signed extension, including
+    # when their endpoints are reversed. Solve once for their total force,
+    # then divide it according to each member's axial stiffness.
+    endpoints = np.array([sorted((dofs[0], dofs[2])) for dofs, _, _ in bars])
+    _, first, group = np.unique(endpoints, axis=0, return_index=True, return_inverse=True)
+    group = group.ravel()
+    group_k = np.bincount(group, weights=axial_k)
+    group_map = bar_map[first]
+    scaled = bmat([[stiffness, group_map.T], [group_map, -diags(1 / group_k)]], format="csc")
+    scale = np.ones(scaled.shape[0])
+    # Zero displacement diagonals are possible on a patch supported solely
+    # by connectors. Equilibrate entire rows/columns of this symmetric system.
+    for _ in range(12):
+        norm = np.asarray(abs(scaled).max(axis=0).toarray()).ravel()
+        if not np.isfinite(norm).all() or np.min(norm) <= 0:
+            raise ValueError("unconnected or invalid diaphragm degrees of freedom")
+        step = 1 / np.sqrt(norm)
+        scale *= step
+        scaling = diags(step)
+        scaled = (scaling @ scaled @ scaling).tocsc()
+        if np.max(np.abs(np.log(norm))) < .05:
+            break
+    solution = scale * _factor(scaled).solve(scale * np.r_[rhs, np.zeros(len(group_k))])
+    total_tension = solution[len(rhs):]
+    return solution[:len(rhs)], total_tension[group] * (axial_k / group_k[group])
+
+
+def _equilibrium_estimates(stiffness, rhs, bar_map, axial_k, cross_patch, use_nodal,
+                           force, ground, panels, bars):
+    if cross_patch:
+        try:
+            mixed = _mixed_bar_solution(stiffness, rhs, bar_map, axial_k, bars)
+        except ValueError:
+            # Redundant nearly rigid connectors may have unresolved self-stress
+            # in the mixed system. Retain their stiffness ratios by condensation.
+            pass
+        else:
+            yield mixed
+    if bars:
+        stiffness = (stiffness + bar_map.T @ diags(axial_k) @ bar_map).tocsc()
+    diagonal = stiffness.diagonal()
+    if not np.isfinite(diagonal).all() or np.min(diagonal) <= 0:
+        raise ValueError("unconnected or invalid diaphragm degrees of freedom")
+    scale = 1 / np.sqrt(diagonal)
+    scaled = (diags(scale) @ stiffness @ diags(scale)).tocsc()
+    factor = _factor(scaled)
+    coordinates = scale * factor.solve(scale * rhs)
+    yield coordinates, None
     if not use_nodal:
         return
     # Use element strains to form the correction load independently of the
@@ -218,7 +278,7 @@ def _coordinate_estimates(coordinates, use_nodal, force, ground, panels, bars, s
         for dofs, axis, stiffness in bars:
             residual[dofs] -= axis * (stiffness * (axis @ x[dofs]))
         x = x + scale * factor.solve(scale * residual.astype(float))
-        yield x
+        yield x, None
 
 
 def _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, basis, use_nodal):
@@ -226,6 +286,7 @@ def _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, ba
     transform, elastic, bar_free, elastic_only_bars = basis
     projection = diags(elastic.astype(float))
     stiffness = (projection @ membrane @ projection + transform.T @ diags(ground) @ transform).tocsc()
+    bar_map, axial_k = None, None
     if bars:
         b_rows, b_cols, b_data = [], [], []
         for i, (dofs, axis, _) in enumerate(bars):
@@ -239,21 +300,9 @@ def _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, ba
         connector_axes = diags((~elastic_only_bars).astype(float)) @ bar_axes
         bar_map = bar_axes @ projection + connector_axes @ transform @ relative
         axial_k = np.array([k for _, _, k in bars])
-        stiffness = (stiffness + bar_map.T @ diags(axial_k) @ bar_map).tocsc()
-    diagonal = stiffness.diagonal()
-    if not np.isfinite(diagonal).all() or np.min(diagonal) <= 0:
-        raise ValueError("unconnected or invalid diaphragm degrees of freedom")
-    scale = 1 / np.sqrt(diagonal)
-    scaled = (diags(scale) @ stiffness @ diags(scale)).tocsc()
-    try:
-        factor = splu(scaled)
-    except RuntimeError as exc:
-        raise ValueError("unsupported or singular diaphragm") from exc
-    pivots = np.abs(factor.U.diagonal())
-    if pivots.min() <= 1e-12 * pivots.max():
-        raise ValueError("unsupported or ill-conditioned diaphragm")
-    coordinates = scale * factor.solve(scale * (transform.T @ force))
-    for coordinates in _coordinate_estimates(coordinates, use_nodal, force, ground, panels, bars, scale, factor):
+    estimates = _equilibrium_estimates(stiffness, transform.T @ force, bar_map, axial_k,
+                                      np.any(~elastic_only_bars), use_nodal, force, ground, panels, bars)
+    for coordinates, mixed_tensions in estimates:
         deformation = elastic * coordinates
         u = transform @ coordinates
 
@@ -267,10 +316,22 @@ def _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, ba
             reactions[dof] += value
             spring_forces.append(value)
             double_energy.append(value * u[dof])
+        constitutive_error = 0.
         internal_force = membrane @ deformation
         if bars:
             extensions = bar_map @ coordinates
-            bar_forces = axial_k * extensions
+            if mixed_tensions is None:
+                bar_forces = axial_k * extensions
+            else:
+                bar_forces = mixed_tensions
+                # Compare independent force and kinematic extensions at the
+                # scale of the endpoint motions, including rigid translation.
+                constitutive_extension = bar_forces / axial_k
+                magnitude = (abs(bar_axes) @ abs(u) + abs(bar_map) @ abs(coordinates)
+                             + abs(constitutive_extension))
+                residual = abs(extensions - constitutive_extension)
+                constitutive_error = float(np.max(residual / np.maximum(magnitude, 1e-30)))
+                extensions = constitutive_extension
             internal_force += bar_axes.T @ bar_forces
             double_energy.extend(bar_forces * extensions)
         for dofs, gauss, weights, recover in panels:
@@ -288,7 +349,7 @@ def _solve_in_basis(spec, xy, force, panels, bars, springs, membrane, ground, ba
         span = np.max(np.ptp(xy, axis=0))
         work = float(force @ u)
         energy = math.fsum(double_energy)
-        errors = [np.linalg.norm(internal_force + reactions - force, np.inf) / load_scale,
+        errors = [constitutive_error, np.linalg.norm(internal_force + reactions - force, np.inf) / load_scale,
                   np.linalg.norm(force_error, 1) / load_scale,
                   abs(moment_error) / (span * load_scale),
                   abs(work - energy) / max(abs(work), abs(energy), 1e-30)]
