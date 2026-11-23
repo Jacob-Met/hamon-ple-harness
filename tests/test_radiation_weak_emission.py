@@ -85,3 +85,23 @@ class WeakRadiationBalance(unittest.TestCase):
                 self.assertEqual(float(error), result["residual"])
                 if not accepted:
                     self.assertEqual(result["error"], "unrepresentable_radiation_heat")
+
+    def test_isothermal_and_adiabatic_zero_heat_is_published_exactly(self):
+        factors = [[.375, .5, .125], [.5,.25,.25], [.125,.25,.625]]
+        for area in (1., 1e6):
+            result = enclosure(factors, [400.]*3, [.1,.3,.85], [area]*3)
+            self.assertTrue(result["verified"])
+            self.assertEqual(result["Q_net_W"], [0., 0., 0.])
+            self.assertEqual(result["radiosity_W_m2"], [float(SIGMA * 400**4)]*3)
+
+        factors = [[.625,.25,.125], [.125,.625,.25], [.03125,.125,.84375]]
+        result = enclosure(factors, [300.,None,515.], [.37,.71,.82], [1.,2.,4.])
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["Q_net_W"][1], 0.)
+
+    def test_positive_radiosity_must_survive_publication(self):
+        for eps in (1e-18, .5):
+            lost = enclosure([[1.]], [1e-90], [eps])
+            self.assertFalse(lost["verified"])
+            self.assertEqual(lost["error"], "unrepresentable_radiation_radiosity")
+            self.assertEqual(lost["residual"], 1.)
