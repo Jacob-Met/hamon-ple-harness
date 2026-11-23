@@ -642,8 +642,24 @@ def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any
         return _isentropic_nozzle(params, gamma, r_gas)
 
     if subkind == "normal_shock":
-        from hamon_normal_shock import normal_shock
-        return normal_shock(params, gamma, r_gas)
+        from hamon_normal_shock import normal_shock_state
+        out = {"domain": "compressible_acoustics", "subkind": "normal_shock", "verified": False}
+        try:
+            g, gas, cp = _ideal_gas_constants(params, gamma, r_gas, "Normal shock")
+            state = (float(params["M1"]), float(params.get("P1", 101325.0)),
+                     float(params.get("T1", 288.15)))
+            if not all(map(math.isfinite, state)) or min(state[1:]) <= 0:
+                raise ValueError("Require finite Mach and positive finite absolute pressure and temperature")
+            m1, p1, t1 = map(Fraction, state)
+            if m1 < 1:
+                raise ValueError("A compressive normal shock requires supersonic inflow")
+            effective = (float(g), float(gas), float(cp))
+            if not all(math.isfinite(v) and v > 0 for v in effective):
+                raise ValueError("Effective caloric properties are outside the reporting range")
+            return dict(out, **normal_shock_state(m1, g, gas, p1, t1),
+                        gamma_effective=effective[0], R_effective_J_kgK=effective[1], cp_J_kgK=effective[2])
+        except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+            return dict(out, error=str(exc))
 
     if subkind == "fanno":
         return _fanno_duct(params, gamma, r_gas)

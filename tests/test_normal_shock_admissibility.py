@@ -83,3 +83,22 @@ class NormalShockAdmissibilityTests(unittest.TestCase):
             with self.subTest(args=args):
                 self.assertFalse(shock(**args)["verified"])
         self.assertFalse(shock(1e100, gamma=1.4)["verified"])
+
+    def test_all_energy_and_entropy_use_the_same_caloric_gas(self):
+        for kwargs in ({"cp": 100., "R": 287.05, "gamma": 1.4},
+                       {"cp": 500., "R": 287.05, "gamma": 1.4},
+                       {"cp": -1.}):
+            self.assertFalse(shock(**kwargs)["verified"])
+        no_r = shock(gamma=1.4, cp=900.)
+        self.assertTrue(no_r["verified"], no_r)
+        with localcontext() as ctx:
+            ctx.prec = 120
+            g = Decimal.from_float(1.4)
+            self.assertEqual(no_r["R_effective_J_kgK"], float(900*(g-1)/g))
+        explicit = shock(2., cp=1004.5, R=287., gamma=1.4)
+        inferred = shock(2., cp=1004.5, R=287.)
+        self.assertTrue(explicit["verified"], explicit)
+        self.assertEqual(explicit, inferred)
+        self.assertEqual(explicit["cp_J_kgK"], 1004.5)
+        self.assertEqual(explicit["R_effective_J_kgK"], 287.)
+        self.assertEqual(explicit["gamma_effective"], 1.4)

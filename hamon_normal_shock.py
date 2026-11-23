@@ -1,12 +1,13 @@
 """Admissible compressive Hugoniot states for a calorically perfect gas."""
 
 import math
-from fractions import Fraction
-
 import mpmath
 
 
-def _compute(ctx, m1, g, gas, p1, t1):
+def normal_shock_state(m1, g, gas, p1, t1):
+    ctx = mpmath.mp.clone()
+    ctx.dps = 110
+
     def real(q):
         return ctx.mpf(q.numerator) / q.denominator
 
@@ -58,21 +59,3 @@ def _compute(ctx, m1, g, gas, p1, t1):
                   shock_state="compression" if q else "sonic_limit", shock_present=bool(q))
     return result
 
-
-def normal_shock(params, gamma, r_gas):
-    out = {"domain": "compressible_acoustics", "subkind": "normal_shock", "verified": False}
-    try:
-        values = [float(params["M1"]), gamma, r_gas,
-                  float(params.get("P1", 101325.0)), float(params.get("T1", 288.15))]
-        if not all(math.isfinite(v) for v in values):
-            raise ValueError("Normal shock inputs must be finite")
-        m1, g, gas, p1, t1 = map(Fraction, values)
-        if g <= 1 or min(gas,p1,t1) <= 0:
-            raise ValueError("Require gamma > 1 and positive R, absolute pressure and temperature")
-        if m1 < 1:
-            raise ValueError("A compressive normal shock requires supersonic inflow")
-        ctx = mpmath.mp.clone()
-        ctx.dps = 110
-        return {**out, **_compute(ctx, m1, g, gas, p1, t1)}
-    except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
-        return dict(out, error=str(exc))

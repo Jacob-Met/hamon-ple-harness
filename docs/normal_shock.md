@@ -1,6 +1,6 @@
 # Calorically perfect normal shock
 
-Use `hamon_conservation_cad_verifier` in mode `compressible_acoustics` with `subkind="normal_shock"`. Supply upstream Mach number `M1`, positive absolute pressure `P1` in Pa, temperature `T1` in K, specific gas constant `R` in J/(kg·K), and `gamma` greater than one. As in the other fixed-inlet gas calculations, default air values apply when omitted. The model treats the gas as calorically perfect throughout the jump.
+Use `hamon_conservation_cad_verifier` in mode `compressible_acoustics` with `subkind="normal_shock"`. Supply upstream Mach number `M1`, positive absolute pressure `P1` in Pa, temperature `T1` in K, specific gas constant `R` in J/(kg·K), and `gamma` greater than one. As in the other fixed-inlet gas calculations, default air values apply when omitted. The model treats the gas as calorically perfect throughout the jump. Optional specific heat `cp` in J/(kg·K) uses the same one-gas convention as the Fanno and Rayleigh calculations. With `cp` alone, the supplied or default gamma sets the effective R. With both `cp` and `R`, they set gamma = cp/(cp−R), which must round to any separately declared gamma. The result identifies all three effective properties.
 
 A supersonic inlet gives a compressive Rankine–Hugoniot state. At exactly Mach one, the reported `sonic_limit` is the continuous zero-jump state and `shock_present` is false. Subsonic inflow has no compressive normal-shock solution.
 
