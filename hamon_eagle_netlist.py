@@ -60,8 +60,15 @@ def schematic_netlist(path):
                     for name, gate in gates.items()}
             package = device.get("package")
             pads = _physical_pads(_named(lib.findall("packages/package"))[package]) if package else {}
-            links = _index(device.findall("connects/connect"), ("gate", "pin"))
-            variants[selection] = pins, package, pads, links
+            links = {}
+            for (gate, pin), row in _index(device.findall("connects/connect"), ("gate", "pin")).items():
+                if gate not in pins or pin not in pins[gate]:
+                    raise ValueError(f"Invalid symbol pin {(gate, pin)!r} in device {selection!r}")
+                targets = row.attrib["pad"].split()
+                if not targets or len(set(targets)) != len(targets) or any(pad not in pads for pad in targets):
+                    raise ValueError(f"Invalid package pad mapping for {(gate, pin)!r} in {selection!r}: {targets!r}")
+                links[gate, pin] = targets
+            variants[selection] = pins, package, links
         return variants[selection]
 
     pin_nets, contacts = {}, {}
@@ -74,13 +81,11 @@ def schematic_netlist(path):
                 raise ValueError(f"Pin {logical!r} belongs to multiple nets")
             return
         try:
-            pins, package, footprint, links = mapping(parts[part])
+            pins, package, links = mapping(parts[part])
             symbol_pin = pins[gate][pin]
-            pads = links[(gate, pin)].attrib["pad"].split() if package else []
+            pads = links[(gate, pin)] if package else []
         except KeyError as exc:
             raise ValueError(f"Unresolved EAGLE pin mapping {logical!r}: {exc}") from exc
-        if package and (not pads or len(set(pads)) != len(pads) or any(pad not in footprint for pad in pads)):
-            raise ValueError(f"Invalid package pad mapping for {logical!r}: {pads!r}")
         pin_nets[logical] = net
         net_names.add(net)
         pin_rows.append(dict(part=part, gate=gate, pin=pin, net=net, sheet=sheet,
@@ -96,6 +101,13 @@ def schematic_netlist(path):
     for sheet_no, sheet in enumerate(sheets, 1):
         instances = _index(sheet.findall("instances/instance"), ("part", "gate"))
         for instance in instances:
+            part, gate = instance
+            try:
+                pins, _, _ = mapping(parts[part])
+                if gate not in pins:
+                    raise KeyError(gate)
+            except KeyError as exc:
+                raise ValueError(f"Unresolved EAGLE gate instance {instance!r}: {exc}") from exc
             if instance in placements:
                 raise ValueError(f"Repeated gate instance {instance!r}")
             placements[instance] = sheet_no
@@ -112,13 +124,13 @@ def schematic_netlist(path):
     # pins, including an uninvoked supply gate. Explicit wires take priority.
     # The @ suffix distinguishes pins inside the symbol, not the rail name.
     for part_name in sorted({part for part, gate in placements}):
-        pins, package, _, links = mapping(parts[part_name])
-        if not package:
-            continue
-        for gate, pin in links:
-            if pins[gate][pin].get("direction") == "pwr" and (part_name, gate, pin) not in pin_nets:
-                add_pin(part_name, gate, pin, pin.split("@", 1)[0],
-                        placements.get((part_name, gate)), "automatic_power")
+        pins, package, _ = mapping(parts[part_name])
+        if package:
+            for gate, symbol_pins in pins.items():
+                for pin, symbol_pin in symbol_pins.items():
+                    if symbol_pin.get("direction") == "pwr" and (part_name, gate, pin) not in pin_nets:
+                        add_pin(part_name, gate, pin, pin.split("@", 1)[0],
+                                placements.get((part_name, gate)), "automatic_power")
 
     return dict(ok=True, kind="eagle-native-schematic-netlist", schematic_sha256=digest,
                 scope="Flat schematic pinrefs and automatic power pins through selected-device pad mappings",

@@ -81,11 +81,20 @@ class EagleNetlistTests(unittest.TestCase):
     def test_conflicting_pins_invalid_devices_and_hierarchy_reject(self):
         for src in (SCHEMATIC.replace('pin="IN" pad="1 2"', 'pin="IN" pad="1 22"'),
                     SCHEMATIC.replace('pin="IN" pad="1 2"', 'pin="IN" pad="3"'),
+                    SCHEMATIC.replace('<connect gate="P" pin="GND@1" pad="4"/>', ''),
                     SCHEMATIC.replace('gate="A" pin="IN"/></segment>', 'gate="Z" pin="IN"/></segment>'),
                     SCHEMATIC.replace('<parts>', '<modules><module name="Nested"/></modules><parts>')):
             with self.subTest(src=src), self.assertRaises(ValueError):
                 self.sch.write_text(src)
                 schematic_netlist(self.sch)
+
+    def test_bad_instance_without_pinrefs_cannot_supply_automatic_power(self):
+        extra_part = '<part name="U2" library="L" deviceset="dual" device="X"/>'
+        bad_instance = '<instance part="U2" gate="NO_SUCH_GATE"/>'
+        src = SCHEMATIC.replace("</parts>", extra_part+"</parts>").replace("<instances>", "<instances>"+bad_instance, 1)
+        self.sch.write_text(src)
+        with self.assertRaisesRegex(ValueError, "Unresolved EAGLE gate instance"):
+            schematic_netlist(self.sch)
 
     def test_real_cli_returns_contact_evidence(self):
         root = Path(__file__).resolve().parents[1]
