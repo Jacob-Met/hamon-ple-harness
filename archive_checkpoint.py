@@ -179,6 +179,15 @@ def publish(stage: Path, target: Path, names: list[str]) -> None:
         candidate.unlink(missing_ok=True)
 
 
+def publish_loose(stage: Path, target: Path, names: list[str]) -> None:
+    """Publish the acknowledged output members; prior private staging cannot supersede them."""
+    if target.parent.is_symlink():
+        raise ValueError("refusing linked output directory")
+    publish(target.parent, target, names)
+    # Staging remains available for refinement; never overwrite existing work.
+    _hydrate_stage_from_output_dir(stage, target.parent, names)
+
+
 if __name__ == "__main__":
     import sys
     stage, target, members = json.loads(sys.argv[1])
@@ -188,6 +197,9 @@ if __name__ == "__main__":
         checkpoint(Path(stage), Path(target), members)
     elif sys.argv[2:] == ["--recover"]:
         print(json.dumps({"action": recover(Path(stage), Path(target), members)}))
+    elif sys.argv[2:] == ["--from-output"]:
+        publish_loose(Path(stage), Path(target), members)
+        print("PLE_ARCHIVE_PUBLISHED", end="")
     elif not sys.argv[2:]:
         publish(Path(stage), Path(target), members)
         print("PLE_ARCHIVE_PUBLISHED", end="")

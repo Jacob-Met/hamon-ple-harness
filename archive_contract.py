@@ -250,7 +250,8 @@ class FirstPublication:
                 tool, path = self.pending_outputs.pop(call_id)
                 if msg.get("toolName") == tool and msg.get("isError") is False:
                     self.written_outputs.add(path)
-                    if self.written_outputs == self.required_outputs and await run_command(session, self.command):
+                    if self.written_outputs == self.required_outputs and await run_command(
+                            session, self.command + " --from-output"):
                         self.published = True
                         await session.log("delivery_gate: complete archive published from acknowledged output members")
                 return

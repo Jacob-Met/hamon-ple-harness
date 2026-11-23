@@ -180,9 +180,9 @@ class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
             target.parent.mkdir()
             stage = root / "stage"
             async def execute(command, timeout_sec):
-                self.assertEqual(command, "publish")
+                self.assertEqual(command, "publish --from-output")
                 try:
-                    archive_checkpoint.publish(stage, target, names)
+                    archive_checkpoint.publish_loose(stage, target, names)
                 except ValueError:
                     return {"exit_code": 1}
                 return {"exit_code": 0}
@@ -197,6 +197,8 @@ class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
                     await watcher.observe(session, {"type": "message_end", "message": {"role": "toolResult",
                         "toolCallId": call_id, "toolName": "write", "isError": failed}})
 
+            stage.mkdir()
+            (stage / names[0]).write_text('{"status": "earlier staged version"}')
             (target.parent / names[0]).write_text('{"status": "format control"}')
             await event(names[0], "first")
             await event(names[1], "interrupted", ack=False)
@@ -208,7 +210,10 @@ class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
             (target.parent / names[1]).write_text("# Basis")
             await event(names[1], "delivered")
             self.assertTrue(watcher.published)
-            archive_checkpoint.verify_checkpoint(stage, target, names)
+            archive_checkpoint.verify(target, names)
+            with zipfile.ZipFile(target) as archive:
+                self.assertEqual(archive.read(names[0]), (target.parent / names[0]).read_bytes())
+            self.assertIn("earlier staged version", (stage / names[0]).read_text())
 
     async def test_provisioned_publisher_is_standalone(self):
         prompt = public_task("eor-review-corrections")
