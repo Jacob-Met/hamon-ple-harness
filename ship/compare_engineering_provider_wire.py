@@ -11,6 +11,15 @@ INCOMPLETE = "synthetic-zinc-incomplete"
 REFERENCE = "synthetic-reference"
 
 
+def original_manual(source):
+    # The TypeScript registration stores its manual in one JSON string literal.
+    pieces = source.read_text().split('name: "hamon_conservation_cad_verifier",')
+    check(len(pieces) == 2, "unique conservation tool definition")
+    manual, _ = json.JSONDecoder().raw_decode(pieces[1].split("description: ", 1)[1])
+    check(isinstance(manual, str) and len(manual) > 1000, "complete tool manual")
+    return manual.encode()
+
+
 def receive(path, labels):
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     if [row["label"] for row in rows] != labels:
@@ -31,6 +40,8 @@ def main():
     parser.add_argument("stock", type=Path)
     parser.add_argument("candidate", type=Path)
     parser.add_argument("--archive", type=Path, default=Path(__file__).resolve().parents[1] / "artifacts")
+    parser.add_argument("--candidate-source", type=Path,
+                        default=Path(__file__).resolve().parents[1] / "task-tools.ts")
     args = parser.parse_args()
     tasks = list(json.loads((args.archive / "manifest.json").read_bytes())["tasks"])
     check(len(tasks) == len(set(tasks)) == 29, "public task roster")
@@ -64,8 +75,10 @@ def main():
     check(first["tool_names"] == second["tool_names"] == stock_names
           and first["guide_sha256"] == second["guide_sha256"] == candidate[tasks[0]]["requests"][0]["guide_sha256"],
           "reference route")
-    check(second["returned_reference_sha256"] == FULL and second["returned_reference_bytes"] == 11872,
-          "reference payload differs from the registered original")
+    manual = original_manual(args.candidate_source)
+    check(second["returned_reference_sha256"] == hashlib.sha256(manual).hexdigest()
+          and second["returned_reference_bytes"] == len(manual),
+          "reference payload differs from the full manual in this checkout")
     summary = {unit: {"min": min(d[unit] for d in differences), "max": max(d[unit] for d in differences),
                       "sum": sum(d[unit] for d in differences)} for unit in differences[0]}
     print(json.dumps(dict(stock_commit=BASE, historical_requests=len(tasks), initial_request_savings=summary,
