@@ -62,6 +62,45 @@ def run(repo, raw):
     return report
 
 
+def run_milling(repo, raw):
+    """The complete bridge capsule fits inside the registered full contour."""
+    sch, board = raw / "due-0.sch", raw / "due-1.brd"
+    report = {}
+    with TemporaryDirectory() as temp:
+        for case, xmax, shift, layer in (
+            ("cut", "37.72", 0, 46), ("partial", "34.80", 0, 46),
+            ("remote", "37.72", 10, 46), ("drawing", "37.72", 0, 51),
+            ("open", "37.72", 0, 46),
+        ):
+            dom = ET.parse(board)
+            signal = dom.find(".//board/signals/signal[@name='D-']")
+            ET.SubElement(signal, "wire", **ENDS, width="0.1", layer="1")
+            corners = [("34.70", "35.40"), (xmax, "35.40"), (xmax, "35.88"), ("34.70", "35.88")]
+            for a, b in zip(corners, corners[1:] + ([] if case == "open" else corners[:1])):
+                coordinates = [str(Decimal(v) + shift) for v in (*a, *b)]
+                ET.SubElement(dom.find(".//board/plain"), "wire",
+                              **dict(zip(("x1", "y1", "x2", "y2"), coordinates)), width="0", layer=str(layer))
+            path = Path(temp) / f"{case}.brd"
+            dom.write(path, encoding="utf-8")
+            doc = json.loads(subprocess.check_output([
+                sys.executable, str(repo / "engineering_toolkit.py"), "eagle-netlist", str(sch),
+                "--board", str(path), "--contact-nets", "D+", "D-"]))
+            result = doc["inter_net_contact"]
+            indices = {r["sources"][0]["primitive"][1] for r in result["contacts"]}
+            expected = {"cut": set(), "partial": {38, 53}, "remote": {38, 42, 53, 54},
+                        "drawing": {38, 42, 53, 54}, "open": set()}[case]
+            assert indices == expected, (case, indices)
+            assert result["clearance"] == "not_certified"
+            assert result["board_sha256"] == sha256(path.read_bytes()).hexdigest()
+            if case == "partial":
+                assert all(r["center_nm"][0] - r["disk_radius_nm"] > 34_800_000
+                           for r in result["contacts"])
+            if case == "open":
+                assert "layer 46" in result["detail"]
+            report[case] = result
+    return report
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, required=True)
@@ -72,3 +111,6 @@ if __name__ == "__main__":
     report = run(args.repo, args.raw)
     (args.out / "inter-net.json").write_text(json.dumps(report, indent=2) + "\n")
     print({case: len(row["contacts"]) for case, row in report.items()})
+    milling = run_milling(args.repo, args.raw)
+    (args.out / "milling.json").write_text(json.dumps(milling, indent=2) + "\n")
+    print({case: len(row["contacts"]) for case, row in milling.items()})

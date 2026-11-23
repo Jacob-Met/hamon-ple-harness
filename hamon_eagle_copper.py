@@ -298,10 +298,53 @@ def wire_material(row, ref):
                            a=a, b=b, width=width, cap=cap, curve=float(curve))
 
 
-def material_fallback(result, board, signal, terminals, elements, footprints, bores):
+def milling_sources(board):
+    """Layer 46 artwork in the board and in actually placed packages."""
+    def on_milling_layer(row):
+        return re.fullmatch(r"\+?0*46", row.get("layer", "").strip()) is not None
+
+    plain = [row for row in board.findall("plain/*") if on_milling_layer(row)]
+    groups = [(None, plain)] if plain else []
+    packages = {
+        (lib.get("name"), package.get("name")): rows
+        for lib in board.findall("libraries/library")
+        for package in lib.findall("packages/package")
+        if (rows := [row for row in package if on_milling_layer(row)])
+    }
+    if packages:
+        for element in board.findall("elements/element"):
+            rows = packages.get((element.get("library"), element.get("package")))
+            if rows:
+                groups.append((element, rows))
+    return groups
+
+
+def milling_edges(groups):
+    """Yield separate board-coordinate edge sets for closed nominal cutouts."""
+    coordinate = partial(nm, subgrid=True)
+    for element, rows in groups:
+        edges = []
+        for row in rows:
+            if (row.tag != "wire" or coordinate(row.get("width")) != 0
+                    or Decimal(row.get("curve", "0")) != 0
+                    or row.get("style", "continuous") != "continuous"):
+                raise ValueError("unsupported layer 46 milling primitive")
+            ends = []
+            for suffix in ("1", "2"):
+                vertex = {axis: row.attrib[axis + suffix] for axis in ("x", "y")}
+                if element is None:
+                    point = coordinate(vertex["x"]), coordinate(vertex["y"])
+                else:
+                    point = placed_center(element, vertex, coordinate)[:2]
+                ends.append(point)
+            edges.append(tuple(ends))
+        yield edges
+
+
+def material_fallback(result, board, signal, terminals, elements, footprints, bores, milling=()):
     """Prove additional routes using a conservative subset of finite copper."""
     try:
-        from hamon_eagle_material import material_continuity
+        from hamon_eagle_material import material_continuity, milling_cutouts
         from shapely.errors import ShapelyError
     except ImportError:
         result["material"] = {"reason": "finite_width_geometry_dependency_unavailable"}
@@ -382,8 +425,9 @@ def material_fallback(result, board, signal, terminals, elements, footprints, bo
         except (KeyError, ValueError, InvalidOperation) as exc:
             omitted(ref, exc)
     try:
-        proof = material_continuity(result["terminals"], primitives, bores)
-    except (ShapelyError, ValueError, OverflowError) as exc:
+        cutouts = milling_cutouts(milling_edges(milling))
+        proof = material_continuity(result["terminals"], primitives, bores, cutouts)
+    except (ShapelyError, KeyError, InvalidOperation, ValueError, OverflowError) as exc:
         result["material"] = {"reason": "finite_width_geometry_unresolved", "detail": str(exc)}
         return result
     result["material"] = proof["material"]
@@ -393,7 +437,7 @@ def material_fallback(result, board, signal, terminals, elements, footprints, bo
         result["material"]["conservative_shapes"] = approximations
     if proof["witnesses"] and not proof["unreachable"]:
         result.update(status="witnessed", witnesses=proof["witnesses"],
-                      scope="Finite outer-layer copper regions minus all known drill voids")
+                      scope="Finite outer-layer copper regions minus known circular drills and supported milling cutouts")
         result.pop("reason", None)
         result.pop("unreachable", None)
     return result
@@ -473,6 +517,11 @@ def routed_continuity(prediction, board_path, signal_name, *, pad_pair=None):
                     surface[node].append((term, ref, diameter))
         except (KeyError, ValueError, InvalidOperation) as exc:
             unsupported(ref, exc)
+    milling = milling_sources(board)
+    if milling:
+        # Centerline routes do not model removal of substrate under copper.
+        result["reason"] = "no_supported_copper_path"
+        return material_fallback(result, board, signal, terminals, elements, footprints, bores, milling)
     ordinal = defaultdict(int)
     for row in signal:
         kind = row.tag
@@ -568,10 +617,10 @@ def inter_net_contact(board_path, net_names):
     if any(name not in signals for name in net_names):
         raise ValueError("Unknown board signal in contact query")
     result = dict(status="unresolved", signals=list(net_names), board_sha256=digest,
-                  scope="Same-layer explicit outer-layer wires minus known circular drills",
+                  scope="Same-layer outer wires minus known circular drills and supported milling cutouts",
                   clearance="not_certified", contacts=[], unsupported=[])
     try:
-        from hamon_eagle_material import wire_contact_witnesses
+        from hamon_eagle_material import milling_cutouts, wire_contact_witnesses
         from shapely.errors import ShapelyError
     except ImportError:
         result["reason"] = "finite_width_geometry_dependency_unavailable"
@@ -595,7 +644,8 @@ def inter_net_contact(board_path, net_names):
                 except (KeyError, ValueError, InvalidOperation) as exc:
                     result["unsupported"].append(dict(signal=name, source=ref, reason=str(exc)))
             groups.append(wires)
-        result["contacts"] = wire_contact_witnesses(groups, bores, net_names, result["unsupported"])
+        cutouts = milling_cutouts(milling_edges(milling_sources(board)))
+        result["contacts"] = wire_contact_witnesses(groups, bores, net_names, result["unsupported"], cutouts)
     except (KeyError, ValueError, InvalidOperation, ShapelyError, OverflowError) as exc:
         result["reason"] = "material_geometry_unresolved"
         result["detail"] = str(exc)

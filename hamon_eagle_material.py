@@ -5,12 +5,12 @@ inside supported artwork; cut polygons contain the true drilled disks. A path
 inside the guarded polygons has at least 1 nm nominal in-plane clearance.
 """
 
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from math import ceil, cos, hypot, pi, radians, sin, sqrt
 
 from shapely import constrained_delaunay_triangles
 from shapely.geometry import LineString, Point, box
-from shapely.ops import unary_union
+from shapely.ops import polygonize_full, unary_union
 from shapely.strtree import STRtree
 
 
@@ -89,6 +89,22 @@ def _inner_copper(primitive):
     else:
         return None
     return copper.buffer(-_GUARD, join_style="mitre")
+
+
+def milling_cutouts(groups):
+    """Enclose the interiors of independently placed, straight closed contours."""
+    cutouts = []
+    for edges in groups:
+        degree = Counter(point for edge in edges for point in edge)
+        if any(a == b for a, b in edges) or any(n != 2 for n in degree.values()):
+            raise ValueError("open or branched layer 46 milling contour")
+        polygons, cuts, dangles, invalid = polygonize_full([LineString(edge) for edge in edges])
+        if polygons.is_empty or not all(g.is_empty for g in (cuts, dangles, invalid)):
+            raise ValueError("invalid layer 46 milling contour")
+        cutouts.extend(polygons.geoms)
+    # Union removes nested islands conservatively. The outward guard bounds
+    # coordinate conversion at the parser's allowed magnitudes.
+    return unary_union(cutouts).buffer(_GUARD, join_style="mitre") if cutouts else None
 
 
 class _Drills:
@@ -216,7 +232,7 @@ def _in_piece_path(piece, a, b):
     return [list(p) for p in compact]
 
 
-def _piece_graph(primitives, bores):
+def _piece_graph(primitives, bores, cutouts):
     drills = _Drills(bores)
     pieces, labels = [], []
     by_layer, terminal_nodes, graph = defaultdict(list), defaultdict(list), defaultdict(list)
@@ -226,6 +242,8 @@ def _piece_graph(primitives, bores):
         copper = _inner_copper(primitive)
         if copper is None or copper.is_empty:
             continue
+        if cutouts is not None:
+            copper = copper.difference(cutouts)
         clipped, nearby = drills.clip(copper)
         parts = sorted(_polygons(clipped), key=lambda p: (p.bounds, p.area))
         plated = primitive.get("plated", False)
@@ -313,7 +331,7 @@ def _witness(pieces, labels, parents, end_node, start, end):
     return {"start": list(start), "end": list(end), "steps": steps}
 
 
-def material_continuity(terminals, primitives, bores):
+def material_continuity(terminals, primitives, bores, cutouts=None):
     """Return finite-area witnesses for already parsed, source-addressed artwork.
 
     A primitive describes a straight segment or round-capped circular arc,
@@ -323,7 +341,7 @@ def material_continuity(terminals, primitives, bores):
     Bores are (x, y, diameter, owner) as returned by board_bores.
     """
     terminals = sorted({tuple(t) for t in terminals})
-    pieces, labels, contacts, graph = _piece_graph(primitives, bores)
+    pieces, labels, contacts, graph = _piece_graph(primitives, bores, cutouts)
     result = {"witnesses": [], "unreachable": [list(t) for t in terminals],
               "material": {"model": "finite_outer_layer_regions",
                            "in_plane_clearance_nm": _CLEARANCE}}
@@ -356,7 +374,7 @@ def material_continuity(terminals, primitives, bores):
 
 
 
-def wire_contact_witnesses(groups, bores, names, unsupported):
+def wire_contact_witnesses(groups, bores, names, unsupported, cutouts=None):
     """Find a strictly interior disk in both drilled wire regions on one layer."""
     drills = _Drills(bores)
     layers = []
@@ -368,6 +386,8 @@ def wire_contact_witnesses(groups, bores, names, unsupported):
                 unsupported.append(dict(signal=name, source=wire["source"],
                                         reason="wire material outside geometric proof limits"))
                 continue
+            if cutouts is not None:
+                inner = inner.difference(cutouts)
             clipped, _ = drills.clip(inner)
             if not clipped.is_empty:
                 pieces[wire["layers"][0]].append((wire["source"], clipped))
