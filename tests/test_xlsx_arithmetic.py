@@ -49,7 +49,7 @@ class ArithmeticWorkbookTests(TestCase):
                 self.assertEqual(proc.returncode, status, proc.stdout + proc.stderr)
                 result = json.loads(proc.stdout)
                 if formula.startswith("SUM"):
-                    self.assertEqual(result["unverified_arithmetic_formulas"], 1)
+                    self.assertEqual(result["unverified_formula_caches"]["arithmetic"], 1)
                 elif status:
                     self.assertIn("arithmetic_mismatches=1", result["reason"])
 
@@ -65,7 +65,12 @@ class ArithmeticWorkbookTests(TestCase):
                                ("E", "1/0", 1), ("F", "Missing!A1", 2)]])
         audit = xlsx_audit(str(path))["arithmetic_audit"]
         self.assertEqual(audit["counts"], {"matched": 0, "mismatch": 0, "unverified": 6})
-        self.assertEqual(audit_local_deliverable(path)["unverified_arithmetic_formulas"], 6)
+        self.assertEqual(audit_local_deliverable(path)["unverified_formula_caches"]["arithmetic"], 6)
+
+    def test_compound_specialized_function_remains_visible_on_format_guard(self):
+        path = self.workbook([[("A", None, 1), ("B", 'CONVERT(A1,"m","cm")+UNKNOWN(1)', 111)]])
+        self.assertEqual(audit_local_deliverable(path)["unverified_formula_caches"],
+                         {"arithmetic": 0, "lookup": 0, "conversion": 1})
 
     def test_precision_sensitive_cancellation_does_not_reject_a_saved_zero(self):
         path = self.workbook([[("A", "0.5-0.4-0.1", 0), ("B", "A1*1e12", 0)]])

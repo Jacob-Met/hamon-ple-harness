@@ -1060,9 +1060,10 @@ def audit_local_deliverable(path: str | pathlib.Path) -> dict[str, Any]:
                 "path": str(p),
                 "reason": f"xlsx_errors({detail})",
             }
-        if arithmetic["unverified"]:
-            return {"ok": True, "path": str(p), "bytes": sz,
-                    "unverified_arithmetic_formulas": arithmetic["unverified"]}
+        unresolved = {"arithmetic": arithmetic["unverified"], "conversion": conversion["unverified"],
+                      "lookup": audit["lookup_audit"]["counts"]["unverified"]}
+        if any(unresolved.values()):
+            return {"ok": True, "path": str(p), "bytes": sz, "unverified_formula_caches": unresolved}
     elif ext in (".zip", ".docx"):
         try:
             with zipfile.ZipFile(p, "r") as zf:
