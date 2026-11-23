@@ -22,7 +22,7 @@ def solve_linear(a, b):
     return [r[-1] for r in rows]
 
 
-def reference(lengths, loads, ei, unilateral):
+def reference(lengths, loads, ei, unilateral, levels=(F(0), F(0), F(0))):
     k = [[F(0) for _ in range(6)] for _ in range(6)]
     f = [F(0) for _ in range(6)]
     for i,(l,q) in enumerate(zip(lengths,loads)):
@@ -42,17 +42,77 @@ def reference(lengths, loads, ei, unilateral):
             continue
         free = [i for i in range(6) if i not in fixed]
         d = [F(0) for _ in range(6)]
-        u = solve_linear([[k[i][j] for j in free] for i in free],[f[i] for i in free])
+        for j in fixed:
+            d[j] = levels[j // 2]
+        rhs = [f[i] - sum(k[i][j]*d[j] for j in fixed) for i in free]
+        u = solve_linear([[k[i][j] for j in free] for i in free], rhs)
         for i,value in zip(free,u):
             d[i] = value
         reactions = [sum(k[2*i][j]*d[j] for j in range(6))-f[2*i] for i in range(3)]
         vertical = d[::2]
-        if all(reactions[i]>=0 and vertical[i]>=0 and reactions[i]*vertical[i]==0 for i in unilateral):
+        gaps = [v-z for v,z in zip(vertical,levels)]
+        if all(reactions[i]>=0 and gaps[i]>=0 and reactions[i]*gaps[i]==0 for i in unilateral):
             candidates.add((tuple(reactions),tuple(vertical)))
     return candidates
 
 
 class TwoSpanComplementarityOracle(unittest.TestCase):
+    def test_prescribed_levels_against_partitioned_stiffness(self):
+        lengths = F(2), F(3)
+        rigidity = F(128), F(384)
+        cases = 0
+        states = set()
+        for loads in [(F(8), F(2)), (F(-3), F(7)), (F(0), F(0))]:
+            for levels in [(F(0), -F(1, 16), F(0)), (F(1, 8), F(0), -F(1, 4))]:
+                # Two bilateral supports always restrain rigid translation and tilt.
+                for bearings in [(), (0,), (1,), (2,)]:
+                    with self.subTest(loads=loads, levels=levels, bearings=bearings):
+                        expected, = reference(lengths, loads, rigidity, bearings, levels)
+                        forces, displacements = expected
+                        spec = dict(span1=2, span2=3, span_EI=[128, 384],
+                                    udl1=float(loads[0]), udl2=float(loads[1]),
+                                    support_conditions={"ABC"[i]: "compression_only" for i in bearings},
+                                    support_settlements_m=dict(zip("ABC", [-float(z) for z in levels])))
+                        result = run_dual_verify_spec(dict(mode="domain", kind="continuous_beam_2span", spec=spec))
+                        self.assertTrue(result["dual_verified"])
+                        self.assertEqual(result["M_B_Nm"], float(forces[0]*lengths[0] - loads[0]*lengths[0]**2/2))
+                        for i, name in enumerate("ABC"):
+                            self.assertEqual(result[f"R_{name}_N"], float(forces[i]))
+                            self.assertEqual(result["support_displacements_m"][name], float(displacements[i]))
+                            self.assertEqual(result["support_gaps_m"][name], float(displacements[i]-levels[i]))
+                            states.add(result["support_states"][name])
+                        cases += 1
+        self.assertEqual(cases, 24)
+        self.assertTrue({"lifted", "bearing", "hold_down"}.issubset(states))
+
+    def test_settled_bearing_boundary(self):
+        # An end-supported, level beam under uniform load deflects 5*q*L**4/(384*EI)
+        # at midspan. Here this is exactly 1/16 m. Change the bearing depth by one ULP.
+        free = 1/16
+        for depth, state in [(math.nextafter(free, 0), "bearing"), (free, "touching"),
+                             (math.nextafter(free, math.inf), "lifted")]:
+            with self.subTest(depth=depth):
+                spec = dict(span1=2, span2=2, udl1=24, udl2=24, span_EI=[1280, 1280],
+                            support_settlements_m={"B": depth}, support_conditions={"B": "compression_only"})
+                result = run_dual_verify_spec(dict(mode="domain", kind="continuous_beam_2span", spec=spec))
+                self.assertEqual(result["support_states"]["B"], state)
+                self.assertEqual(result["support_displacements_m"]["B"], -min(depth, free))
+                self.assertEqual(result["support_gaps_m"]["B"], max(0., depth-free))
+
+    def test_settlement_units_and_rigid_tilt(self):
+        # These supports lie on a straight line, so the unloaded beam follows them stress free.
+        spec = dict(span1=2, span2=3, span_EI=[128, 384],
+                    support_settlements_m={"A": "125*mm", "B": "-125*mm", "C": "-500*mm"})
+        payload = dict(mode="domain", kind="continuous_beam_2span", spec=spec)
+        result = run_dual_verify_spec(payload)
+        self.assertEqual(result["support_displacements_m"], dict(A=-.125, B=.125, C=.5))
+        self.assertEqual([result[f"R_{n}_N"] for n in "ABC"], [0., 0., 0.])
+        for invalid in ({"D": 0}, {"A": "1*N"}, [0, 0, 0], None):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "support_settlements_m"):
+                run_dual_verify_spec(dict(payload, spec=dict(spec, support_settlements_m=invalid)))
+
+
+
     def test_nonuniform_spans_signed_loads_and_mixed_bearings(self):
         count = 0
         for lengths, loads in [((2,3),(8,2)), ((3,2),(0,12)), ((2,5),(-3,7)), ((5,3),(1,-9))]:
