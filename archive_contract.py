@@ -187,15 +187,34 @@ def first_instruction(stage, command):
     )
 
 
-async def run_command(session, command):
+async def _command_result(session, command):
     try:
         reply = await asyncio.wait_for(session.exec(command, timeout_sec=30), 33)
-        return (reply.get("exit_code") == 0 and not reply.get("timed_out")
-                and not reply.get("truncated"))
+        if (reply.get("exit_code") == 0 and not reply.get("timed_out")
+                and not reply.get("truncated")):
+            return reply
     except Cancelled:
         raise
     except Exception:
-        return False
+        pass
+    return None
+
+
+async def run_command(session, command):
+    return await _command_result(session, command) is not None
+
+
+async def recover_after_refinement(session, command):
+    reply = await _command_result(session, command + " --recover")
+    if reply is not None:
+        try:
+            outcome = json.loads(reply.get("output", ""))
+        except (TypeError, ValueError):
+            return None
+        action = outcome.get("action") if isinstance(outcome, dict) else None
+        if isinstance(action, str) and action in {"kept", "published", "restored"}:
+            return action
+    return None
 
 
 class FirstPublication:

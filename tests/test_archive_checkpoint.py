@@ -235,9 +235,9 @@ class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
                 await on_line(b'{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"phase complete"}]}}')
                 return SimpleNamespace(code=0, stderr="")
             async def command(_, cmd):
-                if cmd.endswith(" --verify"):
-                    archive_checkpoint.verify_checkpoint(stage,target,members)
-                    events.append("verified")
+                if cmd.endswith(" --checkpoint"):
+                    archive_checkpoint.checkpoint(stage,target,members)
+                    events.append("checkpointed")
                 else:
                     try:
                         archive_checkpoint.publish(stage,target,members)
@@ -265,6 +265,7 @@ class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
                     (harness.delivery_guard,"extract_targets",dict(return_value=targets)),
                     (harness.archive_contract,"provision",dict(return_value=plan)),
                     (harness.archive_contract,"run_command",dict(side_effect=command)),
+                    (harness.archive_contract,"recover_after_refinement",dict(return_value="kept")),
                 ]:
                     stack.enter_context(mock.patch.object(obj,attr,**kw))
                 await harness.solve(session)
@@ -273,7 +274,7 @@ class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
     async def test_verified_first_package_precedes_optional_run(self):
         events, exists = await self.exercise(complete=True)
         self.assertTrue(exists)
-        self.assertEqual(events, ["first pass", "published", "initial process still running", "verified", "refinement"])
+        self.assertEqual(events, ["first pass", "published", "initial process still running", "checkpointed", "refinement"])
 
     async def test_missing_member_allows_repair_and_prevents_refinement(self):
         events, exists = await self.exercise(complete=False)

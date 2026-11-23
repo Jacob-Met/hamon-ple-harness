@@ -4,6 +4,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -15,7 +18,7 @@ import harness
 
 
 class ArchiveRefinementRecovery(unittest.IsolatedAsyncioTestCase):
-    async def exercise(self, change, *, tool_tail=False, checkpoint_ok=True):
+    async def exercise(self, change, *, tool_tail=False, checkpoint_ok=True, after_checkpoint=900):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             stage, target = root / "members", root / "answer.zip"
@@ -24,8 +27,10 @@ class ArchiveRefinementRecovery(unittest.IsolatedAsyncioTestCase):
             plan = (str(stage), "fixture-publisher")
             calls, commands = [], []
             first = None
+            remaining = 900
 
             async def execute(command, timeout_sec):
+                nonlocal remaining
                 commands.append(command)
                 try:
                     if command.endswith(" --verify"):
@@ -35,6 +40,7 @@ class ArchiveRefinementRecovery(unittest.IsolatedAsyncioTestCase):
                         if not checkpoint_ok:
                             return {"exit_code": 1, "output": "checkpoint unavailable"}
                         archive_checkpoint.checkpoint(stage, target, members)
+                        remaining = after_checkpoint
                         action = None
                     elif command.endswith(" --recover"):
                         action = archive_checkpoint.recover(stage, target, members)
@@ -48,7 +54,7 @@ class ArchiveRefinementRecovery(unittest.IsolatedAsyncioTestCase):
             session = SimpleNamespace(
                 workdir=str(root), instruction="Write an early complete archive, then improve it.",
                 mcp_servers=[], final_message="", log=mock.AsyncMock(), usage=mock.AsyncMock(),
-                time_left=lambda: 900, exec=execute,
+                time_left=lambda: remaining, exec=execute,
             )
 
             async def process(argv, _, *, on_line, log_prefix, **kwargs):
@@ -120,6 +126,8 @@ class ArchiveRefinementRecovery(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["state"], "ready")
                 self.assertEqual(result["final"], result["first"])
                 self.assertEqual(len(result["calls"]), 2)
+                self.assertIn("Recovered a complete archive", result["reply"])
+                self.assertNotIn("Refinement complete", result["reply"])
 
     async def test_successful_or_unpublished_refinement_keeps_the_valid_output(self):
         for change in ("unchanged", "stage_invalid", "improved"):
@@ -140,6 +148,56 @@ class ArchiveRefinementRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["state"], "ready")
         self.assertEqual(result["final"], result["first"])
         self.assertEqual(len(result["calls"]), 1)
+
+
+    async def test_standalone_task_helper_restores_the_saved_archive(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            target, stage = root / "answer.zip", root / "members"
+            prompt = ("First create a complete version, then improve it. Write answer.zip "
+                      "containing exactly these two files at the archive root:\n"
+                      "1. `report.md`\n2. `result.json`\n")
+            async def write_file(path, body):
+                return (root / Path(path).name).write_bytes(body)
+            session = SimpleNamespace(instruction=prompt, write_file=write_file)
+            plan = await harness.archive_contract.provision(session, [{"kind": "file", "path": str(target)}])
+            self.assertIsNotNone(plan)
+            _, helper, arguments = shlex.split(plan[1])
+            _, _, members = json.loads(arguments)
+            stage.mkdir()
+            (stage / "report.md").write_text("# Complete report\n")
+            (stage / "result.json").write_text('{"result":12}')
+            command = [sys.executable, "-I", "-S", str(root / Path(helper).name),
+                       json.dumps([str(stage), str(target), members])]
+            subprocess.run(command, check=True, capture_output=True)
+            first = target.read_bytes()
+            subprocess.run(command + ["--checkpoint"], check=True, capture_output=True)
+            target.write_bytes(b"incomplete ZIP")
+            (stage / "result.json").write_text('{"unfinished":')
+            restored = subprocess.run(command + ["--recover"], check=True, capture_output=True, text=True)
+            self.assertEqual(json.loads(restored.stdout), {"action": "restored"})
+            self.assertEqual(target.read_bytes(), first)
+            archive_checkpoint.verify(target, members)
+
+    async def test_checkpoint_time_is_removed_from_the_refinement_budget(self):
+        for remaining, expected_runs in ((79.999, 1), (80, 2)):
+            with self.subTest(remaining=remaining):
+                result = await self.exercise("both_invalid", after_checkpoint=remaining)
+                self.assertEqual(result["state"], "ready")
+                self.assertEqual(result["final"], result["first"])
+                self.assertEqual(len(result["calls"]), expected_runs)
+
+    async def test_unknown_recovery_and_cancellation_do_not_report_success(self):
+        for result in ({"exit_code": 1}, {"exit_code": 0, "output": "not json"},
+                       {"exit_code": 0, "output": '{"action":"restored"}', "truncated": True},
+                       {"exit_code": 0, "output": '{"action":"unknown"}'},
+                       {"exit_code": 0, "output": '{"action":[]}'}):
+            with self.subTest(result=result):
+                session = SimpleNamespace(exec=mock.AsyncMock(return_value=result))
+                self.assertIsNone(await harness.archive_contract.recover_after_refinement(session, "publisher"))
+        session = SimpleNamespace(exec=mock.AsyncMock(side_effect=harness.taskbridge.Cancelled("fixture")))
+        with self.assertRaises(harness.taskbridge.Cancelled):
+            await harness.archive_contract.recover_after_refinement(session, "publisher")
 
 
 if __name__ == "__main__":
