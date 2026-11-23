@@ -41,4 +41,16 @@ class ExactBlockScaleTests(unittest.TestCase):
         result=self.verify(("1.","1.","1."),origin=("10000000000000000.","0.","0."))
         self.assert_properties(result,(1.,1.,1.),(1e16,0.,0.))
 
+    def test_long_block_keeps_a_positive_weak_principal_moment(self):
+        result=self.verify(("1e16","1.","1."))
+        self.assertTrue(result["conservation_verified"],result)
+        np.testing.assert_allclose(result["principal_moments_kg_m2"],
+                                   [1e16/6,1e48/12,1e48/12],rtol=3e-15,atol=0)
+
+    def test_decimal_local_centroid_survives_large_opposing_source_coordinates(self):
+        length="20000000000000000."+"0"*59+"2"
+        result=self.verify((length,"1.","1."),origin=("-10000000000000000.","0.","0."))
+        self.assertTrue(result["conservation_verified"],result)
+        self.assertEqual(result["centroid_m"][0],1e-60)
+
 if __name__=="__main__":unittest.main()
