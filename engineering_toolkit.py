@@ -246,6 +246,55 @@ _EXACT_LOOKUP = re.compile(
     r"(?P<index>[1-9][0-9]{0,4})\s*,\s*(?:FALSE|0)\s*\)", re.I | re.ASCII)
 
 
+# Excel CONVERT unit tokens are case-sensitive. Only multiplicative units with
+# a matching toolkit definition qualify; Excel and toolkit aliases differ.
+_CONVERT_UNITS = {
+    key: UNITS[name] for key, name in {
+        "m": "m", "mm": "mm", "cm": "cm", "km": "km", "in": "inch", "ft": "ft",
+        "yd": "yd", "g": "g", "kg": "kg", "lbm": "lbm", "sec": "s", "hr": "hr",
+    }.items()
+}
+_DIRECT_CONVERT = re.compile(
+    rf"CONVERT\(\s*(?:(?P<sheet>'(?:[^']|'')+'|[A-Z_][A-Z0-9_.]*)!)?"
+    rf'(?P<source>{_CELL_REF})\s*,\s*"(?P<from_unit>[A-Z]+)"\s*,\s*'
+    r'"(?P<to_unit>[A-Z]+)"\s*\)', re.I | re.ASCII)
+
+
+def _verify_conversion(sheet, expression, cached, literals):
+    match = _DIRECT_CONVERT.fullmatch(expression)
+    if match is None or cached is None:
+        return {"status": "unverified"}
+    ref_sheet = match["sheet"] or sheet
+    if ref_sheet.startswith("'"):
+        ref_sheet = ref_sheet[1:-1].replace("''", "'")
+    # External workbook and 3-D references are outside the direct-cell contract.
+    if any(c in ref_sheet for c in "[]:"):
+        return {"status": "unverified"}
+    names = [n for n in literals if n == ref_sheet or (
+        n.isascii() and ref_sheet.isascii() and n.lower() == ref_sheet.lower())]
+    if len(names) != 1:
+        return {"status": "unverified"}
+    address = match["source"].replace("$", "").upper()
+    try:
+        _grid_position(address)
+    except ValueError:
+        return {"status": "unverified"}
+    value = literals[names[0]].get(address)
+    source = _CONVERT_UNITS.get(match["from_unit"])
+    target = _CONVERT_UNITS.get(match["to_unit"])
+    if value is None or source is None or target is None:
+        return {"status": "unverified"}
+    evidence = {"source_sheet": names[0], "source_cell": address, "source_value": value,
+                "from_unit": match["from_unit"], "to_unit": match["to_unit"], "cached": cached}
+    if source.dim != target.dim:
+        return {"status": "dimension_mismatch", **evidence}
+    expected = float(D(value) * source.val / target.val)
+    if not math.isfinite(expected) or (expected == 0 and value != 0):
+        return {"status": "unverified"}
+    agrees = math.isclose(cached, expected, rel_tol=1e-12, abs_tol=0.0)
+    return {"status": "matched" if agrees else "mismatch", "expected": expected, **evidence}
+
+
 def _grid_position(address):
     match = re.fullmatch(r"([A-Z]{1,3})([1-9][0-9]{0,6})", address.replace("$", "").upper())
     if match is None:
@@ -374,7 +423,8 @@ def xlsx_audit(filename: str):
     manifest = {"file": filename, "kind": "xlsx-formula-audit", "sheets": [], "other_sheets": []}
     literals = {}
     lookups = []
-    lookup_total = indexed = 0
+    conversions = []
+    conversion_total = lookup_total = indexed = 0
     complete_index = True
     with zipfile.ZipFile(filename) as archive:
         workbook, parts = _xlsx_parts(archive)
@@ -445,6 +495,10 @@ def xlsx_audit(filename: str):
                             if formula_type == "shared":
                                 expression = _shared_lookup_at(shared_master, address) if shared_master else ""
                             lookups.append((name, address, expression, _numeric_cell(cell, value)))
+                    if expression.upper().startswith("CONVERT("):
+                        conversion_total += 1
+                        if len(conversions) < 256 and len(expression) <= 512 and formula_type == "normal":
+                            conversions.append((name, address, expression, _numeric_cell(cell, value)))
                     formulas += 1
                     if value is None:
                         missing += 1
@@ -492,7 +546,17 @@ def xlsx_audit(filename: str):
                 counts[result["status"]] += 1
             examples.append({"sheet": name, "cell": address, **result})
     manifest["lookup_audit"] = {"counts": counts, "examples": examples}
-    manifest["note"] = "Formula results are not evaluated; cached results can be stale."
+    counts = {"matched": 0, "mismatch": 0, "dimension_mismatch": 0, "unverified": conversion_total}
+    examples = []
+    if complete_index:
+        for name, address, expression, cached in conversions:
+            result = _verify_conversion(name, expression, cached, literals)
+            if result["status"] != "unverified":
+                counts["unverified"] -= 1
+                counts[result["status"]] += 1
+            examples.append({"sheet": name, "cell": address, **result})
+    manifest["conversion_audit"] = {"counts": counts, "examples": examples}
+    manifest["note"] = "Only supported literal-dependency lookups and unit conversions are checked; other caches can be stale."
     return manifest
 
 
@@ -753,11 +817,16 @@ def audit_local_deliverable(path: str | pathlib.Path) -> dict[str, Any]:
         audit = xlsx_audit(str(p))
         err_cells = sum(s.get("error_count", 0) for s in audit.get("sheets", []))
         mismatches = audit.get("lookup_audit", {}).get("counts", {}).get("mismatch", 0)
-        if err_cells > 0 or mismatches > 0:
+        conversion = audit["conversion_audit"]["counts"]
+        conversion_errors = conversion["mismatch"] + conversion["dimension_mismatch"]
+        if err_cells > 0 or mismatches > 0 or conversion_errors:
+            detail = f"error_cells={err_cells},lookup_mismatches={mismatches}"
+            if conversion_errors:
+                detail += f",conversion_errors={conversion_errors}"
             return {
                 "ok": False,
                 "path": str(p),
-                "reason": f"xlsx_errors(error_cells={err_cells},lookup_mismatches={mismatches})",
+                "reason": f"xlsx_errors({detail})",
             }
     elif ext in (".zip", ".docx"):
         try:
