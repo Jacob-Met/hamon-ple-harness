@@ -34,3 +34,52 @@ class NormalShockAdmissibilityTests(unittest.TestCase):
             self.assertEqual(r["entropy_increase_J_kgK"], float(gas*s))
             self.assertEqual(r["stagnation_pressure_loss_fraction"], float(1-(-s).exp()))
             self.assertEqual(r["P02_over_P01"], float((-s).exp()))
+
+    def test_sonic_limit_and_subsonic_refusal(self):
+        r = shock(1., P1=83200., T1=270.)
+        self.assertTrue(r["verified"], r)
+        self.assertFalse(r["shock_present"])
+        self.assertEqual(r["shock_state"], "sonic_limit")
+        for key in ("M2", "P2_over_P1", "rho2_over_rho1", "T2_over_T1", "P02_over_P01"):
+            self.assertEqual(r[key], 1.)
+        self.assertEqual(r["entropy_increase_J_kgK"], 0.)
+        self.assertEqual(r["stagnation_pressure_loss_fraction"], 0.)
+        self.assertFalse(shock(math.nextafter(1., 0.))["verified"])
+
+    def test_static_states_replay_mass_momentum_and_total_energy(self):
+        cases = [(1.2, 1.3, 250., 90e3, 275.), (3., 5/3, 190., 1e240, 1e-220),
+                 (1e50, 1.4, 287., 1e-200, 1e-200),
+                 (1.4, math.nextafter(1., math.inf), 80., 18000., 340.)]
+        for mach, gamma, gas, p1, t1 in cases:
+            with self.subTest(mach=mach, gamma=gamma):
+                r = shock(mach, gamma=gamma, R=gas, P1=p1, T1=t1)
+                self.assertTrue(r["verified"], r)
+                self.assertTrue(r["shock_present"])
+                self.assertGreater(r["entropy_increase_J_kgK"], 0.)
+                self.assertGreater(r["stagnation_pressure_loss_fraction"], 0.)
+                with localcontext() as ctx:
+                    ctx.prec = 180
+                    m, g, gas_d, p, t = map(Decimal.from_float, (mach,gamma,gas,p1,t1))
+                    p2,t2,m2 = map(Decimal.from_float, (r["P2_Pa"],r["T2_K"],r["M2"]))
+                    density1, density2 = p/(gas_d*t), p2/(gas_d*t2)
+                    v1, v2 = m*(g*gas_d*t).sqrt(), m2*(g*gas_d*t2).sqrt()
+                    cp = g*gas_d/(g-1)
+                    pairs = ((density1*v1, density2*v2),
+                             (p+density1*v1*v1, p2+density2*v2*v2),
+                             (cp*t+v1*v1/2, cp*t2+v2*v2/2))
+                    for upstream, downstream in pairs:
+                        self.assertLess(abs(upstream-downstream)/upstream, Decimal("8e-16"))
+                    # Independent compression and entropy from normal mass,
+                    # momentum and a calorically perfect equilibrium equation.
+                    compressed = (g+1)*m*m/(2+(g-1)*m*m)
+                    rise = 1+g*m*m*(1-1/compressed)
+                    entropy = (rise.ln()-g*compressed.ln())/(g-1)
+                    self.assertEqual(r["entropy_increase_J_kgK"], float(gas_d*entropy))
+                    self.assertEqual(r["P02_over_P01"], float((-entropy).exp()))
+
+    def test_explicit_domain_and_reporting_limits(self):
+        for args in ({"R":0.}, {"T1":-1.}, {"P1":0.}, {"gamma":1.},
+                     {"P1":math.inf}, {"T1":math.nan}):
+            with self.subTest(args=args):
+                self.assertFalse(shock(**args)["verified"])
+        self.assertFalse(shock(1e100, gamma=1.4)["verified"])

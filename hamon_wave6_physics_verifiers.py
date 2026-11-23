@@ -642,45 +642,8 @@ def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any
         return _isentropic_nozzle(params, gamma, r_gas)
 
     if subkind == "normal_shock":
-        m1 = float(params["M1"])
-        if m1 <= 1.0:
-            raise ValueError(f"Normal shock requires M1 > 1, got {m1}")
-        gm1 = gamma - 1.0
-        gp1 = gamma + 1.0
-        m1_sq = m1 * m1
-        m2 = math.sqrt((1.0 + 0.5 * gm1 * m1_sq) / (gamma * m1_sq - 0.5 * gm1))
-        p2_p1 = 1.0 + (2.0 * gamma / gp1) * (m1_sq - 1.0)
-        rho2_rho1 = (gp1 * m1_sq) / (2.0 + gm1 * m1_sq)
-        t2_t1 = p2_p1 / rho2_rho1
-        p02_p01 = (rho2_rho1 ** (gamma / gm1)) * ((gp1 / (2.0 * gamma * m1_sq - gm1)) ** (1.0 / gm1))
-
-        p1 = float(params.get("P1", 101325.0))
-        t1 = float(params.get("T1", 288.15))
-        rho1 = p1 / (r_gas * t1)
-        u1 = m1 * math.sqrt(gamma * r_gas * t1)
-        p2 = p1 * p2_p1
-        t2 = t1 * t2_t1
-        rho2 = rho1 * rho2_rho1
-        u2 = m2 * math.sqrt(gamma * r_gas * t2)
-        cp = gamma * r_gas / gm1
-        res_mass = abs(rho1 * u1 - rho2 * u2) / (rho1 * u1)
-        res_mom = abs((p1 + rho1 * u1 * u1) - (p2 + rho2 * u2 * u2)) / (p1 + rho1 * u1 * u1)
-        res_eng = abs((cp * t1 + 0.5 * u1 * u1) - (cp * t2 + 0.5 * u2 * u2)) / (cp * t1 + 0.5 * u1 * u1)
-        residual = max(res_mass, res_mom, res_eng)
-        return {
-            "domain": "compressible_acoustics",
-            "subkind": subkind,
-            "M1": m1,
-            "M2": m2,
-            "P2_over_P1": p2_p1,
-            "T2_over_T1": t2_t1,
-            "rho2_over_rho1": rho2_rho1,
-            "P02_over_P01": p02_p01,
-            "P2_Pa": p2,
-            "T2_K": t2,
-            "residual": residual,
-            "verified": residual < 1e-10,
-        }
+        from hamon_normal_shock import normal_shock
+        return normal_shock(params, gamma, r_gas)
 
     if subkind == "fanno":
         return _fanno_duct(params, gamma, r_gas)
