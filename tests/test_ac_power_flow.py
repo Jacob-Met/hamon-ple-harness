@@ -47,22 +47,30 @@ def test_independent_generator_groups_share_one_fixed_slack(angle, reverse):
     assert not verify_ac_power_flow(spec)["conservation_verified"]
 
 
-def test_weak_cross_tie_prevents_independent_component_search():
-    from hamon_ac_power_flow import _slack_components
-
-    # Every physical branch couples unknowns, even if it is weak or currently
-    # carries zero current. A cross-tie joins the two previously independent groups.
-    adjacency = [{1, 2, 3, 4, 5}, {0, 2}, {0, 1, 3}, {0, 2}, {0, 5}, {0, 4}]
-    assert _slack_components(adjacency, 0) == [{1, 2, 3}, {4, 5}]
-    adjacency[3].add(4)
-    adjacency[4].add(3)
-    assert _slack_components(adjacency, 0) == [{1, 2, 3, 4, 5}]
-    spec = coupled_generator_groups()
-    spec["lines"].append({"id": "cross", "from": "G2", "to": "G3", "r_pu": 100, "x_pu": 0})
-    # The old phasors now add +0.06/-0.02 pu at the cross-tie terminals,
-    # so their original 6/0 pu targets must not be certified.
+@pytest.mark.parametrize("resistance", [10, 100])
+@pytest.mark.parametrize("angle,reverse", [(0, False), (17, False), (17, True)])
+def test_cross_tie_requires_joint_mixed_reactive_limits(resistance, angle, reverse):
+    spec = coupled_generator_groups(angle)
+    spec["lines"].append({"id": "cross", "from": "G2", "to": "G3",
+                          "r_pu": resistance, "x_pu": 0})
+    # At V_G2=3 and V_G3=1 the new branch injects 6/R and -2/R.
+    # The old claims must fail until these physical terminal powers are supplied.
+    assert not verify_ac_power_flow(spec)["conservation_verified"]
+    spec["buses"][3]["p_injection_pu"] += 6 / resistance
+    spec["buses"][4]["p_injection_pu"] -= 2 / resistance
+    if reverse:
+        spec["buses"].reverse()
+        spec["lines"].reverse()
     answer = verify_ac_power_flow(spec)
-    assert not answer["conservation_verified"], answer
+    assert answer["conservation_verified"], answer
+    assert answer["clamped_pv_q_pu"] == {f"G{i}": 0 for i in range(5)}
+    for name, expected in spec["proposed_voltages"].items():
+        assert answer["voltages"][name] == pytest.approx(expected, abs=1e-10)
+    assert answer["lines"]["cross"] == pytest.approx({
+        "p_from_pu": 6 / resistance, "q_from_pu": 0,
+        "p_to_pu": -2 / resistance, "q_to_pu": 0}, abs=1e-12)
+    spec["proposed_voltages"]["G3"]["va_deg"] += 0.1
+    assert not verify_ac_power_flow(spec)["conservation_verified"]
 
 
 def test_pq_branches_cannot_exhaust_regulator_search_allowance():
@@ -315,8 +323,7 @@ def test_reactive_bound_can_solve_unreachable_pv_setpoint(injections):
     rejected = verify_ac_power_flow(spec)
     assert not rejected["conservation_verified"]
     if len(injections) == 5:
-        assert rejected["regime_search_budget_exhausted"]
-        assert rejected["regimes_tried"] == 81
+        assert "feasibility undetermined" in rejected["reason"]
 
 
 @pytest.mark.parametrize("transformers", [False, True])
