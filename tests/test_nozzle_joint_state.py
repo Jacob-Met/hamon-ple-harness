@@ -7,7 +7,7 @@ from hamon_conservation_cad_verifier import run_router_conservation_cad_verifier
 
 
 def route(**observations):
-    spec = dict(subkind="isentropic", gamma=3., **observations)
+    spec = {"subkind":"isentropic", "gamma":3., **observations}
     return run_router_conservation_cad_verifier({"mode":"compressible_acoustics","spec":spec})
 
 
@@ -78,8 +78,34 @@ class CommonNozzleState(unittest.TestCase):
                         self.assertFalse(route(**bad)["verified"])
 
     def test_every_supplied_scalar_is_validated(self):
-        for p in [dict(mach=.5,area_ratio=.9),dict(mach=2.,p0_over_p=1.),
+        for p in [dict(mach=.5,area_ratio=.9),dict(mach=2.,p0_over_p=.9),
+                  dict(p0_over_p=1.),
                   dict(mach=2.,area_ratio=1.25,p0_over_p=float("inf")),
                   dict(p0_over_p=2.,regime="unknown")]:
             with self.subTest(p=p), self.assertRaises(ValueError):
                 route(**p)
+
+
+    def test_rounded_unity_pressure_is_constrained_by_other_measurements(self):
+        with localcontext() as ctx:
+            ctx.prec=150
+            nominal=1.e-8
+            true_mach=D(nominal)+D(".4")*D(math.ulp(nominal))
+            g=D(1.4)
+            def readings(mach):
+                temp_ratio=1+(g-1)*mach**2/2
+                return (float((2*temp_ratio/(g+1))**((g+1)/(2*(g-1)))/mach),
+                        float(temp_ratio**(g/(g-1))))
+            area, pressure=readings(true_mach)
+            self.assertEqual(pressure,1.)
+            for coordinates in (dict(mach=nominal),dict(area_ratio=area),
+                                dict(mach=nominal,area_ratio=area)):
+                result=route(gamma=1.4,p0_over_p=1.,**coordinates)
+                self.assertTrue(result["verified"],result)
+                self.assertEqual(result["P0_over_P"],1.)
+            upper=(D(1)+D(math.nextafter(1.,math.inf)))/2
+            limit=(2*(upper**((g-1)/g)-1)/(g-1)).sqrt()
+            outside=math.nextafter(float(limit),math.inf)
+            bad_area, actual=readings(D(outside))
+            self.assertGreater(actual,1.)
+            self.assertFalse(route(gamma=1.4,mach=outside,area_ratio=bad_area,p0_over_p=1.)["verified"])

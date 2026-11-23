@@ -128,7 +128,11 @@ def _joint_nozzle_mach(mach, area, pressure, gamma, regime):
         return (2*((value.ln()*gm1/gamma).exp()-1)/gm1).sqrt()
 
     if pressure is not None:
-        lo, hi = map(inverse_pressure, cell(pressure))
+        p_low, p_high = cell(pressure)
+        # Finite slow flow can have a stagnation ratio that rounds to unity.
+        # Other observations still locate its positive Mach within that cell.
+        lo = max(inverse_pressure(max(one, p_low)), Decimal.from_float(math.ulp(0.))/2)
+        hi = inverse_pressure(p_high)
         preferred = inverse_pressure(pressure)
     else:
         lo, hi = cell(mach)
@@ -146,7 +150,7 @@ def _joint_nozzle_mach(mach, area, pressure, gamma, regime):
                 and float(log_value.exp()) == float(observation))
 
     def matches(candidate):
-        if candidate <= 0 or (mach is not None and float(candidate) != float(mach)):
+        if float(candidate) == 0 or (mach is not None and float(candidate) != float(mach)):
             return False
         if pressure is not None:
             log_pressure = (1+gm1*candidate**2/2).ln()*gamma/gm1
@@ -175,7 +179,7 @@ def _joint_nozzle_mach(mach, area, pressure, gamma, regime):
             continue
         target = (lower+upper)/2
         while left < right:
-            middle = (left+right)/2
+            middle = (left*right).sqrt() if right > 2*left else (left+right)/2
             if middle in (left, right):
                 break
             observed = _isentropic_log_area(middle, gamma)
@@ -231,9 +235,9 @@ def _isentropic_nozzle(params, gamma_value, gas_constant):
             raise ValueError("Nozzle regime must be subsonic or supersonic")
         if area is not None and area < 1:
             raise ValueError("Isentropic A/A* must be at least one")
-        if pressure is not None and pressure <= 1:
-            raise ValueError("A finite-area flowing nozzle requires P0/P greater than one")
         supplied = sum(value is not None for value in (mach, area, pressure))
+        if pressure is not None and (pressure < 1 or (pressure == 1 and supplied == 1)):
+            raise ValueError("A pressure-only flowing nozzle requires P0/P greater than one and joint ratios must be at least one")
         if supplied == 0:
             raise ValueError("isentropic requires 'mach', 'area_ratio', or 'p0_over_p'")
         joint = supplied > 1
