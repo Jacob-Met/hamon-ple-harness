@@ -231,3 +231,35 @@ def test_net_bearing_claim_uses_the_reported_overburden_basis(field):
     mixed = {**spec, key: gross, "proposed_" + gross_field: gross}
     assert not verify_bearing_capacity(mixed)["conservation_verified"]
     assert not verify_bearing_capacity({**spec, key: "unknown"})["ok"]
+
+
+@pytest.mark.parametrize("pressure_scale,length_scale", [(1.0, 1.0), (2.**-20, 8.0), (2.**20, 0.25)])
+def test_small_net_resistance_survives_gross_capacity_rounding(pressure_scale, length_scale):
+    spec = {**base("terzaghi"), "phi_deg": 0.0, "FS": 2.0,
+            "footing_B_m": 2 * length_scale, "depth_Df_m": length_scale,
+            "gamma_N_m3": 18000 * pressure_scale / length_scale,
+            "c_prime_Pa": 2.**-43 * pressure_scale}
+    # A frictionless Terzaghi strip has Nq=1 and Ngamma=0, so the
+    # overburden contributes only to gross capacity.
+    net = spec["c_prime_Pa"] * (1 + 1.5 * math.pi)
+    result = verify_bearing_capacity({**spec, "proposed_q_net_ult_Pa": net,
+                                     "proposed_q_net_allow_Pa": net / 2})
+    assert result["conservation_verified"], result
+    assert result["q_ult_Pa"] == result["effective_overburden_Pa"]
+    assert result["q_net_ult_Pa"] == net
+    assert result["q_net_allow_Pa"] == net / 2
+    assert not verify_bearing_capacity({**spec, "proposed_q_net_ult_Pa": 0.0})["conservation_verified"]
+
+
+@pytest.mark.parametrize("method,expected", [
+    ("terzaghi", 7.182254625531533e-13), ("meyerhof", 4.3924565912143233e-13),
+    ("vesic", 6.655964087457286e-13), ("legacy_vesic", 5.95839038785556e-13),
+])
+def test_weak_friction_preserves_net_surcharge_from_unit_factors(method, expected):
+    # Direct 90-digit evaluation of (Nq*sq*dq - 1)*q + B*Ngamma*sg*dg*gamma/2.
+    spec = {**base(method), "footing_L_m": 2.0, "c_prime_Pa": 0.0, "phi_deg": 2.**-52}
+    result = verify_bearing_capacity({**spec, "proposed_q_net_ult_Pa": expected})
+    assert result["conservation_verified"]
+    assert result["Nq"] == 1.0
+    assert result["surcharge_term_Pa"] == result["effective_overburden_Pa"]
+    assert result["q_net_ult_Pa"] == pytest.approx(expected, rel=2e-15, abs=0)
