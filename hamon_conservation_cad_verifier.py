@@ -383,10 +383,10 @@ def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, densi
     watertight = manifold and bool(edge_counts) and all(cnt == 2 for cnt in edge_counts.values())
     edge1, edge2 = v1 - v0, v2 - v0
     area_vectors = 0.5 * np.cross(edge1, edge2)
-    surface_area = float(np.linalg.norm(area_vectors, axis=1).sum())
+    surface_area = float(np.hypot.reduce(area_vectors, axis=1).sum())
     net_area = np.array([math.fsum(area_vectors[:, i]) for i in range(3)])
-    area_residual = float(np.linalg.norm(net_area))
-    cross_scale = 0.5 * np.sum(np.linalg.norm(edge1, axis=1) * np.linalg.norm(edge2, axis=1))
+    area_residual = math.hypot(*net_area)
+    cross_scale = 0.5 * np.sum(np.hypot.reduce(edge1, axis=1) * np.hypot.reduce(edge2, axis=1))
     area_tolerance = float(64 * np.finfo(np.float64).eps * cross_scale)
     diagnostics = {
         "watertight_manifold": bool(watertight),

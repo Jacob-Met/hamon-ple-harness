@@ -163,6 +163,23 @@ class StepSurfaceEmbeddingTests(unittest.TestCase):
                 for key in ("volume_m3", "mass_kg", "centroid_m", "inertia_tensor_centroid_kg_m2"):
                     self.assertNotIn(key, got)
 
+    def test_scaled_cubes_keep_representable_surface_area_and_moments(self):
+        corners = np.array([(0,0,0), (1,0,0), (1,1,0), (0,1,0),
+                            (0,0,1), (1,0,1), (1,1,1), (0,1,1)], dtype=float)
+        faces = [(0,3,2,1), (4,5,6,7), (0,1,5,4), (1,2,6,5), (2,3,7,6), (3,0,4,7)]
+        for exponent, multiplier in ((-290, 1.), (290, 1.), (-268, 1.5)):
+            with self.subTest(exponent=exponent, multiplier=multiplier):
+                side, density = multiplier*2.**exponent, 2.**(-900 if exponent > 0 else 900)
+                got = verify_step_cad_geometry({"step_text": surface_step(side*corners, faces),
+                                                "density_kg_m3": density})
+                self.assertTrue(got["conservation_verified"], got)
+                self.assertEqual(got["surface_area_m2"], float(6*F(side)**2))
+                self.assertEqual(got["volume_m3"], float(F(side)**3))
+                self.assertEqual(got["mass_kg"], float(F(density)*F(side)**3))
+                self.assertEqual(got["centroid_m"], [side/2]*3)
+                moment = float(F(density)*F(side)**5/6)
+                self.assertEqual(got["principal_moments_kg_m2"], [moment]*3)
+
 
 if __name__ == "__main__":
     unittest.main()
