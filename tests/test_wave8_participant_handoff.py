@@ -34,6 +34,12 @@ def test_solver_receipt_reaches_low_effort_participant_with_original_request(tmp
     alt = {"mode": "civil_geotech", "spec": {**spec, "footing_B_m": 3}}
     pair = [json.loads(single), alt]
     fence = "```json\n" + json.dumps(pair) + "\n```"
+    history = {"mode": "civil_geotech", "spec": {
+        "calculation": "consolidation_history_1d", "H_clay_m": 1, "cv_m2_s": 1,
+        "mv_per_Pa": 1e-7, "drainage": "single", "time_s": 1,
+        "load_history": [{"time_s": 0, "surcharge_Pa": 0}, {"time_s": 1, "surcharge_Pa": 10000}],
+    }}
+    staged = json.dumps(history)
     for instruction, tier, count in (
         (single, "low", 1),
         (json.dumps({"mode": "civil_geotech", "spec": {**spec, "applied_gross_pressure_Pa": 1e12}}),
@@ -41,6 +47,9 @@ def test_solver_receipt_reaches_low_effort_participant_with_original_request(tmp
         ("Run the calculations below and return their JSON results in the same order.\n" + fence,
          "low", 2),
         (fence + "\nCompare against the project specification.", "medium", 0),
+        (staged, "low", 1),
+        (json.dumps({**history, "spec": {**history["spec"], "proposed_settlement_m": 1}}),
+         "medium", 0),
     ):
         session = SimpleNamespace(
             instruction=instruction,
@@ -62,8 +71,12 @@ def test_solver_receipt_reaches_low_effort_participant_with_original_request(tmp
                 answer = json.loads(prompt.splitlines()[-1])
                 results = answer if count == 2 else [answer]
                 assert len(results) == count
-                assert all(result["conservation_verified"]
-                           and result["bearing_method"] == "terzaghi" for result in results)
+                assert all(result["conservation_verified"] for result in results)
+                if instruction == staged:
+                    assert results[0]["calculation"] == "consolidation_history_1d"
+                    assert 0 < results[0]["mean_excess_pore_pressure_Pa"] < 10000
+                else:
+                    assert all(result["bearing_method"] == "terzaghi" for result in results)
                 if count == 2:
                     assert results[0] != results[1]
             await kwargs["on_line"](
