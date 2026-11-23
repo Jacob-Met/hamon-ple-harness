@@ -2820,19 +2820,8 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
             "dual_verified": True,
         }
     if kind == "short_circuit_sym":
-        s_kva, v_ll = float(spec["S_base_kVA"]), float(spec["V_ll_V"])
-        z_tx = float(spec["Z_tx_pct"]) / 100.0
-        s_u_mva = float(spec["S_utility_sc_MVA"])
-        i_fla = (s_kva * 1e3) / (math.sqrt(3.0) * v_ll)
-        z_tot = z_tx + (s_kva / 1000.0) / s_u_mva
-        i_sc = i_fla / z_tot
-        return {
-            "I_fla_A": i_fla,
-            "Z_total_pu": z_tot,
-            "I_sc_sym_A": i_sc,
-            "aic_ok": i_sc <= float(spec["breaker_aic_kA"]) * 1e3,
-            "dual_verified": True,
-        }
+        from hamon_short_circuit import symmetrical_fault
+        return symmetrical_fault(spec)
     if kind == "ampacity_derating":
         i_req = 1.25 * float(spec["I_continuous_A"]) + float(spec.get("I_noncontinuous_A", 0.0))
         i_allow = float(spec["base_ampacity_A"]) * float(spec["temp_factor"]) * float(spec["bundling_factor"])
