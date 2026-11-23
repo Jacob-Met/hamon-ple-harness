@@ -91,6 +91,73 @@ class DiaphragmTests(unittest.TestCase):
                 self.assertLess(result["dual_rel_discrepancy"], 1e-12)
 
 
+    def test_stiff_patches_joined_by_axial_bars(self):
+        xy = [[0, 0], [1, 0], [1, 1], [0, 1], [3, 0], [4, 0], [4, 1], [3, 1]]
+        panels = [{"nodes": nodes, "Dx_N_m": 1e13, "Dy_N_m": 1e13, "G_N_m": 3e12}
+                  for nodes in ([0, 1, 2, 3], [4, 5, 6, 7])]
+        supports = [(0, "x", 1), (0, "y", 2), (1, "y", 1e-14),
+                    (4, "x", 2), (4, "y", 2), (5, "x", 2), (5, "y", 2)]
+        def solve(links, active, displacement, axial_forces):
+            forces = [[0., 0.] for _ in xy]
+            for node, axis, stiffness in active:
+                dim = int(axis == "y")
+                forces[node][dim] += stiffness*displacement[node][dim]
+            bars = []
+            for (a, b, ea), tension in zip(links, axial_forces):
+                dx, dy = xy[b][0]-xy[a][0], xy[b][1]-xy[a][1]
+                norm = (dx*dx + dy*dy)**.5
+                for dim, component in enumerate((dx/norm, dy/norm)):
+                    forces[b][dim] += tension*component
+                    forces[a][dim] -= tension*component
+                bars.append({"nodes": [a, b], "EA_N": ea})
+            spec = {"nodes_m": xy, "panels": panels, "bars": bars,
+                    "springs": [{"node": n, "axis": axis, "k_N_m": k} for n, axis, k in active],
+                    "loads": [{"node": i, "force_N": f} for i, f in enumerate(forces)]}
+            return run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": spec})
+
+        rigid = [[.004-.002*y, .002*x] for x, y in xy]
+        one = [(1, 7, 3e11)]
+        result = solve(one, supports, rigid, [0])
+        assert_allclose(result["displacements_m"], rigid, atol=2e-15)
+        assert_allclose(result["bar_tension_N"], [0], atol=1e-14)
+        with self.assertRaises(ValueError):
+            solve(one, supports[:3], rigid, [0])
+        # Three independent connector extensions restrain the second patch,
+        # which has no direct springs. All bars are unstretched by this motion.
+        three = [(1, 4, 3e4), (2, 7, 5e4), (1, 7, 2e4)]
+        result = solve(three, supports[:3], rigid, [0, 0, 0])
+        assert_allclose(result["displacements_m"], rigid, atol=2e-15)
+        # Relative patch translation stretches a real horizontal connector.
+        # These nodal loads include its equal and opposite end forces.
+        movement = [[.004 + (1e-5 if i >= 4 else 0), 0] for i in range(8)]
+        horizontal = [(1, 4, 600.)]
+        tension = 600.*1e-5/2
+        result = solve(horizontal, supports, movement, [tension])
+        assert_allclose(result["displacements_m"], movement, atol=2e-14)
+        assert_allclose(result["bar_tension_N"], [tension], rtol=1e-12)
+
+    def test_corner_hinge_compatibility_and_redundant_brace(self):
+        xy = [[0, 0], [1, 0], [1, 1], [0, 1], [2, 1], [2, 2], [1, 2]]
+        spec = {"nodes_m": xy, "panels": [
+            {"nodes": ns, "Dx_N_m": 1e13, "Dy_N_m": 1e13, "G_N_m": 3e12}
+            for ns in ([0, 1, 2, 3], [2, 4, 5, 6])],
+            "springs": [{"node": 0, "axis": "x", "k_N_m": 1},
+                        {"node": 0, "axis": "y", "k_N_m": 1},
+                        {"node": 1, "axis": "y", "k_N_m": 1},
+                        {"node": 4, "axis": "y", "k_N_m": 1e-14}],
+            "loads": [{"node": 0, "force_N": [.004, 0]},
+                      {"node": 4, "force_N": [0, 2e-17]}]}
+        result = run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": spec})
+        expected = [[.004, 0] if i < 4 else [.004-.002*(y-1), .002*(x-1)]
+                    for i, (x, y) in enumerate(xy)]
+        assert_allclose(result["displacements_m"], expected, atol=2e-15)
+        # This bar passes through the shared pin; its first-order extension
+        # cannot restrain the second panel's otherwise free hinge rotation.
+        spec["springs"].pop()
+        spec["bars"] = [{"nodes": [0, 5], "EA_N": 1e4}]
+        with self.assertRaises(ValueError):
+            run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": spec})
+
     def test_center_shear_sign_and_reaction_moment_for_pure_shear_patch(self):
         spec = {"nodes_m": [[0, 0], [1, 0], [1, 1], [0, 1]],
                 "panels": [{"nodes": [0, 1, 2, 3], "Dx_N_m": 450, "Dy_N_m": 700,

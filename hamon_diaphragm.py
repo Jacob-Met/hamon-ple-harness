@@ -9,7 +9,7 @@ import math
 
 import numpy as np
 from scipy.sparse import coo_matrix, diags
-from scipy.sparse.csgraph import connected_components
+from hamon_diaphragm_modes import diaphragm_coordinates
 from scipy.sparse.linalg import splu
 
 
@@ -117,62 +117,6 @@ def _recover_stations(requests, cells, xy, shears):
     return results
 
 
-def _rigid_coordinates(xy, edges, ground):
-    """Separate each component's rigid motions from anchored elastic displacement."""
-    n = len(xy)
-    starts, ends = zip(*edges)
-    graph = coo_matrix((np.ones(len(edges)), (starts, ends)), shape=(n, n))
-    _, labels = connected_components(graph, directed=False)
-    groups = {}
-    for node, label in enumerate(labels):
-        groups.setdefault(label, []).append(node)
-
-    rows, cols, values = [], [], []
-    elastic = np.ones(2*n, dtype=bool)
-    for group in groups.values():
-        nodes = np.array(group)
-        support = ground.reshape(-1, 2)[nodes]
-        anchors = nodes[np.argmax(support, axis=0)]
-        if np.any(np.max(support, axis=0) == 0):
-            raise ValueError("diaphragm component has an unrestrained translation")
-        for axis, anchor in enumerate(anchors):
-            dof = 2*anchor + axis
-            elastic[dof] = False
-            rows.extend(2*nodes + axis)
-            cols.extend([dof]*len(nodes))
-            values.extend([1.0]*len(nodes))
-        if len(nodes) == 1:
-            continue
-        # Rotation about the intersection of the two strongest spring lines
-        # does no work on either spring. Even a very soft third restraint
-        # then retains its actual stiffness instead of disappearing in a sum.
-        levers = np.column_stack((xy[anchors[0], 1] - xy[nodes, 1],
-                                  xy[nodes, 0] - xy[anchors[1], 0]))
-        candidates = np.nonzero((support > 0) & (levers != 0))
-        if not len(candidates[0]):
-            raise ValueError("diaphragm component has an unrestrained rotation")
-        # Choose the third reference DOF by its rotational spring stiffness
-        # k*r², comparing logs so otherwise finite products cannot overflow.
-        strength = np.log(support[candidates]) + 2*np.log(np.abs(levers[candidates]))
-        best = np.argmax(strength)
-        point, axis = (indices[best] for indices in candidates)
-        spin = 2*nodes[point] + axis
-        elastic[spin] = False
-        # Scale the rotation parameter to a displacement. Removing the
-        # elastic coordinate at the chosen nonzero lever makes the map invertible.
-        length = _positive(np.max(np.abs(levers)))
-        rows.extend(np.column_stack((2*nodes, 2*nodes+1)).ravel())
-        cols.extend([spin]*(2*len(nodes)))
-        values.extend((levers/length).ravel())
-    free = np.flatnonzero(elastic)
-    rows.extend(free)
-    cols.extend(free)
-    values.extend(np.ones(len(free)))
-    transform = coo_matrix((values, (rows, cols)), shape=(2*n, 2*n)).tocsc()
-    transform.eliminate_zeros()
-    return transform, elastic
-
-
 def solve_diaphragm(spec):
     xy = np.asarray(spec["nodes_m"], dtype=float)
     if xy.ndim != 2 or xy.shape[1] != 2 or not np.isfinite(xy).all() or len(xy) < 4:
@@ -196,12 +140,12 @@ def solve_diaphragm(spec):
 
     panels, bars, springs = [], [], []
     rectangles = []
-    edges = []
+    panel_nodes = []
     for panel in spec["panels"]:
         ids = tuple(node(i) for i in panel["nodes"])
         if len(ids) != 4 or len(set(ids)) != 4:
             raise ValueError("each panel needs four distinct nodes and a unique cell")
-        edges.extend((ids[0], other) for other in ids[1:])
+        panel_nodes.append(ids)
         p = xy[list(ids)]
         width, height = p[2] - p[0]
         expected = [[0, 0], [width, 0], [width, height], [0, height]]
@@ -219,13 +163,11 @@ def solve_diaphragm(spec):
 
     for bar in spec.get("bars", []):
         a, b = (node(i) for i in bar["nodes"])
-        edges.append((a, b))
         vector = xy[b] - xy[a]
         length = _positive(np.linalg.norm(vector))
         axis = np.r_[-vector, vector] / length
         k = _positive(bar["EA_N"]) / length
         dofs = np.array([2*a, 2*a+1, 2*b, 2*b+1])
-        scatter(dofs, k * np.outer(axis, axis))
         bars.append((dofs, axis, k))
     for spring in spec["springs"]:
         axis = {"x": 0, "y": 1}[spring["axis"]]
@@ -239,16 +181,29 @@ def solve_diaphragm(spec):
             raise ValueError("force_N must be a finite [Fx,Fy] vector")
         force[dof:dof+2] += f
 
-    internal = coo_matrix((entries, (rows, cols)), shape=(ndof, ndof)).tocsc()
+    membrane = coo_matrix((entries, (rows, cols)), shape=(ndof, ndof)).tocsc()
     ground = np.zeros(ndof)
     for dof, k in springs:
         ground[dof] += k
-    transform, elastic = _rigid_coordinates(xy, edges, ground)
+    if not np.isfinite(ground).all():
+        raise ValueError("nonfinite assembled spring stiffness")
+    transform, elastic, bar_free, elastic_only_bars = diaphragm_coordinates(xy, panel_nodes, bars, ground)
     projection = diags(elastic.astype(float))
-    # Panels and bars have exactly zero strain in a rigid motion. Enforce
-    # that geometric identity before the spring terms enter the stiffness.
-    stiffness = (projection @ internal @ projection
-                 + transform.T @ diags(ground) @ transform).tocsc()
+    stiffness = (projection @ membrane @ projection + transform.T @ diags(ground) @ transform).tocsc()
+    if bars:
+        b_rows, b_cols, b_data = [], [], []
+        for i, (dofs, axis, _) in enumerate(bars):
+            b_rows.extend([i]*4)
+            b_cols.extend(dofs)
+            b_data.extend(axis)
+        bar_axes = coo_matrix((b_data, (b_rows, b_cols)), shape=(len(bars), ndof)).tocsr()
+        # An in-patch bar also annihilates *relative* patch motions.
+        # Cross-patch bars retain exactly the straining patch coordinates.
+        relative = diags((~elastic & ~bar_free).astype(float))
+        connector_axes = diags((~elastic_only_bars).astype(float)) @ bar_axes
+        bar_map = bar_axes @ projection + connector_axes @ transform @ relative
+        axial_k = np.array([k for _, _, k in bars])
+        stiffness = (stiffness + bar_map.T @ diags(axial_k) @ bar_map).tocsc()
     diagonal = stiffness.diagonal()
     if not np.isfinite(diagonal).all() or np.min(diagonal) <= 0:
         raise ValueError("unconnected or invalid diaphragm degrees of freedom")
@@ -275,10 +230,12 @@ def solve_diaphragm(spec):
         reactions[dof] += value
         spring_forces.append(value)
         double_energy.append(value * u[dof])
-    for dofs, axis, k in bars:
-        extension = axis @ deformation[dofs]
-        bar_forces.append(k * extension)
-        double_energy.append(k * extension**2)
+    internal_force = membrane @ deformation
+    if bars:
+        extensions = bar_map @ coordinates
+        bar_forces = axial_k * extensions
+        internal_force += bar_axes.T @ bar_forces
+        double_energy.extend(bar_forces * extensions)
     for dofs, gauss, weights, recover in panels:
         local_u = deformation[dofs]
         panel_shears.append(recover @ local_u)
@@ -294,7 +251,7 @@ def solve_diaphragm(spec):
     span = np.max(np.ptp(xy, axis=0))
     work = float(force @ u)
     energy = math.fsum(double_energy)
-    errors = [np.linalg.norm(internal @ deformation + reactions - force, np.inf) / load_scale,
+    errors = [np.linalg.norm(internal_force + reactions - force, np.inf) / load_scale,
               np.linalg.norm(force_error, 1) / load_scale,
               abs(moment_error) / (span * load_scale),
               abs(work - energy) / max(abs(work), abs(energy), 1e-30)]
