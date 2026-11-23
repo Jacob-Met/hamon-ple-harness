@@ -2232,6 +2232,73 @@ def solve_pile_group_dual(spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def verify_compaction_lot(spec):
+    """Compare measured gravimetric moisture and field density with the supplied reference."""
+    def number(record, key):
+        value = record[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise ValueError(f"{key} must be a finite number")
+        binary = float(value)
+        if not math.isfinite(binary):
+            raise ValueError(f"{key} must be finite")
+        decimal = Decimal(str(value))
+        if binary == 0 and decimal != 0:
+            raise ValueError(f"{key} is outside the numeric range")
+        return Fraction(decimal)
+
+    try:
+        reference = number(spec, "gamma_d_max")
+        optimum = number(spec, "w_opt_pct")
+        minimum = number(spec, "min_rc")
+        if reference <= 0 or optimum < 0 or minimum <= 0:
+            raise ValueError("Invalid maximum dry density, optimum moisture or relative compaction")
+        if "w_tol_pct" in spec:
+            if "w_tol_below_pct" in spec or "w_tol_above_pct" in spec:
+                raise ValueError("Specify symmetric or directional moisture tolerances")
+            below = above = number(spec, "w_tol_pct")
+        else:
+            below = number(spec, "w_tol_below_pct")
+            above = number(spec, "w_tol_above_pct")
+        if min(below, above) < 0:
+            raise ValueError("Moisture tolerances must be nonnegative percentage points")
+        tests = spec["tests"]
+        if not isinstance(tests, list) or not tests:
+            raise ValueError("At least one field density test is required")
+        dry_limit = reference * minimum
+        low, high = optimum - below, optimum + above
+        rows, ratios, passed = [], {}, []
+        for row in tests:
+            test_id = row["id"]
+            if type(test_id) not in (int, str) or not str(test_id).strip():
+                raise ValueError("A nonblank field test identifier is required")
+            key = f"{test_id}_rc"
+            if key in ratios:
+                raise ValueError(f"Duplicate field test identifier: {test_id}")
+            moisture = number(row, "w_pct")
+            if moisture < 0:
+                raise ValueError("Measured water content must be nonnegative")
+            if ("gamma_dry" in row) == ("gamma_wet" in row):
+                raise ValueError("Declare exactly one measured density, gamma_dry or gamma_wet")
+            if "gamma_dry" in row:
+                dry = number(row, "gamma_dry")
+            else:
+                dry = number(row, "gamma_wet") / (1 + moisture / 100)
+            if dry <= 0:
+                raise ValueError("Measured field density must be positive")
+            density_ok, moisture_ok = dry >= dry_limit, low <= moisture <= high
+            ratios[key] = float(dry / reference)
+            rows.append({"id": test_id, "dry_density": float(dry),
+                         "density_passes": density_ok, "moisture_passes": moisture_ok})
+            if density_ok and moisture_ok:
+                passed.append(test_id)
+        return {**ratios, "passed_ids": passed, "test_results": rows,
+                "dry_density_minimum": float(dry_limit), "moisture_range_pct": [float(low), float(high)],
+                "lot_accepted": len(passed) == len(rows), "dual_verified": True,
+                "basis": "Numerical comparison of the supplied tests and reference only."}
+    except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+        return {"lot_accepted": False, "dual_verified": False, "reason": str(exc)}
+
+
 def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
     """Unified dispatcher for general multi-discipline engineering checks (zero task ID branching)."""
     if kind in ("beam_design_check", "beam_fixed_fixed"):
@@ -2591,22 +2658,7 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
             "dual_verified": True,
         }
     if kind == "compaction_acceptance":
-        gd_max, w_opt = float(spec["gamma_d_max"]), float(spec["w_opt_pct"])
-        min_rc, w_tol = float(spec["min_rc"]), float(spec["w_tol_pct"])
-        passed = []
-        rcs = {}
-        for t in spec["tests"]:
-            gd = float(t["gamma_wet"]) / (1.0 + float(t["w_pct"]) / 100.0)
-            rc = gd / gd_max
-            rcs[f"{t['id']}_rc"] = rc
-            if rc >= min_rc and (w_opt - w_tol) <= float(t["w_pct"]) <= (w_opt + w_tol):
-                passed.append(t["id"])
-        return {
-            **rcs,
-            "passed_ids": passed,
-            "lot_accepted": len(passed) == len(spec["tests"]),
-            "dual_verified": True,
-        }
+        return verify_compaction_lot(spec)
     if kind == "rankine_retaining":
         H, gam, phi_d = float(spec["H_m"]), float(spec["gamma_N_m3"]), float(spec["phi_deg"])
         q_s, m_res, fs_min = float(spec["surcharge_Pa"]), float(spec["M_resist_Nm_per_m"]), float(spec["min_FS_overturning"])
