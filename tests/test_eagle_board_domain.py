@@ -49,7 +49,9 @@ def board(rows):
 
 class BoardDomainTests(unittest.TestCase):
     def test_isolated_reflex_quarter_excludes_the_entire_circular_recess(self):
-        corners = [(0, 0), (8, 0), (8, 8), (5, 8), (5, 5), (4, 4), (0, 4)]
+        # The left tip selects counterclockwise canonical traversal here. Its
+        # reflection starts at the opposite side and selects clockwise traversal.
+        corners = [(0, 0), (8, 0), (8, 8), (5, 8), (5, 5), (4, 4), (0, 4), (-1, 2)]
         for mirror in (1, -1):
             rows = outline([(mirror*x, y) for x, y in corners])
             rows[4].set("curve", str(-90*mirror))
