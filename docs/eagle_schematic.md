@@ -92,4 +92,10 @@ On the same Uno TH Rev3e drawing, the two remaining +5V islands have complete ar
 
 An independent receiver froze the PDF-only predictions for each original drawing and all three quarter-turns before opening the corresponding manufacturer CAD. All 930 visible wire sections had unique geometric matches. Page and document membership, wire endpoints, glyph stems and the side-label boxes were covariant under rotation. The three-sheet Due export remained unresolved. A separate receiver checked distinct labels and shared-occurrence counterexamples under four rotations and both source orders.
 
+The Uno replay uses the manufacturer's [schematic PDF](https://content.arduino.cc/assets/UNO-TH_Rev3e_sch.pdf) and [native EAGLE ZIP](https://content.arduino.cc/assets/UNO-TH_Rev3e-reference.zip). It checks all three source hashes and produces every PDF prediction before opening the native schematic.
+
+```sh
+python3 ship/verify_eagle_uno.py UNO-TH_Rev3e_sch.pdf UNO-TH_Rev3e-reference.zip --quarter-turns
+```
+
 These are measured visible-wire connectivity results on the named drawings. They do not establish device-pin connectivity, support for another export profile, or a PLE competition score.
