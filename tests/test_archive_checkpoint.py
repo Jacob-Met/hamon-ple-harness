@@ -16,7 +16,6 @@ import zipfile
 import archive_checkpoint
 import archive_contract
 import harness
-from test_docx_format_guard import package as word_package
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,15 +28,15 @@ def public_task(name):
 
 class ArchiveInterruption(unittest.TestCase):
     def test_bounded_office_validation_accounts_for_both_archives(self):
-        document = io.BytesIO()
-        word_package(document, target="word/report.xml", part="word/report.xml")
-        with zipfile.ZipFile(document) as office:
+        memo = ROOT / "artifacts/permission-to-operate-memo/files/filesystem/Corwyn_PTO_Memo.docx"
+        document = memo.read_bytes()
+        with zipfile.ZipFile(io.BytesIO(document)) as office:
             expanded = sum(part.file_size for part in office.infolist())
         package = io.BytesIO()
         with zipfile.ZipFile(package, "w") as output:
-            output.writestr("memo.docx", document.getvalue())
+            output.writestr("memo.docx", document)
         with zipfile.ZipFile(package) as archive:
-            needed = len(document.getvalue()) + expanded
+            needed = len(document) + expanded
             self.assertFalse(archive_checkpoint.verify_typed_members(archive, ["memo.docx"], needed - 1))
             self.assertTrue(archive_checkpoint.verify_typed_members(archive, ["memo.docx"], needed))
 
