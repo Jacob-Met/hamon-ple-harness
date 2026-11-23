@@ -363,6 +363,9 @@ async def solve(session: taskbridge.Session) -> str:
           session.instruction, session.workdir
       )
       terminal = delivery_guard.TerminalDelivery(session.instruction, delivery_targets)
+      working_copy = terminal.add_working_copy(session.workdir)
+      if working_copy:
+        delivery_targets = [{"path": working_copy, "kind": "file"}]
       session.fallback_summary = terminal.summary
       # Share one observation allowance before the participant starts. Later
       # delivery verification retains its own existing per-operation limits.
@@ -396,6 +399,8 @@ async def solve(session: taskbridge.Session) -> str:
             " file integrity and required format. Input examples are NOT outputs."
           if delivery_targets else ""
       )
+      if working_copy:
+        delivery_note = terminal.copy_instruction(working_copy)
       first_request = session.instruction
       if archive_plan:
         first_request += archive_contract.first_instruction(*archive_plan)
@@ -460,6 +465,7 @@ async def solve(session: taskbridge.Session) -> str:
           stop_before_sec=reserve_window,
           log_prefix="pi: ",
       )
+      first_publication = run.archive_watch
       run.archive_watch = None
       tool_session = None
       if run.tool_turn is not None and not run.invalid_tail:
@@ -546,17 +552,20 @@ async def solve(session: taskbridge.Session) -> str:
               issues = delivery_guard.compare(before_delivery, after_delivery)
               await session.log("delivery_gate: post_materialize=" + str(len(issues)))
           delivery_time = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC)
-          if issues and can_continue and (delivery_time is None or delivery_time >= MIN_DELIVERY_RUN_SEC):
+          if (issues or (working_copy and terminal.filing)) and can_continue and (delivery_time is None or delivery_time >= MIN_DELIVERY_RUN_SEC):
             # Each task has its own temporary session directory. Continue the
             # actual calculation history if Pi persisted it before the cutoff.
             resume = any(session_dir.glob("*.jsonl"))
             terminal.invalidate()
-            instruction = delivery_guard.repair_instruction(issues)
+            instruction = delivery_guard.repair_instruction(issues) if issues else "\n\nThe working copy was recovered locally."
+            if working_copy:
+              instruction += terminal.copy_instruction(working_copy)
             if archive_plan:
               instruction += archive_contract.first_instruction(*archive_plan)
             if not resume:
               instruction = session.instruction + instruction
             participant_followup = True
+            run.archive_watch = first_publication
             await taskbridge.run_process(
                 [*argv, "--continue"] if resume else argv,
                 session,
@@ -567,9 +576,17 @@ async def solve(session: taskbridge.Session) -> str:
                 stop_before_sec=STOP_BEFORE_SEC,
                 log_prefix="pi-delivery-repair: ",
             )
+            run.archive_watch = None
             after_repair = await delivery_guard.snapshot(session, delivery_targets)
             terminal.observe(after_repair)
             still_missing = delivery_guard.compare(before_delivery, after_repair)
+            if still_missing and archive_plan:
+              # The final repair can finish the staged members just before its cutoff.
+              # The participant's last turn is not responsible for committing them.
+              if await archive_contract.run_command(session, archive_plan[1]):
+                after_repair = await delivery_guard.snapshot(session, delivery_targets)
+                terminal.observe(after_repair)
+                still_missing = delivery_guard.compare(before_delivery, after_repair)
             await session.log(
                 "delivery_gate: residual=" + str(len(still_missing))
             )

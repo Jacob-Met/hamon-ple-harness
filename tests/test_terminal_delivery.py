@@ -15,6 +15,7 @@ import zipfile
 
 import archive_contract
 import harness
+import hamon_witness_package
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,13 +27,13 @@ def public_instruction(name):
 
 
 class TerminalReceipt(unittest.IsolatedAsyncioTestCase):
-    async def course(self, prompt, populate=None, *, unavailable=False, workdir="/filesystem/work"):
+    async def course(self, prompt, populate=None, *, unavailable=False, workdir="/filesystem/work", inspect=None):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             probes = []
             session = SimpleNamespace(instruction=prompt, workdir=workdir,
                 mcp_servers=[], final_message="", usage=mock.AsyncMock(), log=mock.AsyncMock(),
-                time_left=lambda: 70)
+                time_left=lambda: 700)
             def real_path(value):
                 path = Path(value)
                 return path if path.is_relative_to(root) else root / str(path).lstrip("/")
@@ -67,6 +68,8 @@ class TerminalReceipt(unittest.IsolatedAsyncioTestCase):
                 ]:
                     patches.enter_context(mock.patch.object(owner, name, value))
                 summary = await harness.solve(session)
+            if inspect:
+                inspect(root)
             return summary, probes
 
     async def test_missing_foundation_archive_and_partial_member_set(self):
@@ -105,11 +108,51 @@ class TerminalReceipt(unittest.IsolatedAsyncioTestCase):
 
     async def test_solar_document_store_is_never_treated_as_a_local_file(self):
         answer, paths = await self.course(public_instruction("solar-witness-test-package"))
-        self.assertEqual(paths, [])
+        self.assertIn("/filesystem/work/.ple-delivery/Municipal_Witness_Test_Package.docx", paths)
+        self.assertTrue(all("commissioning folder" not in path for path in paths))
         self.assertIn("Municipal_Witness_Test_Package.docx", answer)
         self.assertIn("Program Office's municipal commissioning folder", answer)
         self.assertIn("not independently verified", answer)
-        self.assertNotIn("(missing)", answer)
+        self.assertIn("Incomplete working copy:", answer)
+        self.assertIn("(missing)", answer)
+
+    async def test_named_return_without_destination_is_verified_as_a_working_copy(self):
+        answer, paths = await self.course(public_instruction("solar-supplemental-review"))
+        self.assertIn("/filesystem/work/.ple-delivery/Bramwick_Commons_Screen_Memo.docx", paths)
+        self.assertIn("Incomplete working copy", answer)
+        self.assertNotIn("External filing", answer)
+        self.assertNotIn(CLAIM, answer)
+
+    def test_root_workdir_places_external_copy_under_exported_output(self):
+        prompt = public_instruction("solar-witness-test-package")
+        terminal = harness.delivery_guard.TerminalDelivery(prompt, [])
+        self.assertEqual(terminal.add_working_copy("/"),
+                         "/app/output/.ple-delivery/Municipal_Witness_Test_Package.docx")
+
+    async def recover_named_filing(self, inspect=None):
+        prompt = public_instruction("solar-witness-test-package")
+        name = "Municipal_Witness_Test_Package.docx"
+        turns = []
+        def recover(root):
+            store = root / "fixture-document-store"
+            copy = root / "filesystem/work/.ple-delivery" / name
+            turns.append(len(turns) + 1)
+            if len(turns) == 1:
+                store.mkdir()
+                _, content = hamon_witness_package.paragraphs(hamon_witness_package.example())
+                hamon_witness_package.write_docx(store / name, content)
+            else:
+                copy.parent.mkdir(parents=True)
+                copy.write_bytes((store / name).read_bytes())
+        answer, paths = await self.course(prompt, recover, inspect=inspect)
+        self.assertEqual(turns, [1, 2])
+        self.assertNotIn("Incomplete", answer)
+        self.assertIn("not independently verified", answer)
+        self.assertIn(CLAIM, answer)
+        self.assertGreaterEqual(paths.count("/filesystem/work/.ple-delivery/" + name), 3)
+
+    async def test_named_filing_recovers_existing_document_without_reupload(self):
+        await self.recover_named_filing()
 
     async def test_complete_local_named_destination_and_unavailable_observation(self):
         prompt = "Return one file named result.md, filed in /app/files/reports."
@@ -128,7 +171,7 @@ class TerminalReceipt(unittest.IsolatedAsyncioTestCase):
         prompt = "Write the final deliverable to output/report.csv."
         def empty(root):
             dest = root / "filesystem/work/output/report.csv"
-            dest.parent.mkdir(parents=True)
+            dest.parent.mkdir(parents=True, exist_ok=True)
             dest.touch()
         answer, _ = await self.course(prompt, empty)
         self.assertIn("/filesystem/work/output/report.csv (empty)", answer)

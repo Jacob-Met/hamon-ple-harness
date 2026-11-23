@@ -145,11 +145,37 @@ class TerminalDelivery:
     """Keep file observations separate from the participant's delivery claims."""
     def __init__(self, instruction, targets):
         self.paths = [target["path"] for target in targets]
-        named = named_return(instruction)
+        named = self.named = named_return(instruction)
         self.filing = named if named and named["destination"] and not named["destination"].startswith(("/app/", "/filesystem/")) else None
+        self.copy_path = None
         self.before = None
         self.after = None
         self.observed = False
+
+    def add_working_copy(self, workdir):
+        """Reserve an observable copy for a named return without a literal file path."""
+        if self.paths or not self.named:
+            return None
+        base = workdir if workdir == "/filesystem" or workdir.startswith("/filesystem/") else "/app/output"
+        self.copy_path = _safe_path(posixpath.join(base, ".ple-delivery", self.named["name"]), base)
+        if self.copy_path:
+            self.paths.append(self.copy_path)
+        return self.copy_path
+
+    def copy_instruction(self, path):
+        note = (f"\n\nKeep a working copy of {self.named['name']} at {path}. "
+                "Create the parent directory if needed. ")
+        if not self.filing:
+            return note + "Use the task records to complete the named file and verify its requested format."
+        return (note
+                + f"The requested final destination is {self.filing['destination']}. "
+                "Check the destination first. If already filed, read the existing artifact "
+                "back into the working copy. Otherwise create the document from the task records, "
+                "validate it, file it using the task's document-store interface, and read it back. "
+                "If you build the document with a script, save the actual generator as generate.py "
+                "beside the working copy so an interrupted build can resume. "
+                "Keep the working copy for verification. Inspect existing records before any "
+                "related case updates and avoid duplicating completed actions.")
 
     def invalidate(self):
         self.after = None
@@ -176,7 +202,8 @@ class TerminalDelivery:
                 missing.append(f"{path} (unchanged starter)")
         notes = []
         if missing:
-            notes.append("Incomplete delivery: " + ", ".join(missing) + ".")
+            label = "Incomplete working copy: " if self.copy_path else "Incomplete delivery: "
+            notes.append(label + ", ".join(missing) + ".")
         if unknown:
             notes.append("Current delivery could not be verified for " + ", ".join(unknown) + ".")
         if self.filing:
