@@ -74,6 +74,15 @@ class DiodeOperatingPoint(unittest.TestCase):
                 diode = next(b for b in r["branch_currents"] if b["name"]=="D1")
                 self.assertAlmostEqual(complex(*diode["current_A"]),g*expected,places=12)
 
+    def test_imposed_current_requires_a_finite_junction_bias(self):
+        for i in (.001, -IS/2, 0.):
+            r = route(common(f"I1 0 out DC {i}\nD1 out 0 silicon"))
+            self.assertTrue(r["conservation_verified"])
+            self.assertAlmostEqual(r["node_voltages"]["out"],THERMAL*math.log1p(i/IS),places=10)
+        for i in (-IS, -2*IS):
+            with self.assertRaises(ValueError):
+                route(common(f"I1 0 out DC {i}\nD1 out 0 silicon"))
+
     def test_unknown_nonlinear_parameters_and_ambiguous_active_networks_refuse(self):
         for changes in [
             ("D1 out 0 missing", ".model silicon D"),
