@@ -25,6 +25,12 @@ def select_csg_root(entities, selector):
             raise ValueError('STEP solid_entity_id must be an integer solid definition')
         return selector if selector in roots else None
     if not roots:return None
+    if any(kind.startswith('IFC') and (
+            any(part in kind for part in ('SOLID','BREP','FACESET','SHAPEREPRESENTATION','PRODUCTDEFINITIONSHAPE'))
+            or kind in {'IFCBLOCK','IFCRIGHTANGULARWEDGE','IFCRIGHTCIRCULARCONE',
+                        'IFCRIGHTCIRCULARCYLINDER','IFCSPHERE','IFCRECTANGULARPYRAMID'})
+           for kind,_ in entities.values()):
+        raise ValueError('Mixed STEP/IFC material requires an explicit solid_entity_id')
     referenced=set()
     for kind,args in entities.values():
         if kind=='BOOLEAN_RESULT' and len(args)==4:

@@ -222,7 +222,7 @@ def integrate_closed_surface(vertices, triangles, density):
             "mass_kg": wire(rho*volume, density > 0),
             "density_kg_m3": density,
             "centroid_m": [wire(x+y) for x, y in zip(anchor, center)],
-            "aabb_extents_m": [wire(max(p[k] for p in raw) - min(p[k] for p in raw)) for k in range(3)],
+            "aabb_extents_m": [wire(max(p[k] for p in raw) - min(p[k] for p in raw), True) for k in range(3)],
             "inertia_tensor_centroid_kg_m2": [[wire(x) for x in row] for row in inertia],
             "mass_moment_method": "exact_polyhedral_integrals",
         }
