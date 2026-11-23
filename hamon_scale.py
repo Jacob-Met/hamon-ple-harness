@@ -220,6 +220,12 @@ def calibrate_inventory(page, spec, quantity, metre):
             raise ValueError(f"reference {i}: positive physical length required")
         label = reference.get("source_label")
         label_key, spans = _source_text(word_index, label)
+        if "source_word_span" in reference:
+            span = reference["source_word_span"]
+            if (not isinstance(span, (list, tuple)) or len(span) != 2
+                    or any(type(index) is not int for index in span) or tuple(span) not in spans):
+                raise ValueError(f"reference {i}: source label does not match the selected PDF word span")
+            spans = [tuple(span)]
         if label_key in source_labels:
             raise ValueError("independent source_label required per reference")
         source_labels[label_key] = spans

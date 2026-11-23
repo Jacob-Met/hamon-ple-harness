@@ -86,6 +86,35 @@ class DimensionAssociationContracts(unittest.TestCase):
         self.assertFalse(out["physical_scale_verified"])
         self.assertEqual(out["annotation_binding"],"two_endpoint_source_witness")
 
+    def test_split_unit_uses_the_same_source_words_as_the_dimension_line(self):
+        page = page_fixture()
+        # The title's identical text is far from every dimension line.
+        page["words"][:1] = [
+            {"text": "1000", "page_bbox_pt": [10, 40, 30, 50], "source_line_id": 9},
+            {"text": "mm", "page_bbox_pt": [32, 40, 47, 50], "source_line_id": 9},
+            {"text": "1000", "page_bbox_pt": [157, 84, 181, 94], "source_line_id": 0},
+            {"text": "mm", "page_bbox_pt": [184, 84, 200, 94], "source_line_id": 0},
+        ]
+        links = hamon_callout.associate_page(page)
+        anchor = next(row for row in links["matches"] if row["source_label"] == "1000 mm")
+        self.assertEqual(anchor["word_ids"], [2, 3])
+
+        def measure():
+            return hamon_callout.auto_measure_page(page, target(), units.quantity, units.UNITS["m"])
+
+        result = measure()
+        observation = next(row for row in result["references"] if row["source_label"] == "1000 mm")
+        self.assertEqual(observation["source_word_span"], [2, 4])
+        page["words"][3]["source_line_id"] = 1
+        self.assertEqual(len(hamon_callout.associate_page(page)["matches"]), 3)
+        with self.assertRaisesRegex(ValueError, "insufficient"):
+            measure()
+        # An old association must fail the numerical gate even when another
+        # part of the sheet still contains the entire printed label.
+        with patch.object(hamon_callout, "associate_page", return_value=links):
+            with self.assertRaisesRegex(ValueError, "selected PDF word span"):
+                measure()
+
     def test_architectural_dimension_uses_both_components(self):
         page = page_fixture()
         page["words"] = [
