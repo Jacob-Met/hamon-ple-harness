@@ -7,6 +7,7 @@ from itertools import product
 
 import unittest
 
+import numpy as np
 from numpy.testing import assert_allclose
 
 from hamon_conservation_cad_verifier import run_router_conservation_cad_verifier
@@ -190,6 +191,25 @@ class DiaphragmTests(unittest.TestCase):
                 assert_allclose(result["bar_tension_N"], [-sign * 4.8793850904796265e-9], rtol=1e-7)
                 self.assertEqual(result["bar_capacity_checks"][0]["passes"], sign > 0)
                 assert_allclose(result["strain_energy_J"], 2.4986302820438824e-14, rtol=1e-7)
+
+        # This slender fixture takes the refined nodal path. Compare at the
+        # published magnitude itself to exercise longdouble-to-binary64 equality.
+        limit = abs(result["bar_tension_N"][0])
+        spec["bars"][0].update(demand_factor=1.0, allowable_tension_N=limit, allowable_compression_N=limit)
+        for sign in (-1, 1):
+            spec["loads"][0]["force_N"][0] = sign * 1e-8
+            result = run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": spec})
+            self.assertEqual(abs(result["bar_tension_N"][0]), limit)
+            self.assertTrue(result["bar_capacity_checks"][0]["passes"])
+
+    def test_refined_bar_capacity_uses_published_force_and_preserves_ratio(self):
+        refined = np.longdouble(1) + np.longdouble(3) * math.ulp(1.0) / 8
+        self.assertEqual(float(refined), 1.0)
+        for sign, limit in product((-1, 1), (1.0, 0.75)):
+            bar = {"allowable_tension_N": limit, "allowable_compression_N": limit}
+            check, = _bar_checks({"bars": [bar]}, [sign * refined])
+            self.assertEqual(check["passes"], 1.0 <= limit)
+            self.assertEqual(check["ratio"], float(refined / limit))
 
     def test_nominal_bar_capacity_at_binary64_rounding_boundaries(self):
         factor = 1.5
