@@ -1706,6 +1706,78 @@ def solve_ac_phasor_rlc_dual(spec: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _transformer_voltage(terminal_voltage, r, x, power_factor, leading):
+    """Absolute EMF and signed percentage regulation from the secondary phasor."""
+    # r and x are the signed impedance-drop components divided by terminal V.
+    # Quadratic terms in E²/V² can be kept exactly as a + b*sqrt(1-p²).
+    sin_squared = 1 - power_factor**2
+    sign = -1 if leading else 1
+    offset = r**2 + x**2 + 2 * r * power_factor
+    sine_coefficient = sign * 2 * x
+
+    def decimal(q):
+        return Decimal(q.numerator) / Decimal(q.denominator)
+
+    sine = decimal(sin_squared).sqrt()
+
+    def radical(constant, coefficient):
+        if constant * coefficient < 0 and sin_squared:
+            # Conjugate before rounding when the two terms might cancel.
+            difference = constant**2 - coefficient**2 * sin_squared
+            return decimal(difference) / (decimal(constant) - decimal(coefficient) * sine)
+        return decimal(constant) + decimal(coefficient) * sine
+
+    # Original rectangular terminal phasor, E/V = 1 + I(R+iX)/V.
+    real = radical(1 + r * power_factor, sign * x)
+    imag = radical(x * power_factor, -sign * r)
+    gain = (real**2 + imag**2).sqrt()
+    gain_squared = radical(1 + offset, sine_coefficient)
+    if gain_squared < 0:
+        raise ValueError("Invalid transformer squared voltage")
+    gain_check = gain_squared.sqrt()
+    discrepancy = abs(gain - gain_check) / gain_check if gain_check else abs(gain)
+    # |E|/V - 1 = (|E|²/V² - 1)/(|E|/V + 1), including at zero regulation.
+    regulation = 100 * radical(offset, sine_coefficient) / (1 + gain)
+
+    def compare_gain(trial):
+        if trial < 0:
+            return 1
+        constant = 1 + offset - trial**2
+        if sine_coefficient == 0 or sin_squared == 0:
+            return (constant > 0) - (constant < 0)
+        if constant * sine_coefficient >= 0:
+            return 1 if sine_coefficient > 0 else -1
+        squared_difference = constant**2 - sine_coefficient**2 * sin_squared
+        side = (squared_difference > 0) - (squared_difference < 0)
+        return side if constant > 0 else -side
+
+    def publish(value, to_gain):
+        # Check each binary64 midpoint against the exact squared phasor;
+        # in particular an exact halfway value must round to its even neighbor.
+        rounded = float(value)
+        if not math.isfinite(rounded):
+            rounded = math.nextafter(rounded, 0.)
+        for direction in (-1, 1):
+            neighbor = math.nextafter(rounded, math.copysign(math.inf, direction))
+            if not math.isfinite(neighbor):
+                limit = Fraction(rounded) + direction * Fraction(math.ulp(rounded)) / 2
+                if direction * compare_gain(to_gain(limit)) >= 0:
+                    raise ValueError("Transformer voltage result exceeds finite numeric range")
+                continue
+            midpoint = (Fraction(rounded) + Fraction(neighbor)) / 2
+            side = compare_gain(to_gain(midpoint))
+            if direction * side > 0 or (side == 0 and float(midpoint) == neighbor):
+                rounded = neighbor
+                break
+        if value and abs((Decimal.from_float(rounded) - value) / value) > Decimal("1e-12"):
+            raise ValueError("Transformer voltage result is outside binary64 resolution")
+        return rounded if rounded else 0.
+
+    e2 = publish(decimal(terminal_voltage) * gain, lambda v: v / terminal_voltage)
+    regulation_pct = publish(regulation, lambda pct: 1 + pct / 100)
+    return e2, regulation_pct, float(discrepancy)
+
+
 def solve_transformer_dual(spec: dict[str, Any]) -> dict[str, Any]:
     """Single-phase passive-load phasor and real-power efficiency at fixed terminal V."""
     def number(key, default=None):
@@ -1746,9 +1818,13 @@ def solve_transformer_dual(spec: dict[str, Any]) -> dict[str, Any]:
         output_w = load * rated_va * power_factor
         input_w = output_w + copper_w + core_w
         eta = float(output_w / input_w) if input_w else None
-        resistive_drop = float(current * resistance)
-        reactive_drop = float(current * reactance)
         p_cu = float(copper_w)
+        voltage = Fraction(v2)
+        normalized_current = Fraction(lf) * Fraction(s_va) / voltage**2
+        e2_mag, regulation, disc = _transformer_voltage(
+            voltage, normalized_current * Fraction(r_eq), normalized_current * Fraction(x_eq),
+            Fraction(pf), mode == "leading",
+        )
 
         # eta(lambda)=A lambda/(A lambda+C+B lambda²), with A=S pf,
         # C=core loss and B=rated copper loss. Where defined, the derivative
@@ -1769,21 +1845,8 @@ def solve_transformer_dual(spec: dict[str, Any]) -> dict[str, Any]:
                 lf_opt = None
                 optimum = "unique_outside_float_range"
 
-    if not all(math.isfinite(x) for x in (resistive_drop, reactive_drop, p_cu)):
+    if not math.isfinite(p_cu):
         raise ValueError("Transformer operating result exceeds finite numeric range")
-    sin_p = math.sqrt((1.0 - pf) * (1.0 + pf))
-    current_direction = complex(pf, sin_p if mode == "leading" else -sin_p)
-    e2_phasor = complex(v2, 0) + current_direction * complex(resistive_drop, reactive_drop)
-    e2_mag = abs(e2_phasor)
-
-    phi_signed = -sin_p if mode == "leading" else sin_p
-    re_alg = v2 + (resistive_drop * pf + reactive_drop * phi_signed)
-    im_alg = reactive_drop * pf - resistive_drop * phi_signed
-    e2_alg = math.hypot(re_alg, im_alg)
-    regulation = ((e2_mag - v2) / v2) * 100.0
-    if not all(math.isfinite(x) for x in (e2_mag, e2_alg, regulation)):
-        raise ValueError("Transformer voltage result exceeds finite numeric range")
-    disc = _rel_diff(e2_mag, e2_alg)
     if disc > 1e-12:
         raise ValueError("transformer phasor vs algebraic discrepancy")
 
