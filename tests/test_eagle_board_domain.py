@@ -134,6 +134,37 @@ class BoardDomainTests(unittest.TestCase):
         self.assertEqual(info["quarter_count"],4)
         self.assertFalse(domain.covers(Point(1500000,1500000)))
 
+    def test_two_guarded_holes_preserve_copper_and_distinct_sources(self):
+        outer = rectangle()
+        left = rectangle(-1.0, -.4, -.3, .3)
+        right = outline([(.4,-.3),(1.,-.3),(1.,.1),(.8,.3),(.4,.3)])
+        right[2].set("curve", "90")
+        for rows in (outer+left+right, reverse_rows(right)+outer+reverse_rows(left)):
+            _, drawing = board(rows)
+            domain, info = nominal_board_domain(dimension_records(drawing))
+            self.assertEqual(len(domain.interiors), 2)
+            self.assertEqual(info["hole_count"], 2)
+            holes = info["dimension_holes"]
+            self.assertEqual([h["quarter_count"] for h in holes], [0,1])
+            self.assertEqual([h["wire_count"] for h in holes], [4,5])
+            keys = [set(map(tuple,h["sources"])) for h in holes]
+            self.assertTrue(keys[0].isdisjoint(keys[1]))
+            self.assertIn(tuple(holes[1]["quarter_source"]), keys[1])
+            self.assertTrue(all(h["boundary_guard_nm"] > 0 for h in holes))
+            self.assertFalse(domain.covers(Point(-700000,0)))
+            self.assertFalse(domain.covers(Point(700000,0)))
+            self.assertTrue(domain.covers(Point(0,0).buffer(100000)))
+            self.assertGreater(info["guarded_hole_separation_nm"],790000)
+
+    def test_second_hole_must_be_isolated_at_the_numeric_guard(self):
+        first = rectangle(-1,0,-.5,.5)
+        for second in (rectangle(0,1,-.3,.3), rectangle(-.2,.3,-.3,.3),
+                       rectangle(-.9,-.1,-.1,.1), rectangle(".000000006",1,-.3,.3),
+                       rectangle(.3,2,-.3,.3)):
+            result = self.query(rectangle()+first+second)
+            self.assertEqual(result["board_domain"]["status"], "unresolved")
+            self.assertFalse(result["contacts"])
+
     def test_one_rounded_hole_preserves_the_whole_removed_disk(self):
         rows = outline([(-.30,-.18),(.30,-.18),(.30,.06),(.18,.18),(-.30,.18)])
         rows[2].set("curve","90")

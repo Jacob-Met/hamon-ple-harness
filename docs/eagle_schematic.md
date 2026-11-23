@@ -239,6 +239,23 @@ identifies the curved source wire, the radial error bound (at most 1 nm before
 the guard), and the upper bound on removed area. Ambiguous contour arrangements
 remain unresolved.
 
+Two disjoint holes may use the same individually qualified contours. The two
+outward-guarded exclusions must each lie strictly inside the guarded substrate
+and have more than 4 nm of clearance from one another. The two-hole report
+retains each loop's wire identities, approximation error, guard and upper area
+bound under `dimension_holes`. Its `guarded_hole_separation_nm` is the distance
+between the exclusions after both outward guards. Touching, intersecting,
+nested and numerically unresolved exclusions return an unresolved domain.
+
+Run `python ship/verify_eagle_two_dimension_holes.py --repo . --out two-holes`
+to replay physical boards with crossings inside each cut and in the intervening
+material, a severed planar path, a complete detour and intact or removed plated
+transitions. The receiver checks complete path segments, overlap disks and
+collars against both analytical cut boundaries in two orientations. Add
+`--raw PATH` for the pinned Arduino Due and Feather RP2040 sources. That
+course preserves all signal and terminal records, moves only the two Dimension
+holes, and checks the resulting N$3 trace and MISO plated transition.
+
 Run `python ship/verify_eagle_rounded_hole.py --repo . --out rounded-hole`
 to reproduce 16 drawings. The course checks crossings on both sides of the arc,
 exact tangency, partial overlap, and routes that skirt or cross the cut. Each
