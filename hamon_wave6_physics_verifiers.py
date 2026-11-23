@@ -959,66 +959,145 @@ def _solve_rlc_transient(params):
     }
 
 
+def _transmission_port(params):
+    """Propagate voltage and Z0-scaled current without dividing at a port node."""
+    from mpmath import mp
+    result = {"domain": "rf_transmission_rlc", "subkind": "transmission_line", "verified": False}
+
+    def scalar(key, default):
+        value = float(params.get(key, default))
+        if not math.isfinite(value):
+            raise ValueError(f"Nonfinite {key}")
+        return Fraction(value)
+
+    def wire(value):
+        f = float(value)
+        if not math.isfinite(f) or (value and f == 0):
+            raise ArithmeticError("Unrepresentable transmission line output")
+        return f
+
+    def chart(numerator, denominator):
+        if denominator == 0:
+            return None, None
+        value = numerator/denominator
+        try:
+            return wire(value.real), wire(value.imag)
+        except ArithmeticError:
+            return None, None
+
+    try:
+        characteristic = complex(params.get("Z0", 50.))
+        if not characteristic or not all(map(math.isfinite, (characteristic.real, characteristic.imag))):
+            raise ValueError("Characteristic impedance must be finite and nonzero")
+        r, x = scalar("R_L", 100.), scalar("X_L", 0.)
+        length = scalar("length_m", 1.)
+        attenuation = scalar("alpha_np_m", 0.)*length
+        in_turns = params.get("length_wavelengths") is not None
+        landmark = 0
+        if in_turns:
+            turns = scalar("length_wavelengths", 0.)
+            landmark = round(8*turns)
+            remaining = turns-Fraction(landmark, 8)
+        else:
+            remaining = scalar("beta_rad_m", 0.)*length
+
+        ctx = mp.clone()
+        # Retain the weak wave as well as the strong one, including a small
+        # departure from an exact standing-wave node. Radian input can require
+        # additional bits to resolve the phase of a long propagation interval.
+        scales = [abs(s) for s in (r, x, Fraction(characteristic.real),
+                  Fraction(characteristic.imag), attenuation, remaining, 1) if s]
+        contrast = max(scales)/min(scales)
+        ctx.prec = 160+2*(contrast.numerator.bit_length()-contrast.denominator.bit_length())
+
+        def real(q):
+            return ctx.mpf(q.numerator)/q.denominator
+
+        line = ctx.mpc(characteristic.real, characteristic.imag)
+        load = ctx.mpc(real(r), real(x))
+        if load+line == 0:
+            raise ValueError("Load reflection coefficient is undefined")
+        phase = real(remaining)*(2*ctx.pi if in_turns else 1)
+        loss = real(attenuation)
+        # At exact eighth turns, use only {0,±1,±i}. The common scale of V
+        # and I is arbitrary, so no independently rounded sqrt(2) is needed.
+        a, b = ((load, line), (load+ctx.j*line, line+ctx.j*load),
+                (line, load), (load-ctx.j*line, line-ctx.j*load))[landmark % 4]
+        if not remaining and not attenuation:
+            v, i = a, b
+        else:
+            t = ctx.tanh(ctx.mpc(loss,phase))
+            v, i = a+b*t, b+a*t
+            if not v or not i:
+                raise ArithmeticError("Unresolved finite transmission port")
+
+        # Independently propagate the forward/backward traveling waves. Their
+        # common attenuation cancels, leaving one relative reflection factor.
+        reflection = (load-line)/(load+line)
+        eighth = (1, -ctx.j, -1, ctx.j)[landmark % 4]
+        reflected = reflection*eighth*ctx.exp(-2*ctx.mpc(loss,phase))
+        v_check, i_check = 1+reflected, 1-reflected
+        check_scale = max(abs(v), abs(i))*max(abs(v_check), abs(i_check))
+        mismatch = abs(v*i_check-i*v_check)/check_scale
+        kind = "open" if not i else "short" if not v else "finite"
+        if abs(reflected) < ctx.mpf(".25"):
+            # Preserve the small complex correction to a matched line: complex
+            # division of two nearly identical port phasors can invent reactance.
+            zin = line+2*line*reflected/(1-reflected)
+            yin = 1/line-2*reflected/(line*(1+reflected))
+            zr, zi = chart(zin, 1)
+            yr, yi = chart(yin, 1)
+        else:
+            zr, zi = chart(line*v, i)
+            yr, yi = chart(i, line*v)
+        if kind == "finite" and zr is None and yr is None:
+            raise ArithmeticError("Both finite port charts exceed the output range")
+
+        for reported, reference in (((zr,zi), (line*v,i)), ((yr,yi), (i,line*v))):
+            if reported[0] is not None:
+                measured = ctx.mpc(*reported)*reference[1]
+                scale = max(abs(measured), abs(reference[0]))
+                if scale:
+                    mismatch = max(mismatch, abs(measured-reference[0])/scale)
+
+        # The lossless forward/backward load-wave ratio can be exactly one
+        # even though its voltage standing-wave ratio has no finite value.
+        plus, minus = abs(load+line), abs(load-line)
+        gamma = abs(reflection)
+        power = 4*ctx.re(load*line.conjugate())
+        vswr, vswr_status = None, "unbounded"
+        if power:
+            try:
+                vswr = wire((plus+minus)**2/abs(power))
+                vswr_status = "finite"
+            except ArithmeticError:
+                vswr_status = "outside_numeric_range"
+        return_loss, loss_status = None, "infinite"
+        if gamma:
+            try:
+                return_loss = wire(-20*ctx.log10(gamma))
+                loss_status = "finite"
+            except ArithmeticError:
+                loss_status = "outside_numeric_range"
+        transformer = None
+        if not x and r >= 0 and characteristic.real >= 0 and not characteristic.imag:
+            transformer = wire(ctx.sqrt(real(r)*line.real))
+        return dict(result, Z_in_kind=kind, Z_in_real=zr, Z_in_imag=zi,
+                    Y_in_real=yr, Y_in_imag=yi, gamma_load_mag=wire(gamma),
+                    gamma_load_deg=wire(ctx.degrees(ctx.arg(reflection))),
+                    VSWR=vswr, VSWR_status=vswr_status,
+                    return_loss_dB=return_loss, return_loss_status=loss_status,
+                    quarter_wave_Z_T=transformer, residual=float(mismatch), verified=mismatch < 1e-10)
+    except (ArithmeticError, ValueError, TypeError) as exc:
+        return dict(result, error=str(exc))
+
+
 def solve_transmission_line_rlc(params: Mapping[str, Any]) -> Dict[str, Any]:
     """Deterministic solver for lossless/lossy transmission lines, Smith-chart stubs, and RLC transients."""
     subkind = str(params.get("subkind", "transmission_line")).strip().lower()
 
     if subkind == "transmission_line":
-        z0 = complex(params.get("Z0", 50.0))
-        zl = complex(float(params.get("R_L", 100.0)), float(params.get("X_L", 0.0)))
-        length = float(params.get("length_m", 1.0))
-        alpha_l = float(params.get("alpha_np_m", 0.0)) * length
-        if params.get("length_wavelengths") is not None:
-            turns = math.remainder(float(params["length_wavelengths"]), 0.5)
-            invert = abs(turns) > 0.125
-            if invert:
-                turns -= math.copysign(0.25, turns)
-            phase = math.tau * turns
-        else:
-            beta_l = float(params.get("beta_rad_m", 0.0)) * length
-            sine, cosine = math.sin(beta_l), math.cos(beta_l)
-            invert = abs(sine) > abs(cosine)
-            phase = math.atan(-cosine / sine if invert else sine / cosine)
-
-        # Work within an eighth wavelength of zero. An extra quarter turn
-        # interchanges the load and characteristic impedance in the transform.
-        scale = max(abs(zl), abs(z0))
-        load, line = zl / scale, z0 / scale
-        gamma_load = (load - line) / (load + line)
-        mag_g = abs(gamma_load)
-        # Rationalizing 1 - |Gamma| preserves finite VSWR for large mismatch.
-        power = 4.0 * (load * line.conjugate()).real
-        vswr = ((abs(load + line) + abs(load - line)) ** 2 / power
-                if power > 0 else float("inf"))
-        return_loss_db = -20.0 * math.log10(max(mag_g, 1e-300))
-
-        a, b = (line, load) if invert else (load, line)
-        t = complex(np.tanh(complex(alpha_l, phase)))
-        z_in = z0 * ((a + b * t) / (b + a * t))
-
-        # Independently propagate voltage and current through the ABCD
-        # matrix. Its common cosh(alpha*l) factor cancels in their ratio.
-        sine, cosine = math.sin(phase), math.cos(phase)
-        loss = math.tanh(alpha_l)
-        cosh_gl = complex(cosine, loss * sine)
-        sinh_gl = complex(loss * cosine, sine)
-        voltage = a * cosh_gl + b * sinh_gl
-        current = b * cosh_gl + a * sinh_gl
-        z_in_check = z0 * (voltage / current)
-        residual = abs(z_in - z_in_check) / max(abs(z_in), abs(z0), 1e-15)
-        return {
-            "domain": "rf_transmission_rlc",
-            "subkind": subkind,
-            "Z_in_real": float(np.real(z_in)),
-            "Z_in_imag": float(np.imag(z_in)),
-            "gamma_load_mag": float(mag_g),
-            "gamma_load_deg": float(math.degrees(math.atan2(np.imag(gamma_load), np.real(gamma_load)))),
-            "VSWR": float(vswr),
-            "return_loss_dB": float(return_loss_db),
-            "quarter_wave_Z_T": float(math.sqrt(float(np.real(z0)) * float(np.real(zl)))) if abs(np.imag(zl)) < 1e-12 else None,
-            "residual": float(residual),
-            "verified": float(residual) < 1e-10,
-        }
+        return _transmission_port(params)
 
     if subkind == "smith_stub":
         z0 = float(params.get("Z0", 50.0))
