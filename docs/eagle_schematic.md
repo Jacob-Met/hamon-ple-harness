@@ -238,14 +238,20 @@ the outline 10 mm away removes the witness. Placing the board's left edge
 at x = 0.05 mm recomputes the overlap as 0.009999000016 mm² and places the
 whole smaller disk inside the remaining board. Tangency yields no witness.
 
-The independent receiver below checks every complete emitted path segment,
+The independent receiver below checks every complete planar path segment,
 contact disk, overlap disk and plated or terminal collar against analytic
 straight and circular board boundaries. Its arithmetic uses Python's standard
-library rather than the production geometry backend. The original Arduino
+library rather than the production geometry backend. It also checks the serialized
+barrel path: its ports and wall coordinates, radial landings, layer transition,
+and agreement with adjacent planar steps. Translating only that path outside
+the board is a rejected receiver control. The original Arduino
 Due and Feather source hashes, the frozen 19-case finite-copper course and
 the existing bridge/milling course are checked separately. The Feather's four
 placed USB-C milling capsules have an independent source and exclusion-box
-check. A failed sufficient witness remains unresolved.
+check. Earlier finite-course source witnesses are checked again against their
+reconstructed source edits and recorded hashes. Cross-net disk counts count
+inspected reports; the same physical bridge contacts appear in both routed-net
+queries. A failed sufficient witness remains unresolved.
 
 ```sh
 python ship/verify_eagle_finite_copper.py --raw RAW --repo . \

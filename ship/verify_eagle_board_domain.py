@@ -17,12 +17,12 @@ from xml.etree import ElementTree as ET
 
 from eagle_board_domain_oracle import (
     P, Q, rect, rounded, disk, authentic_domains, material_path_on_board,
-    reported_disk_on_board, point_nm_to_mm,
+    reported_disk_on_board, point_nm_to_mm, norm2, pseg2,
 )
 from eagle_board_milling_oracle import (
     verify_original, path_clears_x6, disk_clears_x6,
 )
-from verify_eagle_finite_copper import CASES, SOURCES
+from verify_eagle_finite_copper import CASES, SOURCES, make, check_witness
 from verify_eagle_inter_net import ENDS
 
 COUNTS = Counter()
@@ -47,19 +47,48 @@ def on_board_disk(domain, center, radius, feather=False):
         assert disk_clears_x6(center,radius), ("disk enters X6 exclusion",center,radius)
 
 
+def inspect_collar(record, domain, feather=False):
+    center=P(*record["drill_center_nm"])
+    wall=P(*record["barrel_wall_point_nm"])
+    port=P(*record["point_nm"])
+    inner,outer=Q(record["drill_radius_nm"]),Q(record["clear_collar_outer_radius_nm"])
+    assert outer>inner>0
+    on_board_disk(domain,record["drill_center_nm"],record["clear_collar_outer_radius_nm"],feather)
+    assert norm2(center,wall)==inner*inner
+    assert inner*inner<norm2(center,port)<outer*outer
+    # A radial landing may meet its intended bore wall, but cannot cross its void.
+    assert pseg2(center,port,wall)>=inner*inner
+    return port,wall
+
+
 def inspect_walk(witness, domain, feather=False):
-    assert witness["steps"]
-    for step in witness["steps"]:
+    steps=witness["steps"]
+    assert steps and steps[0]["start"]==witness["start"] and steps[-1]["end"]==witness["end"]
+    assert all(a["end"]==b["start"] for a,b in zip(steps,steps[1:]))
+    for step in steps:
         material=step["material"]
         if material["kind"]=="plated_barrel":
-            on_board_disk(domain,material["drill_center_nm"],
-                          material["clear_collar_outer_radius_nm"],feather)
-            assert material["clear_collar_outer_radius_nm"]>material["drill_radius_nm"]>0
+            port,wall=inspect_collar(material,domain,feather)
+            assert material["source"]==step["source"]
+            path=material["path"]
+            assert len(path)==4 and path[0]==step["start"] and path[-1]==step["end"]
+            assert [node[0] for node in path]==["copper","barrel_wall","barrel_wall","copper"]
+            assert {path[0][1],path[-1][1]}=={1,16}
+            assert path[0][1]==path[1][1] and path[2][1]==path[3][1]
+            assert P(*path[0][2:])==P(*path[3][2:])==port
+            assert P(*path[1][2:])==P(*path[2][2:])==wall
+            # The two radial landings lie in the collar; the middle segment
+            # stays at the same bore-wall XY through the plated layer crossing.
             COUNTS["plated_barrels"]+=1
+            COUNTS["barrel_path_segments"]+=3
             continue
         assert material["kind"]=="component" and material["in_plane_clearance_nm"]==1
         path=material["path_nm"]
         assert path
+        for key,point in (("start",path[0]),("end",path[-1])):
+            node=step[key]
+            if node[0]=="copper":
+                assert node[1]==material["layer"] and node[2:]==point
         if len(set(map(tuple,path)))==1:
             on_board_disk(domain,path[0],1,feather)
             COUNTS["point_landings"]+=1
@@ -73,12 +102,32 @@ def inspect_walk(witness, domain, feather=False):
                 continue
             record=material[key]
             if key=="exit_overlap":
+                assert record["kind"]=="overlap" and record["point_nm"]==path[-1]
                 on_board_disk(domain,record["point_nm"],record["radius_nm"],feather)
                 COUNTS["overlap_disks"]+=1
             else:
-                on_board_disk(domain,record["drill_center_nm"],
-                              record["clear_collar_outer_radius_nm"],feather)
+                port,_=inspect_collar(record,domain,feather)
+                assert any(step[key][0]=="pad" and P(*point)==port
+                           for key,point in (("start",path[0]),("end",path[-1])))
                 COUNTS["terminal_collars"]+=1
+
+
+def reject_translated_barrel(witness, domain, feather=False):
+    """The whole serialized barrel path, not just its declared disk, is checked."""
+    saved=COUNTS.copy()
+    candidate=copy.deepcopy(witness)
+    barrel=next(step for step in candidate["steps"] if step["material"]["kind"]=="plated_barrel")
+    for node in barrel["material"]["path"]:
+        node[2]+=120_000_000
+    try:
+        inspect_walk(candidate,domain,feather)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("translated serialized barrel path was accepted")
+    finally:
+        COUNTS.clear();COUNTS.update(saved)
+    COUNTS["rejected_translated_barrel_paths"]+=1
 
 
 def run_cli(args, label, root, schematic, query, membership=(605,163)):
@@ -246,13 +295,15 @@ def authentic_walks(args, original, sch, domain):
                 row.set(axis,str(Decimal(row.get(axis))+120))
     signal=root.find("./drawing/board/signals/signal[@name='D-']")
     ET.SubElement(signal,"wire",**ENDS,width=".1",layer="1")
-    doc=run_cli(args,"authentic-outline-remote",root,sch,
-                ["--routed-net","D+","--contact-nets","D+","D-"])
-    routed,contact=doc["routed_continuity"],doc["inter_net_contact"]
-    assert routed["board_domain"]["status"]==contact["board_domain"]["status"]=="bounded"
-    assert routed["status"]==contact["status"]=="unresolved"
-    assert not routed["witnesses"] and not contact["contacts"]
-    records["outline_only_plus_120mm"]={"paths":0,"contacts":0,"contacts_declared":605,"nets_declared":163}
+    for net in ("D+","D-"):
+        doc=run_cli(args,"authentic-outline-remote"+("-plus" if net=="D+" else "-minus"),root,sch,
+                    ["--routed-net",net,"--contact-nets","D+","D-"])
+        routed,contact=doc["routed_continuity"],doc["inter_net_contact"]
+        assert routed["board_domain"]["status"]==contact["board_domain"]["status"]=="bounded"
+        assert routed["status"]==contact["status"]=="unresolved"
+        assert not routed["witnesses"] and not contact["contacts"]
+    records["outline_only_plus_120mm"]={"queried_nets":["D+","D-"],"paths":0,"contacts":0,
+                                       "contacts_declared":605,"nets_declared":163}
     return records
 
 
@@ -274,9 +325,14 @@ def main():
     assert set(finite)==set(CASES)
     for name,row in finite.items():
         assert row["passed"] and row["observed"]==("witnessed" if CASES[name] else "unresolved")
+        data,signal,bores=make(args.raw,name)
+        assert sha256(data).hexdigest()==row["board_sha256"]
         if CASES[name]:
+            assert check_witness(name,row["source_witness"],signal,bores)==row["witness"]
             feather=name.startswith("feather")
             inspect_walk(row["source_witness"],domains["Feather" if feather else "Due"],feather)
+            if feather:
+                reject_translated_barrel(row["source_witness"],domains["Feather"],True)
     milling=json.loads(args.milling.read_text())
     assert {k:len(v["contacts"]) for k,v in milling.items()}=={
         "cut":0,"partial":2,"remote":4,"drawing":4,"open":0}
