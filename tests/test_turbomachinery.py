@@ -186,3 +186,20 @@ def test_zero_angular_momentum_change_with_unequal_radii():
     assert result["conservation_verified"]
     assert result["fluid_torque_N_m"] == result["fluid_specific_work_J_kg"] == 0
     assert result["rotor_static_enthalpy_change_J_kg"] == pytest.approx(4)
+
+
+def test_zero_rothalpy_change_with_reoriented_velocity_triangles():
+    # Equal r*Vtheta = 15/4 and equal C² = 169 give zero work and zero dh.
+    spec = {
+        "machine_kind": "pump", "rotation_rpm": 900, "mass_flow_kg_s": 3,
+        "inlet": {"radius_m": 0.75, "meridional_velocity_m_s": 12,
+                  "absolute_tangential_velocity_m_s": 5},
+        "outlet": {"radius_m": 0.3125, "meridional_velocity_m_s": 5,
+                   "absolute_tangential_velocity_m_s": 12},
+        "measured_rotor_static_enthalpy_change_J_kg": 0,
+    }
+    result = verify_turbomachinery(spec)
+    assert result["conservation_verified"]
+    assert result["fluid_specific_work_J_kg"] == result["rotor_static_enthalpy_change_J_kg"] == 0
+    spec["measured_rotor_static_enthalpy_change_J_kg"] = -(2 ** -42)
+    assert not verify_turbomachinery(spec)["conservation_verified"]
