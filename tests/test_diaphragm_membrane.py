@@ -1,5 +1,6 @@
 import copy
 import json
+import math
 from decimal import Decimal, localcontext
 from fractions import Fraction
 from itertools import product
@@ -9,6 +10,7 @@ import unittest
 from numpy.testing import assert_allclose
 
 from hamon_conservation_cad_verifier import run_router_conservation_cad_verifier
+from hamon_diaphragm import _bar_checks
 from hamon_dual_verifier import run_dual_verify_spec
 from hamon_pareto import select_domain_tools
 
@@ -188,6 +190,23 @@ class DiaphragmTests(unittest.TestCase):
                 assert_allclose(result["bar_tension_N"], [-sign * 4.8793850904796265e-9], rtol=1e-7)
                 self.assertEqual(result["bar_capacity_checks"][0]["passes"], sign > 0)
                 assert_allclose(result["strain_energy_J"], 2.4986302820438824e-14, rtol=1e-7)
+
+    def test_nominal_bar_capacity_at_binary64_rounding_boundaries(self):
+        factor = 1.5
+        # 1, 1+ulp and 1+3*ulp give exact, rounded-up and rounded-down
+        # binary64 products, respectively.
+        for steps, sign in product((0, 1, 3), (-1, 1)):
+            force = sign * (1.0 + steps * math.ulp(1.0))
+            demand = abs(force) * factor
+            exact = abs(Fraction(force)) * Fraction(factor)
+            for limit in (math.nextafter(demand, 0), demand, math.nextafter(demand, math.inf)):
+                with self.subTest(force=force, limit=limit):
+                    bar = {"demand_factor": factor,
+                           "allowable_tension_N": limit if sign > 0 else 4.0,
+                           "allowable_compression_N": limit if sign < 0 else 4.0}
+                    check, = _bar_checks({"bars": [bar]}, [force])
+                    self.assertEqual(check["ratio"], demand / limit)
+                    self.assertEqual(check["passes"], exact <= Fraction(limit))
 
     def test_compensated_displacements_replay_after_json_round_trip(self):
         spec = {"nodes_m": [[0, 0], [1, 0], [1, .01], [0, .01]],

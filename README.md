@@ -53,6 +53,12 @@ in Python, use a Decimal context with at least 60 digits and evaluate
 the JSON. A binary64 addition can discard the remainder. The capacity decision
 uses the axial force from the decoded pair before rounding the displayed ratio.
 
+In default mode, a bar passes when the exact product of the magnitude of its
+reported binary64 `bar_tension_N` and `demand_factor` is at most the allowable
+for its sign. The displayed binary64 ratio can round to 1.0 on either side
+of the limit. Error in the reported force relative to the exact equilibrium
+solution is outside this comparison.
+
 ## Files
 
 | File | Purpose |
