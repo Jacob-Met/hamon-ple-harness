@@ -2390,7 +2390,11 @@ def run_router_conservation_cad_verifier(payload: Dict[str, Any]) -> Dict[str, A
         supplied_resonator = (family == "compressible_acoustics"
                               and spec[selector].strip().lower() == "acoustics"
                               and {"A_neck", "V_cavity", "L_eff"} <= spec.keys())
-        if physical_inputs is not None and not (spec.keys() & physical_inputs) and not supplied_resonator:
+        supplied_termination = (family == "rf_transmission_rlc"
+                                and spec[selector].strip().lower() == "transmission_line"
+                                and spec.get("load_kind") in ("open", "short"))
+        if (physical_inputs is not None and not (spec.keys() & physical_inputs)
+                and not supplied_resonator and not supplied_termination):
             raise ValueError(f"{family}/{spec[selector]} requires recognized physical inputs")
         spec["domain"] = family
         if family in wave5:
