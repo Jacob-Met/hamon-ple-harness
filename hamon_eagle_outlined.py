@@ -199,8 +199,11 @@ def wire_words(wires, segments, pitch):
                     after = group_index+1 < len(groups) and groups[group_index+1][0]-end < .96*pitch
                     if before or after:
                         continue
+                    # A complete label may extend beyond its wire. Its exact
+                    # grid-registered origin and unique physical occurrence bind
+                    # it below; a percentage of word width is not that evidence.
                     overlap = min(end, right) - max(start, left)
-                    if overlap < .60*(end-start) or not 4 <= len(edges) <= 140:
+                    if overlap <= 0 or not 4 <= len(edges) <= 140:
                         continue
                     name = _signal_word(edges, scan_y-.03*pitch, pitch)
                     if name:
