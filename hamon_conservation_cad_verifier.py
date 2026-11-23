@@ -1000,6 +1000,8 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
     distortional behavior and shell buckling are outside this section model.
     An unresolved stress assessment leaves passes_stress null. Equilibrium and
     virtual-work consistency are reported separately by conservation_verified.
+    Euler buckling uses the declared ideal end restraints in the bending plane.
+    An explicit K_buckling supplies the effective-length factor for that check.
     """
     def unsupported(message):
         return {"ok": False, "mode": "structural", "tool": "hamon_conservation_cad_verifier",
@@ -1014,8 +1016,9 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": True, "tool": "hamon_conservation_cad_verifier", "mode": "structural",
                 "conservation_verified": result["dual_verified"], **result}
     bc = str(spec.get("boundary", "simply_supported_udl")).lower()
-    if bc not in {"simply_supported_udl", "simply_supported_point", "cantilever_point",
-                  "cantilever_udl", "fixed_fixed_udl"}:
+    end_factors = {"simply_supported_udl": 1., "simply_supported_point": 1.,
+                   "cantilever_point": 2., "cantilever_udl": 2., "fixed_fixed_udl": .5}
+    if bc not in end_factors:
         return unsupported(f"unsupported structural boundary: {bc}")
     tube = None
     if "section" in spec:
@@ -1032,7 +1035,7 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
     J = float(spec.get("J_m4", 2.0 * I))
     r_outer = float(spec.get("r_outer_m", c_dist))
     axial_comp = float(spec.get("axial_compression_N", 0.0))
-    K_eff = float(spec.get("K_buckling", 1.0))
+    K_eff = float(spec.get("K_buckling", end_factors[bc]))
     fy, fs_req = float(spec.get("yield_strength_Pa", 250e6)), float(spec.get("safety_factor", 1.5))
     defl_ratio = float(spec.get("deflection_limit_ratio", 360.0))
 
@@ -1108,6 +1111,8 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
         "von_mises_stress_Pa": vm,
         "allowable_stress_Pa": allow,
         "euler_critical_load_N": p_cr,
+        "buckling_effective_length_factor": K_eff,
+        "buckling_effective_length_source": "K_buckling" if "K_buckling" in spec else "boundary",
         "passes_stress": passes_stress,
         "stress_assessment": assessment,
         "von_mises_bounds_Pa": stress_bounds,
