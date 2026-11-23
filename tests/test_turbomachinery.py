@@ -203,3 +203,19 @@ def test_zero_rothalpy_change_with_reoriented_velocity_triangles():
     assert result["fluid_specific_work_J_kg"] == result["rotor_static_enthalpy_change_J_kg"] == 0
     spec["measured_rotor_static_enthalpy_change_J_kg"] = -(2 ** -42)
     assert not verify_turbomachinery(spec)["conservation_verified"]
+
+
+def test_direction_and_power_survive_underflow_of_reported_specific_work():
+    spec = {
+        "machine_kind": "pump", "rotation_rpm": 1e-30, "mass_flow_kg_s": 1e300,
+        "inlet": {"radius_m": 1, "meridional_velocity_m_s": 1,
+                  "absolute_tangential_velocity_m_s": 0},
+        "outlet": {"radius_m": 1, "meridional_velocity_m_s": 1,
+                   "absolute_tangential_velocity_m_s": 1e-300},
+        "measured_fluid_torque_N_m": 1,
+    }
+    result = verify_turbomachinery(spec)
+    assert result["conservation_verified"]
+    assert result["fluid_specific_work_J_kg"] == 0
+    assert result["fluid_power_W"] == pytest.approx(1e-30 * math.tau / 60, abs=0)
+    assert not verify_turbomachinery(dict(spec, machine_kind="turbine"))["conservation_verified"]

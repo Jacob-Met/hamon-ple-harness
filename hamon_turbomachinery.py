@@ -121,7 +121,8 @@ def rotor(spec):
     # Rounding each r*Vtheta product before subtraction can turn a loaded
     # rotor into a zero-torque rotor. Round the signed change only at output.
     angular_momentum_change = r2 * vt2 - r1 * vt1
-    work = float(Fraction(omega) * angular_momentum_change)
+    specific_work = Fraction(omega) * angular_momentum_change
+    work = float(specific_work)
     # Reconstruct energy independently from rothalpy using the components.
     # A rounded speed norm can conceal changes smaller than its own ulp.
     u1, u2 = Fraction(omega) * r1, Fraction(omega) * r2
@@ -132,7 +133,7 @@ def rotor(spec):
     kinetic_change = float((meridional_term + (vt2 - vt1) * (vt2 + vt1)) / 2)
     energy_work = math.fsum((static_change, kinetic_change))
     residual = abs(work - energy_work)
-    compatible = work >= 0 if kind in ("pump", "compressor") else work <= 0
+    compatible = angular_momentum_change >= 0 if kind in ("pump", "compressor") else angular_momentum_change <= 0
     out = {
         "ok": True,
         "calculation": "euler_rotor",
@@ -148,7 +149,7 @@ def rotor(spec):
     if "mass_flow_kg_s" in spec:
         mass = positive(spec, "mass_flow_kg_s")
         out.update(
-            fluid_power_W=mass * work,
+            fluid_power_W=float(Fraction(mass) * specific_work),
             fluid_torque_N_m=float(Fraction(mass) * angular_momentum_change),
         )
     if "stage_boundary_speeds_m_s" in spec:
