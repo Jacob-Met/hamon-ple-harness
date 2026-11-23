@@ -60,8 +60,8 @@ def _color(value):
     return ""
 
 
-def _red_shape_bounds(tag, element, matrix):
-    """Conservative page-space bounds for symbol paths outside the straight-stroke list."""
+def _shape_bounds(tag, element, matrix):
+    """Conservative page-space bounds for a supported SVG shape."""
     if tag == "path":
         return drawing._svg_curve_bbox(element.get("d", ""), matrix)
     if tag in ("circle", "ellipse"):
@@ -70,13 +70,13 @@ def _red_shape_bounds(tag, element, matrix):
     return drawing._bounds(points, matrix) if points else None
 
 
-def _ink(svg, glyph_origins=None, symbol_obstacles=None):
+def _ink(svg, glyph_origins=None, symbol_obstacles=None, junction_dots=None):
     wires, symbol_lines = [], []
     unsupported = Counter()
     fills = 0
-    stack = [(ElementTree.fromstring(svg), drawing._ID, "none", "black", True, True)]
+    stack = [(ElementTree.fromstring(svg), drawing._ID, "none", "black", True, True, True, "1", "4")]
     while stack:
-        element, matrix, stroke, fill, visible, glyph_visible = stack.pop()
+        element, matrix, stroke, fill, visible, glyph_visible, dot_visible, stroke_width, miter = stack.pop()
         tag = drawing.local(element.tag)
         if tag in ("defs", "clipPath", "symbol"):
             continue
@@ -84,9 +84,14 @@ def _ink(svg, glyph_origins=None, symbol_obstacles=None):
         matrix = drawing.mmul(matrix, transform) if matrix is not None and transform is not None else None
         stroke = element.get("stroke", stroke)
         fill = element.get("fill", fill)
+        stroke_width = element.get("stroke-width", stroke_width)
+        miter = element.get("stroke-miterlimit", miter)
         visible = visible and all(element.get(k, "1") == "1" for k in ("opacity", "stroke-opacity"))
         glyph_visible = glyph_visible and element.get("fill-opacity", "1") == "1"
-        stack.extend((child, matrix, stroke, fill, visible, glyph_visible) for child in reversed(list(element)))
+        dot_visible = (dot_visible and not element.get("clip-path") and not element.get("mask")
+                       and element.get("display") != "none" and element.get("visibility", "visible") == "visible")
+        stack.extend((child, matrix, stroke, fill, visible, glyph_visible, dot_visible, stroke_width, miter)
+                     for child in reversed(list(element)))
         if (tag == "use" and glyph_origins is not None and matrix is not None
                 and visible and glyph_visible and fill != "none"):
             ref = element.get("{http://www.w3.org/1999/xlink}href", element.get("href", ""))
@@ -96,6 +101,39 @@ def _ink(svg, glyph_origins=None, symbol_obstacles=None):
                 glyph_origins.append((point, ref.rsplit("-", 1)[0]))
         if tag not in ("path", "line", "rect", "circle", "ellipse", "polygon", "polyline"):
             continue
+        # Later non-green ink can hide an earlier dot. Use conservative paint
+        # bounds for this evidence only; unknown outlines cannot establish visibility.
+        other_stroke = stroke != "none" and _color(stroke) != "green"
+        if junction_dots and (other_stroke or (fill != "none" and _color(fill) != "green")):
+            cover = _shape_bounds(tag, element, matrix) if matrix is not None else None
+            pad = 0.0
+            if cover and other_stroke:
+                try:
+                    pad = .5 * float(stroke_width) * max(1, float(miter)) * math.hypot(*matrix[:4])
+                except ValueError:
+                    cover = None
+            if cover:
+                x, y, u, v = cover
+                junction_dots[:] = [(center, d) for center, d in junction_dots
+                                    if center[0] + d/2 < x - pad or u + pad < center[0] - d/2
+                                    or center[1] + d/2 < y - pad or v + pad < center[1] - d/2]
+            else:
+                junction_dots.clear()
+        # Cairo appends an empty move after a closed circle. The existing
+        # round-marker reader verifies the four cubic quarter arcs.
+        if (junction_dots is not None and tag == "path" and visible and glyph_visible and dot_visible
+                and matrix is not None and _color(fill) == "green"):
+            data = element.get("d", "")
+            path, closed, after = data.partition("Z")
+            if (closed and (not after.strip() or re.fullmatch(
+                    rf"\s*M\s*{drawing._FLOAT}\s+{drawing._FLOAT}\s*", after))
+                    and drawing._round_marker({"type": tag, "d": path + closed})):
+                box = drawing._svg_curve_bbox(path + closed, matrix)
+                if box and ((matrix[0] == matrix[3] == 0) or (matrix[1] == matrix[2] == 0)):
+                    x, y, u, v = box
+                    width, height = u - x, v - y
+                    if min(width, height) > 0 and abs(width - height) <= .015 * max(width, height):
+                        junction_dots.append((_midpoint((x, y), (u, v)), width))
         color = _color(stroke)
         red_ink = color == "red" or _color(fill) == "red"
         if not color and not (red_ink and symbol_obstacles is not None):
@@ -110,7 +148,7 @@ def _ink(svg, glyph_origins=None, symbol_obstacles=None):
                 page_points = [drawing.transform_point(matrix, v) for v in vertices]
                 extra_lines.extend((page_points[i], page_points[j]) for i, j in pairs)
             else:
-                bounds.append(_red_shape_bounds(tag, element, matrix))
+                bounds.append(_shape_bounds(tag, element, matrix))
         if not color or tag == "rect":
             continue
         if not visible or matrix is None:
@@ -382,7 +420,123 @@ def _side_supply_labels(glyphs, words):
     return candidates
 
 
-def _graph(wires, lines, words, *, wire_end_witnesses=None, symbol_obstacles=((), ())):
+def _arm_power_labels(center, end, pin, direction, words):
+    start, track = _label_frame(center, direction)
+    stop, _ = _label_frame(end, direction)
+    tip = _label_frame(pin, direction)[0] if pin else None
+    for index, word in words:
+        baseline = word.get("baseline_direction", word.get("power_baseline_direction"))
+        origin = word.get("baseline_origin", word.get("power_baseline_origin"))
+        if baseline and abs(_label_frame(baseline, direction)[0]) != 1:
+            continue
+        box = word["page_bbox_pt"]
+        a, b = _label_frame(box[:2], direction), _label_frame(box[2:], direction)
+        left, right = sorted((a[0], b[0]))
+        low, high = sorted((a[1], b[1]))
+        height, width = high - low, right - left
+        if not pin:
+            # A caption lies wholly beside the free arm and ends near its tip.
+            if ((low - track) * (high - track) <= 0 or min(abs(low - track), abs(high - track)) > height
+                    or left <= start or not 0 <= stop - right <= height):
+                continue
+        else:
+            # A second print run straddles the green-to-red pin transition.
+            if (min(stop, right) - max(start, left) < width / 2
+                    or min(tip, right) - max(stop, left) < width / 4
+                    or not low - .13 <= track <= high + .13
+                    or (origin and abs(_label_frame(origin, direction)[1] - track) > .13)):
+                continue
+        yield index, word, bool(baseline and origin)
+
+
+def _other_caption_wire(wires, roots, owner, axis, caption_word):
+    # A separate parallel wire can carry the same caption without a second T.
+    for wire_root, (a, b) in zip(roots, wires):
+        if wire_root == owner:
+            continue
+        a0, a1 = _label_frame(a, axis)
+        b0, b1 = _label_frame(b, axis)
+        if abs(a1 - b1) > .08:
+            continue
+        start, end = (a, b) if a0 <= b0 else (b, a)
+        if (any(_arm_power_labels(start, end, None, axis, [caption_word]))
+                or any(_arm_power_labels(end, start, None, (-axis[0], -axis[1]), [caption_word]))):
+            return True
+    return False
+
+
+def _junction_power_labels(dots, wires, roots, endpoints, lines, bounds, words, word_roots):
+    """Two separately printed rail names on perpendicular arms of a filled green T."""
+    if not dots or len(dots) > len(wires) or any(box is None for box in bounds):
+        return []
+    rails = [(i, word) for i, word in enumerate(words)
+             if _POWER_NAME.fullmatch(word["text"]) or _GROUND_NAME.fullmatch(word["text"])
+             or re.fullmatch(r"[+A-Z][A-Z0-9_+/\-]{1,16}", word["text"])]
+    proposals, sites, occupied = [], defaultdict(set), Counter()
+    for center, diameter in dots:
+        arms = set(endpoints.near(center))
+        if (len(arms) != 3 or len({roots[i] for i in arms}) != 1
+                or any(i not in arms and _touches_segment(center, wire, .12) for i, wire in enumerate(wires))):
+            continue
+        slots, directions = defaultdict(list), set()
+        for i in sorted(arms):
+            end = max(wires[i], key=lambda p: math.dist(p, center))
+            dx, dy = end[0] - center[0], end[1] - center[1]
+            if min(abs(dx), abs(dy)) > .08 or max(abs(dx), abs(dy)) < 4 * diameter:
+                break
+            axis = (int(math.copysign(1, dx)), 0) if abs(dx) > abs(dy) else (0, int(math.copysign(1, dy)))
+            directions.add(axis)
+            if (any(j != i and _touches_segment(end, w, .12) for j, w in enumerate(wires))
+                    or any(x - .13 <= end[0] <= u + .13 and y - .13 <= end[1] <= v + .13 for x, y, u, v in bounds)):
+                continue
+            touching = [line for line in lines if _touches_segment(end, line, .13)]
+            pin = None
+            if touching:
+                if len(touching) != 1 or min(math.dist(end, p) for p in touching[0]) > .13:
+                    continue
+                pin = max(touching[0], key=lambda p: math.dist(p, end))
+                forward, offset = _label_frame((pin[0] - end[0], pin[1] - end[1]), axis)
+                if forward <= 0 or abs(offset) > .13:
+                    continue
+            role = "pin" if pin else "caption"
+            for index, word, oriented in _arm_power_labels(center, end, pin, axis, rails):
+                slots[role].append((index, oriented, axis, {
+                    "wire_index": i, "endpoint": end, "name": word["text"], "bbox": word["page_bbox_pt"],
+                }))
+                sites[index].add((center, i))
+        if len(directions) != 3:
+            continue
+        if set(slots) != {"pin", "caption"}:
+            continue
+        root = roots[next(iter(arms))]
+        occupied[root] += 1
+        # Reserve all plausible printed occurrences before a positive pairing.
+        for matches in slots.values():
+            for index, *_ in matches:
+                word_roots[index].add(root)
+        if len(slots["caption"]) != 1 or len(slots["pin"]) != 1:
+            continue
+        ci, caption_oriented, caption_axis, caption = slots["caption"][0]
+        pi, pin_oriented, pin_axis, pin = slots["pin"][0]
+        if (not caption_oriented or not pin_oriented or ci == pi or caption["name"] != pin["name"]
+                or bool(caption_axis[0]) == bool(pin_axis[0])):
+            continue
+        if not _POWER_NAME.fullmatch(caption["name"]):
+            continue
+        if _other_caption_wire(wires, roots, root, caption_axis, (ci, words[ci])):
+            continue
+        proposals.append((root, {
+            "name": caption["name"], "junction": center, "wire_index": caption["wire_index"],
+            "label_placement": "junction", "arms": [dict(caption, role="caption"), dict(pin, role="pin")],
+            "_word_indices": (ci, pi),
+        }))
+    for root, witness in proposals:
+        witness["_admissible"] = occupied[root] == 1 and all(len(sites[i]) == 1 for i in witness["_word_indices"])
+    return proposals
+
+
+def _graph(wires, lines, words, *, wire_end_witnesses=None, symbol_obstacles=((), ()),
+           junction_dots=(), junction_witnesses=None):
     groups, endpoints = Groups(len(wires)), Points(.12)
     for i, (a, b) in enumerate(wires):
         for p in (a, b):
@@ -408,13 +562,18 @@ def _graph(wires, lines, words, *, wire_end_witnesses=None, symbol_obstacles=(()
     clearance_lines = [*lines, *extra_lines] if extra_lines else lines
     candidates = (_wire_end_labels(wires, roots, endpoints, clearance_lines, words, symbol_bounds)
                   + _side_supply_labels(all_glyphs, words))
+    junctions = _junction_power_labels(junction_dots, wires, roots, endpoints, clearance_lines, symbol_bounds, words, word_roots)
+    for root, witness in candidates:
+        witness["_word_indices"] = (witness["_word_index"],)
+    candidates.extend(junctions)
     # An ordinary glyph and a proposed wire end can overlap the same printed
     # occurrence. Track its actual island for every role before admitting joins.
     for glyph in all_glyphs:
         for index in glyph["ordinary_word_indices"]:
             word_roots[index].add(glyph["wire_index"])
     for root, witness in candidates:
-        word_roots[witness["_word_index"]].add(root)
+        for index in witness["_word_indices"]:
+            word_roots[index].add(root)
     label_roots = defaultdict(lambda: defaultdict(set))
     occurrences = defaultdict(set)
     for name, hits in anchors.items():
@@ -433,11 +592,11 @@ def _graph(wires, lines, words, *, wire_end_witnesses=None, symbol_obstacles=(()
     for root, witness in candidates:
         # A single printed occurrence cannot name two disconnected candidates.
         # This check is symmetric between loose-end and side-glyph proposals.
-        word_index = witness["_word_index"]
-        if len(word_roots[word_index]) != 1:
+        indices = witness["_word_indices"]
+        if any(len(word_roots[index]) != 1 for index in indices):
             continue
-        if witness.get("label_placement") == "side":
-            if not witness["_admissible"] or word_index in label_words:
+        if witness.get("label_placement") in ("side", "junction"):
+            if not witness["_admissible"] or any(index in label_words for index in indices):
                 continue
         name = witness["name"]
         existing = anchors.get(name)
@@ -458,6 +617,9 @@ def _graph(wires, lines, words, *, wire_end_witnesses=None, symbol_obstacles=(()
         public_witness = {key: value for key, value in witness.items() if not key.startswith("_")}
         if witness.get("label_placement") == "side":
             marks.append(public_witness)
+        elif witness.get("label_placement") == "junction":
+            if junction_witnesses is not None:
+                junction_witnesses.append(public_witness)
         elif wire_end_witnesses is not None:
             wire_end_witnesses.append(public_witness)
     group_ids = {}
@@ -474,8 +636,8 @@ def page_connectivity(filename, page=1):
     source = Path(filename)
     stock = drawing.scan_pdf(source, page, page, limit_paths=1, limit_words=5000)["pages"][0]
     with tempfile.TemporaryDirectory(prefix="hamon-eagle-") as directory:
-        glyphs, symbol_obstacles = [], ([], [])
-        wires, red, fills, unsupported = _ink(drawing._page_svg(source, page, directory), glyphs, symbol_obstacles)
+        glyphs, symbol_obstacles, junction_dots = [], ([], []), []
+        wires, red, fills, unsupported = _ink(drawing._page_svg(source, page, directory), glyphs, symbol_obstacles, junction_dots)
     if len(wires) > 2000 or len(red) > 5000 or len(stock["words"]) >= 5000:
         raise ValueError("EAGLE schematic exceeds the registered page processing bounds")
     result = {"kind": "eagle-schematic-page-connectivity", "page": page,
@@ -490,12 +652,14 @@ def page_connectivity(filename, page=1):
     if not re.search(r"\bEAGLE\b", creator, re.I) or not wires or not red or unsupported or stock["embedded_images"]:
         return {**result, "status": "unresolved_profile", "wire_groups": None}
     _word_directions(stock["words"], glyphs)
-    wire_end_witnesses = []
+    wire_end_witnesses, junction_witnesses = [], []
     membership, marks, anchors = _graph(wires, red, stock["words"],
-                                        wire_end_witnesses=wire_end_witnesses, symbol_obstacles=symbol_obstacles)
+                                        wire_end_witnesses=wire_end_witnesses, symbol_obstacles=symbol_obstacles,
+                                        junction_dots=junction_dots, junction_witnesses=junction_witnesses)
     return {**result, "status": "candidate_evidence", "wire_groups": membership,
             "group_count": len(set(membership)), "supply_glyphs": marks,
             "wire_end_label_witnesses": wire_end_witnesses,
+            "junction_label_witnesses": junction_witnesses,
             "printed_equivalence_anchors": anchors}
 
 
