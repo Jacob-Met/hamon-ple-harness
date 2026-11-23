@@ -60,3 +60,16 @@ The native comparison on the single-sheet UNO TH Rev3e remained at 59 of 61 comp
 ```sh
 python3 ship/verify_eagle_schematic.py MEGA2560_Rev3e_sch.pdf MEGA2560_Rev3e-reference.zip --quarter-turns
 ```
+
+### Labels over a free wire end
+
+EAGLE can print a net name across the open end of a wire. The page reader uses the first native glyph origin and the direction of the complete glyph run to locate its baseline. At least half of the printed name must overlap one collinear wire island. A free end within that label must be clear of other green wires and red symbol strokes, including the interior of each stroke.
+
+A label qualified this way can extend a separately established same-page net. A supply name requires a matching physical supply symbol. Conflicting names on either component prevent the join, subject to the existing repeated-ground-bar rule for a uniquely identified incidental annotation. The decision uses the groups present before any free-end joins. Each accepted entry in `wire_end_label_witnesses` gives the name, wire index, physical endpoint and glyph baseline origin in page points.
+
+| Manufacturer drawing | Wire sections | Complete native nets, before → after | False joins | Missed native wire pairs, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| Arduino Mega 2560 Rev3e, both sheets in flat-document mode | 483 | 107 → 109 of 111 | 0 | 87 → 17 |
+| Arduino Uno TH Rev3e, single sheet | 447 | 59 → 60 of 61 | 0 | 353 → 302 |
+
+The Mega result recovers AREF and GND in full, plus two pairs on +3V3. Its 17 remaining separations comprise eight VIN pairs and nine +3V3 pairs. The Uno result recovers its remaining GND wire. All 302 outstanding Uno pairs belong to +5V. The comparisons use manufacturer CAD membership as the reference for PDF-only predictions. The Mega endpoint coordinates and group memberships also pass the three quarter-turn replays.
