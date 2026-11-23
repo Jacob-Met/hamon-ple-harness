@@ -75,16 +75,11 @@ def _strain_rows(spec, xy, springs):
     return shape, np.array(weights, dtype=object)
 
 
-def solve_compensated(spec, nodes, springs, bar_checks):
+def solve_compensated(spec, nodes, springs, exact_force, bar_checks):
     with localcontext() as context:
         context.prec = 60
         xy = np.array([[_fraction(x), _fraction(y)] for x, y in nodes], dtype=object)
         exact_shape, exact_weights = _strain_rows(spec, xy, springs)
-        # Round only after summing all binary64 loads on each degree of freedom.
-        exact_force = np.full(2*len(xy), Fraction(0), dtype=object)
-        for load in spec["loads"]:
-            for axis, value in enumerate(load["force_N"]):
-                exact_force[2*load["node"] + axis] += _fraction(value)
         to_decimal = np.vectorize(_decimal_ratio, otypes=[object])
         shape = to_decimal(exact_shape)
         weights = to_decimal(exact_weights)

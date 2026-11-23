@@ -131,7 +131,7 @@ def solve_diaphragm(spec):
     if len(np.unique(xy, axis=0)) != len(xy):
         raise ValueError("coincident diaphragm nodes")
     ndof = 2 * len(xy)
-    force = np.zeros(ndof)
+    exact_force = np.full(ndof, Fraction(0), dtype=object)
     rows, cols, entries = [], [], []
 
     def node(value):
@@ -186,7 +186,9 @@ def solve_diaphragm(spec):
         f = np.asarray(load["force_N"], dtype=float)
         if f.shape != (2,) or not np.isfinite(f).all():
             raise ValueError("force_N must be a finite [Fx,Fy] vector")
-        force[dof:dof+2] += f
+        # A large positive/negative pair must not erase smaller applied loads.
+        for i, component in enumerate(f, dof):
+            exact_force[i] += Fraction.from_float(float(component))
 
     membrane = coo_matrix((entries, (rows, cols)), shape=(ndof, ndof)).tocsc()
     ground = np.zeros(ndof)
@@ -196,10 +198,14 @@ def solve_diaphragm(spec):
         raise ValueError("nonfinite assembled spring stiffness")
     basis = diaphragm_coordinates(xy, panel_nodes, bars, ground)
     if precision == "compensated":
-        result = solve_compensated(spec, xy, springs, _bar_checks)
+        result = solve_compensated(spec, xy, springs, exact_force, _bar_checks)
         result["stations"] = _recover_stations(spec.get("stations", []), spec["panels"],
                                               xy, result["panel_center_shear_N_m"])
         return result
+    try:
+        force = exact_force.astype(float)
+    except OverflowError as exc:
+        raise ValueError("assembled nodal load exceeds binary64 range") from exc
     for use_nodal in (False, True):
         if use_nodal:
             # Mixed restraints on slender panels can lose spring displacement
