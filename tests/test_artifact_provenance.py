@@ -42,6 +42,28 @@ class ProvenanceGateTests(unittest.TestCase):
             self.assertEqual([v["path"] for v in report["diverged"]],["harness.py"])
             self.assertEqual(p.main([str(root)]),3)
 
+    def test_partial_export_reports_only_tasks_from_a_different_snapshot(self):
+        tmp, root = self.make_project()
+        with tmp:
+            path = root / "artifacts" / "manifest.json"
+            manifest = json.loads(path.read_text())
+            manifest["dev_set"] = "current-dev-set"
+            manifest["tasks"] = {
+                "current": {"run": "first", "tree": "example"},
+                "also-current": {"run": "second", "tree": "example",
+                                 "dev_set": "current-dev-set"},
+            }
+            path.write_text(json.dumps(manifest))
+            self.assertEqual(p.evaluate(root)["status"], "fresh")
+
+            manifest["tasks"]["old-tree"] = {"tree": "previous-tree"}
+            manifest["tasks"]["old-dev"] = {"tree": "example", "dev_set": "previous-dev-set"}
+            path.write_text(json.dumps(manifest))
+            report = p.evaluate(root)
+            self.assertEqual(report["status"], "stale")
+            self.assertEqual(report["task_harness_mismatches"], ["old-tree"])
+            self.assertEqual(report["task_dev_set_mismatches"], ["old-dev"])
+
     def test_missing_old_executable_and_symlink_refused(self):
         tmp,root=self.make_project()
         with tmp:
@@ -101,7 +123,9 @@ class ProvenanceGateTests(unittest.TestCase):
             # not a frozen expectation that artifacts must remain stale.
             self.assertEqual(report["status"],"stale" if
                 (report["diverged"] or report["missing_in_manifest"] or
-                 report["unsafe"] or report["removed_executable"]) else "fresh")
+                 report["unsafe"] or report["removed_executable"] or
+                 report["empty_archive_tasks"] or report["task_harness_mismatches"] or
+                 report["task_dev_set_mismatches"]) else "fresh")
             self.assertGreater(report["source_files_checked"],0)
 
 
