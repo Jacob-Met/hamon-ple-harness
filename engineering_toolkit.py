@@ -260,39 +260,81 @@ _DIRECT_CONVERT = re.compile(
     r'"(?P<to_unit>[A-Z]+)"\s*\)', re.I | re.ASCII)
 
 
-def _verify_conversion(sheet, expression, cached, literals):
-    match = _DIRECT_CONVERT.fullmatch(expression)
-    if match is None or cached is None:
-        return {"status": "unverified"}
-    ref_sheet = match["sheet"] or sheet
-    if ref_sheet.startswith("'"):
-        ref_sheet = ref_sheet[1:-1].replace("''", "'")
-    # External workbook and 3-D references are outside the direct-cell contract.
-    if any(c in ref_sheet for c in "[]:"):
-        return {"status": "unverified"}
-    names = [n for n in literals if n == ref_sheet or (
-        n.isascii() and ref_sheet.isascii() and n.lower() == ref_sheet.lower())]
-    if len(names) != 1:
-        return {"status": "unverified"}
-    address = match["source"].replace("$", "").upper()
-    try:
-        _grid_position(address)
-    except ValueError:
-        return {"status": "unverified"}
-    value = literals[names[0]].get(address)
-    source = _CONVERT_UNITS.get(match["from_unit"])
-    target = _CONVERT_UNITS.get(match["to_unit"])
-    if value is None or source is None or target is None:
-        return {"status": "unverified"}
-    evidence = {"source_sheet": names[0], "source_cell": address, "source_value": value,
-                "from_unit": match["from_unit"], "to_unit": match["to_unit"], "cached": cached}
-    if source.dim != target.dim:
-        return {"status": "dimension_mismatch", **evidence}
-    expected = float(D(value) * source.val / target.val)
-    if not math.isfinite(expected) or (expected == 0 and value != 0):
-        return {"status": "unverified"}
-    agrees = math.isclose(cached, expected, rel_tol=1e-12, abs_tol=0.0)
-    return {"status": "matched" if agrees else "mismatch", "expected": expected, **evidence}
+def _conversion_audit(formulas, literals):
+    """Reconstruct normal CONVERT chains independently of all saved formula caches."""
+    producers = {(sheet, addr): expression for sheet, addr, expression, _ in formulas}
+    evaluated = {}
+    visiting = set()
+
+    def evaluate(key):
+        if key in evaluated:
+            return evaluated[key]
+        if key in visiting:
+            return {"reason": "cyclic_reference"}
+        visiting.add(key)
+        result = calculate(key)
+        visiting.remove(key)
+        evaluated[key] = result
+        return result
+
+    def calculate(key):
+        sheet, _ = key
+        match = _DIRECT_CONVERT.fullmatch(producers[key])
+        if match is None:
+            return {"reason": "unsupported_conversion"}
+        ref_sheet = match["sheet"] or sheet
+        if ref_sheet.startswith("'"):
+            ref_sheet = ref_sheet[1:-1].replace("''", "'")
+        if any(c in ref_sheet for c in "[]:"):
+            return {"reason": "external_or_multisheet_reference"}
+        names = [n for n in literals if n == ref_sheet or (
+            n.isascii() and ref_sheet.isascii() and n.lower() == ref_sheet.lower())]
+        if len(names) != 1:
+            return {"reason": "unknown_or_ambiguous_worksheet"}
+        ref = (names[0], match["source"].replace("$", "").upper())
+        try:
+            _grid_position(ref[1])
+        except ValueError:
+            return {"reason": "invalid_cell_reference"}
+        source = _CONVERT_UNITS.get(match["from_unit"])
+        target = _CONVERT_UNITS.get(match["to_unit"])
+        if source is None or target is None:
+            return {"reason": "unsupported_unit"}
+        value = literals[ref[0]].get(ref[1])
+        root_sheet, root_cell = ref
+        depth = 1
+        if value is None:
+            if ref not in producers:
+                return {"reason": "unsupported_or_missing_dependency"}
+            prior = evaluate(ref)
+            if "expected" not in prior:
+                return {"reason": prior.get("reason", "invalid_upstream_conversion")}
+            if prior["to_unit"] != match["from_unit"]:
+                return {"reason": "upstream_unit_disagrees", "upstream_unit": prior["to_unit"],
+                        "from_unit": match["from_unit"]}
+            value = prior["expected"]
+            root_sheet, root_cell = prior["root_sheet"], prior["root_cell"]
+            depth = prior["conversion_depth"] + 1
+        evidence = {"source_sheet": ref[0], "source_cell": ref[1], "source_value": value,
+                    "root_sheet": root_sheet, "root_cell": root_cell, "conversion_depth": depth,
+                    "from_unit": match["from_unit"], "to_unit": match["to_unit"]}
+        if source.dim != target.dim:
+            return {**evidence, "dimension_mismatch": True}
+        expected = float(D(value) * source.val / target.val)
+        if not math.isfinite(expected) or (expected == 0 and value != 0):
+            return {"reason": "numeric_range"}
+        return {**evidence, "expected": expected}
+
+    for sheet, address, _, cached in formulas:
+        evidence = evaluate((sheet, address))
+        status = "unverified"
+        if cached is not None:
+            if evidence.get("dimension_mismatch"):
+                status = "dimension_mismatch"
+            elif "expected" in evidence:
+                agrees = math.isclose(cached, evidence["expected"], rel_tol=1e-12, abs_tol=0.0)
+                status = "matched" if agrees else "mismatch"
+        yield {"sheet": sheet, "cell": address, **evidence, "cached": cached, "status": status}
 
 
 def _grid_position(address):
@@ -450,6 +492,7 @@ def xlsx_audit(filename: str):
             cell_path = f"{ns}sheetData/{ns}row/{ns}c"
             unresolved_shared_followers = 0
             masters = _shared_lookup_masters(root.iterfind(cell_path), ns)
+            first_conversion = len(conversions)
             for cell in root.iterfind(cell_path):
                 cells += 1
                 formula = cell.find(ns + "f")
@@ -517,18 +560,22 @@ def xlsx_audit(filename: str):
             # Rectangles never expand into coordinates, even for a whole worksheet.
             if derived_ranges is None:
                 sheet_values.clear()
+                del conversions[first_conversion:]
             elif derived_ranges and complete_index:
-                for address, numeric in sheet_values.items():
-                    if numeric is None:
-                        continue
-                    try:
-                        x, y = _grid_position(address)
-                    except ValueError:
-                        sheet_values.clear()
-                        break
-                    if any(x1 <= x <= x2 and y1 <= y <= y2
-                           for x1, y1, x2, y2 in derived_ranges):
-                        sheet_values[address] = None
+                def is_derived(address):
+                    x, y = _grid_position(address)
+                    return any(x1 <= x <= x2 and y1 <= y <= y2 for x1, y1, x2, y2 in derived_ranges)
+
+                try:
+                    for address, numeric in sheet_values.items():
+                        if numeric is not None and is_derived(address):
+                            sheet_values[address] = None
+                    conversions[first_conversion:] = [
+                        row for row in conversions[first_conversion:] if not is_derived(row[1])
+                    ]
+                except ValueError:
+                    sheet_values.clear()
+                    del conversions[first_conversion:]
             manifest["sheets"].append({**sheet, "cells": cells, "formulas": formulas,
                                        "formulas_without_cached_values": missing,
                                        "formulas_with_empty_string_cache": empty_strings,
@@ -549,14 +596,13 @@ def xlsx_audit(filename: str):
     counts = {"matched": 0, "mismatch": 0, "dimension_mismatch": 0, "unverified": conversion_total}
     examples = []
     if complete_index:
-        for name, address, expression, cached in conversions:
-            result = _verify_conversion(name, expression, cached, literals)
+        for result in _conversion_audit(conversions, literals):
             if result["status"] != "unverified":
                 counts["unverified"] -= 1
                 counts[result["status"]] += 1
-            examples.append({"sheet": name, "cell": address, **result})
+            examples.append(result)
     manifest["conversion_audit"] = {"counts": counts, "examples": examples}
-    manifest["note"] = "Only supported literal-dependency lookups and unit conversions are checked; other caches can be stale."
+    manifest["note"] = "Checked lookups use literal cells. Checked conversion chains start at a numeric literal. Other caches can be stale."
     return manifest
 
 
