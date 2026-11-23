@@ -2,7 +2,7 @@
 import math
 
 import numpy as np
-from scipy.linalg import eigh_tridiagonal
+from scipy.linalg import eigh_tridiagonal, svd
 
 from hamon_consolidation import _area_integral, _number, _rectangles
 from hamon_footing_settlement import _depth_intervals, _depth_stress, _gauss_integral, _precise_corner
@@ -59,14 +59,50 @@ def _loading(spec, layers):
     return load, np.array(integrals), peak
 
 
-def _grid(layers, load, drained, elapsed, n, vertex):
+def _graded_widths(width, reach, count):
+    parameter = np.linspace(0., 1., count + 1)
+    if reach >= width / 8:
+        return width * parameter
+    return reach * np.sinh(math.asinh(width / reach) * parameter)
+
+
+def _mesh(layers, drained, elapsed, n, varying_load=False):
+    """Nested spatial grids in the local diffusion length on each side of a layer."""
+    pieces = []
+    # Diffusion distance in units of sqrt(time). For a uniform initial
+    # pressure the drained boundaries are the only sources of a front.
+    travel = (layers[:, 1] - layers[:, 0]) / (np.sqrt(layers[:, 3]) * math.sqrt(elapsed))
+    # At twelve diffusion lengths the semi-infinite pressure deficit is erfc(6).
+    # This sets mesh allocation only. Both spatial checks still govern acceptance.
+    for i, (a, b, _, cv) in enumerate(layers):
+        length = b - a
+        reach = math.sqrt(cv) * math.sqrt(elapsed)
+        left = (drained[0] and sum(travel[:i]) < 12) or (varying_load and i > 0)
+        right = (drained[1] and sum(travel[i+1:]) < 12) or (varying_load and i+1 < len(layers))
+        if left and right:
+            half = n // 2
+            near = _graded_widths(length / 2, reach, half)
+            far = _graded_widths(length / 2, reach, n - half)
+            z = np.r_[a + near[:-1], b - far[::-1]]
+        elif left:
+            z = a + _graded_widths(length, reach, n)
+        elif right:
+            z = b - _graded_widths(length, reach, n)[::-1]
+        else:
+            z = np.linspace(a, b, n + 1)
+        z[0], z[-1] = a, b
+        pieces.append(z[:-1])
+    faces = np.concatenate(pieces + [layers[-1:, 1]])
+    if np.any(np.diff(faces) <= 0) or not np.all(np.isfinite(faces)):
+        raise ValueError("Spatial coordinates cannot represent the diffusion front")
+    return faces
+
+
+def _grid(layers, load, drained, elapsed, n, vertex, z):
     """Cell-centred finite volumes or linear finite elements with lumped storage."""
-    thickness = (layers[:, 1] - layers[:, 0]) / n
-    dx = np.repeat(thickness, n)
+    dx = np.diff(z)
     storage = dx * np.repeat(layers[:, 2], n)
     mobility = np.repeat(layers[:, 2] * layers[:, 3], n)
-    # Generate each layer locally; retain the supplied interface ordinates.
-    z = np.concatenate([np.linspace(a, b, n + 1)[:-1] for a, b, _, _ in layers] + [layers[-1:, 1]])
     if vertex:
         mass = (np.pad(storage, (0, 1)) + np.pad(storage, (1, 0))) / 2
         conductance = mobility / dx
@@ -96,10 +132,42 @@ def _grid(layers, load, drained, elapsed, n, vertex):
             raise ValueError("Closed-column zero diffusion mode was unresolved")
         eigen[0] = 0.
     slowest = eigen[0] if any(drained) else eigen[1]
-    if slowest <= 0 or np.finfo(float).eps * eigen[-1] > slowest * 1e-5:
-        raise ValueError("Diffusion spectrum unresolved")
     pressure = np.zeros(len(mass))
-    pressure[active] = (vectors @ (np.exp(-eigen * elapsed) * (vectors.T @ (root * initial[active])))) / root
+    initial_mode = root * initial[active]
+    if slowest > 0 and np.finfo(float).eps * eigen[-1] <= slowest * 1e-5:
+        evolved = vectors @ (np.exp(-eigen * elapsed) * (vectors.T @ initial_mode))
+    else:
+        # A stiffness eigenproblem squares the condition number of the flux
+        # gradient. Factor the time-scaled gradient itself before filtering
+        # pressure modes. Its singular values are sqrt(rate * elapsed).
+        size = len(mass)
+        edges = np.arange(size - 1)
+        gradient = np.zeros((size + 1, size))
+        weight = np.sqrt(conductance) * math.sqrt(elapsed)
+        gradient[edges, edges] = -weight
+        gradient[edges, edges+1] = weight
+        if not vertex:
+            for i, boundary in ((0, 0), (-1, 1)):
+                if drained[boundary]:
+                    gradient[size-1+boundary, i] = math.sqrt(2 * mobility[i] / dx[i]) * math.sqrt(elapsed)
+        gradient = gradient[:, active] / root
+        if not np.all(np.isfinite(gradient)):
+            raise ValueError("Time-scaled diffusion gradient is outside the finite range")
+        _, singular, right = svd(gradient, full_matrices=False, lapack_driver="gesvd")
+        if np.finfo(float).eps * max(gradient.shape) * singular[0] > 1e-7:
+            raise ValueError("Diffusion gradient is ill-conditioned over the requested time interval")
+        # h(s) = exp(-s²) is insensitive to tiny unresolved rates at short
+        # times. expm1 preserves their small changes and the sealed null mode.
+        projection = right @ initial_mode
+        scale = -np.square(singular)
+        change = right.T @ (np.expm1(scale) * projection)
+        evolved = initial_mode + change
+        # For nearly drained locations, filter directly to avoid subtracting
+        # the whole initial pressure from itself.
+        small = abs(evolved) < .5 * abs(initial_mode)
+        if np.any(small):
+            evolved[small] = right[:, small].T @ (np.exp(scale) * projection)
+    pressure[active] = evolved / root
     average = (pressure[:-1] + pressure[1:]) * .5 if vertex else pressure
     retained = (storage * average).reshape(len(layers), n).sum(axis=1)
     faces = []
@@ -153,11 +221,13 @@ def verify_layered_transient(spec):
                            "downward_darcy_flux_m_s": None} for z in layers[:-1, 1]]
         else:
             coarse = None
+            storage_precision = 0.
             for count in (24, 48, 96, 192):
                 if count * len(layers) > 576:
                     break
-                cell, cell_faces, cell_initial = _grid(layers, load, drained, elapsed, count, False)
-                node, node_faces, node_initial = _grid(layers, load, drained, elapsed, count, True)
+                z = _mesh(layers, drained, elapsed, count, "rectangular_loads" in spec)
+                cell, cell_faces, cell_initial = _grid(layers, load, drained, elapsed, count, False, z)
+                node, node_faces, node_initial = _grid(layers, load, drained, elapsed, count, True, z)
                 current = (cell, node, cell_faces, node_faces, cell_initial, node_initial)
                 if coarse is not None:
                     # Extrapolate the two distinct spatial operators separately.
@@ -165,13 +235,22 @@ def verify_layered_transient(spec):
                         fine + (fine-old)/3 for fine, old in zip(current, coarse)]
                     motion = math.fsum(full-cell_ex)
                     h = layers[:, 1] - layers[:, 0]
-                    phase = [math.sqrt(layers[i, 3]*elapsed) * count / h[i]
-                             for i, is_drained in ((0, drained[0]), (-1, drained[1])) if is_drained]
+                    phase = [math.sqrt(layers[i, 3]) * math.sqrt(elapsed) / width
+                             for i, width, active in ((0, z[1]-z[0], drained[0]),
+                                                      (-1, z[-1]-z[-2], drained[1])) if active]
                     residual = max(max(abs(cell_ex-node_ex)/full), max(abs(fv_initial-full)/full),
                                    max(abs(fe_initial-full)/full))
                     if any(drained):
                         # Small settlements must be resolved relative to their own scale.
-                        residual = max(residual, abs(math.fsum(cell_ex-node_ex))/max(abs(motion), np.finfo(float).tiny))
+                        motion_scale = max(abs(motion), np.finfo(float).tiny)
+                        # Settlement is reported by subtracting retained storage.
+                        # Agreement between rounded bulk pressures cannot resolve
+                        # arbitrarily small drainage even on a front-fitted mesh.
+                        roundoff = math.fsum(math.ulp(value) for values in (full, cell_ex)
+                                             for value in values)
+                        storage_precision = roundoff / motion_scale
+                        residual = max(residual, storage_precision,
+                                       abs(math.fsum(cell_ex-node_ex)) / motion_scale)
                     if len(fv_faces):
                         mobility = layers[:, 2] * layers[:, 3]
                         flux_scale = peak / (h[:-1]/mobility[:-1] + h[1:]/mobility[1:])
@@ -184,17 +263,17 @@ def verify_layered_transient(spec):
                                       for z, (p, q) in zip(layers[:-1, 1], fv_faces)]
                         break
                 coarse = current
-            else:
-                raise ValueError("Finite-volume and finite-element responses did not converge")
             if retained is None:
-                raise ValueError("Refinement budget exhausted before resolving the response")
+                if storage_precision >= 1e-6:
+                    raise ValueError("Pressure-storage precision cannot resolve settlement to one part per million")
+                raise ValueError("Finite-volume and finite-element responses did not converge within the refinement budget")
         settlement = math.fsum(full-retained)
         target = math.fsum(full)
         if not any(drained):
             if abs(settlement) > target*1e-6:
                 raise ValueError("Closed-column total water balance failed")
             settlement = 0.
-        if not 0 <= settlement <= target*(1+1e-6) or not all(np.isfinite(retained)):
+        if not 0 <= settlement <= target*(1+1e-6) or not math.isfinite(settlement) or not all(np.isfinite(retained)):
             raise ValueError("Transient response outside the physical range")
         accepted = True
         if "proposed_settlement_m" in spec:
