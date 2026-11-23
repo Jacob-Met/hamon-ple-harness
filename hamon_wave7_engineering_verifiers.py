@@ -168,6 +168,71 @@ def _rankine_cycle(params: Mapping[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _vapor_compression_cycle(params: Mapping[str, Any]) -> Dict[str, Any]:
+    """Throttle isenthalpically and balance the compressor from its suction datum."""
+    result = {"domain": "thermo_cycles", "subkind": "vapor_compression", "verified": False}
+
+    def quantity(name, default=None):
+        raw = params.get(name, default)
+        if isinstance(raw, bool):
+            raise ValueError
+        return Fraction.from_float(float(raw))
+
+    try:
+        h1, h2s, h3 = (quantity(key) for key in ("h1", "h2s", "h3"))
+        eta, flow = quantity("eta_c", 1), quantity("m_dot", 1)
+        if h2s <= h1 or h1 <= h3 or not (0 < eta <= 1) or flow <= 0:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        return dict(result, error="invalid_vcr_enthalpies")
+
+    # These extensive differences are invariant to a common enthalpy datum.
+    isentropic_rise = h2s - h1
+    work = isentropic_rise / eta
+    cold = h1 - h3
+    hot = cold + work
+    cop_r = cold / work
+    cop_hp = hot / work
+    carnot_checked = "T_L" in params and "T_H" in params
+    carnot_ok = True
+    if carnot_checked:
+        try:
+            low, high = quantity("T_L"), quantity("T_H")
+            if low <= 0 or high <= low:
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            return dict(result, error="invalid_vcr_reservoirs")
+        carnot_ok = cop_r <= low / (high - low) + Fraction.from_float(1e-9)
+
+    try:
+        h2 = h1 + work
+        primary = float(h2)
+        correction = float(h2 - Fraction(primary))
+        exact_values = {"q_evap": cold, "q_cond": hot, "w_comp": work,
+                        "Q_evap_W": flow * cold, "W_comp_W": flow * work,
+                        "COP_R": cop_r, "COP_HP": cop_hp}
+        wire = {name: float(value) for name, value in exact_values.items()}
+    except (OverflowError, ValueError):
+        return dict(result, error="vcr_result_outside_numeric_range")
+
+    # Replay the emitted values in the original equations. The correction lets
+    # receivers reconstruct a sub-ULP discharge rise even at a large datum.
+    decoded = {name: Fraction(value) for name, value in wire.items()}
+    rise = Fraction(primary) + Fraction(correction) - h1
+    residuals = [abs(decoded[key] - value) / value for key, value in exact_values.items()]
+    residuals.extend((
+        abs(eta * rise - isentropic_rise) / isentropic_rise,
+        abs(decoded["w_comp"] - rise) / work,
+        abs(decoded["q_evap"] + decoded["w_comp"] - decoded["q_cond"]) / hot,
+        abs((decoded["COP_HP"] - decoded["COP_R"]) - 1),
+    ))
+    residual = max(residuals)
+    result.update(wire, h2=primary, h2_correction=correction, h4=float(h3),
+                  carnot_checked=carnot_checked, residual=float(residual),
+                  verified=bool(carnot_ok and residual < 1e-11))
+    return result
+
+
 def solve_thermodynamic_cycle(params: Mapping[str, Any]) -> Dict[str, Any]:
     subkind = str(params.get("subkind") or params.get("cycle_type") or "brayton").strip().lower()
 
@@ -298,50 +363,7 @@ def solve_thermodynamic_cycle(params: Mapping[str, Any]) -> Dict[str, Any]:
         }
 
     if subkind == "vapor_compression":
-        h1 = float(params["h1"])
-        h2s = float(params["h2s"])
-        h3 = float(params["h3"])
-        eta_c = float(params.get("eta_c", 1.0))
-        m_dot = float(params.get("m_dot", 1.0))
-        if h2s <= h1 or h1 <= h3 or not (0.0 < eta_c <= 1.0) or m_dot <= 0.0:
-            return {"domain": "thermo_cycles", "subkind": subkind, "verified": False, "error": "invalid_vcr_enthalpies"}
-        h4 = h3
-        h2 = h1 + (h2s - h1) / eta_c
-        w_in = h2 - h1
-        q_l = h1 - h4
-        q_h = h2 - h3
-        cop_r = q_l / w_in
-        cop_hp = q_h / w_in
-
-        carnot_ok = True
-        if "T_L" in params and "T_H" in params:
-            t_l = float(params["T_L"])
-            t_h = float(params["T_H"])
-            if t_l <= 0.0 or t_h <= t_l:
-                return {"domain": "thermo_cycles", "subkind": subkind, "verified": False, "error": "invalid_vcr_reservoirs"}
-            carnot_ok = bool(cop_r <= (t_l / (t_h - t_l)) + 1e-9)
-
-        residual = float(
-            max(
-                abs((cop_hp - cop_r) - 1.0),
-                abs((q_l + w_in) - q_h) / max(abs(q_h), 1e-12),
-            )
-        )
-        return {
-            "domain": "thermo_cycles",
-            "subkind": subkind,
-            "h2": float(h2),
-            "h4": float(h4),
-            "q_evap": float(q_l),
-            "q_cond": float(q_h),
-            "w_comp": float(w_in),
-            "Q_evap_W": float(m_dot * q_l),
-            "W_comp_W": float(m_dot * w_in),
-            "COP_R": float(cop_r),
-            "COP_HP": float(cop_hp),
-            "residual": residual,
-            "verified": bool(carnot_ok and residual < 1e-11),
-        }
+        return _vapor_compression_cycle(params)
 
     return {"domain": "thermo_cycles", "subkind": subkind, "verified": False, "error": f"unsupported_cycle:{subkind}"}
 
