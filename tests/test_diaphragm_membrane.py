@@ -39,6 +39,58 @@ class DiaphragmTests(unittest.TestCase):
         assert_allclose(result["strain_energy_J"], .8, atol=1e-12)
 
 
+    def test_rigid_displacement_with_soft_restraints_and_stiff_membrane(self):
+        xy = [[0, 0], [1, 0], [1, 1], [0, 1]]
+        for stiffness in (1e9, 1e13):
+            for weak_node in (0, 1):
+                with self.subTest(stiffness=stiffness, weak_node=weak_node):
+                    strong_node = 1 - weak_node
+                    angle = .002
+                    weak_force = 1e-14 * angle * (weak_node - strong_node)
+                    springs = [{"node": 0, "axis": "x", "k_N_m": 1.0},
+                               {"node": strong_node, "axis": "y", "k_N_m": 1.0},
+                               {"node": weak_node, "axis": "y", "k_N_m": 1e-14}]
+                    spec = {"nodes_m": xy,
+                            "panels": [{"nodes": [0, 1, 2, 3], "Dx_N_m": stiffness,
+                                        "Dy_N_m": stiffness, "G_N_m": stiffness/3}],
+                            "springs": springs,
+                            "loads": [{"node": 0, "force_N": [.004, 0]},
+                                      {"node": weak_node, "force_N": [0, weak_force]}]}
+                    result = run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": spec})
+                    self.assertTrue(result["dual_verified"])
+                    expected = [[.004 - angle*y, angle*(x-strong_node)] for x, y in xy]
+                    assert_allclose(result["displacements_m"], expected, rtol=1e-12, atol=1e-17)
+                    assert_allclose(result["panel_center_shear_N_m"], [0], atol=1e-15)
+                    assert_allclose(result["spring_transmitted_N"][2], weak_force, rtol=1e-12)
+                    spec["springs"] = springs[:2]
+                    with self.assertRaisesRegex(ValueError, "unrestrained rotation"):
+                        run_dual_verify_spec({"kind": "diaphragm_membrane", "spec": spec})
+
+    def test_small_elastic_shear_survives_large_rigid_translation(self):
+        xy = [[0, 0], [1, 0], [1, 1], [0, 1]]
+        for stiffness in (1e9, 1e13):
+            with self.subTest(stiffness=stiffness):
+                shear = .002
+                shear_strain = shear / (stiffness/3)
+                loads = [[.004 - shear/2, -shear/2], [-shear/2, shear/2],
+                         [shear/2, shear/2], [shear/2, -shear/2]]
+                spec = {"nodes_m": xy,
+                        "panels": [{"nodes": [0, 1, 2, 3], "Dx_N_m": stiffness,
+                                    "Dy_N_m": stiffness, "G_N_m": stiffness/3}],
+                        "springs": [{"node": 0, "axis": "x", "k_N_m": 1},
+                                    {"node": 0, "axis": "y", "k_N_m": 1},
+                                    {"node": 1, "axis": "y", "k_N_m": 1}],
+                        "loads": [{"node": i, "force_N": f} for i, f in enumerate(loads)]}
+                result = run_router_conservation_cad_verifier(
+                    {"spec": {"calculation": "diaphragm_membrane", **spec}})
+                self.assertTrue(result["conservation_verified"], result)
+                assert_allclose(result["displacements_m"],
+                                [[.004 + shear_strain*y, 0] for _, y in xy], rtol=1e-12, atol=1e-17)
+                assert_allclose(result["panel_center_shear_N_m"], [shear], rtol=1e-12)
+                assert_allclose(result["spring_transmitted_N"], [.004, 0, 0], atol=1e-16)
+                self.assertLess(result["dual_rel_discrepancy"], 1e-12)
+
+
     def test_center_shear_sign_and_reaction_moment_for_pure_shear_patch(self):
         spec = {"nodes_m": [[0, 0], [1, 0], [1, 1], [0, 1]],
                 "panels": [{"nodes": [0, 1, 2, 3], "Dx_N_m": 450, "Dy_N_m": 700,
