@@ -83,3 +83,23 @@ class RayleighBranchTests(unittest.TestCase):
         self.assertFalse(solve(1., -.25, branch="supersonic", **params)["verified"])
         self.assertFalse(solve(1., .01, **params)["verified"])
         self.assertTrue(solve(1., 0., **params)["verified"])
+
+    def test_caloric_constants_match_dimensional_mass_momentum_and_energy(self):
+        with self.assertRaisesRegex(ValueError, "inconsistent gas properties"):
+            solve(2., 10000., gamma=1.4, R=287., cp=500.)
+        for props in ({"gamma":1.4,"R":287.,"cp":1004.5}, {"gamma":1.4,"cp":500.},
+                      {"gamma":2.,"R":1.,"cp":2.}, {"gamma":1.4,"R":287.}):
+            spec = dict(subkind="rayleigh", M1=2., T01=300., q_J_kg=25., **props)
+            r = dispatch_wave6_verifier("compressible_acoustics",spec)
+            self.assertTrue(r["verified"],r)
+            cp, gas, gamma = r["cp_J_kgK"], r["R_effective_J_kgK"], props["gamma"]
+            mach1, mach2, pressure2 = 2., r["M2"], r["P2_over_P1"]
+            temp1 = 300./(1+gamma*gas*mach1**2/(2*cp))
+            speed1 = mach1*math.sqrt(gamma*gas*temp1)
+            density1 = 1./(gas*temp1)
+            speed2 = speed1 * pressure2*(mach2/mach1)**2
+            density2 = density1*speed1/speed2
+            temp2 = pressure2/(gas*density2)
+            self.assertAlmostEqual(1+density1*speed1**2, pressure2+density2*speed2**2, places=11)
+            dimensional_heat = cp*(temp2-temp1)+(speed2**2-speed1**2)/2
+            self.assertAlmostEqual(dimensional_heat,25.,places=7)

@@ -222,13 +222,38 @@ def _rayleigh_duct(params, gamma, r_gas):
     mach, t_in, heat = (float(params[key]) for key in ("M1", "T01", "q_J_kg"))
     if not (math.isfinite(gamma) and gamma > 1 and math.isfinite(r_gas) and r_gas > 0):
         raise ValueError("Rayleigh flow requires gamma > 1 and a positive finite gas constant")
-    cp = float(params["cp"]) if "cp" in params else gamma * r_gas / (gamma - 1)
-    if not all(map(math.isfinite, (mach, t_in, heat, cp))) or min(mach, t_in, cp) <= 0:
-        raise ValueError("Rayleigh flow requires positive finite Mach, inlet temperature and specific heat")
+    if not all(map(math.isfinite, (mach, t_in, heat))) or min(mach, t_in) <= 0:
+        raise ValueError("Rayleigh flow requires positive finite Mach and inlet temperature")
+
+    def rounding_cell(value):
+        center = Fraction(value)
+        lower = (Fraction(math.nextafter(value, 0.)) + center) / 2
+        next_value = math.nextafter(value, math.inf)
+        upper = ((center + Fraction(next_value)) / 2 if math.isfinite(next_value)
+                 else center + (center-lower))
+        return lower, upper
+
+    g, gas = map(Fraction, (gamma, r_gas))
+    if "cp" in params:
+        cp = float(params["cp"])
+        if not math.isfinite(cp) or cp <= 0:
+            raise ValueError("Rayleigh flow requires positive finite specific heat")
+        c = Fraction(cp)
+        if "R" in params:
+            # cp/R = gamma/(gamma-1). Allow correctly rounded presentations
+            # of one consistent calorically perfect gas, including rounded gamma.
+            clo, chi = rounding_cell(cp)
+            rlo, rhi = rounding_cell(r_gas)
+            glo, ghi = rounding_cell(gamma)
+            if chi < rlo*ghi/(ghi-1) or clo > rhi*glo/(glo-1):
+                raise ValueError("Rayleigh cp, R and gamma describe inconsistent gas properties")
+        gas = c*(g-1)/g
+    else:
+        c = g*gas/(g-1)
     branch = params.get("branch")
     if branch not in (None, "subsonic", "supersonic"):
         raise ValueError("Rayleigh branch must be subsonic or supersonic")
-    m, t, q, c, g = map(Fraction, (mach, t_in, heat, cp, gamma))
+    m, t, q = map(Fraction, (mach, t_in, heat))
     inlet_branch = "subsonic" if m < 1 else "supersonic" if m > 1 else None
     if inlet_branch and branch and branch != inlet_branch:
         raise ValueError("Rayleigh outlet must stay on the inlet branch")
@@ -247,9 +272,10 @@ def _rayleigh_duct(params, gamma, r_gas):
     base = {"domain": "compressible_acoustics", "subkind": "rayleigh", "M1": mach,
             "requested_heat_J_kg": heat, "verified": False}
     try:
-        if budget and float(budget) == 0:
+        if float(gas) == 0 or (budget and float(budget) == 0):
             raise OverflowError
-        base.update(T0_star_K=float(star), q_choke_J_kg=float(budget))
+        base.update(T0_star_K=float(star), q_choke_J_kg=float(budget),
+                    cp_J_kgK=float(c), R_effective_J_kgK=float(gas))
         # Retain the documented relative sonic tolerance for rounded critical inputs.
         at_limit = abs(q-budget) <= Fraction(_DUCT_SONIC_REL_TOL) * max(abs(q), budget)
         if q > budget and not at_limit:
@@ -299,14 +325,6 @@ def _rayleigh_duct(params, gamma, r_gas):
         # Confirm one physical state in the intersection of the two reported
         # rounding cells. Along the fixed momentum line, heat is quadratic in
         # u2/u1 and has its maximum at the sonic velocity.
-        def rounding_cell(value):
-            center = Fraction(value)
-            lower = (Fraction(math.nextafter(value, 0.)) + center) / 2
-            next_value = math.nextafter(value, math.inf)
-            upper = ((center + Fraction(next_value)) / 2 if math.isfinite(next_value)
-                     else center + (center-lower))
-            return lower, upper
-
         def velocity_at_mach(value):
             return (value/m)**2 * (1+g*m*m) / (1+g*value*value)
 
