@@ -931,6 +931,8 @@ MASS_PRODUCT_TYPES = frozenset({
 def _product_shapes(entities, *, strict=False):
     """Yield each product owning a shape and its representations."""
     for eid, (etype, args) in sorted(entities.items()):
+        if strict and etype in MASS_PRODUCT_TYPES and len(args) < 7:
+            raise ValueError(f"Incomplete IFC product on #{eid}")
         if len(args) < 7 or not etype.startswith("IFC"):
             continue
         placement, rep = args[5:7]

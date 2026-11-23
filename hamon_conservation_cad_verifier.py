@@ -517,8 +517,7 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
     if spec.get("unit_scale_m") is not None:
         unit_scale = float(spec["unit_scale_m"])
 
-    if any(kind.startswith("IFC") and (len(args) >= 7 or kind == "IFCPRODUCTDEFINITIONSHAPE")
-           for kind, args in entities.values()):
+    if any(kind.startswith("IFC") for kind, _ in entities.values()):
         occurrences = _ifc_product_properties(step_text, entities, unit_scale, density)
         if occurrences is not None:
             return _cad_report(*occurrences, unit_scale, len(entities))

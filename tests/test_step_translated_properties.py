@@ -208,3 +208,15 @@ def test_ifc_mass_rejects_partial_or_unsupported_product(before, after):
     spec["step_text"] = spec["step_text"].replace(before, after)
     with pytest.raises(ValueError):
         verify_step_cad_geometry(spec)
+
+
+@pytest.mark.parametrize("spec", [product_scene("one"), rectangular_ifc_sweep((0.,0.,0.), 1., (0.,0.,1.))])
+def test_ifc_mass_refuses_short_physical_owner_even_without_product_shapes(spec):
+    from hamon_ifc_spatial_clash import _product_shapes, parse_ifc_entities
+
+    body, trailer = spec["step_text"].rsplit("ENDSEC;", 1)
+    text = body + "#99=IFCCOLUMN('short');\nENDSEC;" + trailer
+    with pytest.raises(ValueError, match="Incomplete IFC product"):
+        verify_step_cad_geometry(dict(spec, step_text=text))
+    # The spatial consumer retains its historical permissive product enumeration.
+    assert all(eid != 99 for eid, *_ in _product_shapes(parse_ifc_entities(text)))
