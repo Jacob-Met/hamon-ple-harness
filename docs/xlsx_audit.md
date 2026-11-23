@@ -33,3 +33,11 @@ the selected return cell and compares its numeric value to the cache.
 Approximate or omitted match modes, external references, unknown keys and
 unsupported INDEX forms remain unverified. The ordinary `format-guard`
 rejects a proven cache mismatch.
+
+## Arithmetic across worksheets
+
+For ordinary, full-precision formulas, the audit reconstructs finite numeric literals, A1 cell references, parentheses, unary signs, and binary addition, subtraction, multiplication and division. References may use absolute or mixed anchors and a local or explicitly named worksheet. Each supported reference is followed to its numeric inputs. A stored intermediate result is never used as an input to the calculation.
+
+`arithmetic_audit` reports matched, mismatched and unverified results. The comparison uses a relative tolerance of 1e-12. A proven mismatch fails the ordinary format guard. A present text or Boolean cache contradicts a grounded numeric result even when the text looks numeric. A missing cache remains unverified. A valid workbook can contain formulas outside this grammar; the guard reports outstanding counts under `unverified_formula_caches` for arithmetic, lookup and conversion formulas. Functions (including SUM), ranges, external references, strings, array/shared arithmetic, blank cells, cycles, near-cancelling sums/differences, subnormal values, and precision-as-displayed workbooks fall outside the check. Existing lookup and unit-conversion checks retain their own counts. Numeric arithmetic alone cannot establish a cell's physical units.
+
+The arithmetic audit checks up to 256 formulas, 512 characters and 96 tokens per expression, and 40 nested dependencies. The workbook-wide 100,000-cell index limit also applies. Formulas that cannot be reconstructed within those limits are reported as unverified.
