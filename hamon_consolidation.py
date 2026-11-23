@@ -1,4 +1,4 @@
-"""Terzaghi primary consolidation for one layer and a uniform step in effective load."""
+"""Terzaghi primary consolidation for one homogeneous layer."""
 import math
 
 
@@ -192,11 +192,192 @@ def consolidation_load(spec, key="delta_sigma_v_Pa", *, coerce_scalar=False):
     return (float(spec[key]) if coerce_scalar else _number(spec, key)), {}
 
 
+
+def _history_segments(history, elapsed):
+    """Clip the right-continuous total load curve to the observation time."""
+    if not isinstance(history, list) or not history:
+        raise ValueError("Provide a nonempty load_history")
+    rows = []
+    for row in history:
+        if not isinstance(row, dict) or set(row) != {"time_s", "surcharge_Pa"}:
+            raise ValueError("Each load_history row requires time_s and surcharge_Pa")
+        time, load = _number(row, "time_s"), _number(row, "surcharge_Pa")
+        if min(time, load) < 0 or (rows and time < rows[-1][0]):
+            raise ValueError("Require nonnegative surcharges in nondecreasing time order")
+        if len(rows) >= 2 and time == rows[-2][0]:
+            raise ValueError("At most two ordinates may describe a jump at one time")
+        rows.append((time, load))
+    if rows[0][0] != 0:
+        raise ValueError("Load history must begin at zero time")
+    segments = []
+    start, current = 0., 0.
+    for end, target in rows:
+        if end > elapsed:
+            if start < elapsed:
+                fraction = (elapsed-start)/(end-start)
+                partial = current + (target-current)*fraction
+                segments.append((start, elapsed, current, partial))
+            break
+        segments.append((start, end, current, target))
+        start, current = end, target
+    else:
+        if start < elapsed:
+            segments.append((start, elapsed, current, current))
+    return segments
+
+
+def _early_interval_response(young, span):
+    # U(T)=2 sqrt(T/pi) up to exponentially small reflected images. Integrate
+    # each linear shape function without subtracting nearly equal roots.
+    old = young+span
+    a, b = math.sqrt(young), math.sqrt(old)
+    root_span = span/(a+b)
+    total = (2/math.sqrt(math.pi))*root_span
+    old_weight = total*((a+root_span/3)/(a+b))
+    new_weight = total*((b-root_span/3)/(a+b))
+    mean_u = (4/(3*math.sqrt(math.pi)))*(old+a*b+young)/(a+b)
+    return old_weight, new_weight, 1-mean_u
+
+
+def _interval_response(young, span):
+    """Return effective-stress weights of the old/new load ordinates and the mean pressure step response."""
+    # Effective stress is the convolution of the actual nonnegative load with
+    # U'(T). Combining positive load ordinates retains short surcharge pulses
+    # even when their start and end have the same rounded age.
+    cutoff = 1/144
+    old = young+span
+    if old == 0:
+        return 0., 0., 1.
+    if old <= cutoff:
+        return _early_interval_response(young, span)
+    if young < cutoff:
+        recent = cutoff-young
+        fraction = recent/span
+        a, b, rp = _early_interval_response(young, recent)
+        c, d, op = _interval_response(cutoff, old-cutoff)
+        return c+fraction*(a+d), b+(1-fraction)*(a+d), fraction*rp+(1-fraction)*op
+    older, newer, pressure = 0., 0., 0.
+    for n in range(200):
+        k = math.pi*(n+.5)
+        rate = k*k
+        coefficient = (2/rate)*math.exp(-rate*young)
+        x = rate*span
+        mean = -math.expm1(-x)/x if x else 1.
+        if x < 1e-5:
+            old_weight, new_weight = x*(.5-x/3), x*(.5-x/6)
+        else:
+            old_weight, new_weight = mean-math.exp(-x), 1-mean
+        older += coefficient*old_weight
+        newer += coefficient*new_weight
+        pressure += coefficient*mean
+        if coefficient < 1e-16:
+            break
+    return older, newer, pressure
+
+
+def _diffusion_history(segments, factor, cells):
+    """Integrate the forced finite-volume equations, including undrained load jumps."""
+    import numpy as np
+    from scipy.linalg import eigh_tridiagonal
+
+    # Grading resolves the drained surface at early times. Face fluxes use
+    # center-to-center distances, a zero surface pressure and a sealed base.
+    faces = np.linspace(0., 1., cells+1)**3
+    volume = np.diff(faces)
+    center = (faces[:-1]+faces[1:])/2
+    conductance = np.r_[1/center[0], 1/np.diff(center), 0.]
+    diag = (conductance[:-1]+conductance[1:])/volume
+    off = -conductance[1:-1]/np.sqrt(volume[:-1]*volume[1:])
+    rates, modes = eigh_tridiagonal(diag, off, lapack_driver="stemr")
+    weights = (np.sqrt(volume) @ modes)**2
+    effective, pressure = np.zeros(cells), np.zeros(cells)
+    for start, end, initial, final in segments:
+        change = final-initial
+        dt = (end-start)*factor
+        if dt == 0:
+            pressure = -effective if final == 0 else pressure+change
+            continue
+        with np.errstate(over="ignore"):
+            x = rates*dt
+        decay = np.exp(-x)
+        dissipated = -np.expm1(-x)
+        retention = np.divide(dissipated, x, out=np.ones_like(x), where=x != 0)
+        ramp_settled = 1-retention
+        small = x < 1e-5
+        ramp_settled[small] = x[small]*(.5-x[small]/6)
+        pressure = pressure*decay + change*retention
+        old_load_weight = retention-decay
+        old_load_weight[small] = x[small]*(.5-x[small]/3)
+        effective = effective*decay + initial*old_load_weight + final*ramp_settled
+        if final == 0:
+            pressure = -effective
+    return float(weights @ effective), float(weights @ pressure)
+
+
+def verify_consolidation_history(spec):
+    """Terzaghi diffusion with constant reversible mv and uniform nonnegative surcharge."""
+    result = dict(ok=False, conservation_verified=False, mode="civil_geotech",
+                  tool="hamon_conservation_cad_verifier", calculation="consolidation_history_1d")
+    try:
+        h, cv, mv, elapsed = (_number(spec, key) for key in
+                              ("H_clay_m", "cv_m2_s", "mv_per_Pa", "time_s"))
+        if min(h, cv, mv) <= 0 or elapsed < 0 or spec["drainage"] not in ("single", "double"):
+            raise ValueError("Require positive H, Cv and mv, nonnegative time and single or double drainage")
+        if {"Cc", "Cr", "e0", "sigma_preconsolidation_Pa", "delta_sigma_v_Pa",
+            "rectangular_loads", "stress_point", "proposed_degree_consolidation"} & spec.keys():
+            raise ValueError("Use a single load history and constant mv; staged loads have no single degree of consolidation")
+        path = h if spec["drainage"] == "single" else h/2
+        factor = (cv/path)/path
+        if not 0 < factor < math.inf or not math.isfinite(elapsed*factor):
+            raise ValueError("Time factor outside finite numerical range")
+        segments = _history_segments(spec["load_history"], elapsed)
+        scale = max(max(initial, final) for _, _, initial, final in segments)
+        effective_terms, pressure_terms = [], []
+        for start, end, initial, final in segments:
+            old, new, retained = _interval_response((elapsed-end)*factor, (end-start)*factor)
+            effective_terms.append(initial*old + final*new)
+            pressure_terms.append((final-initial)*retained)
+        effective, pressure = math.fsum(effective_terms), math.fsum(pressure_terms)
+        current = segments[-1][3]
+        # Use the positive effective-stress integral to recover near-cancelling
+        # negative pore-pressure tails after construction loads are removed.
+        if abs(current)+abs(effective) < math.fsum(map(abs, pressure_terms)):
+            pressure = current-effective
+        coarse = _diffusion_history(segments, factor, 96)
+        fine = _diffusion_history(segments, factor, 192)
+        fv_eff, fv_pressure = (b+(b-a)/3 for a,b in zip(coarse, fine))
+        strain = mv*effective
+        if not 0 <= strain < 1:
+            raise ValueError("Predicted compression exhausts or exceeds the layer thickness")
+        settlement = strain*h
+        if not all(math.isfinite(x) for x in (effective, pressure, settlement, fv_eff, fv_pressure)):
+            raise ValueError("Nonfinite consolidation history response")
+        residual = max(abs(effective-fv_eff), abs(pressure-fv_pressure), abs(effective+pressure-current))
+        valid = residual <= 2e-6*scale
+        if "proposed_settlement_m" in spec:
+            proposed = _number(spec, "proposed_settlement_m")
+            valid = valid and 0 <= proposed < h and math.isclose(proposed, settlement, rel_tol=1e-6, abs_tol=1e-12)
+        if "proposed_mean_excess_pore_pressure_Pa" in spec:
+            proposed = _number(spec, "proposed_mean_excess_pore_pressure_Pa")
+            valid = valid and math.isclose(proposed, pressure, rel_tol=1e-6, abs_tol=1e-6)
+        result.update(ok=True, conservation_verified=valid, drainage_path_m=path,
+                      surcharge_at_time_Pa=current, mean_effective_increment_Pa=effective,
+                      mean_excess_pore_pressure_Pa=pressure, settlement_at_time_m=settlement,
+                      finite_volume_mean_effective_increment_Pa=fv_eff,
+                      finite_volume_mean_excess_pore_pressure_Pa=fv_pressure,
+                      dual_solver_abs_residual_Pa=residual)
+    except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError) as exc:
+        result["reason"] = str(exc)
+    return result
+
+
 def verify_consolidation_1d(spec):
     """Check a settlement-time calculation in SI units, including compression history."""
     result = {"ok": False, "conservation_verified": False, "mode": "civil_geotech",
               "tool": "hamon_conservation_cad_verifier", "calculation": "consolidation_1d"}
     try:
+        if "load_history" in spec or "mv_per_Pa" in spec:
+            raise ValueError("Use calculation=consolidation_history_1d for staged loads with constant mv")
         h = _number(spec, "H_clay_m")
         e0 = _number(spec, "e0")
         cc = _number(spec, "Cc")
