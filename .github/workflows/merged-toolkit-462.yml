@@ -1,0 +1,49 @@
+name: Merged toolkit first-request comparison
+on:
+  push:
+    branches: ["dfab0b0b/verify-merged-toolkit-462"]
+permissions:
+  contents: read
+jobs:
+  parent-comparison:
+    runs-on: ubuntu-latest
+    timeout-minutes: 16
+    env:
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 4b9b0abd56441eac0e229bf27023757027c37685
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install matched runtimes and pin the actual merge parent
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^1)" = ebef1dd72ff43a67f864506cbb78aa61ae2f2dec
+          git worktree add --detach "$RUNNER_TEMP/parent" HEAD^1
+          cmp package-lock.json "$RUNNER_TEMP/parent/package-lock.json"
+          npm ci --no-fund --no-audit
+          ln -s "$PWD/node_modules" "$RUNNER_TEMP/parent/node_modules"
+          python -m pip install -q -r requirements.txt tiktoken==0.12.0
+      - name: Paired provisioned and short-write first requests
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/evidence"
+          mkdir -p "$out"
+          python ship/replay_toolkit_prompt.py --bpe --root "$RUNNER_TEMP/parent" > "$out/parent.jsonl"
+          python ship/replay_toolkit_prompt.py --bpe > "$out/merged.jsonl"
+          python ship/replay_toolkit_prompt.py --compare "$out/parent.jsonl" "$out/merged.jsonl" | tee "$out/comparison.json"
+          python ship/replay_toolkit_prompt.py --short-write --task backfeed-energization-reply --root "$RUNNER_TEMP/parent" > "$out/short-parent.jsonl"
+          python ship/replay_toolkit_prompt.py --short-write --task backfeed-energization-reply > "$out/short-merged.jsonl"
+          python ship/replay_toolkit_prompt.py --short-write --task backfeed-energization-reply --compare "$out/short-parent.jsonl" "$out/short-merged.jsonl" | tee "$out/short-comparison.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: merged-toolkit-wire-evidence
+          path: ${{ runner.temp }}/evidence
