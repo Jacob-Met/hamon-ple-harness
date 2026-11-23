@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -27,15 +28,15 @@ def public_task(name):
 
 class ArchiveInterruption(unittest.TestCase):
     def test_bounded_office_validation_accounts_for_both_archives(self):
-        document = io.BytesIO()
-        with zipfile.ZipFile(document, "w", zipfile.ZIP_DEFLATED) as office:
-            office.writestr("[Content_Types].xml", b"types")
-            office.writestr("word/document.xml", b"document")
+        memo = ROOT / "artifacts/permission-to-operate-memo/files/filesystem/Corwyn_PTO_Memo.docx"
+        document = memo.read_bytes()
+        with zipfile.ZipFile(io.BytesIO(document)) as office:
+            expanded = sum(part.file_size for part in office.infolist())
         package = io.BytesIO()
         with zipfile.ZipFile(package, "w") as output:
-            output.writestr("memo.docx", document.getvalue())
+            output.writestr("memo.docx", document)
         with zipfile.ZipFile(package) as archive:
-            needed = len(document.getvalue()) + len(b"typesdocument")
+            needed = len(document) + expanded
             self.assertFalse(archive_checkpoint.verify_typed_members(archive, ["memo.docx"], needed - 1))
             self.assertTrue(archive_checkpoint.verify_typed_members(archive, ["memo.docx"], needed))
 
@@ -171,6 +172,29 @@ archive_checkpoint.publish(Path(stage), Path(target), names)
             self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), good_sha)
 
 class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
+    async def test_provisioned_publisher_is_standalone(self):
+        prompt = public_task("eor-review-corrections")
+        original = next((ROOT / "artifacts/eor-review-corrections/files").rglob("submission.zip"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "submission.zip"
+
+            async def write_helper(name, body):
+                return (root / Path(name).name).write_bytes(body)
+
+            session = SimpleNamespace(instruction=prompt, write_file=write_helper)
+            plan = await archive_contract.provision(session, [{"kind": "file", "path": str(target)}])
+            _, helper, argument = shlex.split(plan[1])
+            stage, destination, names = json.loads(argument)
+            stage = root / Path(stage).name
+            with zipfile.ZipFile(original) as archive:
+                archive.extractall(stage)
+            command = [sys.executable, "-I", "-S", str(root / Path(helper).name),
+                       json.dumps([str(stage), destination, names])]
+            subprocess.run(command, check=True, cwd=root)
+            subprocess.run(command + ["--verify"], check=True, cwd=root)
+            archive_checkpoint.verify(target, names)
+
     async def exercise(self, complete):
         prompt = public_task("eor-review-corrections")
         original = next((ROOT/"artifacts/eor-review-corrections/files").rglob("submission.zip"))

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 from pathlib import Path
 import re
 import secrets
 import shlex
+import zipfile
 
 NUMBERS = "zero one two three four five six seven eight nine ten eleven twelve".split()
 EARLY_RE = re.compile(
@@ -149,8 +151,12 @@ async def provision(session, targets):
     if not names:
         return None
     tag = secrets.token_hex(8)
-    helper, stage = f"/tmp/ple-archive-{tag}.py", f"/tmp/ple-members-{tag}"
-    body = Path(__file__).with_name("archive_checkpoint.py").read_bytes()
+    helper, stage = f"/tmp/ple-archive-{tag}.pyz", f"/tmp/ple-members-{tag}"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        bundle.write(Path(__file__).with_name("archive_checkpoint.py"), "__main__.py")
+        bundle.write(Path(__file__).with_name("office_package.py"), "office_package.py")
+    body = buffer.getvalue()
     try:
         if await asyncio.wait_for(session.write_file(helper, body), 12) != len(body):
             return None

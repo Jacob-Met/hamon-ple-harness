@@ -1,8 +1,16 @@
 """Structural Word document checks for the isolated engineering CLI."""
+import contextlib
+import io
+import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
+
+import archive_checkpoint
+import delivery_guard
 
 from engineering_toolkit import audit_local_deliverable
 
@@ -68,3 +76,68 @@ class DocxFormatGuard(unittest.TestCase):
                 with zipfile.ZipFile(path, "w") as z:
                     z.writestr("readme.txt", "example")
                 self.assertEqual(audit_local_deliverable(path)["ok"], valid)
+
+
+class DeliveryPackageChecks(unittest.TestCase):
+    def test_relocated_main_parts_standalone_and_inside_deliverable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            word = root / "report.docx"
+            package(word, target="word/output.xml", part="word/output.xml")
+            names = [word.name]
+            for suffix, content_type in (
+                ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"),
+                ("xlsm", "application/vnd.ms-excel.sheet.macroEnabled.main+xml"),
+            ):
+                book = root / ("register." + suffix)
+                part = "xl/register.xml"
+                package(book, target=part, part=part, declaration=(
+                    f'<Override PartName="/{part}" ContentType="{content_type}"/>'),
+                    main_xml='<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>')
+                names.append(book.name)
+            submitted = root / "submission.zip"
+            with zipfile.ZipFile(submitted, "w") as outer:
+                for name in names:
+                    outer.write(root / name, name)
+            archive_checkpoint.verify(submitted, names)
+            targets = [{"path": "/filesystem/" + name, "kind": "file"} for name in names]
+            targets.append({"path": "/filesystem/submission.zip", "kind": "file", "root_members": names})
+            self.assertEqual(self.probe(root, targets), {item["path"]: "ready" for item in targets})
+
+    @staticmethod
+    def probe(root, targets):
+        observed = io.StringIO()
+        with (mock.patch("pathlib.Path", side_effect=lambda path: root / Path(path).name),
+              mock.patch.object(sys, "argv", ["-c", json.dumps(targets)]),
+              contextlib.redirect_stdout(observed)):
+            exec(delivery_guard.REMOTE_PROBE, {})
+        return {k: v["state"] for k, v in json.loads(observed.getvalue()).items()}
+
+    def test_secondary_parts_follow_declared_xml_types_through_eof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book = root / "register.xlsx"
+            submitted = root / "submission.zip"
+            part = "xl/register.xml"
+            sheet_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
+            types = (f'<Override PartName="/{part}" ContentType="application/'
+                     'vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                     f'<Default Extension="data" ContentType="{sheet_type}"/>'
+                     '<Override PartName="/xl/preview.xml" ContentType="application/octet-stream"/>')
+            main = '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>'
+            targets = [{"path": "/filesystem/register.xlsx", "kind": "file"},
+                       {"path": "/filesystem/submission.zip", "kind": "file", "root_members": [book.name]}]
+            for sheet, expected in (("<worksheet/>", "ready"), ("<worksheet>", "invalid")):
+                with self.subTest(expected=expected):
+                    package(book, target=part, part=part, declaration=types, main_xml=main)
+                    with zipfile.ZipFile(book, "a") as inner:
+                        inner.writestr("xl/worksheets/pump.data", sheet)
+                        inner.writestr("xl/preview.xml", b"binary preview")
+                    with zipfile.ZipFile(submitted, "w") as outer:
+                        outer.write(book, book.name)
+                    self.assertEqual(self.probe(root, targets), {x["path"]: expected for x in targets})
+                    if expected == "ready":
+                        archive_checkpoint.verify(submitted, [book.name])
+                    else:
+                        with self.assertRaises(ValueError):
+                            archive_checkpoint.verify(submitted, [book.name])
