@@ -185,3 +185,32 @@ def test_unsupported_eccentric_design_refused(changes):
     result = verify_bearing_capacity(eccentric_spec(**changes))
     assert not result["ok"]
     assert not result["conservation_verified"]
+
+
+@pytest.mark.parametrize(
+    "phi, allowable",
+    [(0, 77123.8898038469), (5, 99943.45328687997), (10, 134014.95855960564)],
+)
+def test_meyerhof_cohesion_shape_uses_the_actual_friction_angle(phi, allowable):
+    # The 3 × 5 m footing has a 2.5 × 4 m effective rectangle. At the
+    # surface, its surcharge and all embedment corrections vanish.
+    spec = eccentric_spec(
+        footing_B_m=3, footing_L_m=5, eccentricity_B_m=0.25, eccentricity_L_m=0.5,
+        depth_Df_m=0, phi_deg=phi, c_prime_Pa=40000, column_load_N=1_000_000,
+    )
+    result = verify_bearing_capacity(spec)
+    assert result["q_allow_Pa"] == pytest.approx(allowable, rel=1e-12)
+    assert result["q_applied_Pa"] == 100000
+    assert result["bearing_ok"] is (allowable >= 100000)
+
+
+def test_meyerhof_cohesion_depth_uses_the_actual_friction_angle():
+    spec = {**base("meyerhof"), "footing_B_m": 2.5, "footing_L_m": 4,
+            "phi_deg": 5, "c_prime_Pa": 40000}
+    surface = verify_bearing_capacity({**spec, "depth_Df_m": 0})
+    embedded = verify_bearing_capacity({**spec, "depth_Df_m": 1.5})
+    # Dividing the terms cancels both Nc and the shape factor.
+    depth_factor = 1 + 0.2 * (1.5 / 2.5) * math.tan(math.radians(45 + 5 / 2))
+    assert embedded["cohesion_term_Pa"] / surface["cohesion_term_Pa"] == pytest.approx(
+        depth_factor, rel=1e-12
+    )

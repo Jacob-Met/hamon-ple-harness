@@ -128,15 +128,15 @@ def geometry_factors(method, degrees, ratio, embedment, shape, nc, nq):
         )
     phi = math.radians(degrees)
     if method == "meyerhof":
-        # Interpolate correction factors between zero and 10 degrees per Table 4-3.
-        angle = max(degrees, 10)
-        root_kp = math.tan(math.pi / 4 + math.radians(angle) / 2)
-        k = root_kp**2
+        # Table 4-3 gives the cohesion factors at the actual friction angle.
+        root_kp = math.tan(math.pi / 4 + phi / 2) if degrees else 1.0
+        sc = 1 + 0.2 * ratio * root_kp**2
+        dc = 1 + 0.2 * embedment * root_kp
+        # Only the wedge and surcharge columns interpolate from zero to 10°.
+        reference_kp_root = math.tan(math.pi / 4 + math.radians(max(10, degrees)) / 2)
         mix = min(1.0, degrees / 10)
-        sc = 1 + 0.2 * ratio * (1 + mix * (k - 1))
-        sq = 1 + 0.1 * ratio * k * mix
-        dc = 1 + 0.2 * embedment * (1 + mix * (root_kp - 1))
-        dq = 1 + 0.1 * embedment * root_kp * mix
+        sq = 1 + 0.1 * ratio * reference_kp_root**2 * mix
+        dq = 1 + 0.1 * embedment * reference_kp_root * mix
         return (sc, sq, sq), (dc, dq, dq)
     # Historical unnamed routes use the original Vesic factor set with depth
     # represented by surcharge alone. Preserve their rectangular correction.
