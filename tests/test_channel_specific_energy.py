@@ -74,3 +74,13 @@ class ChannelSpecificEnergy(unittest.TestCase):
         self.assertEqual(stagnant["depth_solutions"][0]["velocity_m_s"],0.)
         for spec in ((2.,1.,0.,0.,4.),(-2.,1.,1.,0.,4.),(2.,1.,1.,-1.,4.)):
             self.assertFalse(alternate(*spec)["ok"])
+
+    def test_exact_json_integer_neighbors_at_discharge_control(self):
+        critical_q = 2**53
+        for sign in (-1, 1):
+            for q, state in ((critical_q-1, "two_depths"), (critical_q, "critical"),
+                             (critical_q+1, "below_minimum")):
+                with self.subTest(sign=sign, q=q):
+                    result = alternate(1.5, q=sign*q, width=critical_q, gravity=1)
+                    self.assertTrue(result["ok"], result)
+                    self.assertEqual(result["state"], state)
