@@ -9,6 +9,7 @@ import math
 
 import numpy as np
 from scipy.sparse import coo_matrix, diags
+from hamon_diaphragm_modes import diaphragm_coordinates
 from scipy.sparse.linalg import splu
 
 
@@ -139,10 +140,12 @@ def solve_diaphragm(spec):
 
     panels, bars, springs = [], [], []
     rectangles = []
+    panel_nodes = []
     for panel in spec["panels"]:
         ids = tuple(node(i) for i in panel["nodes"])
         if len(ids) != 4 or len(set(ids)) != 4:
             raise ValueError("each panel needs four distinct nodes and a unique cell")
+        panel_nodes.append(ids)
         p = xy[list(ids)]
         width, height = p[2] - p[0]
         expected = [[0, 0], [width, 0], [width, height], [0, height]]
@@ -165,13 +168,11 @@ def solve_diaphragm(spec):
         axis = np.r_[-vector, vector] / length
         k = _positive(bar["EA_N"]) / length
         dofs = np.array([2*a, 2*a+1, 2*b, 2*b+1])
-        scatter(dofs, k * np.outer(axis, axis))
         bars.append((dofs, axis, k))
     for spring in spec["springs"]:
         axis = {"x": 0, "y": 1}[spring["axis"]]
         dof = 2 * node(spring["node"]) + axis
         k = _positive(spring["k_N_m"])
-        scatter([dof], np.array([[k]]))
         springs.append((dof, k))
     for load in spec["loads"]:
         dof = 2 * node(load["node"])
@@ -180,7 +181,29 @@ def solve_diaphragm(spec):
             raise ValueError("force_N must be a finite [Fx,Fy] vector")
         force[dof:dof+2] += f
 
-    stiffness = coo_matrix((entries, (rows, cols)), shape=(ndof, ndof)).tocsc()
+    membrane = coo_matrix((entries, (rows, cols)), shape=(ndof, ndof)).tocsc()
+    ground = np.zeros(ndof)
+    for dof, k in springs:
+        ground[dof] += k
+    if not np.isfinite(ground).all():
+        raise ValueError("nonfinite assembled spring stiffness")
+    transform, elastic, bar_free, elastic_only_bars = diaphragm_coordinates(xy, panel_nodes, bars, ground)
+    projection = diags(elastic.astype(float))
+    stiffness = (projection @ membrane @ projection + transform.T @ diags(ground) @ transform).tocsc()
+    if bars:
+        b_rows, b_cols, b_data = [], [], []
+        for i, (dofs, axis, _) in enumerate(bars):
+            b_rows.extend([i]*4)
+            b_cols.extend(dofs)
+            b_data.extend(axis)
+        bar_axes = coo_matrix((b_data, (b_rows, b_cols)), shape=(len(bars), ndof)).tocsr()
+        # An in-patch bar also annihilates *relative* patch motions.
+        # Cross-patch bars retain exactly the straining patch coordinates.
+        relative = diags((~elastic & ~bar_free).astype(float))
+        connector_axes = diags((~elastic_only_bars).astype(float)) @ bar_axes
+        bar_map = bar_axes @ projection + connector_axes @ transform @ relative
+        axial_k = np.array([k for _, _, k in bars])
+        stiffness = (stiffness + bar_map.T @ diags(axial_k) @ bar_map).tocsc()
     diagonal = stiffness.diagonal()
     if not np.isfinite(diagonal).all() or np.min(diagonal) <= 0:
         raise ValueError("unconnected or invalid diaphragm degrees of freedom")
@@ -193,7 +216,9 @@ def solve_diaphragm(spec):
     pivots = np.abs(factor.U.diagonal())
     if pivots.min() <= 1e-12 * pivots.max():
         raise ValueError("unsupported or ill-conditioned diaphragm")
-    u = scale * factor.solve(scale * force)
+    coordinates = scale * factor.solve(scale * (transform.T @ force))
+    deformation = elastic * coordinates
+    u = transform @ coordinates
 
     if not np.isfinite(u).all():
         raise ValueError("nonfinite diaphragm displacement")
@@ -205,12 +230,14 @@ def solve_diaphragm(spec):
         reactions[dof] += value
         spring_forces.append(value)
         double_energy.append(value * u[dof])
-    for dofs, axis, k in bars:
-        extension = axis @ u[dofs]
-        bar_forces.append(k * extension)
-        double_energy.append(k * extension**2)
+    internal_force = membrane @ deformation
+    if bars:
+        extensions = bar_map @ coordinates
+        bar_forces = axial_k * extensions
+        internal_force += bar_axes.T @ bar_forces
+        double_energy.extend(bar_forces * extensions)
     for dofs, gauss, weights, recover in panels:
-        local_u = u[dofs]
+        local_u = deformation[dofs]
         panel_shears.append(recover @ local_u)
         double_energy.extend(weights @ (b @ local_u)**2 for b in gauss)
 
@@ -224,7 +251,7 @@ def solve_diaphragm(spec):
     span = np.max(np.ptp(xy, axis=0))
     work = float(force @ u)
     energy = math.fsum(double_energy)
-    errors = [np.linalg.norm(stiffness @ u - force, np.inf) / load_scale,
+    errors = [np.linalg.norm(internal_force + reactions - force, np.inf) / load_scale,
               np.linalg.norm(force_error, 1) / load_scale,
               abs(moment_error) / (span * load_scale),
               abs(work - energy) / max(abs(work), abs(energy), 1e-30)]
