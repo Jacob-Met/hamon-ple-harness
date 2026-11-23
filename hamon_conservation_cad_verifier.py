@@ -434,13 +434,12 @@ def _rectangular_sweep(entities, et, args, unit_scale, frame=None):
             return vertices, faces if normal > 0 else faces[:, ::-1], lx * ly * depth * abs(normal)
 
 
-def _ifc_product_properties(step_text, raw, unit_scale, density):
+def _ifc_product_properties(typed, raw, unit_scale, density):
     from hamon_ifc_spatial_clash import (
         MASS_PRODUCT_TYPES, _placed_product_frame, _product_shapes, _require_single_swept_body,
-        _rigid_ifc_frame, parse_ifc_entities,
+        _rigid_ifc_frame,
     )
 
-    typed = parse_ifc_entities(step_text)
     owners = list(_product_shapes(typed, strict=True))
     if not owners:
         if any(kind == "IFCPRODUCTDEFINITIONSHAPE" for kind, _ in typed.values()):
@@ -518,7 +517,11 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
         unit_scale = float(spec["unit_scale_m"])
 
     if any(kind.startswith("IFC") for kind, _ in entities.values()):
-        occurrences = _ifc_product_properties(step_text, entities, unit_scale, density)
+        from hamon_ifc_spatial_clash import _detect_length_unit_scale, parse_ifc_entities
+        typed = parse_ifc_entities(step_text)
+        if spec.get("unit_scale_m") is None:
+            unit_scale = _detect_length_unit_scale(typed)
+        occurrences = _ifc_product_properties(typed, entities, unit_scale, density)
         if occurrences is not None:
             return _cad_report(*occurrences, unit_scale, len(entities))
 

@@ -220,3 +220,76 @@ def test_ifc_mass_refuses_short_physical_owner_even_without_product_shapes(spec)
         verify_step_cad_geometry(dict(spec, step_text=text))
     # The spatial consumer retains its historical permissive product enumeration.
     assert all(eid != 99 for eid, *_ in _product_shapes(parse_ifc_entities(text)))
+
+
+def ifc_units_fixture(assignment, projects=(), extras=()):
+    spec = product_scene("one")
+    units = [
+        "#40=IFCSIUNIT(*,.TIMEUNIT.,.MILLI.,.SECOND.);",
+        "#41=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);",
+        "#42=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);",
+        "#43=IFCSIUNIT(*,.AREAUNIT.,.CENTI.,.SQUARE_METRE.);",
+        "#44=IFCMEASUREWITHUNIT(IFCLENGTHMEASURE(25.4),#42);",
+        "#45=IFCCONVERSIONBASEDUNIT($,.LENGTHUNIT.,'inch',#44);",
+        *assignment, *extras,
+    ]
+    for i, ref in enumerate(projects):
+        units.append(f"#60{i}=IFCPROJECT('project{i}',$,$,$,$,$,$,(#7),{ref});")
+    spec["step_text"] = spec["step_text"].replace("ENDSEC;", "\n".join(units) + "\nENDSEC;")
+    return spec
+
+
+@pytest.mark.parametrize("groups,projects,scale", [
+    (["#50=IFCUNITASSIGNMENT((#40,#41,#43));"], [], 1.),
+    (["#50=IFCUNITASSIGNMENT((#40,#42,#43));"], [], .001),
+    (["#50=IFCUNITASSIGNMENT((#40,#45,#43));"], [], .0254),
+    (["#51=IFCUNITASSIGNMENT((#42));", "#50=IFCUNITASSIGNMENT((#40,#41,#43));"], ["#50"], 1.),
+    (["#50=IFCUNITASSIGNMENT((#40,#41,#43));", "#51=IFCUNITASSIGNMENT((#42));"], ["#50"], 1.),
+    ([], [], 1.),
+])
+def test_ifc_geometry_uses_its_project_length_unit(groups, projects, scale):
+    got = verify_step_cad_geometry(ifc_units_fixture(groups, projects))
+    assert got["conservation_verified"] and got["unit_scale_m"] == pytest.approx(scale)
+    assert got["volume_m3"] == pytest.approx(.000048 * scale**3, rel=1e-12, abs=0)
+    assert got["mass_kg"] == pytest.approx(.048 * scale**3, rel=1e-12, abs=0)
+    np.testing.assert_allclose(got["centroid_m"], np.array([2., 0., .03]) * scale, atol=1e-15)
+    inertia = np.diag([2.08e-5, 1.60e-5, 8e-6]) * scale**5
+    np.testing.assert_allclose(got["inertia_tensor_centroid_kg_m2"], inertia, atol=1e-19 * scale**5)
+
+
+@pytest.mark.parametrize("groups,projects", [
+    (["#50=IFCUNITASSIGNMENT((#40,#43));"], ["#50"]),
+    (["#50=IFCUNITASSIGNMENT((#41,#42));"], ["#50"]),
+    (["#50=IFCUNITASSIGNMENT((#41,#999));"], ["#50"]),
+    (["#50=IFCUNITASSIGNMENT((#41));"], ["#999"]),
+    (["#50=IFCUNITASSIGNMENT((#41));", "#51=IFCUNITASSIGNMENT((#42));"], ["#50","#51"]),
+    (["#50=IFCUNITASSIGNMENT((#41));", "#51=IFCUNITASSIGNMENT((#42));"], []),
+])
+def test_ifc_uncertain_project_units_require_explicit_scale(groups, projects):
+    spec = ifc_units_fixture(groups, projects)
+    with pytest.raises(ValueError, match="IFC"):
+        verify_step_cad_geometry(spec)
+    got = verify_step_cad_geometry(dict(spec, unit_scale_m=1.))
+    assert got["conservation_verified"] and got["mass_kg"] == pytest.approx(.048)
+
+
+def test_unowned_ifc_sweep_uses_assigned_length_and_named_step_keeps_units():
+    spec = rectangular_ifc_sweep((0., 0., 0.), 1., (0., 0., 1.))
+    del spec["unit_scale_m"]
+    spec["step_text"] = spec["step_text"].replace("ENDSEC;END-ISO", """
+#81=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);
+#82=IFCSIUNIT(*,.TIMEUNIT.,.MILLI.,.SECOND.);
+#83=IFCUNITASSIGNMENT((#81,#82));
+ENDSEC;END-ISO""")
+    bare = verify_step_cad_geometry(spec)
+    assert bare["conservation_verified"] and bare["volume_m3"] == pytest.approx(.002 * .006 * .010)
+
+    step = {"step_text": """DATA;
+#1=CARTESIAN_POINT('',(10.,0.,0.));
+#2=AXIS2_PLACEMENT_3D('',#1,$,$);
+#3=BLOCK('part',#2,20.,30.,40.);
+#4=SI_UNIT(.MILLI.,.METRE.);
+ENDSEC;"""}
+    named = verify_step_cad_geometry(step)
+    assert named["conservation_verified"] and named["unit_scale_m"] == .001
+    np.testing.assert_allclose(named["centroid_m"], [.020, .015, .020], atol=1e-15)
