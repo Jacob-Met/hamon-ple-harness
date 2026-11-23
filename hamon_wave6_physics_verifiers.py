@@ -567,7 +567,14 @@ def _passive_acoustic_interface(params: Mapping[str, Any]) -> Dict[str, Any]:
     """Normal-incidence pressure and power at a lossless, passive fluid interface."""
     result = {"domain": "compressible_acoustics", "subkind": "acoustics", "verified": False}
 
+    oblique = "incidence_angle_deg" in params or "incidence_sine" in params
+
     def positive(value):
+        if oblique:
+            if type(value) is int and value > 0:
+                return Fraction(value)
+            if type(value) is not float:
+                raise ValueError("Oblique acoustic properties must be positive finite JSON numbers")
         value = float(value)
         if not math.isfinite(value) or value <= 0:
             raise ValueError("Acoustic material and resonator parameters must be finite and positive")
@@ -583,6 +590,24 @@ def _passive_acoustic_interface(params: Mapping[str, Any]) -> Dict[str, Any]:
         rho1, c1, rho2, c2 = (positive(params.get(name, default)) for name, default in
                                (("rho1", 1.204), ("c1", 343.0), ("rho2", 998.0), ("c2", 1481.0)))
         z1, z2 = rho1 * c1, rho2 * c2
+        frequency = None
+        dimensions = {"A_neck", "V_cavity", "L_eff"}
+        supplied = dimensions.intersection(params)
+        if supplied:
+            if supplied != dimensions:
+                raise ValueError("Helmholtz resonance requires A_neck, V_cavity and L_eff together")
+            area, volume, length = (positive(params[key]) for key in ("A_neck", "V_cavity", "L_eff"))
+            squared = c1 * c1 * area / (volume * length)
+            with localcontext() as context:
+                context.prec = 60
+                root = (Decimal(squared.numerator) / Decimal(squared.denominator)).sqrt()
+                frequency = represent(root / Decimal.from_float(math.tau), "resonant frequency")
+
+        if oblique:
+            from hamon_oblique_acoustic_interface import oblique_interface
+            return {**result, **oblique_interface(params, rho1, c1, rho2, c2),
+                    "helmholtz_f0_Hz": frequency}
+
         total = z1 + z2
         r = (z2 - z1) / total
         t = 2 * z2 / total
@@ -597,19 +622,6 @@ def _passive_acoustic_interface(params: Mapping[str, Any]) -> Dict[str, Any]:
                 context.prec = 60
                 power_decimal = Decimal(power.numerator) / Decimal(power.denominator)
                 loss = float(-10 * power_decimal.log10())
-
-        frequency = None
-        dimensions = {"A_neck", "V_cavity", "L_eff"}
-        supplied = dimensions.intersection(params)
-        if supplied:
-            if supplied != dimensions:
-                raise ValueError("Helmholtz resonance requires A_neck, V_cavity and L_eff together")
-            area, volume, length = (positive(params[key]) for key in ("A_neck", "V_cavity", "L_eff"))
-            squared = c1 * c1 * area / (volume * length)
-            with localcontext() as context:
-                context.prec = 60
-                root = (Decimal(squared.numerator) / Decimal(squared.denominator)).sqrt()
-                frequency = represent(root / Decimal.from_float(math.tau), "resonant frequency")
 
         # Check the reported binary coefficients against the two interface
         # boundary equations (the velocity equation is impedance-scaled).
