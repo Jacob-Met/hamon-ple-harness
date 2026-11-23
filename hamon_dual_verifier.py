@@ -2792,6 +2792,82 @@ def _column_exact_quantity(spec: dict[str, Any], field: str, unit: str) -> Fract
     return amount(ast.parse(expression, mode="eval").body)
 
 
+def _ug27_circumferential_shell(spec):
+    """UG-27(c)(1) cylindrical circumferential stress under internal pressure.
+
+    R_inner_m is the inside radius in the corroded design condition. The
+    longitudinal-joint efficiency applies to hoop stress. Only the metal
+    remaining after corrosion allowance contributes to pressure resistance.
+    """
+    def quantity(key):
+        raw = spec[key]
+        if isinstance(raw, bool):
+            raise ValueError(f"{key} must be a finite SI quantity")
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError(f"{key} must be a finite SI quantity")
+        return Fraction(value)
+
+    def publish(q):
+        if q is None:
+            return None
+        try:
+            value = float(q)
+        except OverflowError as exc:
+            raise ValueError("Shell result is outside the finite reporting range") from exc
+        if not math.isfinite(value) or (q and not value):
+            raise ValueError("Shell result is outside the finite reporting range")
+        return value
+
+    pressure, radius, strength, efficiency, allowance, supplied = map(quantity, (
+        "P_Pa", "R_inner_m", "S_allow_Pa", "weld_efficiency_E", "corrosion_allowance_m",
+        "supplied_thickness_m"))
+    wall = supplied-allowance
+    if (min(radius, strength, wall) <= 0 or min(pressure, allowance) < 0
+            or not 0 < efficiency <= 1):
+        raise ValueError("Require positive corroded radius, stress and remaining metal, "
+                         "nonnegative internal pressure and allowance, and 0 < E <= 1")
+
+    joint = strength*efficiency
+    coefficient = Fraction(3, 5)
+    pressure_limit = Fraction(77, 200)*joint
+
+    def applicable(t, p):
+        return 2*t <= radius or p <= pressure_limit
+
+    # The supply rating and pressure sizing are separate uses of the relation:
+    # each (t,P) pair must satisfy its own thickness-or-pressure applicability.
+    capacity = joint*wall/(radius+coefficient*wall)
+    qualified_capacity = capacity if applicable(wall, capacity) else None
+    denominator = joint-coefficient*pressure
+    required = None
+    if denominator > 0:
+        candidate = pressure*radius/denominator
+        if applicable(candidate, pressure):
+            required = candidate
+
+    # Compare positive-wall force resultants before rounding output values.
+    # A scoped supplied-wall rating can demonstrate insufficient wall even
+    # when a new required thickness cannot be sized by this formula.
+    qualified = required is not None or qualified_capacity is not None
+    passes = pressure*(radius+coefficient*wall) <= joint*wall if qualified else None
+    if required is not None and passes != (wall >= required):
+        raise ArithmeticError("Pressure-wall force and required-thickness decisions disagree")
+    if qualified_capacity is not None and passes != (pressure <= qualified_capacity):
+        raise ArithmeticError("Pressure-wall force and capacity decisions disagree")
+    return {
+        "analysis_scope": "UG-27(c)(1) cylindrical shell circumferential stress, internal pressure",
+        "effective_wall_thickness_m": publish(wall),
+        "pressure_thickness_required_m": publish(required),
+        "t_required_m": publish(required+allowance) if required is not None else None,
+        "required_thickness_status": "qualified" if required is not None else "outside_formula_range",
+        "circumferential_pressure_capacity_Pa": publish(qualified_capacity),
+        "pressure_capacity_status": "qualified" if qualified_capacity is not None else "outside_formula_range",
+        "passes_ug27": passes,
+        "dual_verified": qualified,
+    }
+
+
 def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
     """Unified dispatcher for general multi-discipline engineering checks (zero task ID branching)."""
     if kind in ("beam_design_check", "beam_fixed_fixed"):
@@ -3022,16 +3098,7 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
             "dual_verified": True,
         }
     if kind == "asme_ug27_shell":
-        p_pa, r_m, s_pa, e_j, ca = (
-            float(spec["P_Pa"]), float(spec["R_inner_m"]), float(spec["S_allow_Pa"]),
-            float(spec["weld_efficiency_E"]), float(spec["corrosion_allowance_m"]),
-        )
-        t_req = (p_pa * r_m) / (s_pa * e_j - 0.6 * p_pa) + ca
-        return {
-            "t_required_m": t_req,
-            "passes_ug27": float(spec["supplied_thickness_m"]) >= t_req,
-            "dual_verified": True,
-        }
+        return _ug27_circumferential_shell(spec)
     if kind == "mixing_balance":
         m_out = sum(float(s["m_kg_s"]) for s in spec["inlets"])
         e_in = sum(float(s["m_kg_s"]) * float(s["h_J_kg"]) for s in spec["inlets"]) + float(spec.get("Q_in_W", 0.0)) - float(spec.get("W_shaft_W", 0.0))

@@ -1,0 +1,9 @@
+# Cylindrical shell under internal pressure
+
+The registered `asme_ug27_shell` calculation evaluates circumferential stress in a cylindrical shell using the internal-pressure relation in ASME VIII-1 UG-27(c)(1). The joint efficiency `weld_efficiency_E` applies to the longitudinal joint. The inputs describe a single shell course with positive allowable tensile stress, positive inside radius in the corroded design condition (`R_inner_m`), and nonnegative internal pressure. The pressure-resisting metal is the supplied thickness less the corrosion allowance.
+
+For radius `R`, net thickness `t`, allowable stress `S`, and joint efficiency `E`, the circumferential pressure rating is `SEt/(R+0.6t)`. Pressure-only sizing gives `PR/(SE−0.6P)`. Adding the corrosion allowance gives the gross required thickness. The equation applies when `t≤R/2` or `P≤0.385SE`. Sizing evaluates this condition for the design pressure and its required net thickness. Rating evaluates it for the available net thickness and its computed pressure.
+
+A qualified sizing or rating can establish the supplied-wall result at the specified design pressure. The two status fields identify which numerical outputs are available. When neither application is in range, the route returns `dual_verified=false`, a null `passes_ug27`, and null sizing and rating values. Pass/fail comparisons use the input numbers before rounding displayed quantities. The reported pressure capacity covers circumferential pressure loading on this shell course. Other stress directions, heads, openings, welds, load combinations and complete vessel certification require separate checks.
+
+The FMCSA Cargo Tank Facility Review guidance gives both relations and their ranges in Chapter 4, “Methods of Analysis,” pages 45–46. [FMCSA technical reference](https://www.fmcsa.dot.gov/sites/fmcsa.dot.gov/files/2026-01/Consolidated-eFOTM-Appendices%209.9.pdf)
