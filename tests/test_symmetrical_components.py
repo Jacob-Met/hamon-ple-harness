@@ -150,3 +150,11 @@ def test_weak_ground_against_shared_neutral_circuit(fault, phases, fault_z, zero
         assert actual_v == pytest.approx(emf[name] - series * i - neutral * ground, abs=1e-13)
         if fault in ("DLG", "SLG") and name in phases:
             assert actual_v == pytest.approx(fault_z * ground, rel=1e-12, abs=1e-38)
+
+
+@pytest.mark.parametrize("mode", ["zero", "positive", "negative"])
+def test_three_phase_fault_rejects_a_singular_terminal_mode(mode):
+    spec = source("3PH")
+    spec["fault_impedance_pu"] = z(0, 0.25)
+    spec["sequence_impedances_pu"][mode] = z(0, -0.25)
+    assert not verify_symmetrical_fault(spec)["conservation_verified"]

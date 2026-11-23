@@ -687,6 +687,10 @@ def symmetrical_fault(spec):
     transform = ctx.matrix([[1, 1, 1], [1, alpha.conjugate(), alpha],
                             [1, alpha, alpha.conjugate()]])
     if fault == "3PH":
+        # With a zero series-plus-fault impedance in an unexcited mode,
+        # the terminal constraints admit arbitrary current in that mode.
+        if any(impedance + zf == 0 for impedance in (z0, z1, z2)):
+            raise ValueError("Three-phase terminal currents are not uniquely determined")
         seq = (0, rotation / (z1 + zf), 0)
     elif fault == "SLG":
         i = rotation / (z0 + z1 + z2 + 3 * zf)
@@ -745,7 +749,11 @@ def symmetrical_fault(spec):
     precision = 32 * np.finfo(float).eps * scale
     tolerances = [min(1e-6, 1e-7 * abs(i) + precision) for i in iabc]
     difference = [abs(independent - actual) for independent, actual in zip(iphase, iabc)]
-    verified = all(d <= tol for d, tol in zip(difference, tolerances)) and max(map(abs, residual)) < 1e-6
+    boundary_error = max(map(abs, residual))
+    verified = (
+        all(d <= tol for d, tol in zip(difference, tolerances))
+        and boundary_error < 1e-6
+    )
     if "proposed_phase_currents_pu" in spec:
         proposed = spec["proposed_phase_currents_pu"]
         if not isinstance(proposed, dict) or set(proposed) != set(labels):
@@ -776,7 +784,7 @@ def symmetrical_fault(spec):
         "sequence_voltages_pu": vector(seq_names, seq_voltage),
         "ground_return_current_pu": pack(3 * seq_current[0]),
         "max_phase_sequence_difference_pu": float(max(difference)),
-        "max_terminal_boundary_residual_pu": float(max(map(abs, residual))),
+        "max_terminal_boundary_residual_pu": float(boundary_error),
     }
 
 
