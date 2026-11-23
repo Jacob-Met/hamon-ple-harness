@@ -1052,6 +1052,111 @@ def _lagrangian_modes(params):
     return result
 
 
+def _orbital_transfer(params: Mapping[str, Any]) -> Dict[str, Any]:
+    """Two circular orbits joined by a Hohmann ellipse, with tilt at the higher apsis."""
+    from mpmath import mp
+
+    result = {"domain": "lagrangian_orbital", "subkind": "orbital_transfer", "verified": False}
+    ctx = mp.clone()
+
+    def number(key, default=None):
+        value = params.get(key, default)
+        if value is None or isinstance(value, bool):
+            raise ValueError
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError
+        return number
+
+    try:
+        mu, r1, r2 = (number(key) for key in ("mu", "r1", "r2"))
+        if min(mu, r1, r2) <= 0:
+            raise ValueError
+        degrees = "delta_inc_rad" not in params
+        angle = number("delta_inc_deg" if degrees else "delta_inc_rad", 0.0)
+        if degrees:
+            angle = math.remainder(angle, 360.0)
+        isp = number("isp_s") if "isp_s" in params else None
+        g0 = number("g0", 9.80665) if isp is not None else None
+        if isp is not None and min(isp, g0) <= 0:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        return dict(result, error="invalid_orbital_parameters")
+
+    # Direct energy replay at periapsis loses log2(ra/rp) bits for long ellipses.
+    ctx.prec = 220 + abs(math.frexp(r1)[1] - math.frexp(r2)[1])
+    mu, r1, r2, angle = map(ctx.mpf, (mu, r1, r2, angle))
+    radii = r1 + r2
+    axis = radii / 2
+    eccentricity = abs(r2 - r1) / radii
+    if degrees:
+        sine, cosine = ctx.sinpi(angle / 360), ctx.cospi(angle / 360)
+    else:
+        sine, cosine = ctx.sin(angle / 2), ctx.cos(angle / 2)
+
+    momentum = ctx.sqrt(2 * mu * r1 * r2 / radii)
+    energy = -mu / radii
+    residuals = []
+
+    def relative_error(reported, reference):
+        if reference == 0:
+            return 0 if reported == 0 else ctx.inf
+        return abs(reported - reference) / abs(reference)
+
+    def publish(value):
+        wire = float(value)
+        if not math.isfinite(wire):
+            raise ArithmeticError
+        residuals.append(relative_error(ctx.mpf(wire), value))
+        return wire
+
+    def impulse(radius, other, tilted):
+        circular = ctx.sqrt(mu / radius)
+        factor = ctx.sqrt(2 * other / radii)
+        transfer = circular * factor
+        # Rationalize (factor - 1) so distinct adjacent radii retain both burns.
+        difference = circular * (other - radius) / (radii * (factor + 1))
+        if tilted:
+            # Components along the bisector of the velocity vectors and its normal.
+            magnitude = ctx.hypot(difference * cosine, (transfer + circular) * sine)
+        else:
+            magnitude = abs(difference)
+        wire = publish(magnitude)
+
+        # Replay the published burn in a frame aligned with the transfer velocity.
+        # Angular momentum gives an independent transfer speed at this apsis.
+        speed = momentum / radius
+        axial = speed - circular if r1 != r2 else ctx.zero
+        normal = ctx.zero
+        if tilted:
+            axial += 2 * circular * sine**2
+            normal = 2 * circular * sine * cosine
+        residuals.extend((relative_error(ctx.mpf(wire), ctx.hypot(axial, normal)),
+                          relative_error(radius * transfer, momentum),
+                          relative_error(transfer**2 / 2 - mu / radius, energy)))
+        return wire, magnitude
+
+    try:
+        first, d1 = impulse(r1, r2, r1 > r2)
+        second, d2 = impulse(r2, r1, r2 >= r1)
+        total = d1 + d2
+        wire_eccentricity = publish(eccentricity)
+        if wire_eccentricity >= 1:
+            raise ArithmeticError
+        result.update({
+            "a_transfer_m": publish(axis), "eccentricity_transfer": wire_eccentricity,
+            "dv1_m_s": first, "dv2_m_s": second, "dv_total_m_s": publish(total),
+            "transfer_time_s": publish(ctx.pi * ctx.sqrt(axis**3 / mu)),
+            "propellant_mass_fraction": (publish(-ctx.expm1(-total / (ctx.mpf(isp) * g0)))
+                                         if isp is not None else None),
+        })
+    except (ArithmeticError, OverflowError):
+        return dict(result, error="orbital_result_outside_numeric_range")
+    residual = max(residuals)
+    result.update(residual=float(residual), verified=bool(residual < 1e-11))
+    return result
+
+
 def solve_lagrangian_orbital(params: Mapping[str, Any]) -> Dict[str, Any]:
     subkind = str(
         params.get("subkind")
@@ -1125,57 +1230,7 @@ def solve_lagrangian_orbital(params: Mapping[str, Any]) -> Dict[str, Any]:
         return _lagrangian_modes(params)
 
     if subkind == "orbital_transfer":
-        mu = float(params["mu"])
-        r1 = float(params["r1"])
-        r2 = float(params["r2"])
-        d_inc = float(params.get("delta_inc_rad", math.radians(float(params.get("delta_inc_deg", 0.0)))))
-        if mu <= 0.0 or r1 <= 0.0 or r2 <= 0.0:
-            return {"domain": "lagrangian_orbital", "subkind": subkind, "verified": False, "error": "invalid_orbital_parameters"}
-
-        vc1 = math.sqrt(mu / r1)
-        vc2 = math.sqrt(mu / r2)
-        a_t = 0.5 * (r1 + r2)
-        e_t = abs(r2 - r1) / (r1 + r2)
-        vt1 = math.sqrt(mu * (2.0 / r1 - 1.0 / a_t))
-        vt2 = math.sqrt(mu * (2.0 / r2 - 1.0 / a_t))
-
-        if r2 >= r1:
-            dv1 = abs(vt1 - vc1)
-            dv2 = math.sqrt(max(0.0, vt2 * vt2 + vc2 * vc2 - 2.0 * vt2 * vc2 * math.cos(d_inc)))
-        else:
-            dv1 = math.sqrt(max(0.0, vc1 * vc1 + vt1 * vt1 - 2.0 * vc1 * vt1 * math.cos(d_inc)))
-            dv2 = abs(vc2 - vt2)
-
-        dv_tot = dv1 + dv2
-        t_trans = math.pi * math.sqrt((a_t ** 3) / mu)
-        h_expect = math.sqrt(mu * a_t * (1.0 - e_t * e_t))
-        h_err = max(abs(r1 * vt1 - h_expect), abs(r2 * vt2 - h_expect)) / max(h_expect, 1e-12)
-        eps_t = -mu / (2.0 * a_t)
-        e_err = max(
-            abs((0.5 * vt1 * vt1 - mu / r1) - eps_t),
-            abs((0.5 * vt2 * vt2 - mu / r2) - eps_t),
-        ) / max(abs(eps_t), 1e-12)
-        residual = float(max(h_err, e_err))
-
-        prop_frac = None
-        if "isp_s" in params:
-            isp = float(params["isp_s"])
-            g0 = float(params.get("g0", 9.80665))
-            prop_frac = float(1.0 - math.exp(-dv_tot / (isp * g0)))
-
-        return {
-            "domain": "lagrangian_orbital",
-            "subkind": subkind,
-            "a_transfer_m": float(a_t),
-            "eccentricity_transfer": float(e_t),
-            "dv1_m_s": float(dv1),
-            "dv2_m_s": float(dv2),
-            "dv_total_m_s": float(dv_tot),
-            "transfer_time_s": float(t_trans),
-            "propellant_mass_fraction": prop_frac,
-            "residual": residual,
-            "verified": bool(residual < 1e-11),
-        }
+        return _orbital_transfer(params)
 
     return {"domain": "lagrangian_orbital", "subkind": subkind, "verified": False, "error": f"unsupported_lagrangian_orbital:{subkind}"}
 
