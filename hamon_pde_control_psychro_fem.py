@@ -42,7 +42,7 @@ import json
 import math
 import re
 import sys
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from fractions import Fraction
 from itertools import zip_longest
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -1751,28 +1751,27 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
     return {"passed": False, "domain": "control", "mode": mode, "reason": f"Unknown control mode: {mode}"}
 
 
-def _pws_ashrae_pa(t_c: float, *, ice_below_c: float = 0.0) -> float:
-    tk = t_c + 273.15
-    if tk <= 0.0:
+_ICE_SATURATION_COEFFICIENTS = (-5674.5359, 6.3925247, -.0096778430, 6.2215701e-7,
+                                2.0747825e-9, -9.4840240e-13, 4.1635019)
+_WATER_SATURATION_COEFFICIENTS = (-5800.2206, 1.3914993, -.048640239, 4.1764768e-5,
+                                  -1.4452093e-8, 6.5459673)
+_DECIMAL_ICE = tuple(Decimal(str(c)) for c in _ICE_SATURATION_COEFFICIENTS)
+_DECIMAL_WATER = tuple(Decimal(str(c)) for c in _WATER_SATURATION_COEFFICIENTS)
+
+
+def _pws_ashrae_pa(t_c, *, ice_below_c=0.0):
+    precise = isinstance(t_c, Decimal)
+    tk = t_c + (Decimal("273.15") if precise else 273.15)
+    if tk <= 0:
         raise ValueError("Temperature below absolute zero")
+    logarithm = tk.ln() if precise else math.log(tk)
     if t_c < ice_below_c:
-        c1 = -5.6745359e3
-        c2 = 6.3925247e0
-        c3 = -9.6778430e-3
-        c4 = 6.2215701e-7
-        c5 = 2.0747825e-9
-        c6 = -9.4840240e-13
-        c7 = 4.1635019e0
-        ln_pws = c1 / tk + c2 + c3 * tk + c4 * (tk ** 2) + c5 * (tk ** 3) + c6 * (tk ** 4) + c7 * math.log(tk)
+        a, b, c, d, e, f, g = _DECIMAL_ICE if precise else _ICE_SATURATION_COEFFICIENTS
+        ln_pws = a/tk + b + c*tk + d*tk**2 + e*tk**3 + f*tk**4 + g*logarithm
     else:
-        c8 = -5.8002206e3
-        c9 = 1.3914993e0
-        c10 = -4.8640239e-2
-        c11 = 4.1764768e-5
-        c12 = -1.4452093e-8
-        c13 = 6.5459673e0
-        ln_pws = c8 / tk + c9 + c10 * tk + c11 * (tk ** 2) + c12 * (tk ** 3) + c13 * math.log(tk)
-    return math.exp(ln_pws)
+        a, b, c, d, e, f = _DECIMAL_WATER if precise else _WATER_SATURATION_COEFFICIENTS
+        ln_pws = a/tk + b + c*tk + d*tk**2 + e*tk**3 + f*logarithm
+    return ln_pws.exp() if precise else math.exp(ln_pws)
 
 
 def _bisect_dew_point(pw_pa: float, lo: float, hi: float) -> float:
@@ -1957,6 +1956,118 @@ def _ice_enthalpy_kj_kg(temp_c: float) -> float:
     return -_FUSION_ENTHALPY_KJ_KG + temp_c * (2.097 + 0.00365 * temp_c)
 
 
+def _mix_air_streams(spec, pressure, model, states):
+    """Dry-air mass, sensible energy and water balances at a common pressure."""
+    D = Decimal
+    def supplied(value):
+        return D.from_float(float(value))
+
+    equilibrium = model == "equilibrium_ice"
+    switch = D(".01") if equilibrium else D(0)
+    p = supplied(pressure)
+    vapor_ratio = D(".621945")
+    cp_air, cp_vapor, latent, fusion = D("1.006"), D("1.86"), D(2501), D("333.5")
+
+    def saturation(temp, ice_limit=False):
+        pw = _pws_ashrae_pa(temp, ice_below_c=(temp + 1 if ice_limit else switch))
+        return vapor_ratio * pw / (p-pw)
+
+    def inlet(row, state):
+        temp = supplied(row["t_db_c"])
+        if "rh" in row:
+            rh = min(1, max(0, supplied(row["rh"])))
+            pw = rh * _pws_ashrae_pa(temp, ice_below_c=switch)
+            water = vapor_ratio * pw / (p-pw)
+        elif "w_kg_per_kgda" in row:
+            water = supplied(row["w_kg_per_kgda"])
+        elif "t_wb_c" in row:
+            wet = supplied(row["t_wb_c"])
+            ws = saturation(wet)
+            if wet >= 0:
+                water = ((latent-D("2.326")*wet)*ws-cp_air*(temp-wet)) / (latent+cp_vapor*temp-D("4.186")*wet)
+            else:
+                water = ((2830-D(".24")*wet)*ws-cp_air*(temp-wet)) / (2830+cp_vapor*temp-D("2.1")*wet)
+            if state["w_kg_per_kgda"] == 0:
+                water = D(0)  # The admitted dry-wick boundary.
+        else:
+            water = saturation(supplied(row["t_dp_c"]))
+        if water < 0:
+            raise ValueError("Inlet humidity ratio must be nonnegative")
+        if "m_da_kg_s" in row:
+            mass = supplied(row["m_da_kg_s"])
+        else:
+            volume = D("287.042")*(temp+D("273.15"))*(1+D("1.607858")*water)/p
+            mass = supplied(row["v_dot_m3_s"])/volume
+        if not mass.is_finite() or mass <= 0:
+            raise ValueError("Non-positive or nonfinite dry-air mass flow")
+        return temp, water, mass
+
+    t1, w1, m1 = inlet(spec["stream1"], states[0])
+    t2, w2, m2 = inlet(spec["stream2"], states[1])
+    mass = m1 + m2
+    w = (m1*w1 + m2*w2)/mass if w1 != w2 else w1
+    c1, c2 = cp_air + cp_vapor*w1, cp_air + cp_vapor*w2
+    sensible = (m1*c1*t1 + m2*c2*t2)/mass
+    # Solving for the all-vapor dry bulb directly preserves an isothermal
+    # inlet and avoids subtracting latent energy from the total enthalpy.
+    t = (m1*c1*t1 + m2*c2*t2)/(m1*c1 + m2*c2) if t1 != t2 else t1
+    total_h = sensible + latent*w
+    fog = w > saturation(t)
+    vapor, ice, liquid = w, D(0), D(0)
+
+    def balance(temp, frozen, ice_limit=False):
+        vapor = saturation(temp, ice_limit)
+        condensed = w-vapor
+        h_cond = (-fusion+temp*(D("2.097")+D(".00365")*temp) if frozen else D("4.186")*temp)
+        # Subtract a common 2501 kJ per kg of total water from both sides.
+        residual = (cp_air+cp_vapor*vapor)*temp + condensed*(h_cond-latent) - sensible
+        return residual, vapor
+
+    if fog:
+        hi = max(t1, t2)
+        lo = max(D(0), min(t, hi))
+        liquid_gap, vapor_zero = balance(D(0), False)
+        frozen = hi < 0 or (t < 0 and liquid_gap > 0)
+        if frozen and not equilibrium:
+            raise ValueError("Fog equilibrium requires an ice or mixed-phase model")
+        ice_gap = liquid_gap - fusion*(w-vapor_zero)
+        if frozen and hi >= 0 and w >= vapor_zero and ice_gap <= 0 <= liquid_gap:
+            t, vapor = D(0), vapor_zero
+            # Each phase is determined from its own melting-interval ordinate.
+            ice, liquid = liquid_gap/fusion, -ice_gap/fusion
+        else:
+            if frozen:
+                lo, hi = max(D(-60), min(t, hi)), min(D(0), hi)
+            if lo > hi or balance(lo, frozen)[0] > 0 or balance(hi, frozen)[0] < 0:
+                raise ValueError("Inlets do not bracket a supported condensate equilibrium")
+            if (lo < switch <= hi and balance(switch, frozen, ice_limit=True)[0] <= 0
+                    < balance(switch, frozen)[0]):
+                raise ValueError("Energy balance falls in the saturation-correlation phase gap")
+            for _ in range(1200):
+                if float(lo) == float(hi):
+                    break
+                mid = (lo+hi)/2
+                if balance(mid, frozen)[0] < 0:
+                    lo = mid
+                else:
+                    hi = mid
+            t = (lo+hi)/2
+            vapor = min(w, saturation(t))
+            if frozen:
+                ice = w-vapor
+            else:
+                liquid = w-vapor
+    rh = (D(1) if fog else min(D(1), p*w/(vapor_ratio+w)/_pws_ashrae_pa(t, ice_below_c=switch)))
+    res = {"m_da_total_kg_s": float(mass), "t_db_mix_c": float(t), "w_mix_kg_per_kgda": float(w),
+           "w_vapor_kg_per_kgda": float(vapor), "w_condensate_kg_per_kgda": float(ice+liquid),
+           "h_mix_kj_per_kgda": float(total_h), "rh_mix": float(rh), "fog_saturated": fog}
+    if not all(math.isfinite(value) for value in res.values()):
+        raise ValueError("Mixed stream exceeds the finite output range")
+    if equilibrium:
+        res.update(condensate_model=model, w_ice_kg_per_kgda=float(ice), w_liquid_kg_per_kgda=float(liquid))
+    return res
+
+
 def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "state")).strip().lower()
     p_atm = float(spec.get("p_atm_pa", 101325.0))
@@ -1982,83 +2093,13 @@ def verify_psychrometric_process(spec: Dict[str, Any]) -> Dict[str, Any]:
         s2 = _psychro_state(spec["stream2"], p_atm, ice_below_c=ice_below)
         if not s1.get("passed") or not s2.get("passed"):
             return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": "Invalid inlet stream state"}
-        m1 = float(spec["stream1"].get("m_da_kg_s") or (float(spec["stream1"]["v_dot_m3_s"]) / s1["v_m3_per_kgda"]))
-        m2 = float(spec["stream2"].get("m_da_kg_s") or (float(spec["stream2"]["v_dot_m3_s"]) / s2["v_m3_per_kgda"]))
-        if m1 <= 0.0 or m2 <= 0.0:
-            return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": "Non-positive dry-air mass flow"}
-        m3 = m1 + m2
-        w3 = (m1 * s1["w_kg_per_kgda"] + m2 * s2["w_kg_per_kgda"]) / m3
-        h3 = (m1 * s1["h_kj_per_kgda"] + m2 * s2["h_kj_per_kgda"]) / m3
-        t_db3 = (h3 - 2501.0 * w3) / (1.006 + 1.86 * w3)
-        pws3 = _pws_ashrae_pa(t_db3, ice_below_c=ice_below)
-        pw3 = p_atm * w3 / (0.621945 + w3)
-        rh3 = pw3 / pws3
-        fogged = rh3 > (1.0 + 8.0 * math.ulp(1.0) if equilibrium else 1.0)
-        vapor = w3
-        ice = 0.0
-        if fogged:
-            frozen = False
-            on_melting_plateau = False
-
-            def saturated_outlet(temp: float) -> Tuple[float, float]:
-                pws = _pws_ashrae_pa(temp, ice_below_c=ice_below)
-                w_sat = 0.621945 * pws / (p_atm - pws)
-                h_air = 1.006 * temp + w_sat * (2501.0 + 1.86 * temp)
-                h_condensed = _ice_enthalpy_kj_kg(temp) if frozen else 4.186 * temp
-                return w_sat, h_air + (w3 - w_sat) * h_condensed
-
-            hi = max(s1["t_db_c"], s2["t_db_c"])
-            lo = max(0.0, min(t_db3, hi))
-            roundoff = 8.0 * math.ulp(max(abs(h3), 1.0))
-            if hi < 0.0 or (t_db3 < 0.0 and saturated_outlet(lo)[1] > h3 + roundoff):
-                if not equilibrium:
-                    return {"passed": False, "domain": "psychrometrics", "mode": mode,
-                            "reason": "Fog equilibrium requires an ice or mixed-phase model"}
-                # At the melting point the air and total condensate mass are fixed.
-                # The fusion enthalpy determines how much condensate is ice.
-                vapor_zero, liquid_zero = saturated_outlet(0.0)
-                frozen = True
-                _, ice_zero = saturated_outlet(0.0)
-                if hi >= 0.0 and w3 >= vapor_zero and ice_zero <= h3 <= liquid_zero:
-                    on_melting_plateau = True
-                    t_db3, vapor = 0.0, vapor_zero
-                    ice = (liquid_zero - h3) / _FUSION_ENTHALPY_KJ_KG
-                else:
-                    lo, hi = max(-60.0, min(t_db3, hi)), min(0.0, hi)
-            if not on_melting_plateau:
-                if (lo > hi or saturated_outlet(lo)[1] > h3 + roundoff
-                        or saturated_outlet(hi)[1] < h3 - roundoff):
-                    return {"passed": False, "domain": "psychrometrics", "mode": mode,
-                            "reason": "Inlets do not bracket a supported condensate equilibrium"}
-                for _ in range(64):
-                    mid = 0.5 * (lo + hi)
-                    if saturated_outlet(mid)[1] < h3:
-                        lo = mid
-                    else:
-                        hi = mid
-                t_db3 = 0.5 * (lo + hi)
-                vapor = min(w3, saturated_outlet(t_db3)[0])
-                if frozen:
-                    ice = w3 - vapor
-            rh3 = 1.0
-        res: Dict[str, Any] = {
-            "passed": True,
-            "domain": "psychrometrics",
-            "mode": mode,
-            "m_da_total_kg_s": m3,
-            "t_db_mix_c": t_db3,
-            "w_mix_kg_per_kgda": w3,  # total water, including any condensate
-            "w_vapor_kg_per_kgda": vapor,
-            "w_condensate_kg_per_kgda": w3 - vapor,
-            "h_mix_kj_per_kgda": h3,  # total stream enthalpy per kg dry air
-            "rh_mix": min(rh3, 1.0),
-            "fog_saturated": fogged,
-        }
-        if equilibrium:
-            condensate = w3 - vapor
-            ice = min(ice, condensate)
-            res.update(condensate_model=model, w_ice_kg_per_kgda=ice,
-                       w_liquid_kg_per_kgda=condensate - ice)
+        try:
+            with localcontext() as ctx:
+                ctx.prec = 80
+                res = _mix_air_streams(spec, p_atm, model, (s1, s2))
+        except (KeyError, ValueError, ArithmeticError) as exc:
+            return {"passed": False, "domain": "psychrometrics", "mode": mode, "reason": str(exc)}
+        res.update(passed=True, domain="psychrometrics", mode=mode)
         _check_claimed(res, spec)
         return res
 
