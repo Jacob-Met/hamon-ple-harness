@@ -150,6 +150,11 @@ _WAVE8_INPUTS = {
         "H_clay_m e0 Cc sigma_v0_eff_Pa delta_sigma_v_Pa cv_m2_s time_s drainage sigma_preconsolidation_Pa Cr",
         "dual_solver_abs_residual",
     ),
+    "layered_consolidation_1d": (
+        "civil_geotech",
+        "consolidation_layers time_s drainage load_history proposed_settlement_m proposed_mean_excess_pore_pressure_Pa",
+        "dual_solver_rel_residual component_rel_residual inversion_rel_residual load_balance_rel_residual",
+    ),
     "consolidation_history_1d": (
         "civil_geotech",
         "H_clay_m cv_m2_s mv_per_Pa time_s drainage load_history proposed_settlement_m proposed_mean_excess_pore_pressure_Pa",
@@ -170,6 +175,7 @@ _RANKINE_LAYER_KEYS = "thickness_m phi_deg gamma_above_water_N_m3 gamma_submerge
 _WAVE8_ROW_KEYS = {
     "rectangular_loads": "center_x_m center_y_m width_m length_m net_pressure_Pa",
     "settlement_layers": "top_depth_m bottom_depth_m e0 Cc Cr sigma_v0_eff_Pa sigma_preconsolidation_Pa",
+    "consolidation_layers": "thickness_m cv_m2_s mv_per_Pa",
     "load_history": "time_s surcharge_Pa",
     "nodes": "id demand_m3_s fixed_head_m",
     "pipes": "id from to length_m diameter_m roughness_m minor_loss_K",
