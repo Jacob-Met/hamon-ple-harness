@@ -1544,17 +1544,19 @@ def _electrochemistry(params: Mapping[str, Any]) -> Dict[str, Any]:
         raw = params.get(key, default)
         if raw is None or isinstance(raw, bool):
             raise ValueError(f"invalid_{key}")
+        if type(raw) is int:
+            return raw
         number = float(raw)
         if not math.isfinite(number):
             raise ValueError(f"invalid_{key}")
         return number
 
     def rational(number):
-        return Fraction(str(number))
+        return Fraction(number) if type(number) is int else Fraction(str(number))
 
     def represent(quantity):
         number = float(quantity)
-        if not math.isfinite(number) or (quantity and number == 0.0):
+        if not math.isfinite(number) or (quantity and abs(Fraction(number)/quantity-1) >= Fraction(1,10**11)):
             raise ArithmeticError("electrochem_result_outside_numeric_range")
         return number
 
@@ -1589,6 +1591,21 @@ def _electrochemistry(params: Mapping[str, Any]) -> Dict[str, Any]:
         extent = reaction_charge / (n * faraday)
         product = nu * extent
         mass = product * rational(molar_mass) if molar_mass is not None else None
+        from hamon_electrochemical_port import electrical_state
+        port = electrical_state(
+            potential=rational(potential),electrons=n,temperature=rational(temperature),
+            quotient=rational(quotient),current=rational(current),resistance=rational(resistance),
+            activation=rational(activation),efficiency=rational(efficiency),mode=mode,
+            circuit=params.get("external_circuit","prescribed_current"),
+            faraday=faraday,gas=rational(R_GAS_UNIV))
+        result.update(port)
+        if not port["operating_point_feasible"]:
+            result.update(verified=False,error="A passive load cannot supply the requested terminal power")
+            if target is not None:
+                result.update(target_mass_status="infeasible_operating_point" if target else "already_met_at_initial_time",
+                              target_time_s=None if target else 0.)
+            return result
+
         result.update({
             "n_electrons": electrons,
             "product_stoich": coefficient,
@@ -1600,33 +1617,18 @@ def _electrochemistry(params: Mapping[str, Any]) -> Dict[str, Any]:
             "mass_deposited_g": represent(mass) if mass is not None else (0.0 if product == 0 else None),
         })
 
-        rt = R_GAS_UNIV * temperature
-        nf = electrons * FARADAY_C_MOL
-        log_q = math.log(quotient)
-        equilibrium = potential - (rt / nf) * log_q
-        standard_gibbs = -nf * potential
-        gibbs = -nf * equilibrium
-        loss = activation + current * resistance
-        terminal = equilibrium + loss if mode == "electrolytic" else equilibrium - loss
-        ln_k = -standard_gibbs / rt
-        thermo = [equilibrium, terminal, standard_gibbs, gibbs, ln_k]
-        if not all(map(math.isfinite, thermo)):
-            raise ArithmeticError("electrochem_result_outside_numeric_range")
-
         # Check both reported molar quantities against the selected reaction charge.
         def balance(charge):
             return float(abs(charge - reaction_charge) / max(abs(reaction_charge), Fraction(1)))
 
         residual = max(
-            abs(gibbs - (standard_gibbs + rt * log_q)) / max(abs(gibbs), abs(standard_gibbs), rt, 1),
+            port["power_balance_residual"],
             balance(rational(result["reaction_extent_mol"]) * n * faraday),
             balance(rational(result["product_moles"]) * n * faraday / nu),
         )
         if not math.isfinite(residual):
             raise ArithmeticError("electrochem_result_outside_numeric_range")
-        result.update({"E_nernst_V": equilibrium, "V_cell_V": terminal,
-                       "delta_G0_J_mol": standard_gibbs, "delta_G_J_mol": gibbs,
-                       "ln_K_eq": ln_k, "residual": residual, "verified": residual < 1e-11})
+        result.update(residual=residual, verified=residual < 1e-11)
 
         if target is not None:
             result["target_time_s"] = None
