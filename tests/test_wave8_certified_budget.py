@@ -102,6 +102,15 @@ def test_verified_wave8_input_changes_real_thinking_tier(spec):
     assert json.loads(plan["presolve_result_json"])["conservation_verified"]
 
 
+def test_pipe_gravity_reaches_certified_budget_only_after_validation():
+    base = route(SPECS[0])
+    local = route({**SPECS[0], "gravity_m_s2": 1.62})
+    base_head = json.loads(base["presolve_result_json"])["heads_m"]["a"]
+    local_head = json.loads(local["presolve_result_json"])["heads_m"]["a"]
+    assert (5 - local_head) == pytest.approx((5 - base_head) * 9.80665 / 1.62, rel=1e-8)
+    assert "presolve_result_json" not in route({**SPECS[0], "gravity_m_s2": -1})
+
+
 def test_extra_work_or_unsupported_evidence_keeps_normal_budget():
     spec = SPECS[-1]
     changes = [

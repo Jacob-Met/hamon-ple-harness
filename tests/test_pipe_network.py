@@ -200,7 +200,8 @@ def test_radial_capillary_and_low_resistance_tap(direction):
 
 
 @pytest.mark.parametrize("left_length,right_length", [(200.0, 200.0), (100.0, 300.0)])
-def test_prescribed_heads_laminar_series(left_length, right_length):
+@pytest.mark.parametrize("gravity", [9.80665, 1.62])
+def test_prescribed_heads_laminar_series(left_length, right_length, gravity):
     # Hagen–Poiseuille gives resistance proportional to length for equal diameters.
     case = {
         "nodes": [{"id": "H", "fixed_head_m": 10.02}, {"id": "M"},
@@ -209,7 +210,8 @@ def test_prescribed_heads_laminar_series(left_length, right_length):
                   {"id": "b", "from": "L", "to": "M", "length_m": right_length, "diameter_m": .02}],
     }
     total_length = left_length + right_length
-    flow = math.pi * 9.80665 * .02**4 * .02 / (128e-6 * total_length)
+    case["gravity_m_s2"] = gravity
+    flow = math.pi * gravity * .02**4 * .02 / (128e-6 * total_length)
     midpoint = 10.02 - .02 * left_length / total_length
     case["proposed_heads_m"] = {"H": 10.02, "M": midpoint, "L": 10.0}
     case["proposed_flows_m3_s"] = {"a": flow, "b": -flow}
@@ -223,6 +225,34 @@ def test_prescribed_heads_laminar_series(left_length, right_length):
     assert max(solved["reynolds"].values()) < 2000
     case["proposed_heads_m"]["L"] += .001
     assert not verify_pipe_network(case)["proposed_checks"]["reservoir_head_matches"]
+
+
+@pytest.mark.parametrize("gravity", [1.62, 9.780, 9.832])
+def test_site_gravity_checks_local_head_and_rejects_standard_gravity_claim(gravity):
+    length, diameter, viscosity, demand, minor = 34.0, .014, 1e-5, 1e-5, 3.5
+    speed = demand / (math.pi * diameter**2 / 4)
+    # Hagen–Poiseuille wall friction and the fitting's minor loss, in J/kg.
+    specific_loss = 32 * viscosity * length * speed / diameter**2 + minor * speed**2 / 2
+    case = {
+        "calculation": "pipe_network", "kinematic_viscosity_m2_s": viscosity,
+        "gravity_m_s2": gravity,
+        "nodes": [{"id": "R", "fixed_head_m": 50}, {"id": "J", "demand_m3_s": demand}],
+        "pipes": [{"id": "p", "from": "R", "to": "J", "length_m": length,
+                   "diameter_m": diameter, "minor_loss_K": minor}],
+        "proposed_heads_m": {"R": 50, "J": 50 - specific_loss / gravity},
+    }
+    solved = run_router_conservation_cad_verifier({"spec": case})
+    assert solved["conservation_verified"], solved
+    assert solved["heads_m"]["J"] == pytest.approx(case["proposed_heads_m"]["J"], abs=1e-11)
+    case["proposed_heads_m"]["J"] = 50 - specific_loss / 9.80665
+    assert not run_dual_verify_spec(
+        {"mode": "domain", "kind": "pipe_network", "spec": case}
+    )["dual_verified"]
+
+
+@pytest.mark.parametrize("gravity", [0, -1, True, "9.81", None, math.inf, math.nan])
+def test_invalid_site_gravity_is_rejected(gravity):
+    assert not verify_pipe_network({**parallel_case(1e-7), "gravity_m_s2": gravity})["ok"]
 
 
 def three_reservoir_case():
