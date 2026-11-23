@@ -404,10 +404,16 @@ def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, densi
         diagnostics["connected_component_count"] = components
         if components != 1:
             return {**diagnostics, "reason": "Declared STEP shell has disconnected surface components"}
-        from hamon_step_surface import verify_surface_embedding
+        from hamon_step_surface import integrate_closed_surface, verify_surface_embedding
         diagnostics.update(verify_surface_embedding(unique, qfaces, surface_face_ids))
         if "reason" in diagnostics:
             return diagnostics
+        if not math.isfinite(surface_area) or surface_area <= 0:
+            return {**diagnostics, "reason": "STEP surface area is outside finite binary64 range"}
+        moments = integrate_closed_surface(unique, qfaces, density_kg_m3)
+        if "reason" in moments:
+            return {**diagnostics, **moments}
+        return {**diagnostics, **moments, "surface_area_m2": surface_area}
 
     dets = np.einsum("ij,ij->i", np.cross(v0, v1), v2)
     signed_vol = float(np.sum(dets) / 6.0)

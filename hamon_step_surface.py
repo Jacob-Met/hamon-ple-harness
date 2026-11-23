@@ -5,6 +5,7 @@ can cross, overlap or touch at a nonmanifold vertex.  Work on the original
 binary64 vertices, without a distance tolerance or coordinate welding.
 """
 from fractions import Fraction
+import math
 
 
 def _sub(a, b):
@@ -164,3 +165,85 @@ def verify_surface_embedding(vertices, triangles, source_faces=None):
                 return result
         active.append(i)
     return {"embedded_surface_verified": True}
+
+
+def integrate_closed_surface(vertices, triangles, density):
+    """Integrate exact polyhedral moments before rounding public quantities.
+
+    An embedded surface may enclose a very thin region between nearly equal
+    pyramids. Floating sums of their first and second moments can lose the
+    result even when volume remains accurate. All signed tetrahedral moments
+    and the parallel-axis subtraction therefore use the parsed coordinates
+    as exact rational numbers.
+    """
+    if not math.isfinite(density) or density < 0:
+        return {"reason": "Solid density must be finite and nonnegative"}
+    raw = [tuple(Fraction(float(x)) for x in point) for point in vertices]
+    anchor = raw[0]
+    local = [_sub(point, anchor) for point in raw]
+    total = Fraction(0)
+    first = [Fraction(0) for _ in range(3)]
+    second = [[Fraction(0) for _ in range(3)] for _ in range(3)]
+    for indices in triangles:
+        tri = [local[int(index)] for index in indices]
+        det = _dot(tri[0], _cross(tri[1], tri[2]))
+        total += det
+        summed = [sum(p[k] for p in tri) for k in range(3)]
+        for i in range(3):
+            first[i] += det*summed[i]
+            for j in range(i, 3):
+                second[i][j] += det*(summed[i]*summed[j] + sum(p[i]*p[j] for p in tri))
+    if total == 0:
+        return {"reason": "Declared STEP shell encloses zero volume"}
+    if total < 0:
+        total = -total
+        first = [-x for x in first]
+        second = [[-x for x in row] for row in second]
+    volume = total/6
+    center = [x/(4*total) for x in first]
+    covariance = [[second[min(i, j)][max(i, j)]/120 - volume*center[i]*center[j]
+                   for j in range(3)] for i in range(3)]
+    trace = sum(covariance[i][i] for i in range(3))
+    rho = Fraction(density)
+    inertia = [[rho*((trace if i == j else 0) - covariance[i][j]) for j in range(3)] for i in range(3)]
+
+    def wire(value, positive=False):
+        try:
+            result = float(value)
+        except OverflowError as exc:
+            raise ValueError("out of binary64 range") from exc
+        if not math.isfinite(result) or (positive and result <= 0):
+            raise ValueError("out of binary64 range")
+        return result
+
+    try:
+        result = {
+            "volume_m3": wire(volume, True),
+            "mass_kg": wire(rho*volume, density > 0),
+            "density_kg_m3": density,
+            "centroid_m": [wire(x+y) for x, y in zip(anchor, center)],
+            "aabb_extents_m": [wire(max(p[k] for p in raw) - min(p[k] for p in raw)) for k in range(3)],
+            "inertia_tensor_centroid_kg_m2": [[wire(x) for x in row] for row in inertia],
+            "mass_moment_method": "exact_polyhedral_integrals",
+        }
+        if density == 0:
+            result["principal_moments_kg_m2"] = [0., 0., 0.]
+            return result
+        determinant = _dot(inertia[0], _cross(inertia[1], inertia[2]))
+        if (inertia[0][0] <= 0 or inertia[0][0]*inertia[1][1] - inertia[0][1]**2 <= 0
+                or determinant <= 0):
+            return {"reason": "Exact STEP inertia is not positive definite"}
+        # For positive eigenvalues, lambda_min >= det(I)/trace(I)^2 and
+        # lambda_max <= trace(I). Their ratio bounds the precision needed to
+        # recover the smallest principal moment without cancellation.
+        condition_bound = sum(inertia[k][k] for k in range(3))**3 / determinant
+        bits = max(0, condition_bound.numerator.bit_length() - condition_bound.denominator.bit_length())
+        digits = 60 + math.ceil(bits*math.log10(2))
+        import mpmath as mp
+        with mp.workdps(digits):
+            matrix = mp.matrix([[mp.mpf(x.numerator)/x.denominator for x in row] for row in inertia])
+            eigenvalues = mp.eigsy(matrix, eigvals_only=True)
+            result["principal_moments_kg_m2"] = [wire(x, True) for x in eigenvalues]
+        return result
+    except ValueError:
+        return {"reason": "STEP mass properties cannot be represented as finite binary64 quantities"}
