@@ -291,20 +291,16 @@ def verify_rigid_polygon_contact(spec):
                 points=[[_render(c,'contact coordinate') for c in p] for p,_ in clipped]
                 pressures=[_render(q,'contact pressure') for _,q in clipped]
                 display=[tuple(map(F,p)) for p in points]
-                local_peak=max(q for _,q in clipped)
-                exact_area=area([p for p,_ in clipped])
-                compact=(len(set(display))==len(display) and
-                         all(_det(display[i-1],v,display[(i+1)%len(display)])>0 for i,v in enumerate(display)) and
-                         abs(area(display)-exact_area)<=exact_area*F('1e-8') and
-                         all(abs(max(F(0),_dot(plane,(1,*xy)))-F(h))<=local_peak*F('1e-8')
-                             and all(abs(v-w)<=d*F('1e-9') for v,w,d in zip(p,xy,scale))
-                             for (p,_),xy,h in zip(clipped,display,pressures)))
+                # Each vertex is an intersection of material, slab or release
+                # boundaries. Moving it even slightly can fill a real hole or
+                # separate adjacent patches while preserving integrated loads.
+                # Round-trip the heights as well, so adjacent patches remain
+                # exact restrictions of the single reported pressure plane.
+                compact=all(xy==p and F(h)==q
+                            for (p,q),xy,h in zip(clipped,display,pressures))
                 if compact:
                     encoding='binary64'
                 else:
-                    # A rounded cut can collapse a real sliver at a slab vertex.
-                    # Preserve the exact intersection of the reported plane with
-                    # the material, using JSON fraction strings only for this patch.
                     encoding='rational'
                     points=[[str(c) for c in p] for p,_ in clipped]
                     pressures=[str(q) for _,q in clipped]
