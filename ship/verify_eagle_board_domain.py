@@ -191,8 +191,19 @@ def crossing_controls(args, original, sch):
     ):
         set_outline(root,rows)
         result=run_cli(args,"crossing-"+label,root,sch,["--contact-nets","D+","D-"])["inter_net_contact"]
-        assert result["board_domain"]["status"]==("unbounded_artwork" if label=="absent" else "unresolved")
-        assert bool(result["contacts"])==(label=="absent")
+        if label == "nested":
+            assert result["board_domain"]["status"] == "bounded"
+            row, = result["contacts"]
+            x,y = map(Q,row["center_nm"])
+            radius = Q(row["disk_radius_nm"])
+            dx,dy = max(abs(x)-50000,0), max(abs(y)-50000,0)
+            assert dx*dx+dy*dy > radius*radius
+            expected = F(199996**2 - 100004**2, 10**12)
+            assert abs(Q(row["overlap_lower_bound_mm2"])-expected) < F(1,10**14)
+            on_board_disk(rect(-2,-2,2,2),row["center_nm"],radius)
+        else:
+            assert result["board_domain"]["status"]==("unbounded_artwork" if label=="absent" else "unresolved")
+            assert bool(result["contacts"])==(label=="absent")
         records[label]=result
     return records
 

@@ -92,18 +92,8 @@ def _inner_copper(primitive):
 
 
 
-def nominal_board_domain(records):
-    """Conservative interior of one simple outline with isolated tangent quarters.
-
-    A validated quarter replaces an isolated sharp rectangular corner of a
-    simple polygon. Convex quarters use inscribed chords. At a reflex corner,
-    the intersection of neighboring tangents bounds the excluded circle from
-    outside, so the additional board material stays on the retained side.
-    """
-    if not records:
-        return None, {"status": "unbounded_artwork", "reason": "no_layer_20_outline"}
-    if len(records) > 2048:
-        raise ValueError("layer 20 outline exceeds the supported edge count")
+def _outline_cycles(records):
+    """Orient degree-two endpoint components without depending on wire order."""
     adjacent = defaultdict(list)
     for index, row in enumerate(records):
         a, b = tuple(row["a"]), tuple(row["b"])
@@ -113,28 +103,41 @@ def nominal_board_domain(records):
         adjacent[b].append(index)
     if any(len(indices) != 2 for indices in adjacent.values()):
         raise ValueError("open or branched layer 20 outline")
-    start = min(adjacent)
-    current, used, ordered = start, set(), []
-    while True:
-        choices = [i for i in adjacent[current] if i not in used]
-        if not choices:
-            raise ValueError("incomplete layer 20 endpoint cycle")
-        def destination(i):
-            row = records[i]
-            return tuple(row["b"]) if tuple(row["a"]) == current else tuple(row["a"])
-        index = min(choices, key=destination)
-        row = dict(records[index])
-        if tuple(row["a"]) != current:
-            row["a"], row["b"] = row["b"], row["a"]
-            row["curve"] = -row["curve"]
-        row["a"], row["b"] = tuple(row["a"]), tuple(row["b"])
-        ordered.append(row)
-        used.add(index)
-        current = row["b"]
-        if current == start:
-            break
-    if len(used) != len(records):
-        raise ValueError("multiple or nested layer 20 contours are unresolved")
+
+    cycles = []
+    unused_vertices = set(adjacent)
+    used_edges = set()
+    while unused_vertices:
+        if len(cycles) == 2:
+            raise ValueError("more than two layer 20 contours are unresolved")
+        start = current = min(unused_vertices)
+        ordered = []
+        while True:
+            unused_vertices.remove(current)
+            choices = [i for i in adjacent[current] if i not in used_edges]
+            if not choices:
+                raise ValueError("incomplete layer 20 endpoint cycle")
+            def destination(i):
+                row = records[i]
+                return tuple(row["b"]) if tuple(row["a"]) == current else tuple(row["a"])
+            index = min(choices, key=destination)
+            row = dict(records[index])
+            if tuple(row["a"]) != current:
+                row["a"], row["b"] = row["b"], row["a"]
+                row["curve"] = -row["curve"]
+            row["a"], row["b"] = tuple(row["a"]), tuple(row["b"])
+            ordered.append(row)
+            used_edges.add(index)
+            current = row["b"]
+            if current == start:
+                break
+        cycles.append(ordered)
+    return cycles
+
+
+def _outer_domain(ordered):
+    """Build the conservatively inset outer contour, with validated tangent quarters."""
+    start = ordered[0]["a"]
 
     def sub(a, b):
         return (a[0]-b[0], a[1]-b[1])
@@ -263,6 +266,48 @@ def nominal_board_domain(records):
         "boundary_guard_nm": _GUARD,
         "interior_area_lower_bound_mm2": domain.area/1e12,
     }
+
+
+
+def nominal_board_domain(records):
+    """Intersect retained copper with one outer boundary and an optional straight hole."""
+    if not records:
+        return None, {"status": "unbounded_artwork", "reason": "no_layer_20_outline"}
+    if len(records) > 2048:
+        raise ValueError("layer 20 outline exceeds the supported edge count")
+    cycles = _outline_cycles(records)
+    if len(cycles) == 1:
+        return _outer_domain(cycles[0])
+
+    # With one curved contour it can only qualify as the outer board. For two
+    # straight contours the enclosing polygon must have the larger exact area.
+    def outer_order(rows):
+        curved = any(row["curve"] for row in rows)
+        area2 = sum(a[0]*b[1] - a[1]*b[0] for a,b in
+                    ((row["a"], row["b"]) for row in rows))
+        return curved, abs(area2)
+
+    outer, inner = sorted(cycles, key=outer_order, reverse=True)
+    if len(inner) < 3 or any(row["curve"] for row in inner):
+        raise ValueError("inner layer 20 loop must be a simple straight polygon")
+    hole = Polygon([tuple(map(float, row["a"])) for row in inner])
+    if not hole.is_valid or hole.area <= 0 or hole.minimum_clearance <= 4*_GUARD:
+        raise ValueError("invalid or numerically unresolved inner layer 20 loop")
+    domain, info = _outer_domain(outer)
+    # Guard outward on the removed material, inward on the retained board.
+    # Test the entire closed hole, including its interior and every edge.
+    removed = hole.buffer(_GUARD, join_style="mitre")
+    if not removed.is_valid or not removed.covers(hole) or not domain.contains_properly(removed):
+        raise ValueError("layer 20 hole crosses, touches, or lies outside the guarded board")
+    result = domain.difference(removed)
+    if result.geom_type != "Polygon" or not result.is_valid or len(result.interiors) != 1:
+        raise ValueError("unresolved layer 20 board-with-hole topology")
+    hole_sources = [list(row["source"]) for row in inner]
+    return result, dict(info,
+        model="outer_outline_with_one_straight_dimension_hole",
+        outer_model=info["model"], hole_sources=hole_sources,
+        sources=info["sources"]+hole_sources, wire_count=len(records),
+        hole_wire_count=len(inner), interior_area_lower_bound_mm2=result.area/1e12)
 
 
 def _milling_capsule_bounds(edges):

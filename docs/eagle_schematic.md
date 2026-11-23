@@ -187,7 +187,7 @@ in-plane paths, terminal islands or plated collars. Autodesk distinguishes the
 This checker interprets the nominal wire centerline as the board boundary; its
 drawing pen width does not add substrate.
 
-A supported outline is one closed, non-self-intersecting endpoint cycle made
+The outer boundary is one closed, non-self-intersecting endpoint cycle made
 from straight wires and isolated convex or reflex quarter-circle corners. The parser
 uses exact source coordinates to join wires independently of their XML order,
 reverses the signed sweep when reversing an edge, and requires each quarter
@@ -208,7 +208,8 @@ The output's `board_domain` distinguishes three states:
 - `unbounded_artwork`: no layer-20 outline was supplied. A positive result is
   explicitly about nominal artwork without an established physical board.
 - `unresolved`: an outline was declared but could not be qualified. This
-  includes open or branched boundaries, multiple or nested contours, circles,
+  includes open or branched boundaries, disjoint boards, touching or crossing
+  contours, more than one inner loop, curved inner contours, circles,
   unsupported curves or placements, degenerate geometry and a missing backend.
 
 Layer-20 drawings in actually placed packages participate in the domain.
@@ -224,10 +225,23 @@ the entire returned path, contact disks and terminal collars in the corner's
 local coordinate system, using exact rational arithmetic on their serialized
 coordinates.
 
-Nested Dimension loops can describe internal holes in EAGLE. This
-implementation leaves them unresolved rather than treating the largest loop
-alone as the board. General curved outlines beyond the isolated tangent
-quarters remain outside the qualified family.
+One strictly contained, simple straight-edged Dimension loop can define an
+internal hole. Winding and XML order do not assign which side is board
+material. The checker validates the outer outline, expands the closed hole
+outward by the 2 nm construction guard, and requires the whole expansion to
+lie strictly inside the guarded outer board. It subtracts the expanded hole
+before computing contacts, planar paths or plated collars. The bounded report
+identifies every outer and inner wire and lists the hole sources separately.
+The same rule accepts a concave straight hole and a qualified curved outer
+boundary. Ambiguous contour arrangements remain unresolved.
+
+Run `python ship/verify_eagle_dimension_hole.py --repo . --out dimension-hole`
+to replay 14 ordinary CLI layouts with axis-aligned and oblique cutouts. The
+course checks a crossing wholly in removed material, retained and straddling
+crossings, an interrupted narrow route, a detour, a wide wire that must route
+around the hole inside its own copper, and intact and interrupted plated
+collars. Its independent rational geometry receiver checks each complete path
+segment, overlap disk and collar against the true cutout and outer boundary.
 
 Clipping occurs before planar components and overlap disks are measured.
 A trace crossing a notch needs an actual in-board detour. A surviving planar
