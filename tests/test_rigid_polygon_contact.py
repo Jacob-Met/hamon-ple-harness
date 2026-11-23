@@ -134,3 +134,83 @@ class PolygonContact(unittest.TestCase):
             gx,gy=map(F,plane['gradient_Pa_per_m'])
             for (x,y),pressure in zip(points,patch['vertex_pressure_Pa']):
                 self.assertEqual(F(pressure),F(plane['pressure_at_reference_Pa'])+gx*(x-origin[0])+gy*(y-origin[1]))
+
+    def test_thin_edge_keeps_the_exact_input_centroid_slack(self):
+        # These supplied binary64 moments have exact rational edge distances.
+        # An absolute global-moment tolerance used to certify a 2.9e-7 peak
+        # error at power 14, then refuse every narrower finite contact here.
+        square=[(-1,-1),(1,-1),(1,1),(-1,1)]
+        for power in (10,14,16,24,32,44):
+            moment=1-2.**(-power)/3
+            width=3*(1-F(moment))
+            base=spec([square],1,moment,0)
+            out=verify({**base,'proposed_q_max_Pa':float(1/width),
+                        'proposed_contact_area_m2':float(2*width)})
+            with self.subTest(power=power):
+                self.assertTrue(out['conservation_verified'],out)
+                self.assertAlmostEqual(out['contact_area_m2']/float(2*width),1,delta=2e-10)
+                self.assertAlmostEqual(out['q_max_Pa']*float(width),1,delta=2e-10)
+                wrong=verify({**base,'proposed_q_max_Pa':float(1/width)*(1+3e-8)})
+                self.assertFalse(wrong['conservation_verified'],wrong)
+
+    def test_thin_edge_is_affine_covariant_and_ignores_an_unloaded_hole(self):
+        square=[(-1,-1),(1,-1),(1,1),(-1,1)]
+        hole=[(-.5,-.5),(.5,-.5),(.5,.5),(-.5,.5)]
+        transforms=[(1,0,0,1),(0,-1,1,0),(3,1,2,1),(-2,0,0,.5),
+                    (3,2,1,3),(2,7,5,1)]
+        for power,origin in ((14,(0,0)),(32,(1024,-2048)),(44,(0,0))):
+            centroid=1-2.**(-power)
+            width=3*(1-F(centroid))
+            for a,b,c,d in transforms:
+                det=abs(a*d-b*c)
+                def transform(p):
+                    x,y=p
+                    return (origin[0]+a*x+b*y,origin[1]+c*x+d*y)
+                for rings in ([square],[square,hole]):
+                    moved=[[transform(p) for p in ring] for ring in rings]
+                    mx,my=transform((centroid,0))
+                    out=verify(spec(moved,1,mx,my))
+                    with self.subTest(power=power,transform=(a,b,c,d),holes=len(rings)-1):
+                        self.assertTrue(out['conservation_verified'],out)
+                        self.assertAlmostEqual(out['contact_area_m2']/float(2*width*F(det)),1,delta=2e-9)
+                        self.assertAlmostEqual(out['q_max_Pa']*float(width*F(det)),1,delta=2e-9)
+
+    def test_thin_corner_uses_both_support_distances(self):
+        square=[(-1,-1),(1,-1),(1,1),(-1,1)]
+        for power in (4,14,24,36,44):
+            centroid=1-2.**(-power)
+            leg=4*(1-F(centroid))
+            out=verify(spec([square],1,centroid,centroid))
+            with self.subTest(power=power):
+                self.assertTrue(out['conservation_verified'],out)
+                self.assertAlmostEqual(out['contact_area_m2']/float(leg*leg/2),1,delta=2e-9)
+                self.assertAlmostEqual(out['q_max_Pa']*float(leg*leg/6),1,delta=2e-9)
+
+    def test_rational_oblique_plane_roundtrips_with_its_contact_geometry(self):
+        centroid=1-2.**(-44)
+        transform=lambda p:(2*p[0]+7*p[1],5*p[0]+p[1])
+        square=[transform(p) for p in [(-1,-1),(1,-1),(1,1),(-1,1)]]
+        mx,my=transform((centroid,0))
+        out=json.loads(json.dumps(verify(spec([square],1,mx,my))))
+        self.assertTrue(out['conservation_verified'],out)
+        plane=out['pressure_plane']
+        self.assertEqual(plane.get('encoding'),'rational')
+        gx,gy=map(F,plane['gradient_Pa_per_m'])
+        rx,ry=map(F,plane['reference_point_m'])
+        a=F(plane['pressure_at_reference_Pa'])-gx*rx-gy*ry
+        total=[F(0),F(0),F(0)]
+        for patch in out['contact_patches']:
+            poly=[tuple(map(F,p)) for p in patch['vertices_m']]
+            moments={(i,j):polygon_moment(poly,i,j)
+                     for i,j in [(0,0),(1,0),(0,1),(2,0),(1,1),(0,2)]}
+            total[0]+=a*moments[0,0]+gx*moments[1,0]+gy*moments[0,1]
+            total[1]+=a*moments[1,0]+gx*moments[2,0]+gy*moments[1,1]
+            total[2]+=a*moments[0,1]+gx*moments[1,1]+gy*moments[0,2]
+            for p,h in zip(poly,patch['vertex_pressure_Pa']):
+                self.assertLessEqual(abs(a+gx*p[0]+gy*p[1]-F(h)),
+                                     F(out['q_max_Pa'])*F('1e-8'))
+        self.assertLess(abs(total[0]-1),F('1e-8'))
+        # Inverse affine coordinates: u=(7*y-x)/33. Its edge slack is tiny.
+        actual_u=(7*total[2]-total[1])/33
+        residual=(total[0]-actual_u)-(1-F(centroid))
+        self.assertLess(abs(residual),(1-F(centroid))*F('1e-8'))

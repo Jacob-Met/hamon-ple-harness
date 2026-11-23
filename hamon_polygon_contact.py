@@ -108,8 +108,9 @@ def _clip(poly, plane):
     for p in poly:
         pb=height(p)
         if pa*pb < 0:
-            t=pa/(pa-pb)
-            out.append((tuple(x+t*(y-x) for x,y in zip(prev,p)),0))
+            inside,outside,hi,ho=(prev,p,pa,pb) if pa>0 else (p,prev,pb,pa)
+            t=hi/(hi-ho)
+            out.append((tuple(x+t*(y-x) for x,y in zip(inside,outside)),0))
         if pb >= 0:
             out.append((p,pb))
         prev,pa=p,pb
@@ -158,20 +159,48 @@ def _inverse(patches,target):
     theta=_solve3(_gram(patches),target)
     if all(_dot(theta,(1,*p))>=0 for poly in patches for p in poly):
         return theta
+    # Put the prescribed centroid at zero and two supporting lines at -1.
+    # Compute their small distances before converting to floating point.
+    # Maximizing the scaled normal determinant is invariant under affine
+    # changes of coordinates, and resolves a thin edge or corner contact.
+    center=tuple(x/target[0] for x in target[1:])
+    hull=_hull([p for poly in patches for p in poly])
+    normals=[]
+    for a,b in _edges(hull):
+        slack=_det(a,b,center)
+        if slack<=0:
+            raise ValueError('Positive contact requires an interior centroid')
+        normals.append(((a[1]-b[1])/slack,(b[0]-a[0])/slack))
+    def cross(a,b):
+        return a[0]*b[1]-a[1]*b[0]
+    u,v=max(((a,b) for i,a in enumerate(normals) for b in normals[i+1:]),
+            key=lambda pair:abs(cross(*pair)))
+    jacobian=cross(u,v)
+    if jacobian<0:
+        u,v=v,u
+        jacobian=-jacobian
+    def coordinates(p):
+        offset=tuple(x-c for x,c in zip(p,center))
+        return _dot(u,offset),_dot(v,offset)
+    transformed=[[coordinates(p) for p in poly] for poly in patches]
+    local_target=(F(1),F(0),F(0))
+    local=_solve3(_gram(transformed),local_target)
+    polys=[[tuple(map(float,p)) for p in poly] for poly in transformed]
+    theta=list(map(float,local))
     # One variational objective couples every occupied patch, including
     # disconnected contact islands. Its Hessian is the active second moment.
-    polys=[[tuple(map(float,p)) for p in poly] for poly in patches]
-    target=list(map(float,target))
-    theta=list(map(float,theta))
     def state(t):
         h=_gram([[p for p,_ in _clip(poly,t)] for poly in polys])
         load=[_dot(row,t) for row in h]
-        return h,[x-y for x,y in zip(load,target)],_dot(t,load)/2-_dot(t,target)
+        return h,[load[0]-1,load[1],load[2]],_dot(t,load)/2-t[0]
     h,g,obj=state(theta)
-    for _ in range(100):
+    for _ in range(200):
         norm=max(map(abs,g))
         if norm<2e-12:
-            return list(map(F,theta))
+            a,b,c=map(F,theta)
+            gradients=tuple(b*x+c*y for x,y in zip(u,v))
+            factor=jacobian*target[0]
+            return [factor*(a-_dot(gradients,center)),*(factor*x for x in gradients)]
         step=_solve3(h,g)
         decrease=_dot(g,step)
         for j in range(40):
@@ -224,12 +253,28 @@ def verify_rigid_polygon_contact(spec):
                 return tuple((x-c)/d for x,c,d in zip(p,origin,scale))
             t=_inverse([[normalized(p) for p in poly] for poly in patches],(F(1),*normalized(center)))
             pressure_scale=n/(scale[0]*scale[1])
-            reference=[_render(c,'plane reference') for c in origin]
-            gradients=[_render(pressure_scale*x/d,'pressure gradient') for x,d in zip(t[1:],scale)]
-            constant=_render(pressure_scale*_dot(t,(1,*normalized(tuple(map(F,reference))))),'pressure intercept')
+            reference_origin=origin
+            if any(_dot(t,(1,*normalized(p)))<0 for p in rings[0]):
+                reference_origin=max(rings[0],key=lambda p:_dot(t,(1,*normalized(p))))
+            reference=[_render(c,'plane reference') for c in reference_origin]
+            exact_gradients=[pressure_scale*x/d for x,d in zip(t[1:],scale)]
+            exact_constant=pressure_scale*_dot(t,(1,*normalized(tuple(map(F,reference)))))
+            exact_plane=(exact_constant-_dot(exact_gradients,map(F,reference)),*exact_gradients)
+            gradients=[_render(x,'pressure gradient') for x in exact_gradients]
+            constant=_render(exact_constant,'pressure intercept')
             plane=(F(constant)-_dot(map(F,gradients),map(F,reference)),*map(F,gradients))
             out['pressure_plane']=dict(reference_point_m=reference,pressure_at_reference_Pa=constant,
                                        gradient_Pa_per_m=gradients)
+            # Separate rounding of oblique gradient components can rotate a
+            # thin strip by more than its width. Preserve the common plane
+            # exactly when binary64 cannot represent its field on the support.
+            peak_exact=max(_dot(exact_plane,(1,*p)) for p in hull)
+            if any(abs(_dot(tuple(a-b for a,b in zip(plane,exact_plane)),(1,*p)))>
+                   peak_exact*F('1e-12') for p in hull):
+                plane=exact_plane
+                out['pressure_plane']=dict(encoding='rational',reference_point_m=reference,
+                                           pressure_at_reference_Pa=str(exact_constant),
+                                           gradient_Pa_per_m=list(map(str,exact_gradients)))
             total=force=mx=my=peak=F(0)
             for poly in patches:
                 clipped=_clip(poly,plane)
@@ -265,10 +310,10 @@ def verify_rigid_polygon_contact(spec):
             if (abs(force-n)>n*F('1e-8') or
                 any(abs((v-o*force)-(w-o*n))>n*d*F('1e-8') for v,w,o,d in zip((mx,my),m,origin,scale))):
                 raise ValueError('Displayed contact geometry does not reconstruct the requested loads')
-            # Global x/y scales alone can hide transverse imbalance on oblique
-            # thin supports. Check moments in every supporting-edge direction.
+            # Check the actual centroid-to-edge distances. A full-footprint
+            # scale can conceal a large relative contact-width or peak error.
             for p,q in _edges(hull):
-                width=max(_det(p,q,v) for v in hull)
+                width=_det(p,q,center)
                 residual=(q[0]-p[0])*(my-m[1]-p[1]*(force-n))-(q[1]-p[1])*(mx-m[0]-p[0]*(force-n))
                 if abs(residual)>n*width*F('1e-8'):
                     raise ValueError('Displayed geometry failed a support-normal moment check')
