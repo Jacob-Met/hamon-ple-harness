@@ -34,7 +34,11 @@ def signed_shunt_bank(spec):
         raise ValueError("bank_connection must be delta or wye")
 
     ctx = mpmath.mp.clone()
-    ctx.dps = 90
+    # Resolve terminal quadrature after cancelling the original load against
+    # its bank, including a nearly reactive initial load with a unity target.
+    lost_bits = max(pf.denominator.bit_length() - pf.numerator.bit_length()
+                    for pf in (initial_pf, target_pf))
+    ctx.prec = 320 + max(0, lost_bits)
 
     def number(q):
         return ctx.mpf(q.numerator) / q.denominator
@@ -91,7 +95,13 @@ def signed_shunt_bank(spec):
     error = abs(replay.imag/q_shunt-1) if q_shunt else abs(replay.imag)
     if error > ctx.mpf("1e-10"):
         raise ValueError("published shunt bank fails the reactive power balance")
+    net_q = q_initial + replay.imag
+    target_scale = abs(q_target) if q_target else power
+    target_error = abs(net_q-q_target)/target_scale
+    if target_error > ctx.mpf("1e-10"):
+        raise ValueError("reported component cannot reach the target reactive power at the load terminals")
     return {
+        "Q_net_replay_kvar": report(net_q), "target_relative_replay_error": float(target_error),
         "Q_initial_kvar": report(q_initial), "Q_target_kvar": report(q_target),
         "Qc_required_kvar": report(-q_shunt), "Q_shunt_kvar": report(q_shunt),
         "initial_pf_direction": initial if initial_pf < 1 else "unity",

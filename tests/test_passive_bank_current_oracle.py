@@ -63,3 +63,38 @@ class PassiveBankCurrentOracle(unittest.TestCase):
                     supply = sum(v*i.conjugate() for v,i in zip(volts,source))
                     self.assertLess(abs(supply-goal), 2e-9)
                     self.assertAlmostEqual(supply.real/abs(supply), after, places=13)
+
+    def test_reported_leg_must_reach_the_target_after_load_is_connected(self):
+        # At near-quadrature initial PF, rounding the positive component alone
+        # can change the final terminal power by many times the entire load.
+        from mpmath import mp
+        with mp.workdps(120):
+            for before, after in ((2.**-70, 1.), (2.**-3, 1.),
+                                  (2.**-70, math.nextafter(1., 0.)),
+                                  (.5, math.nextafter(1., 0.))):
+                for old in ("leading", "lagging"):
+                    with self.subTest(before=before, after=after, old=old):
+                        spec = dict(P_kW=1, V_ll_V=1, freq_Hz=1,
+                                    pf_initial=before, pf_target=after,
+                                    initial_pf_direction=old, target_pf_direction="lagging")
+                        def quadrature(pf, direction):
+                            return mp.tan(mp.acos(mp.mpf(pf)))*(-1 if direction=="leading" else 1)
+                        start, goal = quadrature(before, old), quadrature(after, "lagging")
+                        omega = 2*mp.pi
+                        want = 1000*(goal-start)
+                        capacitor = want < 0
+                        ideal = -want/(3*omega) if capacitor else 3/(omega*want)
+                        candidate = mp.mpf(float(ideal))
+                        component_var = -3*omega*candidate if capacitor else 3/(omega*candidate)
+                        obtained = start+component_var/1000
+                        # Compare at the terminal angle. For unity the 1 kW
+                        # real power is the scale for residual quadrature.
+                        scale = abs(goal) if goal else mp.mpf(1)
+                        err = abs(obtained-goal)/scale
+                        try:
+                            result = run_dual_verify_spec(dict(mode="domain",kind="pf_correction",spec=spec))
+                        except ValueError:
+                            self.assertGreater(err, mp.mpf("1e-10"), err)
+                        else:
+                            self.assertTrue(result["dual_verified"])
+                            self.assertLessEqual(err, mp.mpf("1e-10"), (result, obtained, goal))
