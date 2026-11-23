@@ -219,12 +219,14 @@ class EagleSchematicTests(unittest.TestCase):
         members, links = _stitch_pages([a, b])
         self.assertEqual(members[0][0], members[1][1])
         self.assertEqual(links[0]["ground_bar_witnesses"][0]["incidental_labels"], ["U12"])
-        for trial in ("same island twice", "bare label away from stem", "recurrent label",
+        for trial in ("same island twice", "one bar and one triangle", "bare label away from stem", "recurrent label",
                       "second supply glyph", "different ground family"):
             a, b = ground_page(1), ground_page(2)
             a["printed_equivalence_anchors"]["U12"] = [1]
             if trial == "same island twice":
                 b["supply_glyphs"][1]["wire_index"] = 0
+            elif trial == "one bar and one triangle":
+                b["supply_glyphs"][1]["shape"] = "ground_triangle"
             elif trial == "bare label away from stem":
                 a["printed_equivalence_anchors"]["U12"] = [2]
             elif trial == "recurrent label":

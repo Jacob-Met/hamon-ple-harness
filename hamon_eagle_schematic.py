@@ -384,6 +384,19 @@ def _supply_anchors(wires, roots, lines, words, *, all_glyphs=None):
             wings = [v for u, v in map(project, ends.near(tip))
                      if -.84 < u < -.66 and .42 < abs(v) < .58]
             arrow = any(v < 0 for v in wings) and any(v > 0 for v in wings)
+            if all_glyphs is not None and not words:
+                for end in centers.near(tip):
+                    u, v = project(end)
+                    if abs(u) > .035 or not .46 < abs(v) < .54:
+                        continue
+                    opposite = (2 * tip[0] - end[0], 2 * tip[1] - end[1])
+                    for apex in ends.near(end):
+                        forward, lateral = project(apex)
+                        if (.46 < forward < .54 and abs(lateral) < .035
+                                and any(math.dist(q, apex) < .12 for q in ends.near(opposite))):
+                            all_glyphs.append({"shape": "ground_triangle", "foot": foot, "tip": tip,
+                                               "wire_index": next(iter(touched)),
+                                               "ordinary_names": [], "ordinary_word_indices": []})
             if transverse == arrow:
                 continue
             printed = [(index, name) for index, name, ground, center in supply_words
@@ -742,11 +755,11 @@ _GND_CHAINS = (
 _GND_EDGES = {tuple(sorted((a, b))) for chain in _GND_CHAINS for a, b in zip(chain, chain[1:])}
 
 
-def _outlined_ground_word(strokes, foot, tip):
+def _outlined_ground_word(strokes, foot, tip, offset=0.0):
     """Require the entire isolated three-glyph word beyond the transverse bar."""
     length = math.dist(foot, tip)
     ux, uy = ((b - a) / length for a, b in zip(foot, tip))
-    center = (tip[0] + .65 * length * ux, tip[1] + .65 * length * uy)
+    center = (tip[0] + length * (.65 * ux + offset * uy), tip[1] + length * (.65 * uy - offset * ux))
 
     def project(point):
         x, y = ((v - origin) / length for v, origin in zip(point, tip))
@@ -756,7 +769,7 @@ def _outlined_ground_word(strokes, foot, tip):
     inks = set()
     for ink, a, b in strokes.near(center):
         edge = (project(a), project(b))
-        if all(abs(x) < 1.4 and .05 < y < 1.25 for x, y in edge):
+        if all(abs(x-offset) < 1.35 and .05 < y < 1.25 for x, y in edge):
             points.extend(edge)
             inks.add(ink)
     if len(points) != 2 * len(_GND_EDGES) or len(inks) != 1:
@@ -803,9 +816,9 @@ def _outlined_supplies(paths, wire_ink, pitch, wires, membership):
     marks = []
     for glyph in candidates:
         foot, tip = glyph["foot"], glyph["tip"]
-        if (glyph["shape"] == "ground_bar" and .9 * pitch < math.dist(foot, tip) < 1.1 * pitch
-                and _outlined_ground_word(strokes, foot, tip)):
-            marks.append({"wire_index": min(endpoints.near(foot)), "name": "GND", "shape": "ground_bar",
+        if (glyph["shape"] in ("ground_bar", "ground_triangle") and .9 * pitch < math.dist(foot, tip) < 1.1 * pitch
+                and any(_outlined_ground_word(strokes, foot, tip, k) for k in (0, -1.1, 1.1))):
+            marks.append({"wire_index": min(endpoints.near(foot)), "name": "GND", "shape": glyph["shape"],
                           "foot": foot, "tip": tip, "label_source": "outlined_GND_strokes"})
     letters, signal_strokes = outlined.letter_strokes(paths, wire_ink, pitch)
     grounded = {m["wire_index"] for m in marks}
@@ -822,7 +835,8 @@ def _outlined_supplies(paths, wire_ink, pitch, wires, membership):
             evidence.append((index, name, occurrence, mark))
 
     for index, name, occurrence, registered in outlined.wire_words(wires, signal_strokes, pitch):
-        if (registered and not _GROUND_NAME.fullmatch(name) and not _POWER_NAME.fullmatch(name)
+        if (registered and (name == "GND" or not _GROUND_NAME.fullmatch(name))
+                and not _POWER_NAME.fullmatch(name)
                 and not re.fullmatch(r"(?:R|C|L|Q|U|J)[0-9]+", name)):
             evidence.append((index, name, occurrence, None))
 
@@ -1040,8 +1054,10 @@ def _ground_glyph_precedence(name, components, glyphs, labels, occurrences):
         return False
     for component in components:
         marks = glyphs[component]
-        if set(marks) != {(name, "ground_bar")}:
+        if not set(marks) <= {(name, "ground_bar"), (name, "ground_triangle")}:
             return False
+        # A triangle can ground a local wire. Overriding conflicting printed
+        # text across sheets still requires two distinct bar-backed islands.
         roots = marks[name, "ground_bar"]
         if len(roots) < 2:
             return False
