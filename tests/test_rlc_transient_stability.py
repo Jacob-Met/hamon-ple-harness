@@ -58,6 +58,15 @@ class RlcTransientStabilityTests(unittest.TestCase):
         # A constant source shifts the equilibrium voltage but not the current.
         self.assert_solution(dict(R=2.5, L=1., C=1., V_s=3., v_c0=4., i_l0=-2., t=30.))
 
+    def test_fast_mode_passive_energy_with_nonunit_inductance_and_capacitance(self):
+        # Poles are -32 and -1/2 per second. The pure fast state's energy
+        # decays as exp(-64t), satisfying dE/dt = -R*i**2 throughout.
+        spec = dict(R=16.25, L=.5, C=.125, V_s=0., v_c0=1., i_l0=-4., t=1.5)
+        result = self.assert_solution(spec)
+        energy = (.125 * result["v_c_V"]**2 + .5 * result["i_l_A"]**2) / 2
+        initial_energy = (.125 + .5*16) / 2
+        self.assertTrue(math.isclose(energy, initial_energy * math.exp(-96), rel_tol=1e-14))
+
     def test_fast_eigenmode_deeper_than_default_reference_precision(self):
         # The exact solution is (exp(-2t), -2 exp(-2t)). At t=100, direct
         # subtraction of slow matrix contributions needs more than 50 digits.
@@ -71,6 +80,15 @@ class RlcTransientStabilityTests(unittest.TestCase):
             rejected = wave6.solve_transmission_line_rlc(spec)
         self.assertFalse(rejected["verified"])
         self.assertEqual(rejected["residual"], 1.)
+
+    def test_unresolved_reference_cannot_qualify_a_decayed_endpoint(self):
+        spec = dict(subkind="rlc_transient", R=2.5, L=1., C=1., V_s=0., v_c0=1., i_l0=-2., t=30.)
+        target = math.exp(-60)
+        references = [(target, -2*target, 10), (math.nextafter(target, math.inf), -2*target, 10)]
+        with patch.object(wave6, "_rlc_matrix_reference", side_effect=references):
+            result = wave6.solve_transmission_line_rlc(spec)
+        self.assertFalse(result["reference_converged"])
+        self.assertFalse(result["verified"])
 
     def test_tiny_zero_state_voltage_survives_all_regimes(self):
         for resistance in (0., 1., 2., 3.):

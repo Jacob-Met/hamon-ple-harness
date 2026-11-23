@@ -617,32 +617,35 @@ def _solve_rlc_transient(params):
         raise ValueError("RLC initial state exceeds the supported finite range")
     voltage, current, regime = _rlc_analytic_state(
         alpha, omega, impedance, vs, v0, i0, time_, r, l, c)
-    reference_v, reference_i, squarings = _rlc_matrix_reference(
-        r, l, c, vs, v0, i0, time_)
-    if not all(math.isfinite(value) for value in (voltage, current, reference_v, reference_i)):
+    if not math.isfinite(voltage) or not math.isfinite(current):
         raise ValueError("RLC solution exceeds the supported finite range")
-    voltage_scale = max(abs(reference_v), abs(v0), math.ulp(0.0))
-    current_scale = max(abs(reference_i), abs(i0), math.ulp(0.0))
-    residual = max(abs(voltage - reference_v) / voltage_scale,
-                   abs(current - reference_i) / current_scale)
-    reference_converged = True
-    if regime == "overdamped" and (abs(voltage) < abs(v0) or abs(current) < abs(i0)):
-        # Allocate decimal places for the cancellation between initial/source
-        # contributions. Confirm the rounded independent endpoints at a second
-        # precision before qualifying relative error on the decayed signal.
+    decayed = regime == "overdamped" and (abs(voltage) < abs(v0) or abs(current) < abs(i0))
+    digits = 50
+    if decayed:
+        # Budget decimal places for cancellation of initial/source contributions.
         z = Decimal(str(impedance))
         v_scale = max(Decimal(str(abs(v0))), Decimal(str(abs(vs))), Decimal(str(abs(i0))) * z)
         smallest = Decimal(str(math.ulp(0.0)))
         lost_digits = max(scale.adjusted() - max(Decimal(str(abs(value))), smallest).adjusted()
                           for scale, value in ((v_scale, voltage), (v_scale / z, current)))
-        digits = max(50, 32 + lost_digits)
-        args = (r, l, c, vs, v0, i0, time_)
-        if digits > 50:
-            reference_v, reference_i, squarings = _rlc_matrix_reference(*args, digits)
+        digits = max(digits, 32 + lost_digits)
+    args = (r, l, c, vs, v0, i0, time_)
+    reference_v, reference_i, squarings = _rlc_matrix_reference(*args, digits)
+    if not math.isfinite(reference_v) or not math.isfinite(reference_i):
+        raise ValueError("RLC solution exceeds the supported finite range")
+    voltage_scale = max(abs(reference_v), math.ulp(0.0))
+    current_scale = max(abs(reference_i), math.ulp(0.0))
+    reference_converged = True
+    if decayed:
+        # Require two independent precision settings to round to the same
+        # endpoints before qualifying relative error on the decayed signal.
         check_v, check_i, _ = _rlc_matrix_reference(*args, digits + 16)
         reference_converged = (reference_v, reference_i) == (check_v, check_i)
-        residual = max(abs(voltage - reference_v) / max(abs(reference_v), math.ulp(0.0)),
-                       abs(current - reference_i) / max(abs(reference_i), math.ulp(0.0)))
+    else:
+        voltage_scale = max(voltage_scale, abs(v0))
+        current_scale = max(current_scale, abs(i0))
+    residual = max(abs(voltage - reference_v) / voltage_scale,
+                   abs(current - reference_i) / current_scale)
     zeta = alpha / omega
     if alpha < omega:
         frequency = math.sqrt(omega - alpha) * math.sqrt(omega + alpha)
@@ -660,6 +663,7 @@ def _solve_rlc_transient(params):
         "percent_overshoot": overshoot,
         "residual": residual,
         "verified": reference_converged and residual < 1e-8,
+        "reference_converged": reference_converged if decayed else None,
         "verification_method": "decimal_scaled_matrix_exponential",
         "reference_squarings": squarings,
     }
