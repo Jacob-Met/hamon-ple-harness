@@ -45,6 +45,11 @@ class ColumnAxialBoundary(unittest.TestCase):
             with self.subTest(amount=amount):
                 self.check_ratio(f"{amount}*kip", "15*kip", Fraction(amount) / 15)
 
+    def test_ordinary_low_and_high_utilizations_stay_on_their_existing_branches(self):
+        for pu, ratio in (("1*kip", Fraction(1, 10)), ("4*kip", Fraction(2, 5))):
+            with self.subTest(pu=pu):
+                self.check_ratio(pu, "10*kip", ratio)
+
     def test_accepts_scalar_functions_and_preserves_field_dimensions(self):
         self.check_ratio("sin(pi/2)*kN", "10*kN", Fraction(1, 10))
         with self.assertRaisesRegex(ValueError, "Pu"):
