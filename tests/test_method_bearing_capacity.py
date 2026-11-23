@@ -124,3 +124,64 @@ def test_design_factor_cannot_certify_loading_above_ultimate(method):
     assert not verify_bearing_capacity(spec)["conservation_verified"]
     spec["FS"] = 0.5
     assert not verify_bearing_capacity(spec)["ok"]
+
+
+def eccentric_spec(**changes):
+    return {
+        **base("meyerhof"), "footing_B_m": 4, "footing_L_m": 6, "c_prime_Pa": 0,
+        "column_load_N": 6_300_000, "eccentricity_method": "meyerhof_effective_area",
+        "eccentricity_B_m": 0.5, "eccentricity_L_m": -0.25, **changes,
+    }
+
+
+def test_biaxial_eccentric_bearing_at_registered_entry_points():
+    from hamon_conservation_cad_verifier import run_router_conservation_cad_verifier
+    from hamon_dual_verifier import run_dual_verify_spec
+
+    # The 4 x 6 m footprint becomes 3 x 5.5 m. Use independently expanded
+    # Meyerhof factors at 30 degrees and a dry 1 m embedment.
+    nq = 3 * math.exp(math.pi / math.sqrt(3))
+    ng = (nq - 1) * math.tan(math.radians(42))
+    factor = (1 + 0.3 * 3 / 5.5) * (1 + 0.1 * math.sqrt(3) / 3)
+    expected = (18_000 * nq + 27_000 * ng) * factor
+    for force, safe in ((6_300_000, False), (2_500_000, True)):
+        spec = eccentric_spec(column_load_N=force)
+        result = run_router_conservation_cad_verifier({"mode": "auto", "spec": spec})
+        assert result["effective_area_m2"] == 16.5
+        assert result["q_ult_Pa"] == pytest.approx(expected)
+        assert result["q_applied_Pa"] == pytest.approx(force / 16.5)
+        assert result["bearing_ok"] is safe
+        dual = run_dual_verify_spec({"mode": "domain", "kind": "bearing_capacity", "spec": spec})
+        assert dual["dual_verified"] is safe
+
+
+def test_effective_dimensions_follow_named_axes_and_ignore_offset_signs():
+    original = verify_bearing_capacity(eccentric_spec())
+    swapped = verify_bearing_capacity(eccentric_spec(
+        footing_B_m=6, footing_L_m=4, eccentricity_B_m=0.25, eccentricity_L_m=-0.5))
+    assert (swapped["effective_B_m"], swapped["effective_L_m"]) == (5.5, 3)
+    assert swapped["q_ult_Pa"] == original["q_ult_Pa"]
+    assert swapped["q_applied_Pa"] == original["q_applied_Pa"]
+
+
+def test_fhwa_prestressed_girder_example_effective_geometry():
+    # FHWA PSC girder worked example, §7.2.4.5. Only the published contact
+    # geometry is compared: its subsequent LRFD resistance uses other factors.
+    foot = 0.3048
+    result = verify_bearing_capacity(eccentric_spec(
+        footing_B_m=12 * foot, footing_L_m=12 * foot,
+        eccentricity_B_m=121 / 1374 * foot, eccentricity_L_m=626 / 1374 * foot))
+    assert round(result["effective_B_m"] / foot, 2) == 11.82
+    assert round(result["effective_L_m"] / foot, 2) == 11.09
+
+
+@pytest.mark.parametrize("changes", [
+    {"eccentricity_method": None}, {"eccentricity_method": "other"},
+    {"bearing_method": "vesic"}, {"eccentricity_B_m": -2}, {"eccentricity_L_m": 4},
+    {"column_load_N": 0}, {"horizontal_load_N": 1}, {"ground_slope_deg": 1},
+    {"base_tilt_deg": 1}, {"footing_shape": "circular"}, {"applied_gross_pressure_Pa": 100},
+])
+def test_unsupported_eccentric_design_refused(changes):
+    result = verify_bearing_capacity(eccentric_spec(**changes))
+    assert not result["ok"]
+    assert not result["conservation_verified"]
