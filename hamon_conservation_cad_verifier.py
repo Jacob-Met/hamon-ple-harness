@@ -2101,19 +2101,43 @@ def verify_thermal_fluid_chemical_balance(spec: Dict[str, Any]) -> Dict[str, Any
             out["mass_balance_ok"] = mass_ok
             all_ok = mass_ok
         if has_species:
+            joint = any("mdot_kg_s" in stream for stream in streams)
+            if joint:
+                from hamon_species_stream_mass import check_stream_mass
+                out["stream_mass_mole_ok"] = False
+                out["stream_molar_mass_default"] = "CIAAW_2024_abridged_normal_material"
+                out["declared_molar_mass_streams"] = [
+                    {"side": name, "index": index}
+                    for name, side in (("inlets", ins), ("outlets", outs))
+                    for index, stream in enumerate(side) if "molar_mass_g_mol" in stream
+                ]
             species_ok = all("ndot_mol_s" in s and s.get("formula") for s in streams)
             if species_ok:
                 ai, ao = {}, {}
-                for side, totals in ((ins, ai), (outs, ao)):
-                    for stream in side:
+                errors = []
+                for side_name, side, totals in (("inlets", ins, ai), ("outlets", outs, ao)):
+                    for index, stream in enumerate(side):
                         try:
                             elements = parse_chemical_formula(str(stream["formula"]))
                         except ValueError as exc:
                             species_ok = False
                             out.setdefault("species_balance_error", str(exc))
                             continue
+                        molar_rate = float(stream["ndot_mol_s"])
+                        if joint:
+                            if "mdot_kg_s" in stream:
+                                reason = check_stream_mass(elements, float(stream["mdot_kg_s"]), molar_rate, rtol, stream)
+                            else:
+                                reason = "missing mass rate"
+                            if reason:
+                                errors.append({"side": side_name, "index": index, "reason": reason})
                         for element, count in elements.items():
-                            totals[element] = totals.get(element, 0.0) + float(stream["ndot_mol_s"]) * count
+                            totals[element] = totals.get(element, 0.0) + molar_rate * count
+                if joint:
+                    out["stream_mass_mole_ok"] = species_ok and not errors
+                    if errors:
+                        out["stream_mass_mole_errors"] = errors
+                    all_ok = all_ok and out["stream_mass_mole_ok"]
                 species_ok = species_ok and all(
                     math.isfinite(ai.get(e, 0.0)) and math.isfinite(ao.get(e, 0.0))
                     and abs(ai.get(e, 0.0) - ao.get(e, 0.0)) / max(ai.get(e, 0.0), ao.get(e, 0.0), 1e-12) <= rtol
