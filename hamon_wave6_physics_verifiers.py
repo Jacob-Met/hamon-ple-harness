@@ -12,7 +12,7 @@ residual-certified engineering domains to maximize the PLE accuracy-cost Pareto 
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, NamedTuple, Optional, Tuple
 
 import numpy as np
 from _scipy_compat import HAS_SCIPY, integrate, optimize
@@ -1101,7 +1101,19 @@ def _cstr_stationary_points(coefficients, *, intervals=False, precision_bits=190
     return roots if intervals else [(lo+hi)/2 for lo, hi in roots]
 
 
-def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon, order, gas):
+class _CstrRoot(NamedTuple):
+    lower: Fraction
+    upper: Fraction
+    monotone_from: Fraction
+    monotone_to: Fraction
+    direction: int
+
+    def coordinates(self):
+        midpoint = (self.lower + self.upper) / 2
+        return float(midpoint), float(1 - midpoint)
+
+
+def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon, order, gas, inlet_x, refine):
     """Enumerate the single-CSTR power-law/Arrhenius steady-state equation.
 
     Exact stationary-polynomial isolation partitions the physical interval.
@@ -1111,8 +1123,6 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
     coordinate determines its complement when checking the physical balance.
     No dynamical stability classification follows from this steady-state model.
     """
-    from fractions import Fraction
-
     inputs = (volume, c0, feed, t0, top, delta, epsilon, order)
     if not all(math.isfinite(x) for x in inputs):
         raise ValueError("CSTR inputs must be finite")
@@ -1123,7 +1133,9 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
     if min(inlet, inlet + slope) <= 0:
         raise ValueError("CSTR temperature must stay positive on 0 <= conversion <= 1")
     if volume == 0:
-        return [(0.0, 1.0)]
+        return [_CstrRoot(inlet_x, inlet_x, 0, 1, 1)]
+    if inlet_x == 1:
+        return [_CstrRoot(Fraction(1), Fraction(1), 1, 1, 0)] if order > 0 else []
 
     # Use precisely the same precedence as the maintained rate law.
     if "A_preexp" in params and "E_a" in params:
@@ -1143,8 +1155,8 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
         reference = 1.0
     if not all(math.isfinite(x) for x in (rate, activation, reference)) or min(rate, reference) <= 0:
         raise ValueError("CSTR kinetic rate and reference temperature must be finite and positive")
-    F = Fraction.from_float
-    x, remaining, expansion, temperature = [F(0.), F(1.)], [F(1.), F(-1.)], [F(1.), F(epsilon)], [F(inlet), F(slope)]
+    F = Fraction
+    x, remaining, expansion, temperature = [-inlet_x, F(1.)], [F(1.), F(-1.)], [F(1.), F(epsilon)], [F(inlet), F(slope)]
 
     def multiply(*polys):
         out = [Fraction(1)]
@@ -1180,6 +1192,7 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
     numerator, denominator = rational_order.numerator, rational_order.denominator
     algebraic = activation == 0.0 and denominator + 2*abs(numerator) <= 64
     common = [Fraction(1)]
+    rational_roots = []
     if algebraic:
         concentration_num = multiply([F(c0)], remaining)
         concentration_den = expansion
@@ -1197,18 +1210,33 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
             residual_poly[i] += c
         for i, c in enumerate(right):
             residual_poly[i] -= c
-        common = _cstr_poly_gcd(coefficients, _cstr_poly_trim(residual_poly))
+        residual_poly = _cstr_poly_trim(residual_poly)
+        if len(residual_poly) == 2:
+            root = -residual_poly[0]/residual_poly[1]
+            if not inlet_x < root <= 1 or (root == 1 and order != 0):
+                return []
+            if root < 1 and min(float(root), float(1-root)) == 0:
+                raise ValueError("interior CSTR conversion is not representable in complementary coordinates")
+            return [_CstrRoot(root, root, inlet_x, F(1), 1)]
+        if len(residual_poly) == 3:
+            a0, a1, a2 = residual_poly
+            disc = a1*a1 - 4*a2*a0
+            if disc >= 0:
+                sqrt_disc = Fraction(math.isqrt(disc.numerator), math.isqrt(disc.denominator))
+                if sqrt_disc*sqrt_disc == disc:
+                    rational_roots = [(-a1 + sign*sqrt_disc)/(2*a2) for sign in (-1, 1)]
+        common = _cstr_poly_gcd(coefficients, residual_poly)
     ordinary = coefficients[:]
     while len((shared := _cstr_poly_gcd(ordinary, common))) > 1:
         ordinary = _cstr_poly_divmod(ordinary, shared)[0]
     exact_reference = []
     if rate_kind == "reference" and activation != 0 and slope != 0:
         q = (F(reference)-F(inlet))/F(slope)
-        if 0 < q < 1 and poly_value(coefficients, q) == 0:
+        if inlet_x < q < 1 and poly_value(coefficients, q) == 0:
             concentration = F(c0)*(1-q)/(1+F(epsilon)*q)
             if gas:
                 concentration *= F(t0)/F(reference)
-            ratio = F(feed)*q/(F(volume)*F(rate))
+            ratio = F(feed)*(q-inlet_x)/(F(volume)*F(rate))
             if (denominator + abs(numerator) <= 64 and
                     ratio**denominator == concentration**numerator):
                 exact_reference.append((q, q))
@@ -1217,7 +1245,11 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
 
     with localcontext() as context:
         context.prec = min(400, 80 + max(0, math.ceil(math.log10(abs(order))) if order else 0))
-        D = Decimal.from_float
+        if 0 < inlet_x < 1:
+            context.prec = min(400, context.prec + max(0, math.ceil(-math.log10(float(min(inlet_x, 1-inlet_x))))))
+        def D(value):
+            f = Fraction(value)
+            return Decimal(f.numerator) / Decimal(f.denominator)
         dc, df, dt0, di, ds, de, dn, dr = map(D, (c0, feed, t0, inlet, slope, epsilon, order, rate))
         ea = D(activation) / D(8.31446261815324)
         tref = D(reference)
@@ -1227,7 +1259,7 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
         fixed = df.ln()-log_rate-dn*log_concentration-target
 
         def balance(z):
-            if z == 0:
+            if z <= D(inlet_x):
                 return Decimal("-Infinity")
             temp = di + ds*z
             log_k = log_rate
@@ -1245,14 +1277,14 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
                 concentration = F(c0)*(1-q)/(1+F(epsilon)*q)
                 if gas:
                     concentration *= F(t0)/(F(inlet)+F(slope)*q)
-                mass_balance = F(feed)*q - F(volume)*F(rate)*concentration**int(order)
+                mass_balance = F(feed)*(q-inlet_x) - F(volume)*F(rate)*concentration**int(order)
                 return Decimal((mass_balance > 0) - (mass_balance < 0))
             log_c = log_concentration - (1 + de*z).ln()
             if dn:
                 log_c += (1-z).ln()
             if gas:
                 log_c -= (temp/dt0).ln()
-            return fixed + z.ln() + (log_rate-log_k) - dn*(log_c-log_concentration)
+            return fixed + (z-D(inlet_x)).ln() + (log_rate-log_k) - dn*(log_c-log_concentration)
 
         def certified_cut_sign(bounds):
             # Interval bounds use exact rational arguments. Decimal ln is
@@ -1275,7 +1307,7 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
                         Decimal(0) if hi == 1 else hi.ln().next_plus())
 
             terms = [(Fraction(1), log_interval(F(feed), F(feed))),
-                     (Fraction(1), log_interval(a, b)),
+                     (Fraction(1), log_interval(a-inlet_x, b-inlet_x)),
                      (Fraction(-1), log_interval(F(rate), F(rate))),
                      (Fraction(-1), log_interval(F(volume), F(volume))),
                      (-F(order), log_interval(F(c0), F(c0)))]
@@ -1303,23 +1335,27 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
             stationary = [(bounds, True) for bounds in _cstr_stationary_points(common, intervals=True, precision_bits=bits)]
             stationary += [(bounds, True) for bounds in exact_reference]
             stationary += [(bounds, False) for bounds in _cstr_stationary_points(ordinary, intervals=True, precision_bits=bits)]
+            stationary = [(bounds, fold) for bounds, fold in stationary if bounds[1] > inlet_x]
+            if any(bounds[0] <= inlet_x for bounds, _ in stationary):
+                continue
             stationary.sort(key=lambda item: sum(item[0]))
             signs = [0 if exact else certified_cut_sign(bounds) for bounds, exact in stationary]
             if all(sign is not None for sign in signs):
                 break
         else:
             raise ValueError("CSTR stationary balance sign is unresolved at supported precision")
-        cuts = [Decimal(0)] + [Decimal((a+b).numerator)/Decimal((a+b).denominator)/2
+        cuts = [D(inlet_x)] + [Decimal((a+b).numerator)/Decimal((a+b).denominator)/2
                                for (a, b), _ in stationary] + [Decimal(1)]
         values = [balance(Decimal(0))] + signs + [balance(Decimal(1))]
         found = []
-        for z, value_ in zip(cuts, values):
+        bounds = [(inlet_x, inlet_x)] + [pair for pair, _ in stationary] + [(F(1), F(1))]
+        for (left, right), value_ in zip(bounds, values):
             if value_ == 0:
-                found.append(z)
-        for lo, hi, flo, fhi in zip(cuts, cuts[1:], values, values[1:]):
+                found.append(_CstrRoot(left, right, left, right, 0))
+        for index, (lo, hi, flo, fhi) in enumerate(zip(cuts, cuts[1:], values, values[1:])):
             if flo == 0 or fhi == 0 or (flo > 0) == (fhi > 0):
                 continue
-            for _ in range(1100):
+            for _ in range(1250):
                 mid = (lo+hi)/2
                 if mid == lo or mid == hi:
                     if context.prec >= 400:
@@ -1335,26 +1371,67 @@ def _cstr_conversion_branches(params, volume, c0, feed, t0, top, delta, epsilon,
                     continue
                 fm = balance(mid)
                 if fm == 0:
-                    lo = hi = mid
+                    if exact_power:
+                        lo = hi = mid
+                    else:
+                        lo, hi = mid.next_minus(), mid.next_plus()
                     break
                 if (flo > 0) == (fm > 0):
                     lo, flo = mid, fm
                 else:
                     hi, fhi = mid, fm
-                if float(lo) == float(hi) and float(1-lo) == float(1-hi):
+                if (float(lo) == float(hi) and float(1-lo) == float(1-hi)
+                        and (not refine or hi-lo <= min(lo, 1-hi) * Decimal("1e-30"))):
                     break
             else:
                 raise ValueError("CSTR root refinement did not converge")
             root = (lo+hi)/2
             if not float(root) > 0 or not float(1-root) > 0:
                 raise ValueError("interior CSTR conversion is not representable in complementary coordinates")
-            found.append(root)
-        roots = [(float(z), float(1-z)) for z in sorted(found)]
-        if len(set(roots)) != len(roots):
+            found.append(_CstrRoot(F(lo), F(hi), bounds[index][1], bounds[index+1][0],
+                                   1 if fhi > 0 else -1))
+        # A rational root must enter the next stage exactly when it can
+        # coincide with a downstream fold. Snap only on polynomial identity.
+        for i, root in enumerate(found):
+            for q in rational_roots:
+                if root.lower <= q <= root.upper:
+                    found[i] = root._replace(lower=q, upper=q)
+                    break
+        found.sort(key=lambda root: root.lower)
+        coordinates = [root.coordinates() for root in found]
+        if len(set(coordinates)) != len(coordinates):
             raise ValueError("distinct CSTR branches are not separable in output precision")
-        if not roots:
-            raise ValueError("no physical CSTR steady state for the supplied volume")
-        return roots
+        return found
+
+
+def _cstr_stage_roots(inputs, inlet_bounds, refine):
+    """Track roots throughout the preceding stage's conversion enclosure."""
+    low, high = inlet_bounds
+    left = _cstr_conversion_branches(*inputs, low, refine)
+    if low == high:
+        return left
+    right = _cstr_conversion_branches(*inputs, high, refine)
+    message = "CSTR series branch topology is unresolved at supported precision"
+    if len(left) != len(right):
+        raise ValueError(message)
+    roots = []
+    for a, b in zip(left, right):
+        lo, hi = min(a.lower, b.lower), max(a.upper, b.upper)
+        # At fixed X the unlogged material balance is affine in the inlet.
+        # Outside these corridors its endpoint signs agree. Inside, the
+        # logarithmic balance's derivative numerator is also affine in the
+        # inlet, so the same monotonicity at both extremes covers the interval.
+        if (a.direction == 0 or a.direction != b.direction or
+                lo <= max(a.monotone_from, b.monotone_from) or
+                hi >= min(a.monotone_to, b.monotone_to) or
+                (roots and lo <= roots[-1].upper)):
+            raise ValueError(message)
+        root = _CstrRoot(lo, hi, max(a.monotone_from, b.monotone_from),
+                         min(a.monotone_to, b.monotone_to), a.direction)
+        if a.coordinates() != b.coordinates():
+            raise ValueError("CSTR series outlet rounding is unresolved at supported precision")
+        roots.append(root)
+    return roots
 
 
 
@@ -1444,14 +1521,16 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
             residual = abs(vol_m3 - v_exact) / max(abs(v_exact), 1e-15)
     elif "volume" in params and params["volume"] is not None:
         vol_m3 = float(params["volume"])
-        if reactor_type == "cstr":
-            if not math.isfinite(v0) or v0 <= 0:
-                raise ValueError("CSTR inlet volume flow must be finite and positive")
-            conversions = _cstr_conversion_branches(params, vol_m3, c_a0, f_a0, t0_k, t_op,
-                                                    delta_t_ad, eps_a, order_n, gas_phase)
-            cstr_branches = []
-            for conversion, unreacted in conversions:
-                temperature = (t0_k + delta_t_ad * conversion) if abs(delta_t_ad) > 1e-15 else t_op
+        if reactor_type in ("cstr", "cstr_series"):
+            if not math.isfinite(v0) or v0 <= 0 or not math.isfinite(vol_m3) or vol_m3 < 0:
+                raise ValueError("CSTR inlet flow must be positive and vessel volume finite and nonnegative")
+            count = params.get("n_stages", 2) if reactor_type == "cstr_series" else 1
+            n_stages = int(count)
+            if isinstance(count, bool) or n_stages < 1 or Fraction(count) != n_stages:
+                raise ValueError("n_stages must be a positive integer")
+            stage_volume = Fraction(vol_m3) / n_stages
+
+            def stage_state(conversion, unreacted, inlet_x):
                 # Check the returned coordinates without subnormal product
                 # underflow or an absolute denominator floor. Use the smaller
                 # coordinate as the accurate chart and recover its complement.
@@ -1476,33 +1555,62 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
                     cd = D(c_a0)*ud/(1+D(eps_a)*xd)
                     if gas_phase:
                         cd *= D(t0_k)/td
-                    feed_consumed = D(f_a0)*xd
-                    reactor_consumed = D(vol_m3)*kd*(cd**D(order_n) if order_n else Decimal(1))
+                    feed_consumed = D(f_a0)*(xd - Decimal(inlet_x.numerator)/Decimal(inlet_x.denominator))
+                    reactor_consumed = Decimal(stage_volume.numerator)/Decimal(stage_volume.denominator)*kd*(cd**D(order_n) if order_n else Decimal(1))
                     scale = max(abs(feed_consumed), abs(reactor_consumed))
                     error = float(abs(feed_consumed-reactor_consumed)/scale) if scale else 0.0
-                cstr_branches.append({"conversion_X": conversion, "unreacted_fraction": unreacted,
-                                      "exit_T_K": temperature,
-                                      "k_exit": k_at_temp(temperature), "residual": error,
-                                      "verified": error < 1e-9})
+                    temperature = float(td)
+                    energy_error = float(abs(D(temperature)-td)/td)
+                error = max(error, energy_error)
+                return {"conversion_X": conversion, "unreacted_fraction": unreacted,
+                        "exit_T_K": temperature, "k_exit": k_at_temp(temperature),
+                        "residual": error, "verified": error < 1e-9}
+
+            # Each tank can have several steady outlets even for one inlet.
+            # Keep complete trajectories: an inlet with no downstream root
+            # does not eliminate a different, physically realizable path.
+            inputs = (params, stage_volume, c_a0, f_a0, t0_k, t_op, delta_t_ad, eps_a, order_n, gas_phase)
             branch = params.get("steady_state_branch")
+            ambiguity = ("multiple physical CSTR steady states; set steady_state_branch to 'all' "
+                         "or an ascending zero-based branch index")
+            paths = [([], (Fraction(0), Fraction(0)), Fraction(0))]
+            for stage in range(n_stages):
+                following = []
+                for history, inlet_bounds, inlet_report in paths:
+                    for root in _cstr_stage_roots(inputs, inlet_bounds, stage + 1 < n_stages):
+                        conversion, remaining = root.coordinates()
+                        row = stage_state(conversion, remaining, inlet_report)
+                        outlet = Fraction(conversion) if conversion <= remaining else 1-Fraction(remaining)
+                        following.append((history+[row], (root.lower, root.upper), outlet))
+                paths = following
+                # A positive-order tank always has a continuation between its
+                # inlet and depletion. These distinct paths therefore persist.
+                if branch is None and order_n > 0 and len(paths) > 1:
+                    raise ValueError(ambiguity)
+                if not paths:
+                    raise ValueError("no physical CSTR steady state for the supplied volume")
+            cstr_branches = []
+            for history, _, _ in sorted(paths, key=lambda path: path[1]):
+                row = history[-1].copy()
+                if reactor_type == "cstr_series":
+                    row.update(stages=history, residual=max(r["residual"] for r in history),
+                               verified=all(r["verified"] for r in history))
+                cstr_branches.append(row)
             if branch == "all":
-                return {"domain": "reactor_kinetics", "reactor_type": "cstr", "volume_m3": vol_m3,
+                return {"domain": "reactor_kinetics", "reactor_type": reactor_type, "volume_m3": vol_m3,
                         "space_time_s": vol_m3 / v0, "steady_states": cstr_branches,
                         "steady_state_count": len(cstr_branches), "steady_state_branch": "all",
                         "residual": max(row["residual"] for row in cstr_branches),
                         "verified": all(row["verified"] for row in cstr_branches)}
             if branch is None:
-                if len(conversions) != 1:
-                    raise ValueError("multiple physical CSTR steady states; set steady_state_branch to 'all' or an ascending zero-based branch index")
+                if len(cstr_branches) != 1:
+                    raise ValueError(ambiguity)
                 branch = 0
-            if type(branch) is not int or not 0 <= branch < len(conversions):
+            if type(branch) is not int or not 0 <= branch < len(cstr_branches):
                 raise ValueError("steady_state_branch must be 'all' or a valid ascending zero-based branch index")
-            x_out = conversions[branch][0]
+            x_out = cstr_branches[branch]["conversion_X"]
         elif vol_m3 <= 0.0:
             x_out = 0.0
-        elif reactor_type == "cstr_series":
-            n_stages = int(params.get("n_stages", 2))
-            x_out = _cstr_series_exit_x(vol_m3 / (n_stages * v0), n_stages)
         else:
             fn_v = lambda x: volume_for_conversion(x) - vol_m3
             gap = 0.5
@@ -1534,9 +1642,13 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
     if cstr_branches is not None:
         result.update(steady_states=cstr_branches, steady_state_count=len(cstr_branches),
                       steady_state_branch=branch)
+        result["exit_T_K"] = cstr_branches[branch]["exit_T_K"]
+        result["k_exit"] = cstr_branches[branch]["k_exit"]
         result["unreacted_fraction"] = cstr_branches[branch]["unreacted_fraction"]
         result["residual"] = cstr_branches[branch]["residual"]
         result["verified"] = cstr_branches[branch]["verified"]
+        if reactor_type == "cstr_series":
+            result["stages"] = cstr_branches[branch]["stages"]
     return result
 
 
