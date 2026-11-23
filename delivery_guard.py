@@ -15,6 +15,8 @@ import re
 import shlex
 from typing import Any
 
+import archive_contract
+
 FILE = re.compile(
     r"(?<![A-Za-z0-9_.])(?P<path>(?:/(?:filesystem|app)/)?"
     r"(?:[A-Za-z0-9_.+\-]+/)*[A-Za-z0-9_.+\-]+"
@@ -125,7 +127,7 @@ def regular(path):
             return False
     return True
 
-def scan_file(p):
+def scan_file(p, root_members):
     try:
         if not p.is_file():
             return {"state":"missing"}
@@ -148,6 +150,11 @@ def scan_file(p):
                     names = z.namelist()
                     if not names:
                         return {"state":"invalid","reason":"zip_empty"}
+                    if root_members:
+                        if sorted(names) != sorted(root_members):
+                            return {"state":"invalid","reason":"zip_root_members_mismatch"}
+                        if any(member.file_size == 0 for member in z.infolist()):
+                            return {"state":"invalid","reason":"zip_empty_root_member"}
                     if ext == ".docx" and "word/document.xml" not in names:
                         return {"state":"invalid","reason":"docx_missing_document"}
                     if ext in (".xlsx",".xlsm") and "xl/workbook.xml" not in names:
@@ -206,7 +213,7 @@ for item in targets[:24]:
     elif kind == "dir":
         result[path] = scan_dir(p)
     else:
-        result[path] = scan_file(p)
+        result[path] = scan_file(p, item.get("root_members"))
 print(json.dumps(result,separators=(",",":")))
 '''
 
@@ -215,7 +222,9 @@ async def snapshot(session: Any, targets: list[dict[str, str]]) -> dict | None:
     """One bounded, read-only remote observation; None means unavailable."""
     if not targets:
         return {}
-    argv = shlex.quote(json.dumps(targets, separators=(",",":")))
+    members = archive_contract.declared_members(getattr(session, "instruction", ""), targets)
+    probe_targets = [{**targets[0], "root_members": members}] if members else targets
+    argv = shlex.quote(json.dumps(probe_targets, separators=(",",":")))
     cmd = "python3 -c " + shlex.quote(REMOTE_PROBE) + " " + argv
     try:
         reply = await asyncio.wait_for(session.exec(cmd, timeout_sec=25), timeout=29)

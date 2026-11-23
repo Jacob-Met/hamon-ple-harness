@@ -3,7 +3,16 @@
 These fixtures are intentionally independent of the parser implementation.
 No hidden task files, model calls, or grading slots are used.
 """
+import contextlib
+import io
+from pathlib import Path
+import shlex
+import sys
+import tempfile
 import unittest
+from unittest import mock
+import warnings
+import zipfile
 
 import delivery_guard as guard
 
@@ -72,6 +81,54 @@ class ParseContracts(unittest.TestCase):
                   "output/model.ifc.")
         self.assertEqual(self.targets(prompt),
                          [("/filesystem/output/model.ifc", "file")])
+
+
+class DirectArchive(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_write_honors_declared_nonempty_root_files(self):
+        path = "/filesystem/output/submission.zip"
+        targets = [{"path": path, "kind": "file"}]
+        prompt = ("Write a first complete version of output/submission.zip, then improve it. "
+                  "Produce exactly these two files at the archive root:\n"
+                  "1. `one.md`\n2. `two.md`")
+        self.instruction = prompt
+        with tempfile.TemporaryDirectory() as tmp:
+            graded = Path(tmp).resolve() / "submission.zip"
+
+            async def task_exec(command, timeout_sec):
+                _, _, program, argument = shlex.split(command)
+                # Map the task container's sole graded path to this real temporary file.
+                def task_path(value):
+                    self.assertEqual(value, path)
+                    return graded
+                output = io.StringIO()
+                with (mock.patch("pathlib.Path", side_effect=task_path),
+                      mock.patch.object(sys, "argv", ["-c", argument]),
+                      contextlib.redirect_stdout(output)):
+                    exec(program, {})
+                return {"exit_code": 0, "output": output.getvalue()}
+
+            self.exec = task_exec
+            before = await guard.snapshot(self, targets)
+            self.assertEqual(before, {path: {"state": "missing"}})
+            complete = [("one.md", b"one"), ("two.md", b"two")]
+            for entries, reason in [
+                (complete[::-1], None),
+                (complete[:1], "zip_root_members_mismatch"),
+                (complete + [("extra.md", b"extra")], "zip_root_members_mismatch"),
+                (complete + complete[:1], "zip_root_members_mismatch"),
+                ([complete[0], ("sub/two.md", b"two")], "zip_root_members_mismatch"),
+                ([complete[0], ("two.md", b"")], "zip_empty_root_member"),
+            ]:
+                with self.subTest(entries=entries):
+                    with warnings.catch_warnings(), zipfile.ZipFile(graded, "w") as archive:
+                        warnings.filterwarnings("ignore", message="Duplicate name")
+                        for name, body in entries:
+                            archive.writestr(name, body)
+                    after = await guard.snapshot(self, targets)
+                    expected = [{"path": path, "reason": reason}] if reason else []
+                    self.assertEqual(guard.compare(before, after), expected)
+            self.instruction = "Write output/submission.zip."
+            self.assertEqual(guard.compare(before, await guard.snapshot(self, targets)), [])
 
 
 class CompareSnapshots(unittest.TestCase):
