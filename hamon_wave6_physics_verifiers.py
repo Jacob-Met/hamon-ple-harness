@@ -217,11 +217,126 @@ def _fanno_param(mach: float, gamma: float) -> float:
     return (1.0 - m2) / (gamma * m2) + (gp1 / (2.0 * gamma)) * math.log((gp1 * m2) / (2.0 + gm1 * m2))
 
 
-def _rayleigh_t0_ratio(mach: float, gamma: float) -> float:
-    m2 = mach * mach
-    gp1 = gamma + 1.0
-    gm1 = gamma - 1.0
-    return (2.0 * gp1 * m2 * (1.0 + 0.5 * gm1 * m2)) / ((1.0 + gamma * m2) ** 2)
+def _rayleigh_duct(params, gamma, r_gas):
+    """Fixed-inlet Rayleigh line with finite-Mach branch and sonic endpoints."""
+    mach, t_in, heat = (float(params[key]) for key in ("M1", "T01", "q_J_kg"))
+    if not (math.isfinite(gamma) and gamma > 1 and math.isfinite(r_gas) and r_gas > 0):
+        raise ValueError("Rayleigh flow requires gamma > 1 and a positive finite gas constant")
+    cp = float(params["cp"]) if "cp" in params else gamma * r_gas / (gamma - 1)
+    if not all(map(math.isfinite, (mach, t_in, heat, cp))) or min(mach, t_in, cp) <= 0:
+        raise ValueError("Rayleigh flow requires positive finite Mach, inlet temperature and specific heat")
+    branch = params.get("branch")
+    if branch not in (None, "subsonic", "supersonic"):
+        raise ValueError("Rayleigh branch must be subsonic or supersonic")
+    m, t, q, c, g = map(Fraction, (mach, t_in, heat, cp, gamma))
+    inlet_branch = "subsonic" if m < 1 else "supersonic" if m > 1 else None
+    if inlet_branch and branch and branch != inlet_branch:
+        raise ValueError("Rayleigh outlet must stay on the inlet branch")
+    branch = inlet_branch or branch
+    # z=(M²-1)/(1+gamma*M²) is negative below sonic and positive above.
+    # T0/T0* = 1-z². The finite supersonic line ends at z=1/gamma.
+    z1 = (m*m - 1) / (1 + g*m*m)
+    star = t / (1 - z1*z1)
+    scale = c * star
+    budget = scale * z1*z1
+    squared = (budget - q) / scale
+
+    def as_decimal(value):
+        return Decimal(value.numerator) / Decimal(value.denominator)
+
+    base = {"domain": "compressible_acoustics", "subkind": "rayleigh", "M1": mach,
+            "requested_heat_J_kg": heat, "verified": False}
+    try:
+        if budget and float(budget) == 0:
+            raise OverflowError
+        base.update(T0_star_K=float(star), q_choke_J_kg=float(budget))
+        # Retain the documented relative sonic tolerance for rounded critical inputs.
+        at_limit = abs(q-budget) <= Fraction(_DUCT_SONIC_REL_TOL) * max(abs(q), budget)
+        if q > budget and not at_limit:
+            return dict(base, requested_state_feasible=False, choked=True,
+                        reason="Specified heat input exceeds the sonic limit at the supplied inlet Mach number.",
+                        reachable_sonic_state={"M": 1., "heat_J_kg": float(budget),
+                                               "T0_K": float(star), "P_over_P1": float((1+g*m*m)/(1+g))},
+                        residual=float((q-budget)/scale))
+        if squared >= 1:
+            raise ValueError("Specified heat removal gives nonpositive stagnation temperature")
+        if branch is None and not at_limit:
+            if squared < 1/(g*g):
+                return dict(base, requested_state_feasible=True, choked=False,
+                            available_branches=["subsonic", "supersonic"],
+                            reason="Select a branch for cooling from a sonic inlet with two finite outlet states.")
+            branch = "subsonic"
+        if branch == "supersonic" and squared >= 1/(g*g):
+            return dict(base, requested_state_feasible=False, choked=False,
+                        limiting_heat_J_kg=float(budget - scale/(g*g)),
+                        reason="No finite supersonic outlet at or below the infinite-Mach cooling limit.")
+        with localcontext() as context:
+            context.prec = 85
+            if at_limit:
+                outlet = Decimal(1)
+            elif q == 0:
+                outlet = Decimal.from_float(mach)
+            else:
+                gap = as_decimal(squared).sqrt()
+                if branch == "subsonic":
+                    m2sq = as_decimal(1-squared) / ((1+gap)*(1+as_decimal(g)*gap))
+                else:
+                    m2sq = (1+gap)*(1+as_decimal(g)*gap) / as_decimal(1-g*g*squared)
+                outlet = m2sq.sqrt()
+            m2 = float(outlet)
+            pressure = float(as_decimal(1+g*m*m) / (1+as_decimal(g)*outlet**2))
+        if not all(math.isfinite(v) and v > 0 for v in (m2, pressure)):
+            raise OverflowError
+        # Decode the reported M and P. Mass continuity sets u2/u1, so the
+        # ideal-gas law gives T2/T1 and both original balances can be replayed.
+        mw, pw = Fraction(m2), Fraction(pressure)
+        velocity = pw * (mw/m)**2
+        temp_ratio = pw * velocity
+        recovered_t0 = t * temp_ratio * (2+(g-1)*mw*mw) / (2+(g-1)*m*m)
+        energy_error = c*(recovered_t0-t)-q
+        momentum_error = pw + g*m*m*velocity - (1+g*m*m)
+        residual = max(abs(energy_error)/scale, abs(momentum_error)/(1+g*m*m))
+        # Confirm one physical state in the intersection of the two reported
+        # rounding cells. Along the fixed momentum line, heat is quadratic in
+        # u2/u1 and has its maximum at the sonic velocity.
+        def rounding_cell(value):
+            center = Fraction(value)
+            lower = (Fraction(math.nextafter(value, 0.)) + center) / 2
+            next_value = math.nextafter(value, math.inf)
+            upper = ((center + Fraction(next_value)) / 2 if math.isfinite(next_value)
+                     else center + (center-lower))
+            return lower, upper
+
+        def velocity_at_mach(value):
+            return (value/m)**2 * (1+g*m*m) / (1+g*value*value)
+
+        def heat_at_velocity(value):
+            pressure_at_v = 1+g*m*m*(1-value)
+            total_ratio = value*(2*pressure_at_v+(g-1)*m*m*value)/(2+(g-1)*m*m)
+            return c*t*(total_ratio-1)
+
+        mlo, mhi = rounding_cell(m2)
+        plo, phi = rounding_cell(pressure)
+        vlo = max(velocity_at_mach(mlo), 1+(1-phi)/(g*m*m))
+        vhi = min(velocity_at_mach(mhi), 1+(1-plo)/(g*m*m))
+        sonic = velocity_at_mach(Fraction(1))
+        if branch == "supersonic":
+            vlo = max(vlo, sonic)
+        elif branch == "subsonic":
+            vhi = min(vhi, sonic)
+        ends = [heat_at_velocity(vlo), heat_at_velocity(vhi)]
+        if vlo <= sonic <= vhi:
+            ends.append(budget)
+        target = budget if at_limit else q
+        enclosed = vlo <= vhi and min(ends) <= target <= max(ends)
+        resolved = at_limit or (m2 != 1 and (q == 0 or m2 != mach or pressure != 1))
+
+        return dict(base, M2=m2, P2_over_P1=pressure, choked=at_limit,
+                    requested_state_feasible=True, residual=float(residual),
+                    wire_rounding_verified=bool(enclosed),
+                    verified=bool(resolved and enclosed and residual < 1e-10))
+    except OverflowError:
+        return dict(base, reason="Rayleigh outlet or sonic reference exceeds the finite output range.")
 
 
 def _passive_acoustic_interface(params: Mapping[str, Any]) -> Dict[str, Any]:
@@ -403,72 +518,7 @@ def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any
         }
 
     if subkind == "rayleigh":
-        m1 = float(params["M1"])
-        t01 = float(params["T01"])
-        q_heat = float(params["q_J_kg"])
-        cp = float(params.get("cp", gamma * r_gas / (gamma - 1.0)))
-        subsonic = 0.0 < m1 < 1.0 and gamma > 1.0
-        if subsonic and (not all(math.isfinite(v) for v in (gamma, t01, q_heat, cp))
-                         or cp <= 0.0 or t01 <= 0.0):
-            raise ValueError("Subsonic Rayleigh flow requires positive stagnation temperature and specific heat")
-        t02 = t01 + q_heat / cp
-        r1 = _rayleigh_t0_ratio(m1, gamma)
-        t0_star = t01 / r1
-        target_r2 = t02 / t0_star
-        if subsonic:
-            # 1 - T01/T0* = [(1-M1²)/(1+gamma M1²)]².  This keeps the
-            # available heat representable even when T01/T0* rounds to 1.
-            inlet_gap = ((1.0 - m1) * (1.0 + m1) / (1.0 + gamma*m1*m1))**2
-            heat_scale = cp * t0_star
-            q_choke = heat_scale * inlet_gap
-            at_limit = math.isclose(q_heat, q_choke, rel_tol=_DUCT_SONIC_REL_TOL)
-            if q_heat > q_choke and not at_limit:
-                return {
-                    "domain": "compressible_acoustics", "subkind": subkind, "M1": m1,
-                    "choked": True, "requested_state_feasible": False,
-                    "reason": "Specified heat input exceeds the sonic limit at the supplied inlet Mach number.",
-                    "requested_heat_J_kg": q_heat, "q_choke_J_kg": q_choke,
-                    "T0_star_K": t0_star,
-                    "reachable_sonic_state": {"M": 1.0, "heat_J_kg": q_choke,
-                                              "T0_K": t0_star, "P_over_P1": (1.0 + gamma*m1*m1)/(1.0 + gamma)},
-                    "residual": (q_heat - q_choke) / heat_scale,
-                    "verified": False,
-                }
-            if t02 <= 0.0:
-                raise ValueError("Specified heat removal gives nonpositive stagnation temperature")
-            choked = at_limit
-            if at_limit:
-                m2 = 1.0
-                residual = abs(q_heat - q_choke) / heat_scale
-            else:
-                gap_root = math.sqrt((q_choke - q_heat) / heat_scale)
-                m2 = math.sqrt(target_r2 / ((1.0 + gap_root) * (1.0 + gamma*gap_root)))
-                residual = abs(_rayleigh_t0_ratio(m2, gamma) - target_r2)
-        elif target_r2 >= 1.0 - 1e-12:
-            m2 = 1.0
-            choked = True
-            residual = 0.0
-        else:
-            choked = False
-            fn = lambda m: _rayleigh_t0_ratio(m, gamma) - target_r2
-            if m1 < 1.0:
-                m2 = float(optimize.brentq(fn, 1e-9, 1.0 - 1e-11, xtol=1e-14, rtol=1e-14))
-            else:
-                m2 = float(optimize.brentq(fn, 1.0 + 1e-11, 60.0, xtol=1e-14, rtol=1e-14))
-            residual = abs(_rayleigh_t0_ratio(m2, gamma) - target_r2)
-        p2_p1 = (1.0 + gamma * m1 * m1) / (1.0 + gamma * m2 * m2)
-        return {
-            "domain": "compressible_acoustics",
-            "subkind": subkind,
-            "M1": m1,
-            "M2": m2,
-            "choked": choked,
-            "T0_star_K": t0_star,
-            **({"requested_state_feasible": True, "q_choke_J_kg": q_choke} if subsonic else {}),
-            "P2_over_P1": p2_p1,
-            "residual": residual,
-            "verified": residual < 1e-10,
-        }
+        return _rayleigh_duct(params, gamma, r_gas)
 
     if subkind == "acoustics":
         return _passive_acoustic_interface(params)
