@@ -1,0 +1,50 @@
+name: Public engineering provider-wire comparison
+on:
+  pull_request:
+    paths:
+      - "ship/replay_engineering_provider_wire.py"
+      - "ship/compare_engineering_provider_wire.py"
+      - ".github/workflows/engineering-provider-wire.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Prepare historical source and identical locked Pi runtime
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/stock" 3efe0f4b626d15fe4dc01a4ad36d3429fd534327
+          cmp package-lock.json "$RUNNER_TEMP/stock/package-lock.json"
+          cmp package.json "$RUNNER_TEMP/stock/package.json"
+          npm ci --no-audit --no-fund
+          ln -s "$GITHUB_WORKSPACE/node_modules" "$RUNNER_TEMP/stock/node_modules"
+          python -m pip install -r requirements.txt tiktoken==0.12.0
+      - name: Capture original stock and candidate HTTP requests
+        run: |
+          set -euo pipefail
+          mkdir wire-results
+          git rev-parse HEAD > wire-results/candidate.commit
+          git -C "$RUNNER_TEMP/stock" rev-parse HEAD > wire-results/stock.commit
+          python ship/replay_engineering_provider_wire.py --root "$RUNNER_TEMP/stock" --bpe > wire-results/stock.jsonl
+          python ship/replay_engineering_provider_wire.py --reference --bpe > wire-results/candidate.jsonl
+          python ship/compare_engineering_provider_wire.py wire-results/{stock,candidate}.jsonl | tee wire-results/comparison.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: public-engineering-wire-requests
+          path: wire-results
+          if-no-files-found: warn
