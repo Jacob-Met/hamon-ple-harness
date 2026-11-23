@@ -2045,6 +2045,12 @@ def verify_thermal_fluid_chemical_balance(spec: Dict[str, Any]) -> Dict[str, Any
             if joint:
                 from hamon_species_stream_mass import check_stream_mass
                 out["stream_mass_mole_ok"] = False
+                out["stream_molar_mass_default"] = "CIAAW_2024_abridged_normal_material"
+                out["declared_molar_mass_streams"] = [
+                    {"side": name, "index": index}
+                    for name, side in (("inlets", ins), ("outlets", outs))
+                    for index, stream in enumerate(side) if "molar_mass_g_mol" in stream
+                ]
             species_ok = all("ndot_mol_s" in s and s.get("formula") for s in streams)
             if species_ok:
                 ai, ao = {}, {}
@@ -2060,7 +2066,7 @@ def verify_thermal_fluid_chemical_balance(spec: Dict[str, Any]) -> Dict[str, Any
                         molar_rate = float(stream["ndot_mol_s"])
                         if joint:
                             if "mdot_kg_s" in stream:
-                                reason = check_stream_mass(elements, float(stream["mdot_kg_s"]), molar_rate, rtol)
+                                reason = check_stream_mass(elements, float(stream["mdot_kg_s"]), molar_rate, rtol, stream)
                             else:
                                 reason = "missing mass rate"
                             if reason:

@@ -1,8 +1,8 @@
 """Qualify joint mass and molar rates of a single neutral formula.
 
 The 2024 CIAAW abridged standard atomic weights and their quoted uncertainties
-describe ordinary terrestrial materials. Isotope-specific samples and elements
-without a standard atomic weight have no joint mass certificate on this route.
+describe ordinary terrestrial materials. A stream may instead declare its own
+whole-formula molar mass (g/mol) for a sample of known composition.
 Source: https://ciaaw.org/abridged-atomic-weights.htm
 """
 
@@ -111,7 +111,14 @@ def _atomic_ranges():
 _ATOMIC_RANGES = _atomic_ranges()
 
 
-def check_stream_mass(elements, mass_rate, molar_rate, rtol):
+# The remaining recognized elements have no CIAAW standard atomic weight.
+_ELEMENTS = _ATOMIC_RANGES.keys() | set(
+    "Tc Pm Po At Rn Fr Ra Ac Np Pu Am Cm Bk Cf Es Fm Md No Lr Rf Db Sg Bh Hs "
+    "Mt Ds Rg Cn Nh Fl Mc Lv Ts Og".split()
+)
+
+
+def check_stream_mass(elements, mass_rate, molar_rate, rtol, stream):
     """Return a reason if mdot cannot arise from ndot at the declared tolerance."""
     if not all(math.isfinite(x) and x >= 0 for x in (mass_rate, molar_rate)):
         return "mass and molar rates must be finite and nonnegative"
@@ -120,15 +127,28 @@ def check_stream_mass(elements, mass_rate, molar_rate, rtol):
     if bool(mass_rate) != bool(molar_rate):
         return "zero mass and zero molar flow must coincide"
 
-    lower = upper = Fraction(0)
-    for symbol, count in elements.items():
-        if not count:
-            continue
-        if symbol not in _ATOMIC_RANGES:
-            return f"no standard atomic weight for {symbol}"
-        low, high = _ATOMIC_RANGES[symbol]
-        lower += Fraction(count) * low
-        upper += Fraction(count) * high
+    for symbol in elements:
+        if symbol not in _ELEMENTS:
+            return f"unknown chemical element {symbol}"
+
+    if "molar_mass_g_mol" in stream:
+        try:
+            mass = float(stream["molar_mass_g_mol"])
+        except (TypeError, ValueError, OverflowError):
+            return "declared whole-formula molar mass must be a positive finite number"
+        if not math.isfinite(mass) or mass <= 0 or isinstance(stream["molar_mass_g_mol"], bool):
+            return "declared whole-formula molar mass must be a positive finite number"
+        lower = upper = Fraction(mass)
+    else:
+        lower = upper = Fraction(0)
+        for symbol, count in elements.items():
+            if not count:
+                continue
+            if symbol not in _ATOMIC_RANGES:
+                return f"no standard atomic weight for {symbol}"
+            low, high = _ATOMIC_RANGES[symbol]
+            lower += Fraction(count) * low
+            upper += Fraction(count) * high
 
     # Work in g/s. Neither a large formula nor a tiny rate should narrow or
     # overflow the comparison interval before both coordinates are examined.

@@ -55,6 +55,21 @@ class SpeciesStreamMassTests(unittest.TestCase):
             with self.subTest(mass=mass, rtol=rtol):
                 self.assertIs(check([record], [record], rtol=rtol)["conservation_verified"], valid)
 
+    def test_sample_molar_mass_is_an_explicit_whole_formula_input(self):
+        heavy = stream("H2O", 2, 0.0400552)
+        self.assertFalse(check([heavy], [heavy])["conservation_verified"])
+        sample = dict(heavy, molar_mass_g_mol=20.0276)
+        result = check([sample], [sample])
+        self.assertTrue(result["conservation_verified"])
+        self.assertEqual(result["declared_molar_mass_streams"],
+                         [{"side": "inlets", "index": 0}, {"side": "outlets", "index": 0}])
+        for declared in (10.0138, True, None, "unknown", -20.0276, math.inf, math.nan):
+            row = dict(heavy, molar_mass_g_mol=declared)
+            self.assertFalse(check([row], [row])["conservation_verified"])
+        for formula, expected in (("Tc", True), ("Xx", False)):
+            row = dict(stream(formula, 1, 0.099), molar_mass_g_mol=99)
+            self.assertIs(check([row], [row])["conservation_verified"], expected)
+
     def test_single_coordinate_contracts(self):
         for row in ({"mdot_kg_s": 1}, {"formula": "NaCl", "ndot_mol_s": 1}):
             result = check([row], [row])
