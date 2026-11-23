@@ -654,6 +654,85 @@ def _ifc_product_properties(typed, raw, unit_scale, density):
     }, math.fsum(analytic for _, analytic, *_ in parts)
 
 
+def _step_face_region(boundaries):
+    """Triangulate the whole planar face, retaining its holes and original vertices.
+
+    Separate signed loop fans can integrate volume correctly while counting a
+    hole twice in unsigned surface area. A constrained partition represents the
+    actual face domain, including concave outer boundaries.
+    """
+    from shapely import Polygon, constrained_delaunay_triangles, union_all
+
+    if not boundaries:
+        raise ValueError("STEP face has no complete boundary")
+    rings = [np.asarray(points, dtype=float) for _, points in boundaries]
+    if any(p.ndim != 2 or p.shape[1] != 3 or len(p) < 3 or not np.isfinite(p).all()
+           for p in rings):
+        raise ValueError("STEP face requires finite three-dimensional boundary vertices")
+    vertices = np.vstack(rings)
+    origin = vertices[0]
+    extent = float(np.max(np.abs(vertices - origin)))
+    if not math.isfinite(extent) or extent <= 0:
+        raise ValueError("STEP face boundary is degenerate")
+    local = [(p - origin) / extent for p in rings]
+    normals = []
+    for p in local:
+        crosses = np.cross(p, np.roll(p, -1, axis=0))
+        normals.append(np.array([math.fsum(crosses[:, j]) for j in range(3)]))
+    explicit = [i for i, (kind, _) in enumerate(boundaries) if kind == "FACE_OUTER_BOUND"]
+    if len(explicit) > 1:
+        raise ValueError("STEP face has more than one outer boundary")
+    outer = explicit[0] if explicit else max(range(len(rings)), key=lambda i: np.linalg.norm(normals[i]))
+    normal_length = float(np.linalg.norm(normals[outer]))
+    if not normal_length > 0:
+        raise ValueError("STEP face outer boundary has zero oriented area")
+    normal = normals[outer] / normal_length
+    # Coordinates may already be rounded after a large translation. Account for
+    # those ulps without imposing a world-origin absolute tolerance.
+    for points, p in zip(rings, local):
+        rounding = 8 * ((np.spacing(np.abs(points)) + np.spacing(np.abs(origin))) @ np.abs(normal)) / extent
+        if np.any(np.abs(p @ normal) > rounding + 64 * np.finfo(float).eps):
+            raise ValueError("STEP face boundaries are non-planar")
+    axes = [j for j in range(3) if j != int(np.argmax(np.abs(normal)))]
+    projected = [p[:, axes] for p in local]
+
+    def signed_area(p):
+        return math.fsum(p[:, 0] * np.roll(p[:, 1], -1) - p[:, 1] * np.roll(p[:, 0], -1)) / 2
+
+    areas = [signed_area(p) for p in projected]
+    if areas[outer] == 0 or any(areas[i] == 0 or (areas[i] > 0) == (areas[outer] > 0)
+                              for i in range(len(rings)) if i != outer):
+        raise ValueError("STEP face hole winding disagrees with its outer boundary")
+    region = Polygon(projected[outer], [p for i, p in enumerate(projected) if i != outer])
+    if not region.is_valid or region.is_empty or not region.area > 0:
+        raise ValueError("STEP face boundaries do not define a simple region with disjoint interior holes")
+    coordinates = {}
+    for index, point in enumerate(np.vstack(projected)):
+        key = tuple(point)
+        if key in coordinates:
+            raise ValueError("STEP face boundaries repeat or share a vertex")
+        coordinates[key] = index
+    triangles = list(constrained_delaunay_triangles(region).geoms)
+    if not triangles or not union_all(triangles).equals(region):
+        raise ValueError("STEP face triangulation does not cover its boundary region")
+    covered_area = math.fsum(triangle.area for triangle in triangles)
+    if abs(covered_area - region.area) > 64 * np.finfo(float).eps * len(triangles) * region.area:
+        raise ValueError("STEP face triangulation contains overlapping regions")
+    faces = []
+    for triangle in triangles:
+        p = np.asarray(triangle.exterior.coords)[:-1]
+        if len(p) != 3 or triangle.interiors or not triangle.area > 0:
+            raise ValueError("STEP face triangulation produced a non-triangle")
+        try:
+            face = [coordinates[tuple(point)] for point in p]
+        except KeyError as exc:
+            raise ValueError("STEP face triangulation introduced an unqualified vertex") from exc
+        if (signed_area(p) > 0) != (areas[outer] > 0):
+            face[1], face[2] = face[2], face[1]
+        faces.append(face)
+    return vertices, np.asarray(faces, dtype=np.int32)
+
+
 def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
     step_text = spec.get("step_text") or ""
     if not step_text and spec.get("file_b64"):
@@ -696,51 +775,128 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
         all_verts.append(v)
         all_faces.append(f + off)
 
-    shell_polys: List[np.ndarray] = []
+    def _direction(reference):
+        kind, values = entities.get(_ref_id(reference), (None, []))
+        if kind != "DIRECTION" or len(values) != 2:
+            raise ValueError("STEP analytic geometry requires a defined direction")
+        ratios = np.asarray(_num_list(values[1]), dtype=float)
+        if ratios.shape != (3,) or not np.isfinite(ratios).all() or not np.any(ratios):
+            raise ValueError("STEP analytic geometry requires a finite nonzero direction")
+        return tuple(Fraction(float(value)) for value in ratios)
+
+    def _cross(a, b):
+        return (a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0])
+
+    def _geometry_points(points, anchor, axis, line=False):
+        # A supporting line/plane can be anchored arbitrarily far along itself.
+        # Exact raw-coordinate predicates avoid cancellation at that anchor;
+        # tolerances derive from the finite boundary, not its parameterization.
+        points = np.asarray(points)
+        scale = float(np.max(np.abs(points - points[0])))
+        if not math.isfinite(scale) or scale <= 0:
+            raise ValueError("STEP analytic geometry is degenerate")
+        normalized = np.array([float(value / max(map(abs, axis))) for value in axis])
+        normalized /= np.linalg.norm(normalized)
+        ulps = np.spacing(np.abs(points))
+        rounding = np.linalg.norm(ulps, axis=1) if line else ulps @ np.abs(normalized)
+        tolerances = 8 * rounding + 64 * np.finfo(float).eps * scale
+        exact = [tuple(Fraction(float(value)) for value in point) for point in points]
+        anchor = tuple(Fraction(float(value)) for value in anchor)
+        norm_sq = sum(value*value for value in axis)
+        for point, tolerance in zip(exact, tolerances):
+            delta = tuple(value - origin for value, origin in zip(point, anchor))
+            if line:
+                residual_sq = sum(value*value for value in _cross(delta, axis))
+            else:
+                residual_sq = sum(value*direction for value, direction in zip(delta, axis))**2
+            if residual_sq > Fraction(float(tolerance))**2 * norm_sq:
+                kind = "line" if line else "plane"
+                raise ValueError(f"STEP boundary vertices disagree with the declared {kind}")
+        return exact
+
     for eid, (et, args) in entities.items():
         if et in ("ADVANCED_FACE", "FACE_SURFACE") and len(args) >= 2:
+            boundaries = []
+            if len(args) >= 3 and args[2] != "$":
+                if entities.get(_ref_id(args[2]), (None, []))[0] != "PLANE":
+                    raise ValueError("STEP face requires a planar surface; curved faces cannot use boundary chords")
             for bid in _ref_list(args[1]):
                 if bid not in entities:
-                    continue
+                    raise ValueError("STEP face references a missing boundary")
                 bet, bargs = entities[bid]
-                if bet not in ("FACE_OUTER_BOUND", "FACE_BOUND") or len(bargs) < 2:
-                    continue
+                if bet not in ("FACE_OUTER_BOUND", "FACE_BOUND") or len(bargs) != 3 or bargs[2] not in (".T.", ".F."):
+                    raise ValueError("STEP face requires an oriented boundary")
                 lid = _ref_id(bargs[1])
-                bound_sense = ".F." not in (bargs[2].upper() if len(bargs) >= 3 else ".T.")
+                bound_sense = bargs[2] == ".T."
                 if lid not in entities:
-                    continue
+                    raise ValueError("STEP face references a missing loop")
                 let, largs = entities[lid]
                 lpts: List[np.ndarray] = []
                 if let == "POLY_LOOP" and len(largs) >= 2:
-                    lpts = [pts[pid] for pid in _ref_list(largs[1]) if pid in pts]
+                    pids = _ref_list(largs[1])
+                    if any(pid not in pts for pid in pids):
+                        raise ValueError("STEP polygon loop references a missing point")
+                    lpts = [pts[pid] for pid in pids]
                 elif let == "EDGE_LOOP" and len(largs) >= 2:
+                    endpoints = []
                     for oe_id in _ref_list(largs[1]):
-                        if oe_id in entities and entities[oe_id][0] == "ORIENTED_EDGE" and len(entities[oe_id][1]) >= 5:
-                            oargs = entities[oe_id][1]
-                            ec_id = _ref_id(oargs[3])
-                            oe_s = ".F." not in oargs[4].upper()
-                            if ec_id in entities:
-                                ec_args = entities[ec_id][1]
-                                vp = _ref_id(ec_args[1]) if oe_s else _ref_id(ec_args[2])
-                                if vp in verts_map:
-                                    lpts.append(verts_map[vp])
-                if len(lpts) >= 3:
-                    arr = np.array(lpts, dtype=np.float64)
-                    # FACE_SURFACE.same_sense relates surface and face normals.
-                    # FACE_BOUND.orientation determines the topological loop winding.
-                    if not bound_sense:
-                        arr = arr[::-1].copy()
-                    shell_polys.append(arr)
-
-    if shell_polys:
-        bv: List[np.ndarray] = []
-        bf: List[List[int]] = []
-        for poly in shell_polys:
-            base = len(bv)
-            bv.extend(poly)
-            for i in range(1, len(poly) - 1):
-                bf.append([base, base + i, base + i + 1])
-        _append(np.array(bv, dtype=np.float64), np.array(bf, dtype=np.int32))
+                        oe_kind, oargs = entities.get(oe_id, (None, []))
+                        if oe_kind != "ORIENTED_EDGE" or len(oargs) != 5 or oargs[4] not in (".T.", ".F."):
+                            raise ValueError("STEP edge loop requires complete oriented edges")
+                        ec_kind, ec_args = entities.get(_ref_id(oargs[3]), (None, []))
+                        if ec_kind != "EDGE_CURVE" or len(ec_args) != 5 or ec_args[4] not in (".T.", ".F."):
+                            raise ValueError("STEP edge loop requires edge curves")
+                        curve_kind, curve_args = entities.get(_ref_id(ec_args[3]), (None, []))
+                        if curve_kind != "LINE" or len(curve_args) != 3:
+                            raise ValueError("STEP edge loop requires straight lines; curved edges cannot use endpoint chords")
+                        start, end = _ref_id(ec_args[1]), _ref_id(ec_args[2])
+                        if start not in verts_map or end not in verts_map:
+                            raise ValueError("STEP edge loop references a missing vertex")
+                        vector_kind, vector = entities.get(_ref_id(curve_args[2]), (None, []))
+                        anchor = pts.get(_ref_id(curve_args[1]))
+                        if vector_kind != "VECTOR" or len(vector) != 3 or anchor is None:
+                            raise ValueError("STEP line requires a defined point and vector")
+                        magnitude = float(vector[2])
+                        if not math.isfinite(magnitude) or magnitude <= 0:
+                            raise ValueError("STEP line requires a positive finite vector magnitude")
+                        axis = _direction(vector[1])
+                        ends = _geometry_points([verts_map[start], verts_map[end]], anchor, axis, line=True)
+                        orientation = sum((b-a)*direction for a, b, direction in zip(ends[0], ends[1], axis))
+                        if orientation == 0 or (orientation > 0) != (ec_args[4] == ".T."):
+                            raise ValueError("STEP edge direction disagrees with the declared curve sense")
+                        if oargs[4] == ".F.":
+                            start, end = end, start
+                        endpoints.append((start, end))
+                        lpts.append(verts_map[start])
+                    if not endpoints or any(a[1] != b[0] for a, b in zip(endpoints, endpoints[1:] + endpoints[:1])):
+                        raise ValueError("STEP edge loop is not a connected cycle")
+                else:
+                    raise ValueError("STEP face boundary loop type is unsupported")
+                arr = np.array(lpts, dtype=np.float64)
+                # FACE_SURFACE.same_sense relates surface and face normals.
+                # FACE_BOUND.orientation determines the topological loop winding.
+                if not bound_sense:
+                    arr = arr[::-1].copy()
+                boundaries.append((bet, arr))
+            face_vertices, face_triangles = _step_face_region(boundaries)
+            if len(args) >= 3 and args[2] != "$":
+                surface = entities[_ref_id(args[2])][1]
+                if len(surface) != 2 or len(args) != 4 or args[3] not in (".T.", ".F."):
+                    raise ValueError("STEP planar face requires a surface placement and sense")
+                placement_kind, placement = entities.get(_ref_id(surface[1]), (None, []))
+                if placement_kind != "AXIS2_PLACEMENT_3D" or len(placement) != 4:
+                    raise ValueError("STEP plane requires a three-dimensional placement")
+                anchor = pts.get(_ref_id(placement[1]))
+                if anchor is None:
+                    raise ValueError("STEP plane references a missing location")
+                axis = (Fraction(0), Fraction(0), Fraction(1)) if placement[2] == "$" else _direction(placement[2])
+                exact = _geometry_points(face_vertices, anchor, axis)
+                a, b, c = (exact[index] for index in face_triangles[0])
+                cross = _cross(tuple(y-x for x, y in zip(a, b)), tuple(y-x for x, y in zip(a, c)))
+                orientation = sum(value*direction for value, direction in zip(cross, axis))
+                if orientation == 0 or (orientation > 0) != (args[3] == ".T."):
+                    raise ValueError("STEP face winding disagrees with the declared surface sense")
+            _append(face_vertices, face_triangles)
 
     for eid, (et, args) in entities.items():
         if et == "BLOCK" and len(args) >= 5:
