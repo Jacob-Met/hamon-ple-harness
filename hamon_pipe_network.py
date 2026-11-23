@@ -329,23 +329,37 @@ def network(spec):
             derivative = A / law(flow)[1]
             return residual, derivative @ paths
 
-        tree_drop = newton(initial, nodal_equations, min(1e-12, 5e-13 * scale))
+        # The minimum flow used to bracket a pipe inverse is not the scale
+        # of the continuity equations for a very lightly loaded closed mesh.
+        mass_scale = float(np.abs(d).sum()) if len(reservoirs) == 1 else scale
+        tree_drop = newton(initial, nodal_equations, min(1e-12, 5e-13 * mass_scale))
         qnode = inverse(pipe_drops(tree_drop), scale)
         relative_tree_drop = tree_drop - boundary_drop[basis]
         head = np.linalg.solve(basis_incidence.T, relative_tree_drop)
         # The second formulation begins with continuity satisfied, and may change
         # only circulations and flows between reservoirs. Their prescribed head
         # differences supply the energy term on those boundary-to-boundary paths.
-        feasible = np.linalg.lstsq(A, -d, rcond=None)[0]
-        cycles = null_space(A)
+        if len(reservoirs) == 1:
+            # Chord flows are physical unknowns. A high-resistance bypass then
+            # starts at zero instead of subtracting two large SVD components.
+            chords = np.setdiff1d(np.arange(len(pipes)), basis)
+            feasible = np.zeros(len(pipes))
+            feasible[basis] = np.linalg.solve(basis_incidence, -d)
+            cycles = np.zeros((len(pipes), len(chords)))
+            cycles[basis, :] = -paths[chords, :].T
+            cycles[chords, np.arange(len(chords))] = 1.0
+        else:
+            feasible = np.linalg.lstsq(A, -d, rcond=None)[0]
+            cycles = null_space(A)
 
         def loop_equations(amount):
             drop, slope = law(feasible + cycles @ amount)
             return cycles.T @ (drop - boundary_drop), (cycles.T * slope) @ cycles
 
         loss_scale = np.max(np.abs(law(feasible)[0] - boundary_drop))
+        loss_floor = 0.0 if len(reservoirs) == 1 else 1e-26
         loop_tolerance = max(32 * np.finfo(float).eps * loss_scale,
-                             min(1e-13, max(1e-26, 1e-13 * loss_scale)))
+                             min(1e-13, max(loss_floor, 1e-13 * loss_scale)))
         amplitude = newton(np.zeros(cycles.shape[1]), loop_equations, loop_tolerance)
         qloop = feasible + cycles @ amplitude
         drop, _ = law(qloop)
@@ -374,7 +388,9 @@ def network(spec):
         flows = proposed("proposed_flows_m3_s", pipe_ids)
         # Check every pipe and junction. A large main cannot conceal a missing
         # demand or a reversed flow on a much smaller branch.
-        pipe_scale = np.abs(qloop) if radial else scale
+        pipe_scale = np.abs(qloop) if radial else np.full(len(qloop), scale)
+        if not radial and len(reservoirs) == 1:
+            pipe_scale[chords] = np.abs(qloop[chords])
         pipe_tolerance = np.minimum(1e-6, 1e-7 * np.abs(qloop) + 32 * eps * pipe_scale)
         registered["flows_match"] = bool(
             np.all(np.abs(flows - qloop) <= pipe_tolerance)
