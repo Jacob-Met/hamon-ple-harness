@@ -139,7 +139,8 @@ class PolyhedralBooleans(unittest.TestCase):
             self.assertEqual(result["status"], "unresolved_solid_geometry")
         with mock.patch.dict(sys.modules, {"manifold3d":None}):
             result = run_router_ifc_clash({"ifc_text":text})
-            self.assertFalse(result["ok"], result)
+            self.assertTrue(result["ok"], result)
+            self.assertAlmostEqual(result["total_solid_volume_m3"], 25.875, places=12)
             original = run_router_ifc_clash({"ifc_text":course(shift=.25,probe=True)})
             self.assertTrue(original["ok"], original)
             self.assertIsNone(original["total_solid_volume_m3"])
@@ -192,3 +193,4 @@ class PolyhedralBooleans(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
