@@ -2179,7 +2179,7 @@ def _truss_node_index(value, node_count):
 class _TrussMember:
     """Raw compatibility row and material factors of one represented member."""
 
-    def __init__(self, element, nodes):
+    def __init__(self, element, nodes, *, minimum_length=1e-12):
         i = _truss_node_index(element["i"], len(nodes))
         j = _truss_node_index(element["j"], len(nodes))
         xi, yi = nodes[i]
@@ -2190,7 +2190,7 @@ class _TrussMember:
         length = math.hypot(float(xj) - float(xi), float(yj) - float(yi))
         modulus = Fraction(float(element["E_pa"]))
         self.area = Fraction(float(element["A_m2"]))
-        if not math.isfinite(length) or length <= 1e-12 or modulus <= 0 or self.area <= 0:
+        if not math.isfinite(length) or length <= minimum_length or modulus <= 0 or self.area <= 0:
             raise ValueError("Degenerate truss member geometry or stiffness")
         self.length = Fraction(length)
         self.ea = modulus * self.area
@@ -2202,7 +2202,7 @@ class _TrussMember:
         self.thermal_extension = alpha * delta_t * self.length
 
 
-def _truss_free_rank(rows, free_count):
+def _truss_free_basis(rows, free_count):
     """Exact echelon basis of free compatibility rows; no stiffness weights enter."""
     basis = {}
     for entries in rows:
@@ -2221,7 +2221,11 @@ def _truss_free_rank(rows, free_count):
                     row.pop(j, None)
         if len(basis) == free_count:
             break
-    return len(basis)
+    return basis
+
+
+def _truss_free_rank(rows, free_count):
+    return len(_truss_free_basis(rows, free_count))
 
 
 def _truss_solve(members, applied, prescribed, free):

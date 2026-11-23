@@ -1026,53 +1026,119 @@ def solve_static_equilibrium_2d(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def solve_truss_2d(spec: dict[str, Any]) -> dict[str, Any]:
-    """Dual-solve 2D pin-jointed truss (SymPy exact stiffness/equilibrium vs SciPy FEM)."""
+    """Verify axial forces of a small-strain pin-jointed truss with fixed support components."""
+    from hamon_pde_control_psychro_fem import (
+        _TrussMember, _diagnostic_float, _truss_free_basis, _truss_solve,
+    )
+
     nodes = spec["nodes"]
-    members = spec["members"]
-    node_names = sorted(nodes.keys())
-    idx_map = {name: i for i, name in enumerate(node_names)}
-    ndof = 2 * len(node_names)
-    K = [[0.0] * ndof for _ in range(ndof)]
-    F = [0.0] * ndof
-    fixed = set()
-    for name, nd in nodes.items():
-        i = idx_map[name]
-        F[2 * i] = float(nd.get("Fx", 0.0))
-        F[2 * i + 1] = float(nd.get("Fy", 0.0))
-        if nd.get("fix_x"):
-            fixed.add(2 * i)
-        if nd.get("fix_y"):
-            fixed.add(2 * i + 1)
+    names = sorted(nodes)
+    index = {name: i for i, name in enumerate(names)}
+    points = [(Fraction(float(nodes[name]["x"])), Fraction(float(nodes[name]["y"])))
+              for name in names]
+    applied, free = [], []
+    for name in names:
+        for axis, load in (("x", "Fx"), ("y", "Fy")):
+            if not nodes[name].get("fix_" + axis):
+                free.append(len(applied))
+            applied.append(Fraction(float(nodes[name].get(load, 0.0))))
 
-    geom = []
-    for m in members:
-        i1, i2 = idx_map[m["n1"]], idx_map[m["n2"]]
-        x1, y1 = float(nodes[m["n1"]]["x"]), float(nodes[m["n1"]]["y"])
-        x2, y2 = float(nodes[m["n2"]]["x"]), float(nodes[m["n2"]]["y"])
-        L = math.hypot(x2 - x1, y2 - y1)
-        c, s = (x2 - x1) / L, (y2 - y1) / L
-        ea = float(m.get("EA", 2.0e8))
-        k = ea / L
-        dofs = [2 * i1, 2 * i1 + 1, 2 * i2, 2 * i2 + 1]
-        vec = [-c, -s, c, s]
-        for a in range(4):
-            for b in range(4):
-                K[dofs[a]][dofs[b]] += k * vec[a] * vec[b]
-        geom.append((m["id"], dofs, k, vec))
+    members = {}
+    for element in spec["members"]:
+        label = "N_" + str(element["id"]) + "_N"
+        if label in members:
+            raise ValueError("Truss member IDs must identify distinct output forces")
+        members[label] = _TrussMember(
+            {"i": index[element["n1"]], "j": index[element["n2"]],
+             "E_pa": element.get("EA", 2e8), "A_m2": 1.0},
+            points, minimum_length=0.0,
+        )
+    if not members:
+        raise ValueError("At least one truss member is required")
 
-    free = [i for i in range(ndof) if i not in fixed]
-    K_ff = [[K[i][j] for j in free] for i in free]
-    F_f = [F[i] for i in free]
-    lin = dual_solve_linear(K_ff, F_f)
-    u = [0.0] * ndof
-    for k_i, dof in enumerate(free):
-        u[dof] = float(lin["solution"][k_i])
+    # B contains raw coordinate differences. Its kernel is the zero-extension
+    # motion space for every set of positive member stiffnesses.
+    free_set = set(free)
+    rows = [[(i, v) for i, v in member.row if i in free_set] for member in members.values()]
+    basis = _truss_free_basis(rows, len(free))
+    residual = {i: applied[i] for i in free}
+    for pivot in sorted(basis):
+        coeff = residual[pivot]
+        for i, v in basis[pivot].items():
+            residual[i] -= coeff * v
+    if any(residual.values()):
+        raise ValueError("Applied load does nonzero virtual work on a truss mechanism")
 
-    forces = {}
-    for mid, dofs, k, vec in geom:
-        axial = k * sum(vec[a] * u[dofs[a]] for a in range(4))
-        forces[f"N_{mid}_N"] = axial
-    return {**forces, "dual_rel_discrepancy": lin["dual_rel_discrepancy"], "dual_verified": True}
+    # All compatible displacements differ by a member of ker(B). Setting the
+    # nonpivot free components to zero selects a representative solely for
+    # recovering axial forces. No displacement from this choice is reported.
+    pivots = sorted(basis)
+    unknown = _truss_solve(list(members.values()), applied, {}, pivots)
+    u = dict(zip(pivots, unknown))
+    forces, internal = {}, [Fraction(0)] * len(applied)
+    for label, member in members.items():
+        extension_times_length = sum(v*u.get(i, 0) for i, v in member.row)
+        axial = member.ea * extension_times_length / member.length**2
+        forces[label] = axial
+        for i, v in member.row:
+            internal[i] += v * axial / member.length
+    if any(internal[i] != applied[i] for i in free):
+        raise ValueError("Member forces fail free-joint equilibrium")
+
+    # An independently solved, dimensionless reduced stiffness system checks
+    # the member-force response. Common stiffness/load units cancel before
+    # the conversion to the numerical solver's binary64 inputs.
+    discrepancy = 0.0
+    if pivots:
+        position = {d: k for k, d in enumerate(pivots)}
+        gram = [[Fraction(0) for _ in pivots] for _ in pivots]
+        for member in members.values():
+            active = [(position[d], v) for d, v in member.row if d in position]
+            for i, vi in active:
+                for j, vj in active:
+                    gram[i][j] += member.weight * vi * vj
+        stiffness = max(gram[i][i] for i in range(len(pivots)))
+        load = max(abs(applied[d]) for d in pivots) or Fraction(1)
+        check = dual_solve_linear(
+            [[_diagnostic_float(x/stiffness) for x in row] for row in gram],
+            [_diagnostic_float(applied[d]/load) for d in pivots],
+        )
+        independent = {d: Fraction(float(x))*load/stiffness
+                       for d, x in zip(pivots, check["solution"])}
+        discrepancy = check["dual_rel_discrepancy"]
+        for label, member in members.items():
+            terms = [v*independent.get(d, 0)*member.ea/member.length**2 for d, v in member.row]
+            error = abs(sum(terms) - forces[label])
+            # A zero-force member can subtract two large equal joint motions.
+            # Record the force error on its own resolved term scale.
+            scale = max(abs(forces[label]), sum(map(abs, terms)))
+            if scale:
+                discrepancy = max(discrepancy, float(error/scale))
+        if discrepancy > 1e-7:
+            raise ValueError("Independent truss force calculation disagrees")
+
+    nullity = len(free) - len(pivots)
+    reported = {key: _diagnostic_float(value) for key, value in forces.items()}
+    # Quantify the equilibrium error visible to a consumer reconstructing
+    # joint forces from the individually rounded scalar member outputs.
+    rounding_load = dict.fromkeys(free, Fraction(0))
+    for label, member in members.items():
+        correction = Fraction(reported[label]) - forces[label]
+        for dof, direction in member.row:
+            if dof in free_set:
+                rounding_load[dof] += correction * direction / member.length
+    residual = max(map(abs, rounding_load.values()), default=Fraction(0))
+    upper = float(residual)
+    if Fraction(upper) < residual:
+        upper = math.nextafter(upper, math.inf)
+    if not math.isfinite(upper):
+        raise ValueError("Displayed joint-force residual exceeds binary64 range")
+    return {**reported,
+            "equilibrium_basis": "represented_member_factors_before_force_rounding",
+            "displayed_free_joint_residual_upper_N": upper,
+            "force_solution": "compatible_mechanism" if nullity else "unique_displacement",
+            "displacement_unique": nullity == 0, "free_mechanism_count": nullity,
+            "dual_rel_discrepancy": discrepancy, "dual_verified": True}
 
 
 def solve_diaphragm_torsion(spec: dict[str, Any]) -> dict[str, Any]:
