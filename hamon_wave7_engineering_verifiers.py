@@ -803,6 +803,176 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
     return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": f"unsupported_exchanger_radiation:{subkind}"}
 
 
+def _dyadic_matrix(matrix):
+    """Return integer entries and one denominator for the supplied binary64 matrix."""
+    ratios = [float(value).as_integer_ratio() for value in matrix.flat]
+    denominator = max(d for _, d in ratios)
+    entries = [a * (denominator // d) for a, d in ratios]
+    return np.asarray(entries, dtype=object).reshape(matrix.shape), denominator
+
+
+def _inertia_counts(matrix):
+    """Count negative and zero directions by exact symmetric fraction-free elimination."""
+    block = matrix.copy()
+    previous = 1
+    negative = 0
+    while len(block):
+        pivot_index = next((i for i, v in enumerate(block.diagonal()) if v), None)
+        if pivot_index is None:
+            mixed = np.argwhere(block != 0)
+            if not len(mixed):
+                return negative, len(block)
+            # An off-diagonal pair with two zero diagonals supplies a nonzero
+            # quadratic pivot after the unimodular basis change e_i <- e_i+e_j.
+            i, j = mixed[0]
+            block[i, :] += block[j, :]
+            block[:, i] += block[:, j]
+            pivot_index = i
+        if pivot_index:
+            block[[0, pivot_index], :] = block[[pivot_index, 0], :]
+            block[:, [0, pivot_index]] = block[:, [pivot_index, 0]]
+        pivot = block[0, 0]
+        negative += (pivot < 0) != (previous < 0)
+        column = block[1:, :1]
+        block = (pivot * block[1:, 1:] - column * column.T) // previous
+        previous = pivot
+    return negative, 0
+
+
+def _energy_bounds(matrix, vectors):
+    """Diagonal lower/upper forms from an exact congruence and absolute row sums."""
+    reduced = vectors.T @ (matrix @ vectors)
+    center = reduced.diagonal()
+    radius = np.abs(reduced).sum(axis=1) - np.abs(center)
+    return center - radius, center + radius
+
+
+def _modal_spectrum_certificate(mass, stiffness, vectors, estimates):
+    """Certify sorted omega² intervals of this binary64 symmetric pencil."""
+    k, kd = _dyadic_matrix(stiffness)
+    m, md = _dyadic_matrix(mass)
+    x, _ = _dyadic_matrix(vectors)
+    ml, mu = _energy_bounds(m, x)
+    have_basis = all(a > 0 for a in ml)
+    if not have_basis and _inertia_counts(m) != (0, 0):
+        raise ValueError("non_spd_mass_matrix")
+    kl, ku = _energy_bounds(k, x)
+    if have_basis and all(a > 0 for a in kl):
+        nullity = 0
+    else:
+        negative, nullity = _inertia_counts(k)
+        if negative:
+            raise ValueError("unstable_negative_stiffness_eigenvalue")
+
+    # For t >= 0, diag(kl)-t*diag(mu) <= X'(K-tM)X <=
+    # diag(ku)-t*diag(ml), with common dyadic scales restored. Counts of
+    # negative directions bracket each ordered generalized eigenvalue.
+    lower, upper = [], []
+    if have_basis:
+        lower = sorted(Fraction(a * md, b * kd) for a, b in zip(kl, mu))
+        upper = sorted(Fraction(a * md, b * kd) for a, b in zip(ku, ml))
+
+    def counts_at(t):
+        return _inertia_counts(k * (md * t.denominator) - m * (kd * t.numerator))
+
+    tolerance = Fraction(1, 10**10)
+    bounds = [(Fraction(0), Fraction(0))] * nullity
+    for i in range(nullity, len(estimates)):
+        if not math.isfinite(estimates[i]) or estimates[i] <= 0:
+            raise ArithmeticError("unresolved_positive_modal_frequency")
+        value = Fraction(float(estimates[i]))
+        low, high = value * (1 - tolerance), value * (1 + tolerance)
+        if have_basis and lower[i] >= low and upper[i] <= high:
+            bounds.append((min(lower[i], value), max(upper[i], value)))
+            continue
+        # Only ambiguous intervals pay for the two exact shifted-pencil tests.
+        # Equality at either endpoint is allowed (including repeated roots).
+        n_below, _ = counts_at(low)
+        n_above, n_equal = counts_at(high)
+        if n_below > i or n_above + n_equal <= i:
+            raise ArithmeticError("unresolved_positive_modal_frequency")
+        bounds.append((low, high))
+    return nullity, bounds
+
+
+def _lagrangian_modes(params):
+    result = {"domain": "lagrangian_orbital", "subkind": "lagrangian_modes", "verified": False}
+    try:
+        m = np.asarray(params["M"], dtype=float)
+        k = np.asarray(params["K"], dtype=float)
+        if m.ndim != 2 or not len(m) or m.shape[0] != m.shape[1] or k.shape != m.shape:
+            raise ValueError("matrix_shape_mismatch")
+        if not (np.isfinite(m).all() and np.isfinite(k).all()):
+            raise ValueError("nonfinite_mass_or_stiffness")
+        if not (np.array_equal(m, m.T) and np.array_equal(k, k.T)):
+            raise ValueError("non_symmetric_mass_or_stiffness")
+
+        # Normalize the independent mass and stiffness units before either solve.
+        def scaled(a):
+            exp = math.frexp(float(np.abs(a).max()))[1]
+            exp -= exp % 2  # Even powers preserve the Cholesky square-root scaling.
+            normalized = np.ldexp(a, -exp)
+            if not np.array_equal(np.ldexp(normalized, exp), a):
+                raise ArithmeticError("unresolved_modal_matrix_dynamic_range")
+            return normalized, exp
+
+        m, me = scaled(m)
+        k, ke = scaled(k)
+        try:
+            chol = np.linalg.cholesky(m)
+        except np.linalg.LinAlgError:
+            # A floating failure alone does not establish invalid mass.
+            if _inertia_counts(_dyadic_matrix(m)[0]) != (0, 0):
+                raise ValueError("non_spd_mass_matrix")
+            raise ArithmeticError("unresolved_mass_factorization")
+
+        values, vectors = linalg.eigh(k, m)
+        if not (np.isfinite(values).all() and np.isfinite(vectors).all()):
+            raise ArithmeticError("unresolved_modal_eigensystem")
+        nullity, bounds = _modal_spectrum_certificate(m, k, vectors, values)
+        values[:nullity] = 0.0
+        left = np.linalg.solve(chol, k)
+        whitened = np.linalg.solve(chol, left.T).T
+        dual = np.linalg.eigvalsh(0.5 * (whitened + whitened.T))
+        positive, dual_positive = values[nullity:], dual[nullity:]
+        if np.any(dual_positive <= 0) or not np.isfinite(dual).all():
+            raise ArithmeticError("unresolved_dual_modal_frequency")
+        dual_error = float(np.max(np.abs(positive-dual_positive) /
+                                  np.maximum(positive, dual_positive), initial=0.0))
+        denominator = (np.linalg.norm(k, np.inf) + np.abs(values)*np.linalg.norm(m, np.inf)) * np.max(np.abs(vectors), axis=0)
+        error = np.max(np.abs(k @ vectors - (m @ vectors)*values), axis=0)
+        eigen_error = float(np.max(np.divide(error, denominator, out=np.zeros_like(error), where=denominator > 0)))
+        orth_error = float(np.linalg.norm(vectors.T @ m @ vectors - np.eye(len(m)), ord=np.inf))
+        residual = max(eigen_error, orth_error, dual_error)
+        if not math.isfinite(residual) or residual >= 1e-10:
+            raise ArithmeticError("unresolved_modal_solver_residual")
+
+        unit = Fraction(2) ** (ke-me)
+        def outward(q, upward):
+            number = float(q)
+            if not math.isfinite(number):
+                raise ArithmeticError("unrepresentable_modal_frequency")
+            represented = Fraction(number)
+            if (upward and represented < q) or (not upward and represented > q):
+                number = math.nextafter(number, math.inf if upward else -math.inf)
+            if not math.isfinite(number):
+                raise ArithmeticError("unrepresentable_modal_frequency")
+            return number
+
+        physical = [float(Fraction(float(v))*unit) for v in values]
+        intervals = [[outward(lo*unit, False), outward(hi*unit, True)] for lo, hi in bounds]
+        if any(low <= 0.0 or val <= 0.0 for (low, _), val in zip(intervals[nullity:], physical[nullity:])):
+            raise ArithmeticError("unrepresentable_modal_frequency")
+        omega = [math.sqrt(val) for val in physical]
+        result.update(eigenvalues_omega2=physical, eigenvalue_intervals_omega2=intervals,
+                      rigid_mode_count=nullity, natural_frequencies_rad_s=omega,
+                      natural_frequencies_Hz=[w/(2*math.pi) for w in omega],
+                      residual=residual, verified=True)
+    except (KeyError, TypeError, ValueError, ArithmeticError, np.linalg.LinAlgError) as exc:
+        result["error"] = str(exc)
+    return result
+
+
 def solve_lagrangian_orbital(params: Mapping[str, Any]) -> Dict[str, Any]:
     subkind = str(
         params.get("subkind")
@@ -873,47 +1043,7 @@ def solve_lagrangian_orbital(params: Mapping[str, Any]) -> Dict[str, Any]:
         }
 
     if subkind == "lagrangian_modes":
-        m_mat = np.asarray(params["M"], dtype=float)
-        k_mat = np.asarray(params["K"], dtype=float)
-        n = m_mat.shape[0]
-        if m_mat.shape != (n, n) or k_mat.shape != (n, n):
-            return {"domain": "lagrangian_orbital", "subkind": subkind, "verified": False, "error": "matrix_shape_mismatch"}
-        sym_err = max(
-            float(np.linalg.norm(m_mat - m_mat.T)),
-            float(np.linalg.norm(k_mat - k_mat.T)),
-        ) / max(float(np.linalg.norm(k_mat)), 1.0)
-        if sym_err > 1e-10:
-            return {"domain": "lagrangian_orbital", "subkind": subkind, "verified": False, "error": "non_symmetric_mass_or_stiffness"}
-
-        try:
-            chol_l = np.linalg.cholesky(m_mat)
-        except np.linalg.LinAlgError:
-            return {"domain": "lagrangian_orbital", "subkind": subkind, "verified": False, "error": "non_spd_mass_matrix"}
-
-        evals, evecs = linalg.eigh(k_mat, m_mat)
-        if np.any(evals < -1e-10):
-            return {"domain": "lagrangian_orbital", "subkind": subkind, "verified": False, "error": "unstable_negative_stiffness_eigenvalue"}
-        evals_pos = np.maximum(evals, 0.0)
-        omegas = np.sqrt(evals_pos)
-
-        l_inv = np.linalg.inv(chol_l)
-        k_tilde = l_inv @ k_mat @ l_inv.T
-        k_tilde = 0.5 * (k_tilde + k_tilde.T)
-        evals_dual = np.maximum(np.linalg.eigvalsh(k_tilde), 0.0)
-
-        eig_res = float(np.linalg.norm(k_mat @ evecs - (m_mat @ evecs) * evals[None, :])) / max(float(np.linalg.norm(k_mat)), 1.0)
-        orth_res = float(np.linalg.norm(evecs.T @ m_mat @ evecs - np.eye(n)))
-        dual_res = float(np.linalg.norm(evals_pos - evals_dual)) / max(float(np.linalg.norm(evals_pos)), 1.0)
-        residual = float(max(eig_res, orth_res, dual_res))
-        return {
-            "domain": "lagrangian_orbital",
-            "subkind": subkind,
-            "eigenvalues_omega2": [float(x) for x in evals_pos],
-            "natural_frequencies_rad_s": [float(x) for x in omegas],
-            "natural_frequencies_Hz": [float(x / (2.0 * math.pi)) for x in omegas],
-            "residual": residual,
-            "verified": bool(residual < 1e-10),
-        }
+        return _lagrangian_modes(params)
 
     if subkind == "orbital_transfer":
         mu = float(params["mu"])
