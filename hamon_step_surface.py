@@ -178,7 +178,7 @@ def integrate_closed_surface(vertices, triangles, density):
     """
     if not math.isfinite(density) or density < 0:
         return {"reason": "Solid density must be finite and nonnegative"}
-    raw = [tuple(Fraction(float(x)) for x in point) for point in vertices]
+    raw = [tuple(x if isinstance(x, Fraction) else Fraction(float(x)) for x in point) for point in vertices]
     anchor = raw[0]
     local = [_sub(point, anchor) for point in raw]
     total = Fraction(0)
