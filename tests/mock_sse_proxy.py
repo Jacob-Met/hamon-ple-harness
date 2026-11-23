@@ -17,6 +17,7 @@ class MockStream:
     """Return a real partial Anthropic event stream, then wait for client close."""
 
     def __init__(self):
+        self.probed = asyncio.Event()
         self.started = asyncio.Event()
         self.disconnected = asyncio.Event()
 
@@ -26,7 +27,19 @@ class MockStream:
             fields = dict(line.lower().split(": ", 1) for line in headers[1:] if ": " in line)
             request = json.loads(await reader.readexactly(int(fields["content-length"])))
             method, target, _ = headers[0].split()
-            if (method, target.split("?", 1)[0]) != ("POST", "/v1/messages") or request.get("stream") is not True:
+            route = (method, target.split("?", 1)[0])
+            if (route == ("POST", "/v1/chat/completions")
+                    and request.get("stream", False) is False and request.get("messages")):
+                # The organizer checks connectivity through its OpenAI-compatible
+                # endpoint before using the native Anthropic SSE stream for Pi.
+                body = json.dumps({"choices": [{"message": {"role": "assistant", "content": "OK"}}]}).encode()
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n"
+                    + f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+                await writer.drain()
+                self.probed.set()
+                return
+            if route != ("POST", "/v1/messages") or request.get("stream") is not True:
                 writer.write(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
                 return
             writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
@@ -59,8 +72,8 @@ async def run_kit(kit_root):
             sys.executable, "-m", "kit", "check", str(Path(__file__).resolve().parents[1]),
             "--cancel-test", "--no-smoke", cwd=kit_root, env=env)
         status = await check.wait()
-        if status == 0 and not (stream.started.is_set() and stream.disconnected.is_set()):
-            print("The local model stream did not start and disconnect.", file=sys.stderr)
+        if status == 0 and not (stream.probed.is_set() and stream.started.is_set() and stream.disconnected.is_set()):
+            print("The local model probe, stream start, or disconnect was missing.", file=sys.stderr)
             return 1
         return status
 
