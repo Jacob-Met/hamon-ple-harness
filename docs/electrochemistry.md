@@ -17,3 +17,18 @@ Supply `target_mass_g` to calculate the time required at the same constant curre
 The `galvanic` and `electrolytic` modes retain the existing voltage convention, subtracting or adding the specified nonnegative activation and ohmic losses to the Nernst potential, respectively. Inputs provide the reaction and its direction. The calculation does not infer product identity, chemical activity, side reactions or reaction selectivity.
 
 IUPAC defines species yield in terms of reaction current efficiency, species stoichiometry and reaction electron number. Its Nernst relation uses the activity quotient on that same reaction basis. [Current efficiency](https://goldbook.iupac.org/terms/view/C01458) · [Nernst equation](https://goldbook.iupac.org/terms/view/09068)
+
+### Supply the individual activities
+
+An optional `activity_terms` list supplies the reaction quotient from the written reaction. Each row identifies a species or reservoir, its signed stoichiometric coefficient (`stoich`, positive for products), and its positive dimensionless `activity`. Use compartment-qualified names when the same species occurs on both sides of a concentration cell. Omit electrons. A pure phase at unit activity contributes zero to the logarithm.
+
+For example, take an ideal zinc concentration cell at 298.15 K with `E0_V=0` and `n_electrons=2`. Zinc ion is produced at the dilute anode and consumed at the concentrated cathode.
+
+```json
+[
+  {"species": "Zn2+ (anode)", "stoich": 1, "activity": 0.10},
+  {"species": "Zn2+ (cathode)", "stoich": -1, "activity": 0.50}
+]
+```
+
+The result is about +0.0207 V. The solver reports `ln_Q_reaction` as the sum of coefficient times log activity; this supports quotients outside the floating-point range. If a positive scalar `Q_reaction` is also given, the two logarithms must agree within an absolute 1e-12. Supplying neither retains the original unit-quotient default. The caller specifies activities relative to its standard states and the stoichiometric coefficients; the calculation does not estimate activity coefficients or balance a chemical equation. [OpenStax Chemistry 2e, §17.4](https://openstax.org/books/chemistry-2e/pages/17-4-potential-free-energy-and-equilibrium)
