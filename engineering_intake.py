@@ -9,7 +9,13 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
+from time import monotonic
 from typing import Any
+
+from taskbridge import TaskError
+
+_PARTICIPANT_RESERVE_SECONDS = 12.0
+_PROVISION_TIMEOUT_SECONDS = 12.0
 
 # This script runs only in the evaluator's isolated task container. It does not
 # contact the internet, mutate files, or read private environment variables.
@@ -212,7 +218,7 @@ async def intake_for_prompt(session: Any, *, deadline_seconds: int = 19) -> str:
     canonical Pi agent, consumes a submission slot, or logs task content.
     """
     left = session.time_left()
-    if left is not None and left < deadline_seconds + 12:
+    if left is not None and left < deadline_seconds + _PARTICIPANT_RESERVE_SECONDS:
         return ""
     cmd = "cd " + shlex.quote(session.workdir) + " && python3 -c " + shlex.quote(REMOTE_PROBE)
     try:
@@ -221,7 +227,7 @@ async def intake_for_prompt(session: Any, *, deadline_seconds: int = 19) -> str:
         if result.get("timed_out") or result.get("exit_code") != 0:
             return ""
         record = parse_probe(result.get("output") or "")
-    except (asyncio.TimeoutError, OSError, RuntimeError, ValueError, KeyError):
+    except (asyncio.TimeoutError, OSError, RuntimeError, ValueError, KeyError, TaskError):
         return ""
     # Never let untrusted filenames override original agent directions.
     summary = json.dumps(record, ensure_ascii=True, separators=(",",":"))
@@ -247,70 +253,36 @@ async def intake_for_prompt(session: Any, *, deadline_seconds: int = 19) -> str:
 # not a copy of any task data. A failed install never blocks the starter agent.
 async def provision_engineering_cli(session: Any) -> str:
     import pathlib
-    import_bytes = pathlib.Path(__file__).with_name("hamon_geometry.py").read_bytes()
-    drawing_bytes = pathlib.Path(__file__).with_name("hamon_drawing.py").read_bytes()
-    schematic_bytes = pathlib.Path(__file__).with_name("hamon_eagle_schematic.py").read_bytes()
-    scale_bytes = pathlib.Path(__file__).with_name("hamon_scale.py").read_bytes()
-    affine_bytes = pathlib.Path(__file__).with_name("hamon_affine_metric.py").read_bytes()
-    callout_bytes = pathlib.Path(__file__).with_name("hamon_callout.py").read_bytes()
-    dxf_bytes = pathlib.Path(__file__).with_name("hamon_dxf.py").read_bytes()
-    dual_bytes = pathlib.Path(__file__).with_name("hamon_dual_verifier.py").read_bytes()
-    takeoff_bytes = pathlib.Path(__file__).with_name("hamon_cad_takeoff.py").read_bytes()
-    pareto_bytes = pathlib.Path(__file__).with_name("hamon_pareto.py").read_bytes()
-    source = pathlib.Path(__file__).with_name("engineering_toolkit.py").read_bytes()
-    target = "/tmp/hamon-engineering-toolkit.py"
     try:
-        module_size = await asyncio.wait_for(
-            session.write_file("/tmp/hamon_geometry.py", import_bytes), timeout=12)
-        if module_size != len(import_bytes):
+        budget = _PROVISION_TIMEOUT_SECONDS
+        left = getattr(session, "time_left", lambda: None)()
+        if left is not None:
+            budget = min(budget, left - _PARTICIPANT_RESERVE_SECONDS)
+        if budget <= 0:
             return ""
-        drawing_size = await asyncio.wait_for(
-            session.write_file("/tmp/hamon_drawing.py", drawing_bytes), timeout=12)
-        if drawing_size != len(drawing_bytes):
-            return ""
-        schematic_size = await asyncio.wait_for(
-            session.write_file("/tmp/hamon_eagle_schematic.py", schematic_bytes), timeout=12)
-        if schematic_size != len(schematic_bytes):
-            return ""
-        scale_size = await asyncio.wait_for(
-            session.write_file("/tmp/hamon_scale.py", scale_bytes), timeout=12)
-        if scale_size != len(scale_bytes):
-            return ""
-        affine_size = await asyncio.wait_for(
-            session.write_file("/tmp/hamon_affine_metric.py", affine_bytes), timeout=12)
-        if affine_size != len(affine_bytes):
-            return ""
-        callout_size = await asyncio.wait_for(
-            session.write_file("/tmp/hamon_callout.py", callout_bytes), timeout=12)
-        if callout_size != len(callout_bytes):
-            return ""
-        dxf_size = await asyncio.wait_for(
-            session.write_file("/tmp/hamon_dxf.py", dxf_bytes), timeout=12)
-        if dxf_size != len(dxf_bytes):
-            return ""
-        for filename in ("office_package.py", "hamon_eagle_netlist.py", "hamon_consolidation.py", "hamon_pipe_network.py", "hamon_diaphragm.py", "hamon_diaphragm_modes.py", "hamon_diaphragm_compensated.py", "hamon_turbomachinery.py", "hamon_ac_power_flow.py", "hamon_bearing_capacity.py"):
+        deadline = monotonic() + budget
+        # Keep the entry point last and advertise it only after every checked
+        # write. One deadline covers the whole install, including local reads.
+        for filename in (
+            "hamon_geometry.py", "hamon_drawing.py", "hamon_eagle_schematic.py",
+            "hamon_scale.py", "hamon_affine_metric.py", "hamon_callout.py",
+            "hamon_dxf.py", "office_package.py", "hamon_eagle_netlist.py",
+            "hamon_consolidation.py", "hamon_pipe_network.py", "hamon_diaphragm.py",
+            "hamon_diaphragm_modes.py", "hamon_diaphragm_compensated.py",
+            "hamon_turbomachinery.py", "hamon_ac_power_flow.py",
+            "hamon_bearing_capacity.py", "hamon_dual_verifier.py",
+            "hamon_cad_takeoff.py", "hamon_pareto.py", "engineering_toolkit.py",
+        ):
             module = pathlib.Path(__file__).with_name(filename).read_bytes()
-            copied = await asyncio.wait_for(
-                session.write_file("/tmp/" + filename, module), timeout=12)
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                return ""
+            target = ("/tmp/hamon-engineering-toolkit.py" if filename == "engineering_toolkit.py"
+                      else "/tmp/" + filename)
+            copied = await asyncio.wait_for(session.write_file(target, module), timeout=remaining)
             if copied != len(module):
                 return ""
-        dual_size = await asyncio.wait_for(
-            session.write_file("/tmp/hamon_dual_verifier.py", dual_bytes), timeout=12)
-        if dual_size != len(dual_bytes):
-            return ""
-        takeoff_size = await asyncio.wait_for(
-            session.write_file("/tmp/hamon_cad_takeoff.py", takeoff_bytes), timeout=12)
-        if takeoff_size != len(takeoff_bytes):
-            return ""
-        pareto_size = await asyncio.wait_for(
-            session.write_file("/tmp/hamon_pareto.py", pareto_bytes), timeout=12)
-        if pareto_size != len(pareto_bytes):
-            return ""
-        reported_size = await asyncio.wait_for(
-            session.write_file(target, source), timeout=12)
-        if reported_size != len(source):
-            return ""
-    except (asyncio.TimeoutError, OSError, RuntimeError, ValueError, KeyError):
+    except (asyncio.TimeoutError, OSError, RuntimeError, ValueError, KeyError, TaskError):
         return ""
     return (
         "\nDETERMINISTIC ENGINEERING TOOLS (in the task container; no internet):"
