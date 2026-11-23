@@ -252,7 +252,7 @@ def file_format_state(p, size, root_members=None):
                         return {"state":"invalid","reason":"office_invalid_package"}
                 if size <= 32_000_000 and z.testzip() is not None:
                     return {"state":"invalid","reason":"zip_crc"}
-        except (OSError,ValueError,zipfile.BadZipFile,RuntimeError):
+        except (OSError, ValueError, EOFError, RuntimeError, zipfile.BadZipFile, zlib.error):
             return {"state":"invalid","reason":"zip_invalid"}
     elif ext == ".pdf":
         with p.open("rb") as f:

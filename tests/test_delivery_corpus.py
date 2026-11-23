@@ -116,6 +116,24 @@ class ArchivedFormatTests(unittest.TestCase):
                 self.assertEqual(export["state"], "verified")
                 self.assertEqual(export["format"].get("reason", export["format"]["state"]), reason)
 
+    def test_damaged_compressed_member_marks_ordinary_archive_incomplete(self):
+        import io
+        import zipfile
+        content = io.BytesIO()
+        with zipfile.ZipFile(content, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("report.txt", "An ordinary report." * 20)
+        with zipfile.ZipFile(content) as archive:
+            member = archive.getinfo("report.txt")
+            offset = member.header_offset + len(member.FileHeader())
+        damaged = bytearray(content.getvalue())
+        damaged[offset:offset + member.compress_size] = bytes([255]) * member.compress_size
+        key = "filesystem/site/output/submission.zip"
+        prompt = "Write the final deliverable to /filesystem/site/output/submission.zip."
+        row = self.observe(prompt, {key: bytes(damaged)})
+        self.assertEqual(row["delivery_status"], "incomplete")
+        self.assertEqual(row["custody"][0]["exports"][0]["format"],
+                         {"state": "invalid", "reason": "zip_invalid"})
+
     def test_complete_typed_archive_matches_the_live_gate(self):
         prompt = ("Write the final deliverable to /filesystem/site/output/submission.zip. "
                   "Create a complete submission early, then improve it in place. "
