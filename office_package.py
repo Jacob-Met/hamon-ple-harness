@@ -97,8 +97,73 @@ class _RootTag:
         return self.tag
 
 
+_SHEET_ID_ATTRIBUTES = {"{" + ns + "}id" for ns in _DOCUMENT_RELS}
+_SHEET_KINDS = {
+    namespace + "/" + kind: (
+        f"application/vnd.openxmlformats-officedocument.spreadsheetml.{kind}+xml",
+        {"{" + ns + "}" + kind for ns in _SPREADSHEET_NS},
+    )
+    for namespace in _DOCUMENT_RELS for kind in ("worksheet", "chartsheet", "dialogsheet")
+}
+for _relation, _kind in (("xlMacrosheet", "macrosheet"), ("xlIntlMacrosheet", "intlmacrosheet")):
+    _SHEET_KINDS["http://schemas.microsoft.com/office/2006/relationships/" + _relation] = (
+        f"application/vnd.ms-excel.{_kind}+xml", {"{http://schemas.microsoft.com/office/excel/2006/main}macrosheet"},
+    )
+
+
+class _WorkbookSheets:
+    """Keep only sheet relationship IDs while parsing the whole workbook."""
+    def __init__(self):
+        self.path = []
+        self.ids = []
+
+    def start(self, tag, attrs):
+        if not self.path:
+            if tag not in {"{" + ns + "}workbook" for ns in _SPREADSHEET_NS}:
+                raise ValueError("incorrect_workbook_root")
+            ns = tag.removesuffix("workbook")
+            self.sheet_path = [tag, ns + "sheets", ns + "sheet"]
+        self.path.append(tag)
+        if self.path == self.sheet_path:
+            keys = _SHEET_ID_ATTRIBUTES.intersection(attrs)
+            if len(keys) != 1:
+                raise ValueError("missing_or_ambiguous_sheet_relationship")
+            self.ids.append(attrs[keys.pop()])
+
+    def end(self, tag):
+        self.path.pop()
+
+    def close(self):
+        if not self.ids:
+            raise ValueError("workbook_has_no_sheets")
+        return self.ids
+
+
+def _workbook_sheet_parts(archive, main, members, defaults, overrides):
+    from posixpath import basename, dirname, join
+
+    with archive.open(main) as stream:
+        sheet_ids = ET.parse(stream, parser=ET.XMLParser(target=_WorkbookSheets())).getroot()
+    rel_name = join(dirname(main), "_rels", basename(main) + ".rels").lower()
+    if rel_name not in members or _opc_content_type(defaults, overrides, rel_name) != _RELATIONSHIPS_TYPE:
+        raise ValueError("missing_or_incorrect_workbook_relationships")
+    relationships = _xlsx_relationships(archive, members[rel_name], limit=None)
+    expected = {}
+    for rid in sheet_ids:
+        rel = relationships.get(rid)
+        if rel is None or rel.get("TargetMode", "Internal") != "Internal":
+            raise ValueError("missing_or_external_sheet_relationship")
+        kind = _SHEET_KINDS.get(rel.get("Type"))
+        target = _xlsx_target(main, rel.get("Target", "")).lower()
+        if (kind is None or target not in members or target in expected or
+                _opc_content_type(defaults, overrides, target) != kind[0]):
+            raise ValueError("missing_or_incorrect_sheet_part")
+        expected[target] = kind[1]
+    return expected, rel_name
+
+
 def check_office_package(archive, suffix):
-    """Validate the main relationship and all parts declared as XML."""
+    """Validate the main part, workbook sheet graph and all parts declared as XML."""
     members = {}
     for item in archive.infolist():
         if item.is_dir():
@@ -126,24 +191,28 @@ def check_office_package(archive, suffix):
         raise ValueError("missing_main_part")
     if suffix == ".docx":
         expected_type = _WORD_MAIN_TYPE
-        roots = _WORD_DOCUMENT_TYPES
     elif suffix in (".xlsx", ".xlsm"):
         expected_type = ("application/vnd.ms-excel.sheet.macroenabled.main+xml" if suffix == ".xlsm"
                          else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml")
-        roots = {"{" + ns + "}workbook" for ns in _SPREADSHEET_NS}
     else:
         raise ValueError(f"unsupported Office suffix: {suffix}")
     if _opc_content_type(defaults, overrides, main) != expected_type:
         raise ValueError("incorrect_word_main_content_type" if suffix == ".docx" else "incorrect_workbook_content_type")
 
-    # The two metadata parts were already parsed through EOF above.
+    checked = {"[content_types].xml", "_rels/.rels"}
+    if suffix == ".docx":
+        expected_roots = {main.lower(): _WORD_DOCUMENT_TYPES}
+    else:
+        expected_roots, workbook_rels = _workbook_sheet_parts(archive, main, members, defaults, overrides)
+        checked.update((main.lower(), workbook_rels))
+
     for key, name in members.items():
-        if key in ("[content_types].xml", "_rels/.rels"):
+        if key in checked and key not in expected_roots:
             continue
         mime = _opc_content_type(defaults, overrides, name).partition(";")[0].strip()
         if mime not in ("application/xml", "text/xml") and not mime.endswith("+xml"):
             continue
         with archive.open(name) as stream:
             root_tag = ET.parse(stream, parser=ET.XMLParser(target=_RootTag())).getroot()
-        if name == main and root_tag not in roots:
-            raise ValueError("incorrect_word_document_root" if suffix == ".docx" else "incorrect_workbook_root")
+        if key in expected_roots and root_tag not in expected_roots[key]:
+            raise ValueError("incorrect_word_document_root" if suffix == ".docx" else "incorrect_sheet_root")

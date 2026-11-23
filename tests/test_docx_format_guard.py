@@ -22,6 +22,8 @@ STRICT = "http://purl.oclc.org/ooxml/officeDocument/relationships"
 WORD = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 STRICT_WORD = "http://purl.oclc.org/ooxml/wordprocessingml/main"
 MAIN = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+SHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+SHEET_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml."
 
 
 def package(path, target="document.xml", part="document.xml", word=WORD,
@@ -79,6 +81,24 @@ class DocxFormatGuard(unittest.TestCase):
 
 
 class DeliveryPackageChecks(unittest.TestCase):
+    @staticmethod
+    def workbook(path, main_type, *, kind="worksheet", body=None, omit_sheet=False):
+        part = "custom/books/register.xml"
+        sheet = "custom/pages/pump.data"
+        types = (f'<Override PartName="/{part}" ContentType="{main_type}"/>'
+                 f'<Default Extension="data" ContentType="{SHEET_TYPE}{kind}+xml"/>'
+                 '<Override PartName="/custom/preview.xml" ContentType="application/octet-stream"/>')
+        main = (f'<workbook xmlns="{SHEET_NS}" xmlns:r="{TRANSITIONAL}"><sheets>'
+                '<sheet name="Pump" sheetId="1" r:id="pump"/></sheets></workbook>')
+        package(path, target="/" + part, part=part, declaration=types, main_xml=main)
+        with zipfile.ZipFile(path, "a") as book:
+            book.writestr("custom/books/_rels/register.xml.rels", f'<Relationships xmlns="{RELS}">'
+                          f'<Relationship Id="pump" Type="{TRANSITIONAL}/{kind}" '
+                          'Target="../pages/pump.data"/></Relationships>')
+            if not omit_sheet:
+                book.writestr(sheet, body if body is not None else f'<{kind} xmlns="{SHEET_NS}"/>')
+            book.writestr("custom/preview.xml", b"binary preview")
+
     def test_relocated_main_parts_standalone_and_inside_deliverable(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -90,10 +110,7 @@ class DeliveryPackageChecks(unittest.TestCase):
                 ("xlsm", "application/vnd.ms-excel.sheet.macroEnabled.main+xml"),
             ):
                 book = root / ("register." + suffix)
-                part = "xl/register.xml"
-                package(book, target=part, part=part, declaration=(
-                    f'<Override PartName="/{part}" ContentType="{content_type}"/>'),
-                    main_xml='<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>')
+                self.workbook(book, content_type)
                 names.append(book.name)
             submitted = root / "submission.zip"
             with zipfile.ZipFile(submitted, "w") as outer:
@@ -118,21 +135,14 @@ class DeliveryPackageChecks(unittest.TestCase):
             root = Path(tmp)
             book = root / "register.xlsx"
             submitted = root / "submission.zip"
-            part = "xl/register.xml"
-            sheet_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
-            types = (f'<Override PartName="/{part}" ContentType="application/'
-                     'vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-                     f'<Default Extension="data" ContentType="{sheet_type}"/>'
-                     '<Override PartName="/xl/preview.xml" ContentType="application/octet-stream"/>')
-            main = '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>'
             targets = [{"path": "/filesystem/register.xlsx", "kind": "file"},
                        {"path": "/filesystem/submission.zip", "kind": "file", "root_members": [book.name]}]
-            for sheet, expected in (("<worksheet/>", "ready"), ("<worksheet>", "invalid")):
-                with self.subTest(expected=expected):
-                    package(book, target=part, part=part, declaration=types, main_xml=main)
-                    with zipfile.ZipFile(book, "a") as inner:
-                        inner.writestr("xl/worksheets/pump.data", sheet)
-                        inner.writestr("xl/preview.xml", b"binary preview")
+            cases = [({}, "ready"), ({"body": "<worksheet>"}, "invalid"),
+                     ({"omit_sheet": True}, "invalid"), ({"kind": "chartsheet"}, "ready"),
+                     ({"kind": "chartsheet", "body": f'<worksheet xmlns="{SHEET_NS}"/>'}, "invalid")]
+            for options, expected in cases:
+                with self.subTest(options=options):
+                    self.workbook(book, SHEET_TYPE + "sheet.main+xml", **options)
                     with zipfile.ZipFile(submitted, "w") as outer:
                         outer.write(book, book.name)
                     self.assertEqual(self.probe(root, targets), {x["path"]: expected for x in targets})
