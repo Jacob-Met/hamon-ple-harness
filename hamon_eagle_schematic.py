@@ -683,13 +683,201 @@ def _graph(wires, lines, words, *, wire_end_witnesses=None, symbol_obstacles=(()
     return membership, marks, {k: sorted(v) for k, v in anchors.items()}
 
 
+def _junction_circle(element, matrix):
+    """Cairo's filled disk path has four tangent cubic quarter circles."""
+    data = element.get("d", "")
+    if re.sub(r"[^A-Za-z]", "", data) not in ("MCCCCZ", "MCCCCZM"):
+        return None
+    values = [float(v) for v in drawing._NUMBER.findall(data)]
+    if len(values) not in (26, 28):
+        return None
+    points = [drawing.transform_point(matrix, pair) for pair in zip(values[::2], values[1::2])]
+    a, b, c, d = points[0], points[3], points[6], points[9]
+    center = _midpoint(a, c)
+    radius = math.dist(a, center)
+    if not .25 < radius < 8:
+        return None
+    tolerance = .025 * radius
+    if (math.dist(center, _midpoint(b, d)) > tolerance
+            or abs(math.dist(b, center) - radius) > tolerance
+            or abs(math.dist(a, b) - math.sqrt(2) * radius) > tolerance
+            or math.dist(a, points[12]) > tolerance):
+        return None
+    k = 4 * (math.sqrt(2) - 1) / 3
+    for i in range(0, 12, 3):
+        start, c1, c2, end = points[i:i + 4]
+        q1 = tuple(x + k * (y - o) for x, y, o in zip(start, end, center))
+        q2 = tuple(y + k * (x - o) for x, y, o in zip(start, end, center))
+        if math.dist(c1, q1) > tolerance or math.dist(c2, q2) > tolerance:
+            return None
+    return center, radius
+
+
+def _junction_grid(values):
+    """Infer the fundamental pitch from independently repeated junction spacings."""
+    coordinates = sorted(set(round(v, 2) for v in values))
+    gaps = Counter(round(b - a, 1) for a, b in zip(coordinates, coordinates[1:]))
+    repeats = [gap for gap, count in gaps.items() if count >= 3 and gap > 1]
+    if not repeats:
+        return None
+    pitch = min(repeats)
+    origin = coordinates[0]
+    steps = [round((v - origin) / pitch) for v in coordinates]
+    mean_i, mean_v = sum(steps) / len(steps), sum(coordinates) / len(coordinates)
+    variance = sum((i - mean_i)**2 for i in steps)
+    pitch = sum((i - mean_i) * (v - mean_v) for i, v in zip(steps, coordinates)) / variance
+    origin = mean_v - pitch * mean_i
+    if any(abs(v - origin - i * pitch) > .12 for v, i in zip(coordinates, steps)):
+        return None
+    return origin, pitch
+
+
+def _geometry_wires(svg):
+    """Identify a single wire ink by repeated on-grid, same-ink, branched junctions."""
+    root = ElementTree.fromstring(svg)
+    if (any(drawing.local(el.tag) == "style" for el in root.iter()) or
+            any(k in root.attrib for k in ("style", "transform", "clip-path", "mask", "filter")) or
+            root.get("display", "inline") == "none" or root.get("visibility", "visible") != "visible" or
+            any(root.get(k, "1") != "1" for k in ("opacity", "stroke-opacity", "fill-opacity"))):
+        return None
+    circles = defaultdict(list)
+    paths = defaultdict(list)
+    excluded = set()
+    # The outlined export paints its electrical layer directly in page space.
+    # Nested/clipped/styled drawings in that ink need their own visibility proof.
+    for el in root:
+        tag = drawing.local(el.tag)
+        if tag == "defs" or el.get("display") == "none":
+            continue
+        ink = el.get("stroke")
+        if tag == "path" and (el.get("visibility", "visible") != "visible" or el.get("opacity") == "0"):
+            continue
+        if tag != "path" or not ink:
+            for child in el.iter():
+                excluded.update((child.get("stroke"), child.get("fill")))
+            continue
+        if not re.fullmatch(r"rgb\([0-9.% ,]+\)", ink) or ink == "rgb(100%, 100%, 100%)":
+            continue
+        if (any(el.get(k, "1") != "1" for k in ("opacity", "stroke-opacity", "fill-opacity"))
+                or any(k in el.attrib for k in ("clip-path", "mask", "filter", "style", "stroke-dasharray"))):
+            excluded.add(ink)
+            continue
+        matrix = drawing.parse_transform(el.get("transform"))
+        if matrix is None:
+            excluded.add(ink)
+        elif el.get("fill") == ink:
+            circle = _junction_circle(el, matrix)
+            if circle:
+                circles[ink].append(circle)
+            else:
+                excluded.add(ink)
+        elif el.get("fill") == "none":
+            paths[ink].append((el, matrix))
+        else:
+            excluded.add(ink)
+
+    found = []
+    for ink, marks in circles.items():
+        if ink in excluded or len(marks) < 8 or len(paths[ink]) > 5000:
+            continue
+        centers = [point for point, radius in marks]
+        grids = [_junction_grid(values) for values in zip(*centers)]
+        if not all(grids):
+            continue
+        radii = [radius for _, radius in marks]
+        if (max(radii) > 1.05 * min(radii) or
+                not all(3 * max(radii) < pitch for _, pitch in grids)):
+            continue
+        wires = []
+        for el, matrix in paths[ink]:
+            points = drawing._path_points(el.get("d", ""))
+            if not points or len(points) != 2:
+                break
+            ends = [tuple(round(x, 4) for x in drawing.transform_point(matrix, p)) for p in points]
+            if ends[0] != ends[1] and all(
+                abs((v - o) - round((v - o) / pitch) * pitch) <= .12
+                for end in ends for v, (o, pitch) in zip(end, grids)
+            ):
+                wires.append(ends)
+        else:
+            if not wires or len(wires) > 2000:
+                continue
+            def grid_node(point):
+                return tuple(round((v - o) / pitch) for v, (o, pitch) in zip(point, grids))
+
+            nodes = defaultdict(list)
+            for i, (a, b) in enumerate(wires):
+                nodes[grid_node(a)].append((i, a, grid_node(b)))
+                nodes[grid_node(b)].append((i, b, grid_node(a)))
+            dots = defaultdict(list)
+            for p in centers:
+                dots[grid_node(p)].append(p)
+            # A grid proposes a site. Visible endpoints still have to coincide.
+            branched = set()
+            groups = Groups(len(wires))
+            for node, incident in nodes.items():
+                point = incident[0][1]
+                if any(math.dist(p, point) > .12 for _, p, _ in incident):
+                    continue
+                if len(incident) >= 3 and any(math.dist(p, point) <= .12 for p in dots[node]):
+                    x, y = node
+                    dx, dy = incident[0][2][0] - x, incident[0][2][1] - y
+                    if any(dx * (v - y) != dy * (u - x) for _, _, (u, v) in incident[1:]):
+                        branched.add(node)
+                if len(incident) == 2 or node in branched:
+                    for other, _, _ in incident[1:]:
+                        groups.join(incident[0][0], other)
+            if len(branched) < 6:
+                continue
+            ids = {}
+            membership = [ids.setdefault(groups.root(i), len(ids)) for i in range(len(wires))]
+            found.append((wires, membership, {"stroke": ink, "pitch_pt": [g[1] for g in grids],
+                         "marked_branch_points": len(branched), "off_grid_strokes": len(paths[ink]) - len(wires)}))
+    return found[0] if len(found) == 1 else None
+
+
+def _license_appendix(stock, svg):
+    text = " ".join(w["text"] for w in stock["words"]).lower()
+    if (stock["embedded_images"] or not stock["text_glyph_instances"] or not re.fullmatch(
+            r"(?:this project.s hardware|this (?:work|hardware|design)) is licensed under (?:the |a )?"
+            r"creative commons [a-z -]+ [0-9.]+ (?:international )?license\. "
+            r"to view a copy of this license, visit https?://creativecommons\.org/licenses/"
+            r"[a-z-]+/[0-9.]+/(?:deed\.[a-z]+)?\.?", text)):
+        return False
+    # Permit native glyphs and an optional full-page white background only.
+    if stock["vector_primitives"] > 1 or stock["unlocalized_vectors"]:
+        return False
+    if stock["vector_primitives"]:
+        box = stock["reported_vectors"][0].get("svg_bbox")
+        if box is None or max(abs(a - b) for a, b in zip(box, stock["viewbox_svg_units"])) > 1:
+            return False
+    root = ElementTree.fromstring(svg)
+    for child in root:
+        if drawing.local(child.tag) == "defs":
+            continue
+        for element in child.iter():
+            tag = drawing.local(element.tag)
+            if tag == "g" and element.get("stroke", "none") == "none":
+                continue
+            if tag == "use":
+                ref = element.get("{http://www.w3.org/1999/xlink}href", "")
+                if re.fullmatch(r"#(?:glyph-?\d+|symbol\d+)-\d+", ref):
+                    continue
+            if (tag == "path" and element.get("fill") == "rgb(100%, 100%, 100%)"
+                    and element.get("stroke", "none") == "none"):
+                continue
+            return False
+    return True
+
+
 def page_connectivity(filename, page=1):
     """Return visible page-local candidate wire groups with geometric evidence."""
     source = Path(filename)
     stock = drawing.scan_pdf(source, page, page, limit_paths=1, limit_words=5000)["pages"][0]
     with tempfile.TemporaryDirectory(prefix="hamon-eagle-") as directory:
         glyphs, symbol_obstacles = [], ([], [])
-        wires, red, fills, unsupported = _ink(drawing._page_svg(source, page, directory), glyphs, symbol_obstacles)
+        svg = drawing._page_svg(source, page, directory)
+        wires, red, fills, unsupported = _ink(svg, glyphs, symbol_obstacles)
     if len(wires) > 2000 or len(red) > 5000 or len(stock["words"]) >= 5000:
         raise ValueError("EAGLE schematic exceeds the registered page processing bounds")
     result = {"kind": "eagle-schematic-page-connectivity", "page": page,
@@ -701,7 +889,17 @@ def page_connectivity(filename, page=1):
     match = re.search(r"(?m)^Creator:\s*(.*)$", metadata)
     creator = match.group(1).strip() if match else ""
     result["pdf_creator"] = creator
-    if not re.search(r"\bEAGLE\b", creator, re.I) or not wires or not red or unsupported or stock["embedded_images"]:
+    if not re.search(r"\bEAGLE\b", creator, re.I) or not stock["words"] or not wires or not red or unsupported or stock["embedded_images"]:
+        if _license_appendix(stock, svg):
+            return {**result, "status": "text_only_license", "wires": [], "wire_groups": [],
+                    "group_count": 0, "supply_glyphs": [], "printed_equivalence_anchors": {}}
+        evidence = None if stock["embedded_images"] else _geometry_wires(svg)
+        if evidence:
+            wires, membership, profile = evidence
+            return {**result, "status": "candidate_evidence", "wires": wires, "wire_groups": membership,
+                    "scope": "Page-local grid wires and witnessed junctions. Outlined labels and device pins remain unresolved.",
+                    "junction_grid": profile, "group_count": len(set(membership)), "supply_glyphs": [],
+                    "wire_end_label_witnesses": [], "printed_equivalence_anchors": {}}
         return {**result, "status": "unresolved_profile", "wire_groups": None}
     _word_directions(stock["words"], glyphs)
     wire_end_witnesses = []
@@ -804,7 +1002,8 @@ def document_connectivity(filename):
     result = {"kind": "eagle-schematic-document-connectivity", "pages": pages,
               "pdf_sha256": pages[0]["pdf_sha256"],
               "scope": "Candidate visible wire groups for one flat EAGLE design. Device pins and hierarchical names are outside the result."}
-    if any(page["status"] != "candidate_evidence" for page in pages):
+    if (not any(page["status"] == "candidate_evidence" for page in pages)
+            or any(page["status"] not in ("candidate_evidence", "text_only_license") for page in pages)):
         return {**result, "status": "unresolved_profile", "document_wire_groups": None}
     memberships, links = _stitch_pages(pages)
     return {**result, "status": "candidate_evidence", "document_wire_groups": memberships,
