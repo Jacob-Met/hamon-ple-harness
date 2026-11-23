@@ -15,12 +15,6 @@ import re
 import time
 import sys
 
-parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("baseline", type=Path)
-parser.add_argument("cases", type=Path, nargs="+")
-args = parser.parse_args()
-root = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(root))
 
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -28,10 +22,6 @@ def load(name, path):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
-
-baseline = load("ac_baseline", args.baseline)
-candidate = load("hamon_ac_power_flow", root / "hamon_ac_power_flow.py")
-controls = load("ac_controls", root / "tests/test_ac_power_flow.py")
 
 
 def matpower(path):
@@ -73,56 +63,71 @@ def timed(module, spec):
     return result, time.perf_counter() - start
 
 
-rows = []
-for path in args.cases:
-    name = path.name
-    spec = matpower(path)
-    before, bt = timed(baseline, spec)
-    after, at = timed(candidate, spec)
-    delta = None
-    if before.get("voltages") and after.get("voltages"):
-        def voltage(row):
-            return cmath.rect(row["vm_pu"], math.radians(row["va_deg"]))
-        delta = max(abs(voltage(before["voltages"][k]) - voltage(after["voltages"][k]))
-                    for k in before["voltages"])
-    rows.append({"case": name, "buses": len(spec["buses"]),
-                 "baseline_verified": before["conservation_verified"],
-                 "candidate_verified": after["conservation_verified"],
-                 "baseline_seconds": bt, "candidate_seconds": at,
-                 "max_voltage_phasor_change_pu": delta,
-                 "candidate_terminal_power_residual": after.get("tellegen_residual_pu"),
-                 "candidate_current_balance_residual": after.get("max_rectangular_mismatch_pu"),
-                 "baseline_reason": before.get("reason"), "candidate_reason": after.get("reason")})
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("baseline", type=Path)
+    parser.add_argument("cases", type=Path, nargs="+")
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root))
+    baseline = load("ac_baseline", args.baseline)
+    candidate = load("hamon_ac_power_flow", root / "hamon_ac_power_flow.py")
+    controls = load("ac_controls", root / "tests/test_ac_power_flow.py")
 
-samples = []
-def capture(spec):
-    samples.append(copy.deepcopy(spec))
-    return candidate.verify_ac_power_flow(spec)
+    rows = []
+    for path in args.cases:
+        name = path.name
+        spec = matpower(path)
+        before, bt = timed(baseline, spec)
+        after, at = timed(candidate, spec)
+        delta = None
+        if before.get("voltages") and after.get("voltages"):
+            def voltage(row):
+                return cmath.rect(row["vm_pu"], math.radians(row["va_deg"]))
+            delta = max(abs(voltage(before["voltages"][k]) - voltage(after["voltages"][k]))
+                        for k in before["voltages"])
+        rows.append({"case": name, "buses": len(spec["buses"]),
+                     "baseline_verified": before["conservation_verified"],
+                     "candidate_verified": after["conservation_verified"],
+                     "baseline_seconds": bt, "candidate_seconds": at,
+                     "max_voltage_phasor_change_pu": delta,
+                     "candidate_terminal_power_residual": after.get("tellegen_residual_pu"),
+                     "candidate_current_balance_residual": after.get("max_rectangular_mismatch_pu"),
+                     "baseline_reason": before.get("reason"), "candidate_reason": after.get("reason")})
 
-controls.verify_ac_power_flow = capture
-positive = []
-for resistance in (10, 100):
-    for angle, reverse in ((0, False), (17, False), (17, True)):
+    samples = []
+    def capture(spec):
+        samples.append(copy.deepcopy(spec))
+        return candidate.verify_ac_power_flow(spec)
+
+    controls.verify_ac_power_flow = capture
+    positive = []
+    for resistance in (10, 100):
+        for angle, reverse in ((0, False), (17, False), (17, True)):
+            samples.clear()
+            controls.test_cross_tie_requires_joint_mixed_reactive_limits(resistance, angle, reverse)
+            positive.append(samples[1])
+    for count in (5, 12, 24):
         samples.clear()
-        controls.test_cross_tie_requires_joint_mixed_reactive_limits(resistance, angle, reverse)
-        positive.append(samples[1])
-for count in (5, 12, 24):
-    samples.clear()
-    controls.test_mixed_limits_on_one_connected_generator_chain(count)
-    positive.append(samples[0])
-bad_claims = []
-for upper in (False, True):
-    for angle in (0, 17):
-        samples.clear()
-        controls.test_saturated_claim_requires_reactive_power_at_its_bound(upper, angle)
-        bad_claims.append(samples[1])
-for label, module in (("baseline", baseline), ("candidate", candidate)):
-    run = [timed(module, spec) for spec in positive]
-    rows.append({"implementation": label, "connected_cases": len(positive),
-                 "verified": sum(r["conservation_verified"] for r, _ in run),
-                 "seconds": sum(t for _, t in run),
-                 "worst_generators": 24,
-                 "incorrect_saturation_claims_accepted": sum(
-                     module.verify_ac_power_flow(spec)["conservation_verified"] for spec in bad_claims),
-                 "bad_claim_count": len(bad_claims)})
-print(json.dumps(rows, indent=2))
+        controls.test_mixed_limits_on_one_connected_generator_chain(count)
+        positive.append(samples[0])
+    bad_claims = []
+    for upper in (False, True):
+        for angle in (0, 17):
+            samples.clear()
+            controls.test_saturated_claim_requires_reactive_power_at_its_bound(upper, angle)
+            bad_claims.append(samples[1])
+    for label, module in (("baseline", baseline), ("candidate", candidate)):
+        run = [timed(module, spec) for spec in positive]
+        rows.append({"implementation": label, "connected_cases": len(positive),
+                     "verified": sum(r["conservation_verified"] for r, _ in run),
+                     "seconds": sum(t for _, t in run),
+                     "worst_generators": 24,
+                     "incorrect_saturation_claims_accepted": sum(
+                         module.verify_ac_power_flow(spec)["conservation_verified"] for spec in bad_claims),
+                     "bad_claim_count": len(bad_claims)})
+    print(json.dumps(rows, indent=2))
+
+
+if __name__ == "__main__":
+    main()
