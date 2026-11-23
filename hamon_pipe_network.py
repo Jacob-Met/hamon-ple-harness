@@ -6,6 +6,7 @@ from fractions import Fraction
 
 import numpy as np
 from scipy.linalg import null_space
+from scipy.sparse import coo_matrix
 
 
 def number(value):
@@ -160,6 +161,63 @@ def pressure_forest(node_count, endpoints, reservoirs, resistance):
     return branches
 
 
+def radial_solution(endpoints, root, demands, datum, law, inverse, re_per_flow):
+    """A tree edge supplies exactly the sum of demands in the cut below it."""
+    adjacency = [[] for _ in demands]
+    for i, (a, b) in enumerate(endpoints):
+        adjacency[a].append((b, i, 1))
+        adjacency[b].append((a, i, -1))
+    visited, order, branches = {root}, [root], []
+    for parent in order:
+        for child, edge, direction in adjacency[parent]:
+            if child not in visited:
+                visited.add(child)
+                order.append(child)
+                branches.append((parent, child, edge, direction))
+    if len(order) != len(demands):
+        raise ValueError("All nodes must belong to one connected network")
+
+    cut = [Fraction(float(value)) for value in demands]
+    flow = np.empty(len(endpoints))
+    for parent, child, edge, direction in reversed(branches):
+        flow[edge] = float(direction * cut[child])
+        cut[parent] += cut[child]
+    drop = law(flow)[0]
+    # Preserve the individual pipe drops when the datum or accumulated
+    # upstream loss is much larger than the local pressure difference.
+    heads = [Fraction(float(datum))] * len(demands)
+    for parent, child, edge, direction in branches:
+        heads[child] = heads[parent] - direction * Fraction(float(drop[edge]))
+    differences = np.array([float(heads[a] - heads[b]) for a, b in endpoints])
+    return flow, inverse(differences, 2000 / re_per_flow), np.array(list(map(float, heads))), drop
+
+
+def radial_balance(endpoints, root, demands, flows):
+    """Replay mass balance from the reported binary64 values at every junction."""
+    load = [Fraction(float(d)) for d in demands]
+    error = load.copy()
+    rounding = [Fraction(0)] * len(load)
+    for (a, b), flow in zip(endpoints, flows):
+        q = Fraction(float(flow))
+        error[a] += q
+        error[b] -= q
+        half_ulp = Fraction(math.ulp(float(flow))) / 2 if q else 0
+        rounding[a] += half_ulp
+        rounding[b] += half_ulp
+    # The root cut is the net demand exactly. Its incident flows are rounded
+    # separately and can lose a small net supply between opposing branches.
+    supply = sum(load)
+    error[root] -= supply
+    verified = True
+    for i, mismatch in enumerate(error):
+        demand = supply if i == root else load[i]
+        tolerance = abs(demand) / 10**7 + rounding[i]
+        if abs(mismatch) > min(Fraction(1, 10**6), tolerance):
+            verified = False
+    return float(max(map(abs, error))), verified, float(supply)
+
+
+
 def network(spec):
     nodes, pipes = spec["nodes"], spec["pipes"]
     node_ids = identifiers(nodes, "Node")
@@ -202,14 +260,22 @@ def network(spec):
     if gravity <= 0:
         raise ValueError("Gravity must be positive")
     index = {name: i for i, name in enumerate(node_ids)}
-    incidence = np.zeros((len(nodes), len(pipes)))
     endpoints = [(index[p["from"]], index[p["to"]]) for p in pipes]
-    for k, (a, b) in enumerate(endpoints):
-        if a == b:
-            raise ValueError("Pipe cannot connect a node to itself")
-        incidence[a, k], incidence[b, k] = 1.0, -1.0
-    if np.linalg.matrix_rank(incidence[1:]) != len(nodes) - 1:
-        raise ValueError("All nodes must belong to one connected network")
+    if any(a == b for a, b in endpoints):
+        raise ValueError("Pipe cannot connect a node to itself")
+    radial = len(reservoirs) == 1 and len(pipes) == len(nodes) - 1
+    if radial:
+        # Connectedness is established by the traversal in radial_solution.
+        row = np.asarray(endpoints).ravel()
+        col = np.repeat(np.arange(len(pipes)), 2)
+        signs = np.tile([1., -1.], len(pipes))
+        incidence = coo_matrix((signs, (row, col)), shape=(len(nodes), len(pipes))).tocsr()
+    else:
+        incidence = np.zeros((len(nodes), len(pipes)))
+        for k, (a, b) in enumerate(endpoints):
+            incidence[a, k], incidence[b, k] = 1.0, -1.0
+        if np.linalg.matrix_rank(incidence[1:]) != len(nodes) - 1:
+            raise ValueError("All nodes must belong to one connected network")
     junctions = np.ones(len(nodes), dtype=bool)
     junctions[reservoirs] = False
     A = incidence[junctions]
@@ -232,15 +298,14 @@ def network(spec):
     d = demands[junctions]
     scale = max(float(np.abs(d).sum()), 1e-12)
 
-    # Use pressure drops on a forest rooted at the reservoirs as continuous
-    # coordinates. Prefer low-resistance pipes so a small pressure gradient
-    # survives even when both endpoint heads are far from the datum.
-    radial = len(pipes) == len(d)
-    initial = np.zeros(len(d))
     if radial:
-        # Every pipe is already an independent coordinate.
-        basis_incidence = A
+        qloop, qnode, total_head, drop = radial_solution(
+            endpoints, reservoirs[0], demands, datum, law, inverse, re_per_flow)
     else:
+        # Use pressure drops on a forest rooted at the reservoirs as continuous
+        # coordinates. Prefer low-resistance pipes so a small pressure gradient
+        # survives even when both endpoint heads are far from the datum.
+        initial = np.zeros(len(d))
         basis = pressure_forest(len(nodes), endpoints, reservoirs, law(np.zeros(len(pipes)))[1])
         basis_incidence = A[:, basis]
         # Each pipe drop is a signed sum along a forest path, plus the
@@ -248,47 +313,52 @@ def network(spec):
         paths = np.linalg.solve(basis_incidence, A).T
         fixed_drop = boundary_drop - paths @ boundary_drop[basis]
 
-    def pipe_drops(tree_drop):
-        return tree_drop if radial else paths @ tree_drop + fixed_drop
+        def pipe_drops(tree_drop):
+            return paths @ tree_drop + fixed_drop
 
-    if np.any(boundary_drop):
-        # The harmonic initial head includes imposed reservoir through-flow.
-        initial_head = np.linalg.lstsq(A.T, -boundary_drop, rcond=None)[0]
-        initial = basis_incidence.T @ initial_head + boundary_drop[basis]
-        initial_flow = inverse(pipe_drops(initial), scale)
-        scale = max(scale, float(np.max(np.abs(initial_flow))))
+        if np.any(boundary_drop):
+            # The harmonic initial head includes imposed reservoir through-flow.
+            initial_head = np.linalg.lstsq(A.T, -boundary_drop, rcond=None)[0]
+            initial = basis_incidence.T @ initial_head + boundary_drop[basis]
+            initial_flow = inverse(pipe_drops(initial), scale)
+            scale = max(scale, float(np.max(np.abs(initial_flow))))
 
-    def nodal_equations(tree_drop):
-        flow = inverse(pipe_drops(tree_drop), scale)
-        residual = A @ flow + d
-        derivative = A / law(flow)[1]
-        return residual, derivative if radial else derivative @ paths
+        def nodal_equations(tree_drop):
+            flow = inverse(pipe_drops(tree_drop), scale)
+            residual = A @ flow + d
+            derivative = A / law(flow)[1]
+            return residual, derivative @ paths
 
-    tree_drop = newton(initial, nodal_equations, min(1e-12, 5e-13 * scale))
-    qnode = inverse(pipe_drops(tree_drop), scale)
-    relative_tree_drop = tree_drop if radial else tree_drop - boundary_drop[basis]
-    head = np.linalg.solve(basis_incidence.T, relative_tree_drop)
-    # The second formulation begins with continuity satisfied, and may change
-    # only circulations and flows between reservoirs. Their prescribed head
-    # differences supply the energy term on those boundary-to-boundary paths.
-    feasible = np.linalg.lstsq(A, -d, rcond=None)[0]
-    cycles = null_space(A)
+        tree_drop = newton(initial, nodal_equations, min(1e-12, 5e-13 * scale))
+        qnode = inverse(pipe_drops(tree_drop), scale)
+        relative_tree_drop = tree_drop - boundary_drop[basis]
+        head = np.linalg.solve(basis_incidence.T, relative_tree_drop)
+        # The second formulation begins with continuity satisfied, and may change
+        # only circulations and flows between reservoirs. Their prescribed head
+        # differences supply the energy term on those boundary-to-boundary paths.
+        feasible = np.linalg.lstsq(A, -d, rcond=None)[0]
+        cycles = null_space(A)
 
-    def loop_equations(amount):
-        drop, slope = law(feasible + cycles @ amount)
-        return cycles.T @ (drop - boundary_drop), (cycles.T * slope) @ cycles
+        def loop_equations(amount):
+            drop, slope = law(feasible + cycles @ amount)
+            return cycles.T @ (drop - boundary_drop), (cycles.T * slope) @ cycles
 
-    loss_scale = np.max(np.abs(law(feasible)[0] - boundary_drop))
-    loop_tolerance = max(32 * np.finfo(float).eps * loss_scale,
-                         min(1e-13, max(1e-26, 1e-13 * loss_scale)))
-    amplitude = newton(np.zeros(cycles.shape[1]), loop_equations, loop_tolerance)
-    qloop = feasible + cycles @ amplitude
-    drop, _ = law(qloop)
-    total_head = np.full(len(nodes), datum)
-    total_head[reservoirs] = fixed_heads
-    total_head[junctions] += head
-    supply = incidence[reservoirs] @ qloop
-    continuity = float(np.max(np.abs(A @ qloop + d), initial=0.0))
+        loss_scale = np.max(np.abs(law(feasible)[0] - boundary_drop))
+        loop_tolerance = max(32 * np.finfo(float).eps * loss_scale,
+                             min(1e-13, max(1e-26, 1e-13 * loss_scale)))
+        amplitude = newton(np.zeros(cycles.shape[1]), loop_equations, loop_tolerance)
+        qloop = feasible + cycles @ amplitude
+        drop, _ = law(qloop)
+        total_head = np.full(len(nodes), datum)
+        total_head[reservoirs] = fixed_heads
+        total_head[junctions] += head
+    if radial:
+        continuity, local_mass_ok, root_supply = radial_balance(endpoints, reservoirs[0], demands, qloop)
+        supply = np.array([root_supply])
+    else:
+        local_mass_ok = True
+        supply = incidence[reservoirs] @ qloop
+        continuity = float(np.max(np.abs(A @ qloop + d), initial=0.0))
     energy = float(np.max(np.abs(incidence.T @ total_head - drop)))
     agreement = float(np.max(np.abs(qnode - qloop)))
 
@@ -304,17 +374,19 @@ def network(spec):
         flows = proposed("proposed_flows_m3_s", pipe_ids)
         # Check every pipe and junction. A large main cannot conceal a missing
         # demand or a reversed flow on a much smaller branch.
-        pipe_tolerance = np.minimum(1e-6, 1e-7 * np.abs(qloop) + 32 * eps * scale)
-        incident_flow = np.abs(A) @ np.abs(flows)
-        mass_tolerance = np.minimum(
-            1e-6, 1e-7 * np.abs(d) + 32 * eps * (incident_flow + np.abs(d))
-        )
+        pipe_scale = np.abs(qloop) if radial else scale
+        pipe_tolerance = np.minimum(1e-6, 1e-7 * np.abs(qloop) + 32 * eps * pipe_scale)
         registered["flows_match"] = bool(
             np.all(np.abs(flows - qloop) <= pipe_tolerance)
         )
-        registered["junction_demands_match"] = bool(
-            np.all(np.abs(A @ flows + d) <= mass_tolerance)
-        )
+        if radial:
+            _, registered["junction_demands_match"], _ = radial_balance(endpoints, reservoirs[0], demands, flows)
+        else:
+            incident_flow = np.abs(A) @ np.abs(flows)
+            mass_tolerance = np.minimum(
+                1e-6, 1e-7 * np.abs(d) + 32 * eps * (incident_flow + np.abs(d))
+            )
+            registered["junction_demands_match"] = bool(np.all(np.abs(A @ flows + d) <= mass_tolerance))
     if "proposed_heads_m" in spec:
         heads = proposed("proposed_heads_m", node_ids)
         # Verify pressure differences in the pipe's physical scale. The two
@@ -328,8 +400,9 @@ def network(spec):
         registered["pipe_head_drops_match"] = bool(
             np.all(np.abs(incidence.T @ heads - drop) <= drop_tolerance)
         )
+    local_flow_ok = (not radial or np.all(np.abs(qnode - qloop) <= np.minimum(1e-6, 1e-7*np.abs(qloop))))
     verified = (
-        continuity < min(1e-6, 1e-7 * scale)
+        local_flow_ok and local_mass_ok and continuity < min(1e-6, 1e-7 * scale)
         and energy < 1e-6
         and agreement < min(1e-6, 1e-7 * scale)
         and all(registered.values())
