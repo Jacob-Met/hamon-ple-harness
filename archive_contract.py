@@ -222,7 +222,7 @@ class FirstPublication:
 
     def __init__(self, plan):
         self.stage, self.command = plan
-        self.pending = set()
+        self.pending: dict[str, bool] = {}
         self.published = False
 
     async def observe(self, session, event):
@@ -234,12 +234,21 @@ class FirstPublication:
             if (isinstance(call_id, str) and isinstance(args, dict)
                     and event.get("toolName") in {"write", "edit", "bash"}
                     and any(isinstance(arg, str) and self.stage in arg for arg in args.values())):
-                self.pending.add(call_id)
+                self.pending[call_id] = (event.get("toolName") == "bash"
+                                         and args.get("command") == self.command)
         elif event.get("type") == "message_end":
             msg = event.get("message") or {}
             call_id = msg.get("toolCallId")
             if msg.get("role") == "toolResult" and call_id in self.pending:
-                self.pending.remove(call_id)
-                if not msg.get("isError") and await run_command(session, self.command):
+                explicit_publisher = self.pending.pop(call_id)
+                if msg.get("isError"):
+                    return
+                # The exact provisioned publisher emits this acknowledgement only
+                # after format/CRC checks, change detection and atomic publication.
+                # A staging command or an ambiguous result still needs our publisher.
+                acknowledged = (explicit_publisher and msg.get("toolName") == "bash"
+                                and msg.get("isError") is False
+                                and msg.get("content") == [{"type": "text", "text": "PLE_ARCHIVE_PUBLISHED"}])
+                if acknowledged or await run_command(session, self.command):
                     self.published = True
                     await session.log("delivery_gate: first complete archive published during initial pass")

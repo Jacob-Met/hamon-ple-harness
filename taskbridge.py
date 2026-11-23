@@ -109,6 +109,7 @@ class Session:
         else None
     )
     self.final_message = ""
+    self.fallback_summary = lambda text: text
     self.cancelled = asyncio.Event()
     self._ids = itertools.count(1)
     self._waiting: dict[str, asyncio.Future[dict[str, Any]]] = {}
@@ -601,7 +602,7 @@ async def _session(ws: Any, handler: Any) -> None:
           "final_message": _final(
               answer
               if isinstance(answer, str) and answer
-              else session.final_message
+              else session.fallback_summary(session.final_message)
           ),
       })
     elif not isinstance(exc, Cancelled):
@@ -619,7 +620,7 @@ async def _session(ws: Any, handler: Any) -> None:
             ]
         )
         await session.send(
-            {"type": "done", "final_message": _final(session.final_message)}
+            {"type": "done", "final_message": _final(session.fallback_summary(session.final_message))}
         )
       else:
         await session.send(
@@ -640,7 +641,7 @@ async def _session(ws: Any, handler: Any) -> None:
       final = (
           answer
           if isinstance(answer, str) and answer
-          else session.final_message
+          else session.fallback_summary(session.final_message or "(stopped: time is up)")
       )
       await session.send({
           "type": "done",

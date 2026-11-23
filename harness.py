@@ -362,6 +362,8 @@ async def solve(session: taskbridge.Session) -> str:
       delivery_targets = delivery_guard.extract_targets(
           session.instruction, session.workdir
       )
+      terminal = delivery_guard.TerminalDelivery(session.instruction, delivery_targets)
+      session.fallback_summary = terminal.summary
       # Share one observation allowance before the participant starts. Later
       # delivery verification retains its own existing per-operation limits.
       observation_start = monotonic()
@@ -373,6 +375,7 @@ async def solve(session: taskbridge.Session) -> str:
       before_delivery = await delivery_guard.snapshot(
           session, delivery_targets, deadline=observation_deadline
       )
+      terminal.before = before_delivery
       checked_delivery = bool(delivery_targets) and before_delivery is not None
       archive_plan = await archive_contract.provision(
           session, delivery_targets, deadline=observation_deadline
@@ -458,13 +461,16 @@ async def solve(session: taskbridge.Session) -> str:
       participant_followup = False
       if delivery_targets and before_delivery is not None:
         after_delivery = await delivery_guard.snapshot(session, delivery_targets)
+        terminal.observe(after_delivery)
         issues = delivery_guard.compare(before_delivery, after_delivery)
         if issues and archive_plan:
           # A completed staging directory can be committed even if Pi ended after
           # an unacknowledged tool request. Independently re-read the graded path.
+          terminal.invalidate()
           if await archive_contract.run_command(session, archive_plan[1]):
             published = await delivery_guard.snapshot(session, delivery_targets)
             if published:
+              terminal.observe(published)
               after_delivery = published
               issues = delivery_guard.compare(before_delivery, published)
         refinement_time = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC) if archive_plan else 0
@@ -486,6 +492,7 @@ async def solve(session: taskbridge.Session) -> str:
           if not resume:
             refine = session.instruction + "\n\n" + refine
           participant_followup = True
+          terminal.invalidate()
           try:
             await taskbridge.run_process(
                 [*argv, "--continue"] if resume else argv, session, env=env, cwd=str(work),
@@ -518,6 +525,7 @@ async def solve(session: taskbridge.Session) -> str:
                 before_generators, after_generators,
             )
             if selected:
+              terminal.invalidate()
               observed = await delivery_materialize.materialize(session, selected)
               await session.log(
                   "delivery_gate: materializers="
@@ -526,6 +534,7 @@ async def solve(session: taskbridge.Session) -> str:
               after_delivery = await delivery_guard.snapshot(
                   session, delivery_targets,
               )
+              terminal.observe(after_delivery)
               issues = delivery_guard.compare(before_delivery, after_delivery)
               await session.log("delivery_gate: post_materialize=" + str(len(issues)))
           delivery_time = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC)
@@ -533,6 +542,7 @@ async def solve(session: taskbridge.Session) -> str:
             # Each task has its own temporary session directory. Continue the
             # actual calculation history if Pi persisted it before the cutoff.
             resume = any(session_dir.glob("*.jsonl"))
+            terminal.invalidate()
             instruction = delivery_guard.repair_instruction(issues)
             if archive_plan:
               instruction += archive_contract.first_instruction(*archive_plan)
@@ -550,6 +560,7 @@ async def solve(session: taskbridge.Session) -> str:
                 log_prefix="pi-delivery-repair: ",
             )
             after_repair = await delivery_guard.snapshot(session, delivery_targets)
+            terminal.observe(after_repair)
             still_missing = delivery_guard.compare(before_delivery, after_repair)
             await session.log(
                 "delivery_gate: residual=" + str(len(still_missing))
@@ -559,20 +570,28 @@ async def solve(session: taskbridge.Session) -> str:
       if tool_session is not None and not participant_followup:
         remaining = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC)
         if remaining is None or remaining >= MIN_DELIVERY_RUN_SEC:
+          terminal.invalidate()
           await session.log("delivery_gate: continuing acknowledged tool results")
           await taskbridge.run_process(
               [*argv, "--session", str(tool_session)], session, env=env, cwd=str(work),
               on_line=run.on_line, stop_before_sec=STOP_BEFORE_SEC, log_prefix="pi-finalize: ",
               stdin=(b"Continue from the recorded tool results. Check what was actually delivered, "
                      b"finish the requested work within the remaining time, and report its status."))
+      if delivery_targets and not terminal.observed:
+        left = session.time_left()
+        budget = 25 if left is None else min(25, max(0, left - 1))
+        if budget >= 1:
+          terminal.observe(await delivery_guard.snapshot(session, delivery_targets, deadline=monotonic() + budget))
   if not run.replies:
     raise RuntimeError(
         f"pi exited with {done.code} before the model answered:"
         f" {done.stderr[-2000:]}"
     )
   if run.tool_turn is not None:
-    return "(pi stopped after requesting a tool, before giving a final answer)"
-  return session.final_message or "(pi stopped without a final message)"
+    note = "(pi stopped after requesting a tool, before giving a final answer)"
+    observation = terminal.summary("")
+    return f"{observation}\n{note}" if observation else note
+  return terminal.summary(session.final_message or "(pi stopped without a final message)")
 
 
 def resolve_wired_domain_tools(prompt: str = "", file_paths=()) -> list[str]:
