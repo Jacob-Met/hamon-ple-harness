@@ -31,6 +31,17 @@ class CounterflowTerminal(unittest.TestCase):
         self.assertAlmostEqual(result["T_h_out_K"], expected, places=12)
         self.assertFalse(rate(C_c=2., UA=80., T_h_out=10.)["verified"])
 
+    def test_resolved_approach_on_ordinary_kelvin_scale(self):
+        # At NTU=40 and Cr=1/2 the terminal gap is about 0.206 microkelvin.
+        # A 0.050 microkelvin reading differs by <1e-9 of the full stream drop.
+        params = dict(C_c=2., UA=40., T_h_in=500., T_c_in=300.)
+        decay = math.exp(-20.)
+        expected = 300. + 200. * decay / (2. - decay)
+        self.assertTrue(rate(**params, T_h_out=expected)["verified"])
+        adverse = rate(**params, T_h_out=300.000000050)
+        self.assertFalse(adverse["verified"])
+        self.assertGreater(adverse["observation_residuals"]["T_h_out"], 0.7)
+
     def test_hot_maximum_capacity_and_zero_conductance(self):
         ch=math.nextafter(1., 2.)
         # NTU*(1-Cr)>200, so the exponential changes the result by <1e-75 K.
