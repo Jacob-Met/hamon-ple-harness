@@ -1,5 +1,6 @@
 """A complete graded archive must survive an interrupted optional refinement."""
 import contextlib
+import csv
 import hashlib
 import json
 import os
@@ -18,7 +19,8 @@ import harness
 
 
 class ArchiveRefinementRecovery(unittest.IsolatedAsyncioTestCase):
-    async def exercise(self, change, *, tool_tail=False, checkpoint_ok=True, after_checkpoint=900):
+    async def exercise(self, change, *, tool_tail=False, checkpoint_ok=True, after_checkpoint=900,
+                       refinement_error=None):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             stage, target = root / "members", root / "answer.zip"
@@ -78,6 +80,8 @@ class ArchiveRefinementRecovery(unittest.IsolatedAsyncioTestCase):
                         archive_checkpoint.publish(stage, target, members)
                 else:
                     self.fail("The optional refinement must not start an unproved third model run")
+                if len(calls) > 1 and refinement_error is not None:
+                    raise refinement_error
                 if tool_tail and log_prefix != "pi: ":
                     message = {"role": "assistant", "stopReason": "toolUse", "content": [
                         {"type": "toolCall", "id": "pending", "name": "bash", "arguments": {}}]}
@@ -149,6 +153,59 @@ class ArchiveRefinementRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["final"], result["first"])
         self.assertEqual(len(result["calls"]), 1)
 
+
+    async def test_ordinary_refinement_error_enters_recovery(self):
+        result = await self.exercise("both_invalid", refinement_error=OSError("fixture"))
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(result["final"], result["first"])
+        self.assertEqual(len(result["calls"]), 2)
+        self.assertIn("Recovered a complete archive", result["reply"])
+
+    async def test_task_cancellation_does_not_start_recovery(self):
+        with mock.patch.object(harness.archive_contract, "recover_after_refinement") as recover:
+            with self.assertRaises(harness.taskbridge.Cancelled):
+                await self.exercise("both_invalid", refinement_error=harness.taskbridge.Cancelled("fixture"))
+            recover.assert_not_awaited()
+
+    def test_csv_parser_failure_restores_the_saved_archive(self):
+        with tempfile.TemporaryDirectory() as folder:
+            stage, target = Path(folder) / "members", Path(folder) / "answer.zip"
+            stage.mkdir()
+            (stage / "data.csv").write_text("value\n12\n")
+            archive_checkpoint.publish(stage, target, ["data.csv"])
+            archive_checkpoint.checkpoint(stage, target, ["data.csv"])
+            first = target.read_bytes()
+            invalid = "x" * 80 + "\n"
+            (stage / "data.csv").write_text(invalid)
+            with zipfile.ZipFile(target, "w") as output:
+                output.writestr("data.csv", invalid)
+            old_limit = csv.field_size_limit(48)
+            try:
+                self.assertEqual(archive_checkpoint.recover(stage, target, ["data.csv"]), "restored")
+            finally:
+                csv.field_size_limit(old_limit)
+            self.assertEqual(target.read_bytes(), first)
+
+    def test_checkpoint_validates_the_copied_version_before_replacing_the_saved_one(self):
+        with tempfile.TemporaryDirectory() as folder:
+            stage, target = Path(folder) / "members", Path(folder) / "answer.zip"
+            stage.mkdir()
+            (stage / "report.md").write_text("# First version\n")
+            archive_checkpoint.publish(stage, target, ["report.md"])
+            archive_checkpoint.checkpoint(stage, target, ["report.md"])
+            first = target.read_bytes()
+            copy_file = archive_checkpoint.shutil.copyfile
+            def replace_then_copy(source, destination):
+                with zipfile.ZipFile(target, "w") as output:
+                    output.writestr("report.md", "# Different valid version\n")
+                return copy_file(source, destination)
+            with mock.patch.object(archive_checkpoint.shutil, "copyfile", side_effect=replace_then_copy):
+                with self.assertRaisesRegex(ValueError, "staged and published versions differ"):
+                    archive_checkpoint.checkpoint(stage, target, ["report.md"])
+            target.write_bytes(b"incomplete")
+            (stage / "report.md").write_text("")
+            self.assertEqual(archive_checkpoint.recover(stage, target, ["report.md"]), "restored")
+            self.assertEqual(target.read_bytes(), first)
 
     async def test_standalone_task_helper_restores_the_saved_archive(self):
         with tempfile.TemporaryDirectory() as folder:

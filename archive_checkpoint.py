@@ -69,7 +69,7 @@ def verify(archive: Path, names: list[str]) -> None:
 
 
 def verify_checkpoint(stage: Path, target: Path, names: list[str]) -> None:
-    """Confirm that the graded archive is the exact first version this session staged."""
+    """Confirm that the archive matches the current staged member bytes."""
     verify(target, names)
     with zipfile.ZipFile(target) as archive:
         for name in names:
@@ -111,7 +111,7 @@ def _replace_synced(candidate: Path, target: Path) -> None:
         os.close(directory_fd)
 
 
-def _copy_verified(source: Path, target: Path, names: list[str]) -> None:
+def _copy_verified(source: Path, target: Path, names: list[str], *, staged: Path | None = None) -> None:
     if not _valid_regular_file(source):
         raise ValueError("missing regular archive checkpoint")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -119,21 +119,23 @@ def _copy_verified(source: Path, target: Path, names: list[str]) -> None:
         candidate = Path(f.name)
     try:
         shutil.copyfile(source, candidate)
-        verify(candidate, names)
+        if staged is None:
+            verify(candidate, names)
+        else:
+            verify_checkpoint(staged, candidate, names)
         _replace_synced(candidate, target)
     finally:
         candidate.unlink(missing_ok=True)
 
 
 def checkpoint(stage: Path, target: Path, names: list[str]) -> None:
-    """Save the verified first version outside the members being refined."""
-    verify_checkpoint(stage, target, names)
-    _copy_verified(target, stage.with_name(stage.name + ".checkpoint.zip"), names)
+    """Save a verified complete version outside the members being refined."""
+    _copy_verified(target, stage.with_name(stage.name + ".checkpoint.zip"), names, staged=stage)
 
 
 def recover(stage: Path, target: Path, names: list[str]) -> str:
     """Keep a complete result, publish complete staging, or restore the saved copy."""
-    invalid = (ValueError, OSError, zipfile.BadZipFile, EOFError, RuntimeError)
+    invalid = (ValueError, OSError, zipfile.BadZipFile, EOFError, RuntimeError, csv.Error)
     try:
         verify(target, names)
     except invalid:
