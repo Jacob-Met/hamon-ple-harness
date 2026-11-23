@@ -16,3 +16,5 @@ The load for maximum efficiency is a separate result. Its search domain is λ �
 | A, B and C all zero | `undefined_at_all_loads` | null |
 
 For example, with a 1,000 VA, 100 V rating, 5 W core loss, zero winding resistance, 0.4 Ω reactance and a half-rated load at 0.8 lagging, useful power is 400 W and operating efficiency is 400/405. The model's efficiency approaches one as the load increases. The CLI returns the finite operating results and a null optimum with status `supremum_as_load_increases`.
+
+The reported voltage regulation is the signed relative change in voltage magnitude, `100 (|E₂| − V₂) / V₂`. It is evaluated before rounding the absolute no-load voltage. Near a leading-power-factor zero crossing, `E2_no_load_V` can round to the rated terminal voltage while `voltage_regulation_pct` still reports the direction and size of the change.
