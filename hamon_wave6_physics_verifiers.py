@@ -417,7 +417,7 @@ def _rlc_matrix_vector(matrix, vector):
             matrix[2] * vector[0] + matrix[3] * vector[1])
 
 
-def _rlc_matrix_reference(r, l, c, vs, v0, i0, time_):
+def _rlc_matrix_reference(r, l, c, vs, v0, i0, time_, digits=50):
     """Independent affine matrix exponential, without modal roots.
 
     Use energy coordinates (v, i*sqrt(L/C)) and propagate the constant
@@ -427,7 +427,7 @@ def _rlc_matrix_reference(r, l, c, vs, v0, i0, time_):
     if time_ == 0 or (v0 == vs and i0 == 0):
         return v0, i0, 0
     with localcontext() as context:
-        context.prec = 50
+        context.prec = digits
         rd, ld, cd, sd, vd, id_, td = map(
             lambda value: Decimal(str(value)), (r, l, c, vs, v0, i0, time_))
         omega = Decimal(1) / (ld * cd).sqrt()
@@ -475,7 +475,54 @@ def _rlc_matrix_reference(r, l, c, vs, v0, i0, time_):
         return float(voltage), float(current), squarings
 
 
-def _rlc_analytic_state(alpha, omega, impedance, vs, v0, i0, time_):
+def _rlc_overdamped_modes(r, l, c, vs, v0, i0, time_):
+    """Project the initial state on the two real poles in physical coordinates."""
+    rd, ld, cd, sd, vd, id_, td = map(
+        lambda value: Decimal(str(value)), (r, l, c, vs, v0, i0, time_))
+    with localcontext() as context:
+        context.prec = 60
+        discriminant = Fraction(rd)**2 * Fraction(cd) - 4 * Fraction(ld)
+        if discriminant <= 0:
+            # Rounded binary rates can straddle critical damping. The existing
+            # continuous propagator handles this near-coincident limit.
+            return None
+        x = Fraction(vd) - Fraction(sd)
+        current = Fraction(id_)
+        # L(i-C*f*x)(i-C*s*x), with x=v0-vs and s,f the slow/fast poles.
+        # Form it exactly so a pure eigenmode has zero complementary amplitude.
+        invariant = (Fraction(ld) * current**2 + Fraction(rd) * Fraction(cd) * x * current
+                     + Fraction(cd) * x**2)
+        for _ in range(2):
+            radicand = Decimal(discriminant.numerator) / Decimal(discriminant.denominator) / cd
+            delta = Decimal(x.numerator) / Decimal(x.denominator)
+            fast = -(rd + radicand.sqrt()) / (2 * ld)
+            slow = 1 / (ld * cd * fast)
+            slow_numerator = id_ - cd * fast * delta
+            fast_numerator = id_ - cd * slow * delta
+            product = Decimal(invariant.numerator) / Decimal(invariant.denominator) / ld
+            # Divide the exact product by the larger projection, avoiding
+            # subtraction of two almost equal quantities in the smaller one.
+            if abs(slow_numerator) < abs(fast_numerator):
+                slow_numerator = product / fast_numerator
+            elif slow_numerator:
+                fast_numerator = product / slow_numerator
+            denominator = cd * (slow - fast)
+            slow_v = slow_numerator / denominator * (slow * td).exp()
+            fast_v = -fast_numerator / denominator * (fast * td).exp()
+            slow_i, fast_i = cd * slow * slow_v, cd * fast * fast_v
+            voltage, current_end = sd + slow_v + fast_v, slow_i + fast_i
+            # An applied source or a crossing can cancel the final sum. Use
+            # enough digits to resolve a binary64 endpoint even from 1e308.
+            sums = ((voltage, max(abs(sd), abs(slow_v), abs(fast_v))),
+                    (current_end, max(abs(slow_i), abs(fast_i))))
+            if all(not size or (value and size.adjusted() - value.adjusted() < context.prec - 25)
+                   for value, size in sums):
+                break
+            context.prec = max(context.prec, 380 + max(size.adjusted() for _, size in sums))
+        return float(voltage), float(current_end)
+
+
+def _rlc_analytic_state(alpha, omega, impedance, vs, v0, i0, time_, r, l, c):
     """Stable modal propagator; voltage and impedance-scaled current."""
     if alpha == omega:
         regime = "critically_damped"
@@ -504,6 +551,10 @@ def _rlc_analytic_state(alpha, omega, impedance, vs, v0, i0, time_):
                          (-wt * increment[0] - 2 * at * increment[1]) / (degree + 1))
         return voltage, current / impedance, regime
     if regime == "overdamped":
+        if v0 or i0:
+            endpoint = _rlc_overdamped_modes(r, l, c, vs, v0, i0, time_)
+            if endpoint is not None:
+                return endpoint[0], endpoint[1], regime
         beta = math.sqrt(alpha - omega) * math.sqrt(alpha + omega)
         denominator = alpha + beta
         slow = -omega * (omega / denominator)
@@ -565,7 +616,7 @@ def _solve_rlc_transient(params):
     if not math.isfinite(v0 - vs) or not math.isfinite(i0 * impedance):
         raise ValueError("RLC initial state exceeds the supported finite range")
     voltage, current, regime = _rlc_analytic_state(
-        alpha, omega, impedance, vs, v0, i0, time_)
+        alpha, omega, impedance, vs, v0, i0, time_, r, l, c)
     reference_v, reference_i, squarings = _rlc_matrix_reference(
         r, l, c, vs, v0, i0, time_)
     if not all(math.isfinite(value) for value in (voltage, current, reference_v, reference_i)):
@@ -574,6 +625,24 @@ def _solve_rlc_transient(params):
     current_scale = max(abs(reference_i), abs(i0), math.ulp(0.0))
     residual = max(abs(voltage - reference_v) / voltage_scale,
                    abs(current - reference_i) / current_scale)
+    reference_converged = True
+    if regime == "overdamped" and (abs(voltage) < abs(v0) or abs(current) < abs(i0)):
+        # Allocate decimal places for the cancellation between initial/source
+        # contributions. Confirm the rounded independent endpoints at a second
+        # precision before qualifying relative error on the decayed signal.
+        z = Decimal(str(impedance))
+        v_scale = max(Decimal(str(abs(v0))), Decimal(str(abs(vs))), Decimal(str(abs(i0))) * z)
+        smallest = Decimal(str(math.ulp(0.0)))
+        lost_digits = max(scale.adjusted() - max(Decimal(str(abs(value))), smallest).adjusted()
+                          for scale, value in ((v_scale, voltage), (v_scale / z, current)))
+        digits = max(50, 32 + lost_digits)
+        args = (r, l, c, vs, v0, i0, time_)
+        if digits > 50:
+            reference_v, reference_i, squarings = _rlc_matrix_reference(*args, digits)
+        check_v, check_i, _ = _rlc_matrix_reference(*args, digits + 16)
+        reference_converged = (reference_v, reference_i) == (check_v, check_i)
+        residual = max(abs(voltage - reference_v) / max(abs(reference_v), math.ulp(0.0)),
+                       abs(current - reference_i) / max(abs(reference_i), math.ulp(0.0)))
     zeta = alpha / omega
     if alpha < omega:
         frequency = math.sqrt(omega - alpha) * math.sqrt(omega + alpha)
@@ -590,7 +659,7 @@ def _solve_rlc_transient(params):
         "i_l_A": current,
         "percent_overshoot": overshoot,
         "residual": residual,
-        "verified": residual < 1e-8,
+        "verified": reference_converged and residual < 1e-8,
         "verification_method": "decimal_scaled_matrix_exponential",
         "reference_squarings": squarings,
     }

@@ -47,6 +47,31 @@ class RlcTransientStabilityTests(unittest.TestCase):
                 self.assertEqual(actual["regime"], "overdamped")
                 self.assertLess(actual["reference_squarings"], 64)
 
+    def test_fast_eigenmode_and_neighboring_signed_mixtures(self):
+        # Independent 90-digit affine exponential checks every component. At
+        # i0=-64 the slow amplitude is exactly zero; both neighbors retain it.
+        for initial in (-64., math.nextafter(-64., 0.), math.nextafter(-64., -math.inf),
+                        -1/64, 0.):
+            with self.subTest(initial=initial):
+                self.assert_solution(dict(R=64.015625, L=1., C=1., V_s=0., t=.75,
+                                          v_c0=1., i_l0=initial))
+        # A constant source shifts the equilibrium voltage but not the current.
+        self.assert_solution(dict(R=2.5, L=1., C=1., V_s=3., v_c0=4., i_l0=-2., t=30.))
+
+    def test_fast_eigenmode_deeper_than_default_reference_precision(self):
+        # The exact solution is (exp(-2t), -2 exp(-2t)). At t=100, direct
+        # subtraction of slow matrix contributions needs more than 50 digits.
+        spec = dict(subkind="rlc_transient", R=2.5, L=1., C=1., V_s=0., v_c0=1., i_l0=-2., t=100.)
+        result = wave6.solve_transmission_line_rlc(spec)
+        exact = math.exp(-200)
+        self.assertTrue(result["verified"], result)
+        self.assertTrue(math.isclose(result["v_c_V"], exact, rel_tol=1e-14))
+        self.assertTrue(math.isclose(result["i_l_A"], -2*exact, rel_tol=1e-14))
+        with patch.object(wave6, "_rlc_analytic_state", return_value=(0., 0., "overdamped")):
+            rejected = wave6.solve_transmission_line_rlc(spec)
+        self.assertFalse(rejected["verified"])
+        self.assertEqual(rejected["residual"], 1.)
+
     def test_tiny_zero_state_voltage_survives_all_regimes(self):
         for resistance in (0., 1., 2., 3.):
             for time_ in (1e-8, 1e-25):
@@ -125,6 +150,8 @@ class RegisteredRlcTransientTests(unittest.TestCase):
         valid = [
             dict(id="stiff", spec=dict(subkind="rlc_transient", R=1e9, L=.001,
                                       C=1e-6, V_s=12., t=1000.)),
+            dict(id="fast_eigenmode", spec=dict(subkind="rlc_transient", R=64.015625,
+                                               L=1., C=1., V_s=0., v_c0=1., i_l0=-64., t=.75)),
             dict(id="tiny", spec=dict(subkind="rlc_transient", R=1., L=1.,
                                      C=1., V_s=1., t=1e-25)),
         ]
