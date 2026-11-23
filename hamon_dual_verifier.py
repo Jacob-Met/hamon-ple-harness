@@ -2910,14 +2910,8 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
         from hamon_short_circuit import symmetrical_fault
         return symmetrical_fault(spec)
     if kind == "ampacity_derating":
-        i_req = 1.25 * float(spec["I_continuous_A"]) + float(spec.get("I_noncontinuous_A", 0.0))
-        i_allow = float(spec["base_ampacity_A"]) * float(spec["temp_factor"]) * float(spec["bundling_factor"])
-        return {
-            "I_design_required_A": i_req,
-            "I_derated_allowable_A": i_allow,
-            "ampacity_ok": i_allow >= i_req,
-            "dual_verified": True,
-        }
+        from hamon_branch_ampacity import branch_ampacity
+        return branch_ampacity(spec)
     if kind == "pf_correction":
         from hamon_shunt_bank import signed_shunt_bank
         return signed_shunt_bank(spec)
