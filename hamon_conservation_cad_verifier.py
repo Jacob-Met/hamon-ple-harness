@@ -155,10 +155,6 @@ def verify_dimensional_homogeneity(spec: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _strip_step_comments(text: str) -> str:
-    return re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-
-
 def _split_step_top_args(s: str) -> List[str]:
     out: List[str] = []
     cur: List[str] = []
@@ -198,27 +194,9 @@ def _split_step_top_args(s: str) -> List[str]:
     return out
 
 
-def _parse_step_entities_map(step_text: str) -> Tuple[Dict[int, Tuple[str, List[str]]], float]:
-    clean = _strip_step_comments(step_text)
-    unit_to_m = 1.0
-    up = clean.upper()
-    if ".MILLI." in up and ".METRE." in up:
-        unit_to_m = 0.001
-    elif ".CENTI." in up and ".METRE." in up:
-        unit_to_m = 0.01
-    elif "'INCH'" in up or ".INCH." in up:
-        unit_to_m = 0.0254
-    elif "'FOOT'" in up or ".FOOT." in up:
-        unit_to_m = 0.3048
-    entities: Dict[int, Tuple[str, List[str]]] = {}
-    data_m = re.search(r"DATA\s*;(.*?)ENDSEC\s*;", clean, flags=re.DOTALL | re.IGNORECASE)
-    body = data_m.group(1) if data_m else clean
-    for stmt in body.split(";"):
-        st = stmt.strip()
-        m = re.match(r"^#(\d+)\s*=\s*([A-Za-z0-9_]+)\s*\((.*)\)\s*$", st, flags=re.DOTALL)
-        if m:
-            entities[int(m.group(1))] = (m.group(2).upper(), _split_step_top_args(m.group(3)))
-    return entities, unit_to_m
+def _parse_step_entities_map(step_text: str):
+    from hamon_step_units import parse_step_records
+    return parse_step_records(step_text, _split_step_top_args)
 
 
 def _ref_id(tok: str) -> Optional[int]:
@@ -887,9 +865,16 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
     elif not step_text and spec.get("path"):
         step_text = Path(spec["path"]).read_text(encoding="utf-8", errors="replace")
     density = float(spec.get("density_kg_m3", 7850.0))
-    entities, unit_scale = _parse_step_entities_map(step_text)
+    entities, components = _parse_step_entities_map(step_text)
+    unit_scale = 1.0
+    unit_metadata = {}
     if spec.get("unit_scale_m") is not None:
+        if isinstance(spec["unit_scale_m"], bool):
+            raise ValueError("unit_scale_m must be finite and positive")
         unit_scale = float(spec["unit_scale_m"])
+        if not math.isfinite(unit_scale) or unit_scale <= 0:
+            raise ValueError("unit_scale_m must be finite and positive")
+        unit_metadata = {"unit_scale_source": "explicit_override"}
 
     if any(kind.startswith("IFC") for kind, _ in entities.values()):
         from hamon_ifc_spatial_clash import _detect_length_unit_scale, parse_ifc_entities
@@ -899,6 +884,14 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
         occurrences = _ifc_product_properties(typed, entities, unit_scale, density)
         if occurrences is not None:
             return _cad_report(*occurrences, unit_scale, len(entities))
+
+    selected_solid, face_occurrences = _step_solid_faces(entities, spec.get("solid_entity_id"))
+    if spec.get("unit_scale_m") is None and not any(kind.startswith("IFC") for kind, _ in entities.values()):
+        from hamon_step_units import resolve_step_length_scale
+        geometry_ids = ([selected_solid] if selected_solid is not None else
+                        [eid for eid, (kind, _) in entities.items()
+                         if kind in {"BLOCK", "RIGHT_CIRCULAR_CYLINDER", "EXTRUDED_AREA_SOLID"}])
+        unit_scale, unit_metadata = resolve_step_length_scale(components, geometry_ids)
 
     pts: Dict[int, np.ndarray] = {}
     verts_map: Dict[int, np.ndarray] = {}
@@ -963,7 +956,6 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
                 raise ValueError(f"STEP boundary vertices disagree with the declared {kind}")
         return exact
 
-    selected_solid, face_occurrences = _step_solid_faces(entities, spec.get("solid_entity_id"))
     for shell_id, eid, forward in face_occurrences or ():
         et, args = entities[eid]
         if et in ("FACE", "ADVANCED_FACE", "FACE_SURFACE") and len(args) >= 2:
@@ -1080,6 +1072,7 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
                                           surface_face_ids=surface_face_ids,
                                           surface_shell_ids=surface_shell_ids)
     report = _cad_report(props, analytic_vol, unit_scale, len(entities))
+    report.update(unit_metadata)
     if selected_solid is not None:
         report["selected_solid_entity_id"] = selected_solid
     return report
