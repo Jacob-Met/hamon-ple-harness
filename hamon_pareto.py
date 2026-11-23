@@ -303,14 +303,21 @@ def _distillation_result(req):
         fractional = result["N_theoretical"]
         feed_stage = result["feed_stage"]
         if (type(count) is not int or type(feed_stage) is not int
-                or not 1 <= feed_stage <= count or not count-1 < fractional <= count):
+                or type(fractional) not in (int, float)
+                or not 1 <= feed_stage <= count or not count - 1 < fractional <= count):
             return None
-        if result["section_mode"] == "single_equilibrium_flash":
-            if count != 1 or result["L_rect_mol_s"] != 0 or result["V_strip_mol_s"] != 0:
+        circulation = result["L_rect_mol_s"] > 0, result["V_strip_mol_s"] > 0
+        section = {(True, True): "two_section", (True, False): "rectifying_only",
+                   (False, True): "stripping_only", (False, False): "single_equilibrium_flash"}
+        if result["section_mode"] != section[circulation]:
+            return None
+        if not any(circulation):
+            if count != 1 or fractional != 1:
                 return None
-        elif (result["section_mode"] not in ("two_section", "rectifying_only", "stripping_only")
-              or not result["min_operating_gap"] > 0):
-            return None
+        else:
+            gap = result["min_operating_gap"]
+            if type(gap) not in (int, float) or not math.isfinite(gap) or gap <= 0:
+                return None
 
     feed = spec.get("F_mol_s", 100.0)
     q = spec.get("q", 1.0)

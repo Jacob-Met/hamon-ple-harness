@@ -131,12 +131,15 @@ class DistillationPresolveTests(unittest.TestCase):
         result = hamon_pareto.dispatch_ple_tool("hamon_conservation_cad_verifier", request)
         for correction in ({"equilibrium_model":"constant_alpha"}, {"min_operating_gap":0},
                            {"N_stages_integer":24}, {"feed_stage":24}, {"D_mol_s":51},
-                           {"section_mode":"unknown"}):
+                           {"section_mode":"unknown"}, {"section_mode":"stripping_only"},
+                           {"section_mode":"rectifying_only"}, {"section_mode":"single_equilibrium_flash"}):
             with patch.object(hamon_pareto,"dispatch_ple_tool", return_value={**result,**correction}):
                 self.assert_abstains(request)
         flash = self.table_request(0)
         flash["spec"].update(x_B=.25,x_D=.75,z_F=.5,q=.5,equilibrium_table=[[0,0],[.25,.75],[1,1]])
-        accepted = self.route(flash)
-        self.assertTrue(accepted["presolve_verified"])
-        self.assertEqual(json.loads(accepted["presolve_result_json"])["section_mode"],
-                         "single_equilibrium_flash")
+        for quality, reflux, expected in ((.5,0,"single_equilibrium_flash"),
+                                           (1,0,"stripping_only"), (0,1,"rectifying_only")):
+            flash["spec"].update(q=quality, R=reflux)
+            accepted = self.route(flash)
+            self.assertTrue(accepted["presolve_verified"])
+            self.assertEqual(json.loads(accepted["presolve_result_json"])["section_mode"],expected)
