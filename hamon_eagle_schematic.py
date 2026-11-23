@@ -115,7 +115,8 @@ def _word_directions(words, glyphs):
     xs = [x for x, _ in x_order]
     for word in words:
         name = word["text"]
-        if not re.fullmatch(r"[+A-Z][A-Z0-9_+/\-]{1,16}", name):
+        ordinary_name = bool(re.fullmatch(r"[+A-Z][A-Z0-9_+/\-]{1,16}", name))
+        if not ordinary_name and not _POWER_NAME.fullmatch(name):
             continue
         left, top, right, bottom = word["page_bbox_pt"]
         # Poppler reports boxes and Cairo glyph origins to different decimal precision.
@@ -131,8 +132,9 @@ def _word_directions(words, glyphs):
         steps = [(b[0][0] - a[0][0], b[0][1] - a[0][1]) for a, b in zip(run, run[1:])]
         for dx, dy in ((1, 0), (0, 1), (-1, 0), (0, -1)):
             if all(dx * x + dy * y > tol and abs(dx * y - dy * x) <= tol for x, y in steps):
-                word["baseline_direction"] = (dx, dy)
-                word["baseline_origin"] = run[0][0]
+                prefix = "" if ordinary_name else "power_"
+                word[prefix + "baseline_direction"] = (dx, dy)
+                word[prefix + "baseline_origin"] = run[0][0]
                 break
 
 
@@ -142,7 +144,7 @@ def _label_frame(point, direction):
     return (dx * x + dy * y, dx * y - dy * x)
 
 
-def _label_anchors(wires, roots, words):
+def _label_anchors(wires, roots, words, *, word_indices=None):
     anchors = defaultdict(set)
     parallel = defaultdict(list)
     for direction in {w["baseline_direction"] for w in words if "baseline_direction" in w}:
@@ -150,7 +152,7 @@ def _label_anchors(wires, roots, words):
             a, b = _label_frame(a, direction), _label_frame(b, direction)
             if abs(a[1] - b[1]) < .08:
                 parallel[direction].append((root, min(a[0], b[0]), max(a[0], b[0]), a[1]))
-    for word in words:
+    for word_index, word in enumerate(words):
         direction = word.get("baseline_direction")
         if not direction:
             continue
@@ -166,6 +168,8 @@ def _label_anchors(wires, roots, words):
                 and min(right, end) - max(left, start) > .55 * min(right - left, end - start)}
         if len(hits) == 1:
             anchors[word["text"]].update(hits)
+            if word_indices is not None:
+                word_indices.add(word_index)
     return anchors
 
 
@@ -205,7 +209,7 @@ def _wire_end_labels(wires, roots, endpoints, lines, words):
                 parallel[direction].append((index, min(start, end), max(start, end), y, other_y,
                                             ((start, a), (end, b))))
     candidates = []
-    for word in words:
+    for word_index, word in enumerate(words):
         if "baseline_origin" not in word:
             continue
         direction = word["baseline_direction"]
@@ -224,7 +228,8 @@ def _wire_end_labels(wires, roots, endpoints, lines, words):
             for pos, point in loose:
                 if left - .5 * height <= pos <= right and is_free(index, point):
                     witnesses.append({"name": word["text"], "wire_index": index, "endpoint": point,
-                                      "baseline_origin": word["baseline_origin"]})
+                                      "baseline_origin": word["baseline_origin"],
+                                      "_word_index": word_index})
         if len(hits) == 1 and witnesses:
             candidates.append((hits.pop(), witnesses[0]))
     return candidates
@@ -238,7 +243,7 @@ _GROUND_NAME = re.compile(r"(?:[AVDS]?GND|VSS)", re.I)
 _POWER_NAME = re.compile(r"(?:[+\-][A-Z0-9.]+|VCC|VDD|VIN|VBUS)", re.I)
 
 
-def _supply_anchors(wires, roots, lines, words):
+def _supply_anchors(wires, roots, lines, words, *, all_glyphs=None):
     endpoints, ends, centers = Points(.13), Points(.13), Points(.13)
     for i, (a, b) in enumerate(wires):
         endpoints.add(a, roots[i])
@@ -248,13 +253,13 @@ def _supply_anchors(wires, roots, lines, words):
         ends.add(b, a)
         centers.add(_midpoint(a, b), a)
     supply_words = []
-    for word in words:
+    for word_index, word in enumerate(words):
         name = word["text"]
         ground = bool(_GROUND_NAME.fullmatch(name))
         power = bool(_POWER_NAME.fullmatch(name))
         if ground or power:
             box = word["page_bbox_pt"]
-            supply_words.append((name, ground, _midpoint(box[:2], box[2:])))
+            supply_words.append((word_index, name, ground, _midpoint(box[:2], box[2:])))
     supplies, marks = defaultdict(set), []
     for a, b in lines:
         for foot, tip in ((a, b), (b, a)):
@@ -275,14 +280,73 @@ def _supply_anchors(wires, roots, lines, words):
             arrow = any(v < 0 for v in wings) and any(v > 0 for v in wings)
             if transverse == arrow:
                 continue
-            names = {name for name, ground, center in supply_words if ground == transverse
-                     and .18 < project(center)[0] < 1.3 and abs(project(center)[1]) < .65}
+            printed = [(index, name) for index, name, ground, center in supply_words
+                       if ground == transverse and .18 < project(center)[0] < 1.3
+                       and abs(project(center)[1]) < .65]
+            names = {name for _, name in printed}
+            if all_glyphs is not None:
+                all_glyphs.append({"wire_index": next(iter(touched)), "foot": foot, "tip": tip,
+                                   "shape": "ground_bar" if transverse else "supply_arrow",
+                                   "ordinary_names": sorted(names),
+                                   "ordinary_word_indices": [i for i, _ in printed]})
             if len(names) == 1:
                 name, root = next(iter(names)), next(iter(touched))
                 supplies[name].add(root)
                 marks.append({"name": name, "wire_index": root, "foot": foot, "tip": tip,
                               "shape": "ground_bar" if transverse else "supply_arrow"})
     return supplies, marks
+
+
+def _side_supply_labels(glyphs, words):
+    """Pair native rotated power text with a complete adjacent arrow glyph."""
+    pairs = []
+    word_hits, glyph_hits = defaultdict(set), defaultdict(set)
+    ordinary_words = {i for glyph in glyphs for i in glyph["ordinary_word_indices"]}
+    for glyph_index, glyph in enumerate(glyphs):
+        if glyph["shape"] != "supply_arrow":
+            continue
+        foot, tip = glyph["foot"], glyph["tip"]
+        length = math.dist(foot, tip)
+        ux, uy = (tip[0] - foot[0]) / length, (tip[1] - foot[1]) / length
+        for word_index, word in enumerate(words):
+            direction = word.get("baseline_direction", word.get("power_baseline_direction"))
+            origin = word.get("baseline_origin", word.get("power_baseline_origin"))
+            if (not _POWER_NAME.fullmatch(word["text"])
+                    or (direction and abs(direction[0] * ux + direction[1] * uy) < 1 - 1e-6)):
+                continue
+            x, y, u, v = word["page_bbox_pt"]
+            projected = [(((a - tip[0]) * ux + (b - tip[1]) * uy) / length,
+                          ((b - tip[1]) * ux - (a - tip[0]) * uy) / length)
+                         for a, b in ((x, y), (u, y), (u, v), (x, v))]
+            along, across = zip(*projected)
+            # In glyph-length units, the stem is [-1, 0]. The nearest word
+            # edge is .1..1 lengths away, the far edge at most 2, and the
+            # projected word covers at least half of the stem's run.
+            if (min(across) * max(across) <= 0
+                    or not .1 < min(map(abs, across)) < 1
+                    or max(map(abs, across)) > 2
+                    or min(0, max(along)) - max(-1, min(along)) < .5):
+                continue
+            # Unoriented power text can veto ambiguity, but cannot supply a name.
+            witnessed = origin is not None and bool(direction)
+            pairs.append((glyph_index, word_index, witnessed))
+            glyph_hits[glyph_index].add(word_index)
+            word_hits[word_index].add(glyph_index)
+    candidates = []
+    for glyph_index, word_index, witnessed in pairs:
+        glyph, word = glyphs[glyph_index], words[word_index]
+        candidates.append((glyph["wire_index"], {
+            "name": word["text"], "wire_index": glyph["wire_index"],
+            "foot": glyph["foot"], "tip": glyph["tip"], "shape": glyph["shape"],
+            "label_placement": "side", "label_bbox_pt": word["page_bbox_pt"],
+            "baseline_origin": word.get("baseline_origin", word.get("power_baseline_origin")),
+            "baseline_direction": word.get("baseline_direction", word.get("power_baseline_direction")),
+            "_word_index": word_index,
+            "_admissible": (witnessed and not glyph["ordinary_names"]
+                            and word_index not in ordinary_words
+                            and len(glyph_hits[glyph_index]) == len(word_hits[word_index]) == 1),
+        }))
+    return candidates
 
 
 def _graph(wires, lines, words, *, wire_end_witnesses=None):
@@ -293,8 +357,9 @@ def _graph(wires, lines, words, *, wire_end_witnesses=None):
                 groups.join(i, j)
             endpoints.add(p, i)
     roots = [groups.root(i) for i in range(len(wires))]
-    labels = _label_anchors(wires, roots, words)
-    supplies, marks = _supply_anchors(wires, roots, lines, words)
+    label_words, all_glyphs = set(), []
+    labels = _label_anchors(wires, roots, words, word_indices=label_words)
+    supplies, marks = _supply_anchors(wires, roots, lines, words, all_glyphs=all_glyphs)
     # A printed supply word alone can land on a different wire. The full
     # glyph and its stem take precedence everywhere the symbol is observed.
     anchors = {name: hits for name, hits in labels.items() if name not in supplies}
@@ -305,7 +370,11 @@ def _graph(wires, lines, words, *, wire_end_witnesses=None):
             groups.join(first, other)
     # A loose-end label only extends an independently observed same-page anchor.
     # Snapshot existing groups before adding joins so inference cannot bootstrap.
-    candidates = _wire_end_labels(wires, roots, endpoints, lines, words)
+    candidates = (_wire_end_labels(wires, roots, endpoints, lines, words)
+                  + _side_supply_labels(all_glyphs, words))
+    word_roots = defaultdict(set)
+    for root, witness in candidates:
+        word_roots[witness["_word_index"]].add(root)
     label_roots = defaultdict(lambda: defaultdict(set))
     occurrences = defaultdict(set)
     for name, hits in anchors.items():
@@ -322,6 +391,14 @@ def _graph(wires, lines, words, *, wire_end_witnesses=None):
         glyphs[groups.root(root)][mark["name"], mark["shape"]].add(root)
     accepted = []
     for root, witness in candidates:
+        # A single printed occurrence cannot name two disconnected candidates.
+        # This check is symmetric between loose-end and side-glyph proposals.
+        word_index = witness["_word_index"]
+        if len(word_roots[word_index]) != 1:
+            continue
+        if witness.get("label_placement") == "side":
+            if not witness["_admissible"] or word_index in label_words:
+                continue
         name = witness["name"]
         existing = anchors.get(name)
         if not existing or set(label_roots[groups.root(root)]) != {name}:
@@ -338,8 +415,11 @@ def _graph(wires, lines, words, *, wire_end_witnesses=None):
         name = witness["name"]
         groups.join(next(iter(anchors[name])), root)
         anchors[name].add(root)
-        if wire_end_witnesses is not None:
-            wire_end_witnesses.append(witness)
+        public_witness = {key: value for key, value in witness.items() if not key.startswith("_")}
+        if witness.get("label_placement") == "side":
+            marks.append(public_witness)
+        elif wire_end_witnesses is not None:
+            wire_end_witnesses.append(public_witness)
     group_ids = {}
     membership = []
     for i in range(len(wires)):
