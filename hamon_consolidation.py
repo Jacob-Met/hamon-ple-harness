@@ -193,7 +193,7 @@ def consolidation_load(spec, key="delta_sigma_v_Pa", *, coerce_scalar=False):
 
 
 
-def _history_segments(history, elapsed):
+def _history_segments(history, elapsed, scalar=float):
     """Clip the right-continuous total load curve to the observation time."""
     if not isinstance(history, list) or not history:
         raise ValueError("Provide a nonempty load_history")
@@ -206,11 +206,11 @@ def _history_segments(history, elapsed):
             raise ValueError("Require nonnegative surcharges in nondecreasing time order")
         if len(rows) >= 2 and time == rows[-2][0]:
             raise ValueError("At most two ordinates may describe a jump at one time")
-        rows.append((time, load))
+        rows.append((scalar(time), scalar(load)))
     if rows[0][0] != 0:
         raise ValueError("Load history must begin at zero time")
     segments = []
-    start, current = 0., 0.
+    start, current = 0, 0
     for end, target in rows:
         if end > elapsed:
             if start < elapsed:
@@ -273,6 +273,77 @@ def _interval_response(young, span):
         if coefficient < 1e-16:
             break
     return older, newer, pressure
+
+
+def _resolved_history_pressure(history, elapsed, height, cv, drainage, scale):
+    """Resolve a signed unload response hidden by cancellation at working precision."""
+    from mpmath import mp
+
+    ctx = mp.clone()
+    ctx.prec = 120
+    # At this precision even an error proportional to the entire surcharge
+    # is below the binary64 subnormal range.
+    max_bits = max(2 * ctx.prec, math.frexp(scale)[1] + 1160)
+    previous = None
+
+    def retention(young, span):
+        old = young + span
+        if old == 0:
+            return ctx.one
+        # Reflected diffusion images are smaller than working precision here.
+        cutoff = ctx.one / (ctx.prec + 24)
+        if old <= cutoff:
+            a, b = ctx.sqrt(young), ctx.sqrt(old)
+            mean_u = 4 * (old + a*b + young) / (3 * ctx.sqrt(ctx.pi) * (a+b))
+            return 1 - mean_u
+
+        # At age zero a Fourier sum converges slowly. Instead integrate R
+        # from zero using the identity integral_0^inf R = 1/3.
+        integral = young < cutoff / 2
+        age = old if integral else young
+        total = ctx.zero
+        n = 0
+        while True:
+            rate = (ctx.pi * (n + ctx.mpf("0.5")))**2
+            term = 2 * ctx.exp(-rate * age) / rate
+            if integral:
+                term /= rate
+            elif span:
+                term *= -ctx.expm1(-rate * span) / (rate * span)
+            total += term
+            if term <= ctx.eps * total:
+                break
+            n += 1
+        if integral:
+            early = young - 4 * young * ctx.sqrt(young) / (3 * ctx.sqrt(ctx.pi))
+            return (ctx.one/3 - total - early) / span
+        return total
+
+    while True:
+        time = ctx.mpf(elapsed)
+        path = ctx.mpf(height) / (2 if drainage == "double" else 1)
+        factor = ctx.mpf(cv) / path**2
+        terms = []
+        variation = ctx.zero
+        for start, end, first, last in _history_segments(history, time, ctx.mpf):
+            change = last - first
+            if change:
+                terms.append(change * retention((time-end)*factor, (end-start)*factor))
+                variation += abs(change)
+        pressure = ctx.fsum(terms)
+        rounded = float(pressure)
+        if not math.isfinite(rounded):
+            raise ValueError("Nonfinite signed unloading pressure")
+        # Resolve the returned component, even when the pressure is much
+        # smaller than the individual load changes. Allow for accumulation
+        # and verify that precision refinement preserves the rounded value.
+        uncertainty = (ctx.prec + 24)**2 * ctx.eps * variation
+        if rounded == previous and uncertainty < ctx.mpf(math.ulp(rounded)) / 16:
+            return rounded
+        if ctx.prec >= max_bits + 64:
+            raise ValueError("Signed unloading pressure did not converge")
+        previous = rounded
+        ctx.prec = min(2 * ctx.prec, max_bits if ctx.prec < max_bits else max_bits + 64)
 
 
 def _diffusion_history(segments, factor, cells):
@@ -341,8 +412,12 @@ def verify_consolidation_history(spec):
         current = segments[-1][3]
         # Use the positive effective-stress integral to recover near-cancelling
         # negative pore-pressure tails after construction loads are removed.
-        if abs(current)+abs(effective) < math.fsum(map(abs, pressure_terms)):
+        impulse_scale = math.fsum(map(abs, pressure_terms))
+        difference_scale = abs(current) + abs(effective)
+        if difference_scale < impulse_scale:
             pressure = current-effective
+        if current and abs(pressure) < math.sqrt(math.ulp(1.0)) * min(impulse_scale, difference_scale):
+            pressure = _resolved_history_pressure(spec["load_history"], elapsed, h, cv, spec["drainage"], scale)
         coarse = _diffusion_history(segments, factor, 96)
         fine = _diffusion_history(segments, factor, 192)
         fv_eff, fv_pressure = (b+(b-a)/3 for a,b in zip(coarse, fine))
