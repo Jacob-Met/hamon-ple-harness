@@ -1393,6 +1393,7 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+_SPICE_HIERARCHY = re.compile(r"(?im)^\s*\.(?:subckt|ends)\b|^[ \t]*X\S*\s")
 _SPICE_SCALE = {"f": 1e-15, "p": 1e-12, "n": 1e-9, "u": 1e-6, "m": 1e-3, "k": 1e3, "meg": 1e6, "g": 1e9, "t": 1e12}
 
 
@@ -1436,6 +1437,9 @@ _BEHAVIORAL_E = re.compile(r"^(?:poly(?:\(|$)|(?:value|vol|table|laplace|freq)(?
 
 
 def _parse_spice_netlist(netlist: str, frequency_override: Optional[float] = None) -> Tuple[List[Dict[str, Any]], float]:
+    if _SPICE_HIERARCHY.search(netlist):
+        from hamon_spice_hierarchy import elaborate_subcircuits
+        netlist = elaborate_subcircuits(netlist)
     branches: List[Dict[str, Any]] = []
     source_clauses = []
     freq_hz = 0.0
@@ -1690,6 +1694,7 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
     if spec.get("calculation") == "ac_power_flow":
         from hamon_ac_power_flow import verify_ac_power_flow
         return {**verify_ac_power_flow(spec), "mode": "circuit", "tool": "hamon_conservation_cad_verifier"}
+    netlist = ""
     if spec.get("netlist") or spec.get("file_b64"):
         netlist = str(spec["netlist"]) if spec.get("netlist") else base64.b64decode(spec["file_b64"]).decode("utf-8", errors="replace")
         branches, freq_hz = _parse_spice_netlist(netlist, spec.get("freq_hz"))
@@ -1785,8 +1790,13 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
     cand_ok = True
     if isinstance(spec.get("proposed_node_voltages"), dict):
         rtol = float(spec.get("rtol", 1e-4))
+        if _SPICE_HIERARCHY.search(netlist):
+            claimed_nodes = {name.casefold(): voltage for name, voltage in v_node.items()}
+        else:
+            claimed_nodes = v_node
         for k_nm, cv_raw in spec["proposed_node_voltages"].items():
-            ref_v = v_node[str(k_nm)]
+            key = str(k_nm) if claimed_nodes is v_node else str(k_nm).casefold()
+            ref_v = claimed_nodes[key]
             cv = complex(cv_raw[0], cv_raw[1]) if isinstance(cv_raw, (list, tuple)) else complex(cv_raw)
             if abs(cv - ref_v) / max(abs(ref_v), 1e-12) > rtol:
                 cand_ok = False
