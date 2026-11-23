@@ -459,10 +459,24 @@ def network(spec):
                     return False
         return True
 
+    def specified_power_matches(v, power):
+        return (np.all(np.abs(power.real[nonslack] - p[nonslack]) <= power_tolerances(v, p, nonslack))
+                and np.all(np.abs(power.imag[pq] - q[pq]) <= power_tolerances(v, q, pq)))
+
+    def polar_phasor(magnitude, degrees):
+        return magnitude * np.exp(1j * math.radians(degrees))
+
+    published = {
+        name: {"vm_pu": float(abs(v)), "va_deg": float(np.angle(v, deg=True))}
+        for name, v in zip(ids, voltage)
+    }
+    emitted = np.array([polar_phasor(row["vm_pu"], row["va_deg"]) for row in published.values()])
+    emitted_power = emitted * np.conj(branch_currents(emitted)[0])
     complementarity = regulated_state(voltage, injection)
     proposed_limits = None
     verified = (
         complementarity
+        and specified_power_matches(emitted, emitted_power)
         and independent_res < 1e-6
         and difference < 1e-6
         and tellegen < 1e-6
@@ -478,7 +492,7 @@ def network(spec):
             deg = number(claims[name]["va_deg"])
             if mag <= 0:
                 raise ValueError("Proposed voltage magnitude must be positive")
-            values.append(mag * np.exp(1j * math.radians(deg)))
+            values.append(polar_phasor(mag, deg))
         claimed = np.asarray(values)
         claim_error = np.max(np.abs(claimed - voltage))
         power = claimed * np.conj(branch_currents(claimed)[0])
@@ -489,13 +503,7 @@ def network(spec):
             and claim_error < 1e-6
             and abs(claimed[slack] - initial[slack])
             <= 16 * np.finfo(float).eps * vset[slack]
-            and np.all(
-                np.abs(power.real[nonslack] - p[nonslack])
-                <= power_tolerances(claimed, p, nonslack)
-            )
-            and np.all(
-                np.abs(power.imag[pq] - q[pq]) <= power_tolerances(claimed, q, pq)
-            )
+            and specified_power_matches(claimed, power)
             and np.all(
                 np.abs(np.abs(claimed[pv]) - vset[pv])
                 <= 16 * np.finfo(float).eps * vset[pv]
@@ -505,10 +513,7 @@ def network(spec):
         "ok": True,
         "calculation": "ac_power_flow",
         "conservation_verified": bool(verified),
-        "voltages": {
-            name: {"vm_pu": float(abs(v)), "va_deg": float(np.angle(v, deg=True))}
-            for name, v in zip(ids, voltage)
-        },
+        "voltages": published,
         "bus_injections": {
             name: {"p_pu": float(s.real), "q_pu": float(s.imag)}
             for name, s in zip(ids, injection)

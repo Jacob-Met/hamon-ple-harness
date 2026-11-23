@@ -501,3 +501,29 @@ def test_stiff_line_preserves_signed_active_injection_in_the_published_map(p, x,
         proposed = {"S": {"vm_pu": 1, "va_deg": 0},
                     "L": {"vm_pu": 1, "va_deg": multiplier * angle}}
         assert verify_ac_power_flow({**spec, "proposed_voltages": proposed})["conservation_verified"] is valid
+
+
+def test_native_flat_map_must_replay_its_terminal_injections():
+    # No shunts or charging, so equal bus voltages produce zero current in
+    # both lines. Summing the B row of Ybus can manufacture precisely 2^-39j.
+    spec = {
+        "buses": [
+            {"id": "A", "type": "slack", "vm_pu": 1},
+            {"id": "B", "type": "PQ", "p_injection_pu": 0, "q_injection_pu": 2**-39},
+            {"id": "C", "type": "PQ", "p_injection_pu": 0, "q_injection_pu": 0},
+        ],
+        "lines": [
+            {"id": "AB", "from": "A", "to": "B", "r_pu": 0, "x_pu": 1.7e-5},
+            {"id": "BC", "from": "B", "to": "C", "r_pu": 0, "x_pu": 1.3e-4},
+        ],
+    }
+    result = verify_ac_power_flow(spec)
+    if result["conservation_verified"]:
+        volts = {name: cmath.rect(v["vm_pu"], math.radians(v["va_deg"]))
+                 for name, v in result["voltages"].items()}
+        current = ((volts["B"] - volts["A"]) / 1.7e-5j
+                   + (volts["B"] - volts["C"]) / 1.3e-4j)
+        assert (volts["B"] * current.conjugate()).imag == pytest.approx(2**-39, rel=1e-7, abs=0)
+    assert not verify_ac_power_flow({
+        **spec, "proposed_voltages": {key: {"vm_pu": 1, "va_deg": 0} for key in "ABC"},
+    })["conservation_verified"]
