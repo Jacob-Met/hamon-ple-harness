@@ -15,6 +15,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+import zipfile
 from unittest import mock
 
 import delivery_materialize
@@ -28,10 +29,19 @@ Path(sys.argv[1]).write_text(json.dumps({'answer': sum(numbers)}))
 """
 
 
+ARCHIVE_NAMES = [f"region_{n}.json" for n in range(6)]
+ARCHIVE_GENERATOR = """import json
+from pathlib import Path
+numbers = json.loads(Path('input.json').read_text())
+for name in %r:
+    Path(name).write_text(json.dumps({'answer': sum(numbers)}))
+""" % ARCHIVE_NAMES
+
+
 class FinalMaterialization(unittest.IsolatedAsyncioTestCase):
     async def course(self, *, inherited=False, remaining=90,
                      early_generator=False, rewrite=False, first_unknown=False,
-                     final_log_failure=None):
+                     final_log_failure=None, archive=False, unchanged_member=False):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             work = root / "filesystem/work"
@@ -39,6 +49,14 @@ class FinalMaterialization(unittest.IsolatedAsyncioTestCase):
             (work / "input.json").write_text("[2, 3, 5]")
             if inherited:
                 (work / "generate.py").write_text(GENERATOR)
+            target_name = "submission.zip" if archive else "report.json"
+            generator = ARCHIVE_GENERATOR if archive else GENERATOR
+            plan = None
+            if archive:
+                if unchanged_member:
+                    (work / ARCHIVE_NAMES[0]).write_text('{"answer": 10}')
+                plan = ("/tmp/loose-stage", "python3 archive_checkpoint.py " +
+                        shlex.quote(json.dumps(["/tmp/loose-stage", "/filesystem/work/submission.zip", ARCHIVE_NAMES])))
             left = 700
             turns, executions = [], []
             session = SimpleNamespace(
@@ -46,6 +64,12 @@ class FinalMaterialization(unittest.IsolatedAsyncioTestCase):
                 workdir="/filesystem/work", mcp_servers=[], final_message="",
                 usage=mock.AsyncMock(), log=mock.AsyncMock(), time_left=lambda: left,
             )
+            if archive:
+                session.instruction = ("Create a complete submission early, then improve it in place. "
+                    "Write the final deliverable to /filesystem/work/submission.zip. "
+                    "Write exactly these six files:\n" + "\n".join(
+                        f"{i}. **`{name}`**" for i, name in enumerate(ARCHIVE_NAMES, 1)))
+
             async def log(text):
                 if text.startswith("delivery_gate: final_materializers="):
                     if final_log_failure == "stall":
@@ -59,12 +83,19 @@ class FinalMaterialization(unittest.IsolatedAsyncioTestCase):
                 return path if path.is_relative_to(root) else root / str(path).lstrip("/")
 
             async def remote(command, timeout_sec):
-                _, _, source, arguments = shlex.split(command)
+                parts = shlex.split(command)
+                if archive and parts[1] == "archive_checkpoint.py":
+                    stage, target, names = json.loads(parts[2])
+                    mapped = json.dumps([str(real_path(stage)), str(real_path(target)), names])
+                    proc = subprocess.run([sys.executable, harness.HERE / "archive_checkpoint.py",
+                                           mapped, *parts[3:]], capture_output=True, timeout=timeout_sec)
+                    return {"exit_code": proc.returncode, "output": proc.stdout.decode()}
+                _, _, source, arguments = parts
                 spec = json.loads(arguments)
                 if isinstance(spec, dict):
                     self.assertEqual(source, delivery_materialize.REMOTE_MATERIALIZE)
                     self.assertEqual(spec["script"], "/filesystem/work/generate.py")
-                    self.assertEqual(spec["target"], "/filesystem/work/report.json")
+                    self.assertEqual(spec["target"], "/filesystem/work/" + target_name)
                     executions.append(spec)
                     if first_unknown and len(executions) == 1:
                         raise harness.taskbridge.TaskError("generator result unavailable")
@@ -89,7 +120,7 @@ class FinalMaterialization(unittest.IsolatedAsyncioTestCase):
                 turns.append(log_prefix)
                 if log_prefix == "pi-delivery-repair: ":
                     if not inherited:
-                        (work / "generate.py").write_text(GENERATOR + ("\n# Revised calculation\n" if rewrite else ""))
+                        (work / "generate.py").write_text(generator + ("\n# Revised calculation\n" if rewrite else ""))
                     left = remaining
                 else:
                     if early_generator:
@@ -109,11 +140,14 @@ class FinalMaterialization(unittest.IsolatedAsyncioTestCase):
                     (harness, "configure", mock.Mock(return_value=("model", "fixture"))),
                     (harness.engineering_intake, "intake_for_prompt", mock.AsyncMock(return_value="")),
                     (harness.engineering_intake, "provision_engineering_cli", mock.AsyncMock(return_value="")),
-                    (harness.archive_contract, "provision", mock.AsyncMock(return_value=None)),
+                    (harness.archive_contract, "provision", mock.AsyncMock(return_value=plan)),
                 ]:
                     patches.enter_context(mock.patch.object(owner, name, value))
                 summary = await harness.solve(session)
-            output = work / "report.json"
+            output = work / target_name
+            if archive and output.exists():
+                with zipfile.ZipFile(output) as result:
+                    return summary, {n: json.loads(result.read(n)) for n in result.namelist()}, turns, executions
             return summary, json.loads(output.read_text()) if output.exists() else None, turns, executions
 
     async def test_new_generator_after_repair_finishes(self):
@@ -122,6 +156,18 @@ class FinalMaterialization(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output, {"answer": 10})
         self.assertNotIn("Incomplete", summary)
         self.assertEqual(len(executions), 1)
+
+    async def test_last_generator_publishes_verified_loose_archive_members(self):
+        summary, output, _, executions = await self.course(archive=True)
+        self.assertEqual(len(executions), 1)
+        self.assertEqual(output, {name: {"answer": 10} for name in ARCHIVE_NAMES})
+        self.assertNotIn("Incomplete", summary)
+
+    async def test_unchanged_member_bytes_do_not_complete_a_new_archive(self):
+        summary, output, _, executions = await self.course(archive=True, unchanged_member=True)
+        self.assertEqual(len(executions), 1)
+        self.assertIsNone(output)
+        self.assertIn("Incomplete", summary)
 
     async def test_unchanged_inherited_generator_stays_unexecuted(self):
         summary, output, _, executions = await self.course(inherited=True)
