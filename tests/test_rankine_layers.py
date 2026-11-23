@@ -1,4 +1,5 @@
 """Public FHWA NHI-06-089 Appendix A.5 pressure diagrams, in coherent SI units."""
+import math
 from pathlib import Path
 import sys
 import unittest
@@ -168,6 +169,11 @@ class TestRankineLayers(unittest.TestCase):
                     self.assertEqual(r["resultant_kind"], "force")
                     self.assertAlmostEqual(r["resultant_above_base_m"]/(moment/force), 1., places=8)
                     self.assertTrue(r["resultant_above_base_m"] > 6 if h < 2 else r["resultant_above_base_m"] < 0)
+        adjacent = run("active", [dry(6)], front_layers=[dry(math.nextafter(2., 3.))])
+        self.assertTrue(adjacent["conservation_verified"])
+        self.assertLess(adjacent["thrust_N_m"], 0.)
+        self.assertEqual(adjacent["resultant_kind"], "force_unresolved_at_roundoff")
+        self.assertIsNone(adjacent["resultant_above_base_m"])
         matched = run("passive", [dry(2, 0)], front_layers=[dry(2, 0)])
         self.assertTrue(matched["conservation_verified"])
         self.assertEqual((matched["thrust_N_m"], matched["moment_Nm_m"]), (0., 0.))
