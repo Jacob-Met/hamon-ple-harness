@@ -788,6 +788,9 @@ def run(argv=None):
     links=sub.add_parser("pdf-detail-links",help="Resolve printed detail references across drawing sheets")
     links.add_argument("file")
     links.add_argument("--target-sheet", help="Return references to this printed sheet ID after indexing the entire document")
+    native=sub.add_parser("eagle-netlist",help="Read native EAGLE XML schematic pins and physical pad nets")
+    native.add_argument("file")
+    native.add_argument("--board",help="Compare predicted pad nets with an EAGLE XML PCB")
     eagle=sub.add_parser("pdf-eagle-connectivity",help="Read wire connectivity evidence from a two-color EAGLE schematic")
     eagle.add_argument("file")
     scope=eagle.add_mutually_exclusive_group()
@@ -848,6 +851,11 @@ def run(argv=None):
         elif args.cmd=="pdf-detail-links":
             import hamon_drawing
             out=hamon_drawing.detail_links(args.file, args.target_sheet)
+        elif args.cmd=="eagle-netlist":
+            from hamon_eagle_netlist import schematic_netlist, compare_board
+            out=schematic_netlist(args.file)
+            if args.board:
+                out["board_comparison"]=compare_board(out,args.board)
         elif args.cmd=="pdf-eagle-connectivity":
             import hamon_eagle_schematic
             if args.flat_document:

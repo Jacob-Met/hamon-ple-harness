@@ -101,3 +101,20 @@ python3 ship/verify_eagle_uno.py UNO-TH_Rev3e_sch.pdf UNO-TH_Rev3e-reference.zip
 ```
 
 These are measured visible-wire connectivity results on the named drawings. They do not establish device-pin connectivity, support for another export profile, or a PLE competition score.
+
+## Native EAGLE schematic and PCB
+
+When a flat EAGLE XML schematic is available, the toolkit can read its logical pins and package pads directly.
+
+```sh
+python3 /tmp/hamon-engineering-toolkit.py eagle-netlist SCHEMATIC.sch --board LAYOUT.brd
+```
+
+The optional board comparison reads signal contact references after generating the schematic prediction. Each logical row identifies its source, part, gate, pin, net, package and pads. A pin may map to several physical pads. Package-free supply symbols contribute logical rows. An explicit pin connection takes priority over an automatic power connection. Unwired power pins use the rail name defined by the symbol, including power pins on an uninvoked gate. The output preserves the full symbol pin name and removes its distinguishing `@` suffix only when deriving an automatic rail name. See section 8.4 of the [EAGLE 9 manual](https://forums.autodesk.com/autodesk/attachments/autodesk/fusion-electronics-forum-en/8948/1/manual_en.pdf).
+
+Inspect `board_comparison.agreement`, `exact_contacts` and `mismatches`. Each mismatch has the printed element and pad identifiers and the net name from each source. A missing side is null. The comparison checks logical membership recorded in the board file. Routed copper continuity, component values and hierarchical module expansion require separate evidence.
+
+On the Arduino Due V02g, explicitly referenced schematic pins recovered 604 of the PCB's 605 signal contacts. The extra contact was RESET pad 5, assigned to 5-GND through an unwired power pin. Including that EAGLE rule recovered all 605 contacts and all 163 physical nets. On the Adafruit Feather RP2040 Original, a schematic-only prediction produced before opening the board signal assignments matched all 207 PCB contacts and all 52 physical nets. Both predictions used the specific paired revisions below.
+
+- [Arduino Due CAD archive](https://docs.arduino.cc/static/f051671bbed80ddf7352991d62cb0d5c/A000056-cad-files.zip)
+- [Adafruit Feather RP2040 Original, revision ea88166](https://github.com/adafruit/Adafruit-Feather-RP2040-PCB/tree/ea88166891ee0a1697a3899a5d55ab3722a2f125)
