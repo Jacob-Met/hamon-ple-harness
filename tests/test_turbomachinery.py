@@ -137,3 +137,52 @@ def test_redundant_angles_use_local_swirl_and_preserve_relative_cancellation(swi
     assert verify_turbomachinery(spec)["conservation_verified"]
     station["absolute_flow_angle_deg"] *= -1
     assert not verify_turbomachinery(spec)["conservation_verified"]
+
+
+@pytest.mark.parametrize("direction,kind", [(1, "pump"), (-1, "turbine")])
+def test_small_angular_momentum_change_preserves_torque_and_rothalpy(direction, kind):
+    # One binary64 increment of swirl at fixed radius. At 900 rpm both U*Vtheta
+    # products round to the same value before subtraction.
+    omega = 900 * 2 * math.pi / 60
+    radius = 0.125
+    low, high = 15.0, math.nextafter(15.0, math.inf)
+    inlet, outlet = (low, high) if direction == 1 else (high, low)
+    delta = outlet - inlet
+    torque = 2 * radius * delta
+    # Unchanged meridional velocity and blade speed give dh=(U-mean(Vtheta))*dVtheta.
+    enthalpy = (omega * radius - (inlet + outlet) / 2) * delta
+    spec = {
+        "machine_kind": kind, "rotation_rpm": 900, "mass_flow_kg_s": 2,
+        "inlet": {"radius_m": radius, "meridional_velocity_m_s": 5,
+                  "absolute_tangential_velocity_m_s": inlet},
+        "outlet": {"radius_m": radius, "meridional_velocity_m_s": 5,
+                   "absolute_tangential_velocity_m_s": outlet},
+        "measured_fluid_torque_N_m": torque,
+        "measured_rotor_static_enthalpy_change_J_kg": enthalpy,
+    }
+    result = verify_turbomachinery(spec)
+    assert result["conservation_verified"]
+    assert result["fluid_torque_N_m"] == torque
+    assert result["fluid_power_W"] == pytest.approx(omega * torque, abs=0)
+    assert result["rothalpy_work_J_kg"] == pytest.approx(omega * torque / 2, abs=0)
+    assert not verify_turbomachinery(dict(spec, measured_fluid_torque_N_m=0))["conservation_verified"]
+    spec["machine_kind"] = "turbine" if kind == "pump" else "pump"
+    wrong = verify_turbomachinery(spec)
+    assert not wrong["machine_direction_consistent"]
+    assert not wrong["conservation_verified"]
+
+
+def test_zero_angular_momentum_change_with_unequal_radii():
+    # r1*Vtheta1 = r2*Vtheta2 = 3/8 m²/s, while the static enthalpy changes.
+    spec = {
+        "machine_kind": "pump", "rotation_rpm": 900, "mass_flow_kg_s": 2,
+        "inlet": {"radius_m": 0.125, "meridional_velocity_m_s": 5,
+                  "absolute_tangential_velocity_m_s": 3},
+        "outlet": {"radius_m": 0.375, "meridional_velocity_m_s": 5,
+                   "absolute_tangential_velocity_m_s": 1},
+        "measured_fluid_torque_N_m": 0, "measured_rotor_static_enthalpy_change_J_kg": 4,
+    }
+    result = verify_turbomachinery(spec)
+    assert result["conservation_verified"]
+    assert result["fluid_torque_N_m"] == result["fluid_specific_work_J_kg"] == 0
+    assert result["rotor_static_enthalpy_change_J_kg"] == pytest.approx(4)

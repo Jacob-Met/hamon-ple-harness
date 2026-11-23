@@ -1,6 +1,7 @@
 """Adiabatic Euler rotor work from signed meridional/tangential velocity triangles."""
 
 import math
+from fractions import Fraction
 
 
 def finite(value, field):
@@ -115,14 +116,22 @@ def rotor(spec):
     omega = positive(spec, "rotation_rpm") * 2 * math.pi / 60
     inlet, outlet = (station(spec[k], omega) for k in ("inlet", "outlet"))
     u1, u2 = (s["blade_speed_m_s"] for s in (inlet, outlet))
-    c1, c2 = (s["absolute_speed_m_s"] for s in (inlet, outlet))
-    w1, w2 = (s["relative_speed_m_s"] for s in (inlet, outlet))
+    cm1, cm2 = (s["meridional_velocity_m_s"] for s in (inlet, outlet))
     vt1, vt2 = (s["absolute_tangential_velocity_m_s"] for s in (inlet, outlet))
-    work = math.fsum((u2 * vt2, -u1 * vt1))
-    # Conservation of I = h + W²/2 - U²/2 in the steady adiabatic rotor.
-    # Differences of squares are factored to protect near-zero loading.
-    static_change = 0.5 * math.fsum(((w1 - w2) * (w1 + w2), (u2 - u1) * (u2 + u1)))
-    energy_work = math.fsum((static_change, 0.5 * (c2 - c1) * (c2 + c1)))
+    r1, r2 = (Fraction(float(spec[k]["radius_m"])) for k in ("inlet", "outlet"))
+    # Rounding each r*Vtheta product before subtraction can turn a loaded
+    # rotor into a zero-torque rotor. Round the signed change only at output.
+    angular_momentum_change = r2 * Fraction(vt2) - r1 * Fraction(vt1)
+    work = float(Fraction(omega) * angular_momentum_change)
+    # Reconstruct energy independently from rothalpy using the components.
+    # A rounded speed norm can conceal changes smaller than its own ulp.
+    delta_u = omega * float(r2 - r1)
+    delta_vt = vt2 - vt1
+    meridional_term = (cm2 - cm1) * (cm2 + cm1)
+    relative_term = (delta_vt - delta_u) * ((vt2 - u2) + (vt1 - u1))
+    static_change = 0.5 * math.fsum((-meridional_term, -relative_term, delta_u * (u2 + u1)))
+    kinetic_change = 0.5 * math.fsum((meridional_term, delta_vt * (vt2 + vt1)))
+    energy_work = math.fsum((static_change, kinetic_change))
     residual = abs(work - energy_work)
     compatible = work >= 0 if kind in ("pump", "compressor") else work <= 0
     out = {
@@ -139,7 +148,10 @@ def rotor(spec):
     checks = [compatible, residual < 1e-6]
     if "mass_flow_kg_s" in spec:
         mass = positive(spec, "mass_flow_kg_s")
-        out.update(fluid_power_W=mass * work, fluid_torque_N_m=mass * work / omega)
+        out.update(
+            fluid_power_W=mass * work,
+            fluid_torque_N_m=float(Fraction(mass) * angular_momentum_change),
+        )
     if "stage_boundary_speeds_m_s" in spec:
         speeds = spec["stage_boundary_speeds_m_s"]
         v1, v2 = (finite(speeds[k], k) for k in ("inlet", "outlet"))
