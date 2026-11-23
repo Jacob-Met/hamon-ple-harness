@@ -4,6 +4,7 @@ All quantities are SI. Nodes are numbered from zero; omit cells within openings.
 The panel rigidities are force per unit width, with zero Poisson coupling and
 material axes along global X and Y. Bars and springs carry signed axial force.
 """
+from fractions import Fraction
 from functools import lru_cache
 import math
 
@@ -386,7 +387,18 @@ def _bar_checks(spec, bar_forces, *, convert=float, output=float):
         if any(k in bar for k in ("allowable_tension_N", "allowable_compression_N", "demand_factor")):
             tension_limit = convert(_positive(bar["allowable_tension_N"]))
             compression_limit = convert(_positive(bar["allowable_compression_N"]))
-            demand = abs(tension) * convert(_positive(bar.get("demand_factor", 1.0)))
-            ratio = demand / (tension_limit if tension >= 0 else compression_limit)
-            member_checks.append({"bar": i, "ratio": output(ratio), "passes": bool(ratio <= 1)})
+            factor = convert(_positive(bar.get("demand_factor", 1.0)))
+            limit = tension_limit if tension >= 0 else compression_limit
+            ratio = abs(tension) * factor / limit
+            if convert is float:
+                # Refined nodal solves can keep more precision internally.
+                # The default decision uses the force published in bar_tension_N.
+                magnitude = abs(float(tension))
+                demand = magnitude * factor
+                passes = demand <= limit
+                if demand == limit:
+                    passes = Fraction(magnitude) * Fraction(factor) <= limit
+            else:
+                passes = ratio <= 1
+            member_checks.append({"bar": i, "ratio": output(ratio), "passes": bool(passes)})
     return member_checks
