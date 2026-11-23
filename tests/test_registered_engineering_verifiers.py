@@ -359,6 +359,9 @@ def routed(tmp_path_factory):
             {"id": "unknown-input-" + family, "mode": family,
              "spec": {selector: spec[selector], "typo_parameter": 1}},
         ])
+    calls.append({"id": "rotated-octahedral-plane", "mode": "solid_mohr_vessel_buckling",
+                  "spec": {"subkind": "mohr_stress", "stress_tensor": [[72, 24, 0], [24, 58, 0], [0, 0, -30]],
+                           "plane_normal": [7, -1, 5]}})
     calls.append({"id": "enriched-product-two-tray", "mode": "electrochem_separations",
                   "spec": {"subkind": "distillation", "z_F": .8, "x_D": .9, "x_B": .7,
                            "alpha": 2., "q": 1., "R": 1000., "F_mol_s": 100.}})
@@ -1463,3 +1466,22 @@ def test_registered_enriched_product_uses_whole_equilibrium_trays(routed):
     assert result["N_stages_integer"] == result["feed_stage"] == 2
     assert result["residual"] < 1e-10
     assert result["verified"], result
+
+
+def test_registered_tensor_and_plane_traction(routed):
+    row = routed["rotated-octahedral-plane"]
+    assert row["completed"], row
+    result = row["details"]
+    assert result["verified"], result
+    # Cauchy traction, evaluated directly from the full Cartesian tensor.
+    v = [7, -1, 5]
+    force = [480, 110, -150]
+    normal = sum(x*y for x,y in zip(v,force)) / 75
+    tangent = [x-normal*y for x,y in zip(force,v)]
+    plane = result["plane_traction"]
+    assert math.isclose(plane["normal_stress"], normal)
+    assert math.isclose(plane["shear_magnitude"], math.sqrt(sum(x*x for x in tangent)/75))
+    assert math.isclose(result["sigma_oct"], 100/3)
+    assert math.isclose(plane["shear_magnitude"], result["tau_oct"])
+    trace = sum((e-100/3)**2 for e in [72,58,-30])+2*24**2
+    assert math.isclose(result["tau_oct"], math.sqrt(trace/3))

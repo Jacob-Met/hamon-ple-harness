@@ -42,6 +42,7 @@ def main():
     parser.add_argument("--archive", type=Path, default=Path(__file__).resolve().parents[1] / "artifacts")
     parser.add_argument("--candidate-source", type=Path,
                         default=Path(__file__).resolve().parents[1] / "task-tools.ts")
+    parser.add_argument("--model", choices=("claude-opus-5-5", "claude-sonnet-4-5"), default="claude-opus-5-5")
     args = parser.parse_args()
     tasks = list(json.loads((args.archive / "manifest.json").read_bytes())["tasks"])
     check(len(tasks) == len(set(tasks)) == 29, "public task roster")
@@ -58,11 +59,22 @@ def main():
         check(x["tool_names"] == y["tool_names"] == stock_names, f"{key}: tools")
         check(x["guide_sha256"] == FULL and x["guide_bytes"] == 11872, f"{key}: stock guide")
         check(x["max_tokens"] == y["max_tokens"], f"{key}: output limit")
+        check(x["model"] == y["model"] == args.model, f"{key}: model identity")
+        if args.model == "claude-opus-5-5":
+            for row in (x, y):
+                check(row["thinking"]["type"] == "adaptive" and "budget_tokens" not in row["thinking"],
+                      f"{key}: registered Opus adaptive thinking")
+            observed_settings = [row["output_config"]["effort"] for row in (x, y)]
+            positive_settings = ["medium", "low"]
+        else:
+            check(x["thinking"]["type"] == y["thinking"]["type"] == "enabled", f"{key}: finite budget")
+            observed_settings = [row["thinking"]["budget_tokens"] for row in (x, y)]
+            positive_settings = [8192, 2048]
         if key == POSITIVE:
             check(x["presolved"] is False and y["presolved"] is True
-                  and (x["budget"], y["budget"]) == (8192, 2048), f"{key}: positive control")
+                  and observed_settings == positive_settings, f"{key}: positive control")
         else:
-            check(x["presolved"] is False and y["presolved"] is False and x["budget"] == y["budget"],
+            check(x["presolved"] is False and y["presolved"] is False and x["thinking"] == y["thinking"] and x["output_config"] == y["output_config"],
                   f"{key}: historical or incomplete request")
         if key in tasks:
             history = json.loads((args.archive / key / "trajectory.json").read_bytes())
@@ -82,7 +94,7 @@ def main():
     summary = {unit: {"min": min(d[unit] for d in differences), "max": max(d[unit] for d in differences),
                       "sum": sum(d[unit] for d in differences)} for unit in differences[0]}
     print(json.dumps(dict(stock_commit=BASE, historical_requests=len(tasks), initial_request_savings=summary,
-                          positive_budget=[8192, 2048], reference_round_trip_requests=candidate[REFERENCE]["requests"],
+                          model=args.model, positive_thinking_settings=positive_settings, reference_round_trip_requests=candidate[REFERENCE]["requests"],
                           measurement="Captured localhost Pi HTTP body sizes and cl100k_base token proxy; "
                                       "responses are fixtures. No model billing or task-solution scores."), sort_keys=True))
 

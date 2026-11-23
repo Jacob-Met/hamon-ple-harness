@@ -956,6 +956,74 @@ def _solve_rlc_transient(params):
     }
 
 
+_DISTRIBUTED_LINE_KEYS = ("R_ohm_per_m", "L_H_per_m", "G_S_per_m", "C_F_per_m", "frequency_Hz")
+
+
+def _distributed_line(ctx, values, length, real):
+    """Uniform passive line, exp(+jωt); quarter-wave landmarks use exact sources."""
+    r, l, g, c, f = values
+    resistance, inductance, conductance, capacitance, frequency = map(real, values)
+    omega = 2 * ctx.pi * frequency
+    series = ctx.mpc(resistance, omega * inductance)
+    shunt = ctx.mpc(conductance, omega * capacitance)
+    # Distortionless lines have real Z0 and β=2πf√(LC). Reducing in
+    # turns before multiplying by π preserves exact lossless port nodes.
+    if l and c and r * c == g * l:
+        line = ctx.sqrt(inductance / capacitance)
+        alpha = resistance / line
+        beta = omega * ctx.sqrt(inductance * capacitance)
+        turns_squared = (f * length)**2 * l * c
+        turns = ctx.sqrt(real(turns_squared))
+        landmark = int(ctx.nint(8 * turns))
+        near = Fraction(landmark, 8)
+        # Difference of squares keeps the full source-coordinate offset even
+        # when rounding the square root alone lands exactly on an eighth turn.
+        offset = real(turns_squared - near**2) / (turns + real(near)) if turns else 0
+        phase = 2 * ctx.pi * offset
+    elif not series or not shunt:
+        return None, 0, 0, (0, 0), series, shunt
+    else:
+        propagation = ctx.sqrt(series * shunt)
+        alpha, beta = propagation.real, propagation.imag
+        line = series / propagation
+        landmark = 0
+        phase = beta * real(length)
+    return line, alpha, beta, (landmark, phase), series, shunt
+
+
+def _degenerate_line_port(ctx, result, modal, termination, load, length, series, shunt, chart):
+    # The generator is nilpotent. Its exact exponential is I + length*M,
+    # even when γ and the two traveling-wave coordinates coalesce.
+    port_v, port_i = (1, 0) if termination == "open" else (load, 1)
+    v = port_v + series * length * port_i
+    i = port_i + shunt * length * port_v
+    zr, zi = chart(v, i)
+    yr, yi = chart(i, v)
+    if zr is None and yr is None:
+        raise ArithmeticError("Both finite port charts exceed the output range")
+    # Reconstruct the load, including its boundary condition, from
+    # each published input chart through the inverse line segment.
+    charts = []
+    if zr is not None:
+        charts.append((ctx.mpc(zr, zi), 1))
+    if yr is not None:
+        charts.append((1, ctx.mpc(yr, yi)))
+    errors = []
+    for vv, ii in charts:
+        lv = vv - series * length * ii
+        li = ii - shunt * length * vv
+        scale = max(abs(lv), abs(li)) * max(abs(port_v), abs(port_i))
+        errors.append(abs(lv * port_i - li * port_v) / scale)
+    error = max(errors)
+    return dict(result, **modal, load_kind=termination, Z0_real=None, Z0_imag=None,
+                Z_in_kind="open" if not i else "short" if not v else "finite",
+                Z_in_real=zr, Z_in_imag=zi, Y_in_real=yr, Y_in_imag=yi,
+                gamma_load_mag=None, gamma_load_deg=None, VSWR=None,
+                VSWR_status="no_characteristic_impedance", return_loss_dB=None,
+                return_loss_status="no_characteristic_impedance", quarter_wave_Z_T=None,
+                residual=float(error), verified=error < 1e-10)
+
+
 def _transmission_port(params):
     """Propagate voltage and Z0-scaled current without dividing at a port node."""
     from mpmath import mp
@@ -983,9 +1051,6 @@ def _transmission_port(params):
             return None, None
 
     try:
-        characteristic = complex(params.get("Z0", 50.))
-        if not characteristic or not all(map(math.isfinite, (characteristic.real, characteristic.imag))):
-            raise ValueError("Characteristic impedance must be finite and nonzero")
         termination = params.get("load_kind", "impedance")
         if termination not in ("impedance", "open", "short"):
             raise ValueError("load_kind must be impedance, open, or short")
@@ -997,29 +1062,71 @@ def _transmission_port(params):
         if termination == "impedance" and r == x == 0:
             termination = "short"
         length = scalar("length_m", 1.)
-        attenuation = scalar("alpha_np_m", 0.)*length
-        in_turns = params.get("length_wavelengths") is not None
-        landmark = 0
-        if in_turns:
-            turns = scalar("length_wavelengths", 0.)
-            landmark = round(8*turns)
-            remaining = turns-Fraction(landmark, 8)
-        else:
-            remaining = scalar("beta_rad_m", 0.)*length
-
+        distributed = any(key in params for key in _DISTRIBUTED_LINE_KEYS)
         ctx = mp.clone()
-        # Retain the weak wave as well as the strong one, including a small
-        # departure from an exact standing-wave node. Radian input can require
-        # additional bits to resolve the phase of a long propagation interval.
-        scales = [abs(s) for s in (r, x, Fraction(characteristic.real),
-                  Fraction(characteristic.imag), attenuation, remaining, 1) if s]
-        contrast = max(scales)/min(scales)
-        ctx.prec = 160+2*(contrast.numerator.bit_length()-contrast.denominator.bit_length())
+        scales = [r, x, length, Fraction(1)]
+        if distributed:
+            if not all(key in params for key in (*_DISTRIBUTED_LINE_KEYS, "length_m")):
+                raise ValueError("Distributed line requires R, L, G, C per metre, frequency_Hz and length_m")
+            if any(key in params for key in ("Z0", "alpha_np_m", "beta_rad_m", "length_wavelengths")):
+                raise ValueError("Specify distributed constants or modal line parameters exclusively")
+            if any(type(params[key]) not in (int, float) for key in (*_DISTRIBUTED_LINE_KEYS, "length_m")):
+                raise ValueError("Distributed constants, length and frequency must be JSON numbers")
+            unknown = params.keys() - {*_DISTRIBUTED_LINE_KEYS, "length_m", "load_kind", "R_L", "X_L", "subkind", "domain"}
+            if unknown:
+                raise ValueError(f"Unrecognized distributed line inputs: {sorted(unknown)}")
+            length = Fraction(params["length_m"])
+            scales.append(length)
+            inputs = [Fraction(params[key]) for key in _DISTRIBUTED_LINE_KEYS]
+            if min(*inputs, length) < 0:
+                raise ValueError("Passive distributed line requires nonnegative constants, length and frequency")
+            scales.extend(inputs)
+        else:
+            characteristic = complex(params.get("Z0", 50.))
+            if not characteristic or not all(map(math.isfinite, (characteristic.real, characteristic.imag))):
+                raise ValueError("Characteristic impedance must be finite and nonzero")
+            attenuation = scalar("alpha_np_m", 0.)*length
+            in_turns = params.get("length_wavelengths") is not None
+            landmark = 0
+            if in_turns:
+                turns = scalar("length_wavelengths", 0.)
+                landmark = round(8*turns)
+                remaining = turns-Fraction(landmark, 8)
+            else:
+                remaining = scalar("beta_rad_m", 0.)*length
+            scales.extend((Fraction(characteristic.real), Fraction(characteristic.imag), attenuation, remaining))
+
+        # Keep source exponent range for long phases, tiny loss and weak waves.
+        positive_scales = [abs(s) for s in scales if s]
+        contrast = max(positive_scales) / min(positive_scales)
+        ctx.prec = 160 + (4 if distributed else 2) * (contrast.numerator.bit_length()-contrast.denominator.bit_length())
 
         def real(q):
             return ctx.mpf(q.numerator)/q.denominator
 
-        line = ctx.mpc(characteristic.real, characteristic.imag)
+        modal = {}
+        constitutive_residual = 0
+        if distributed:
+            line, alpha, beta, coordinates, series, shunt = _distributed_line(
+                ctx, inputs, length, real)
+            modal = {"line_model": "distributed_rlgc", "alpha_np_m": wire(alpha), "beta_rad_m": wire(beta)}
+            if line is None:
+                return _degenerate_line_port(ctx, result, modal, termination, ctx.mpc(real(r), real(x)),
+                                             real(length), series, shunt, chart)
+            landmark, phase = coordinates
+            loss = alpha * real(length)
+            modal.update(Z0_real=wire(line.real), Z0_imag=wire(line.imag))
+            published_gamma = ctx.mpc(modal["alpha_np_m"], modal["beta_rad_m"])
+            published_z0 = ctx.mpc(modal["Z0_real"], modal["Z0_imag"])
+            for actual, expected in ((published_gamma * published_z0, series),
+                                     (published_gamma / published_z0, shunt)):
+                if expected:
+                    constitutive_residual = max(constitutive_residual, abs(actual-expected)/abs(expected))
+            modal["constitutive_residual"] = float(constitutive_residual)
+        else:
+            line = ctx.mpc(characteristic.real, characteristic.imag)
+            loss = real(attenuation)
+            phase = real(remaining) * (2*ctx.pi if in_turns else 1)
         # Homogeneous coordinates (V, Z0*I) include an ideal open without
         # an infinite number. Finite impedances use an arbitrary unit current.
         if termination == "open":
@@ -1028,13 +1135,11 @@ def _transmission_port(params):
             load_v, load_i = ctx.mpc(real(r), real(x)), line
         if load_v+load_i == 0:
             raise ValueError("Load reflection coefficient is undefined")
-        phase = real(remaining)*(2*ctx.pi if in_turns else 1)
-        loss = real(attenuation)
         # At exact eighth turns, use only {0,±1,±i}. The common scale of V
         # and I is arbitrary, so no independently rounded sqrt(2) is needed.
         a, b = ((load_v, load_i), (load_v+ctx.j*load_i, load_i+ctx.j*load_v),
                 (load_i, load_v), (load_v-ctx.j*load_i, load_i-ctx.j*load_v))[landmark % 4]
-        if not remaining and not attenuation:
+        if not phase and not loss:
             v, i = a, b
         else:
             t = ctx.tanh(ctx.mpc(loss,phase))
@@ -1049,7 +1154,7 @@ def _transmission_port(params):
         reflected = reflection*eighth*ctx.exp(-2*ctx.mpc(loss,phase))
         v_check, i_check = 1+reflected, 1-reflected
         check_scale = max(abs(v), abs(i))*max(abs(v_check), abs(i_check))
-        mismatch = abs(v*i_check-i*v_check)/check_scale
+        mismatch = max(constitutive_residual, abs(v*i_check-i*v_check)/check_scale)
         kind = "open" if not i else "short" if not v else "finite"
         if abs(reflected) < ctx.mpf(".25"):
             # Preserve the small complex correction to a matched line: complex
@@ -1096,9 +1201,9 @@ def _transmission_port(params):
             except ArithmeticError:
                 loss_status = "outside_numeric_range"
         transformer = None
-        if termination != "open" and not x and r >= 0 and characteristic.real >= 0 and not characteristic.imag:
+        if termination != "open" and not x and r >= 0 and line.real >= 0 and not line.imag:
             transformer = wire(ctx.sqrt(real(r)*line.real))
-        return dict(result, load_kind=termination,
+        return dict(result, **modal, load_kind=termination,
                     Z_in_kind=kind, Z_in_real=zr, Z_in_imag=zi,
                     Y_in_real=yr, Y_in_imag=yi, gamma_load_mag=wire(gamma),
                     gamma_load_deg=wire(ctx.degrees(ctx.arg(reflection))),
@@ -1256,16 +1361,73 @@ def _rounded_stress_root(compare):
     return sign*value(chosen)
 
 
+def _stress_number(value, *, legacy_text=False):
+    numeric = isinstance(value, (int, float, np.integer, np.floating))
+    if isinstance(value, (bool, np.bool_)) or not (numeric or (legacy_text and isinstance(value, str))):
+        raise ValueError("Stress and direction inputs must be finite real numbers")
+    if isinstance(value, (int, np.integer)):
+        return Fraction(int(value))
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError("Stress and direction inputs must be finite real numbers")
+    return Fraction(value)
+
+
+def _cauchy_tensor(params):
+    keys = (("sigma_x", "tau_xy", "tau_xz"),
+            ("tau_xy", "sigma_y", "tau_yz"),
+            ("tau_xz", "tau_yz", "sigma_z"))
+    if "stress_tensor" not in params:
+        return [[_stress_number(params.get(key, 0), legacy_text=True) for key in row] for row in keys]
+    matrix = np.asarray(params["stress_tensor"], dtype=object)
+    if matrix.shape != (3, 3):
+        raise ValueError("stress_tensor must be a symmetric 3 by 3 array")
+    tensor = [[_stress_number(value) for value in row] for row in matrix]
+    for i, row in enumerate(keys):
+        for j, key in enumerate(row):
+            if tensor[i][j] != tensor[j][i]:
+                raise ValueError("stress_tensor must be symmetric")
+            if key in params and _stress_number(params[key]) != tensor[i][j]:
+                raise ValueError(f"{key} conflicts with stress_tensor")
+    return tensor
+
+
+def _plane_traction(tensor, normal):
+    """Cauchy traction with an unnormalized normal and exact squared norm."""
+    normal = np.asarray(normal, dtype=object)
+    if normal.shape != (3,):
+        raise ValueError("plane_normal must have three components")
+    v = [_stress_number(x) for x in normal]
+    length_squared = sum(x*x for x in v)
+    if not length_squared:
+        raise ValueError("plane_normal must be nonzero")
+    force = [sum(a*b for a,b in zip(row,v)) for row in tensor]
+    normal_stress = sum(t*n for t,n in zip(force,v)) / length_squared
+    tangent = [t-normal_stress*n for t,n in zip(force,v)]
+    if sum(s*n for s,n in zip(tangent,v)) != 0:
+        raise ArithmeticError("Tangential traction is not in the supplied plane")
+
+    def root(square):
+        def compare(trial):
+            if trial < 0:
+                return 1
+            difference = square - trial*trial
+            return (difference>0) - (difference<0)
+        return _rounded_stress_root(compare)
+
+    def normalize(items):
+        return [(-1 if x<0 else 1)*root(x*x/length_squared) for x in items]
+
+    return {"unit_normal": normalize(v), "traction": normalize(force),
+            "normal_stress": _rounded_stress_root(lambda t: (normal_stress>t)-(normal_stress<t)),
+            "shear_traction": normalize(tangent),
+            "shear_magnitude": root(sum(s*s for s in tangent)/length_squared)}
+
+
 def _mohr_stress(params):
     """Recover pressure-independent shear and yield from both Cartesian and principal invariants."""
     def sign(v):
         return int(v > 0) - int(v < 0)
-
-    def number(key):
-        v = float(params.get(key, 0.0))
-        if not math.isfinite(v):
-            raise ValueError("Stress inputs must be finite")
-        return Fraction(v)
 
     def compare_root(index, quadratic, linear, constant):
         # The shifted monic cubic has three real roots. Sign variations
@@ -1279,9 +1441,11 @@ def _mohr_stress(params):
         return 1 if threshold < 0 else sign(square-threshold*threshold)
 
     try:
-        x, y, z = (number(k) for k in ("sigma_x", "sigma_y", "sigma_z"))
-        xy, xz, yz = (number(k) for k in ("tau_xy", "tau_xz", "tau_yz"))
-        strength = number("sigma_yield") if params.get("sigma_yield") is not None else None
+        stress = _cauchy_tensor(params)
+        x, y, z = (stress[i][i] for i in range(3))
+        xy, xz, yz = stress[0][1], stress[0][2], stress[1][2]
+        strength = _stress_number(params["sigma_yield"], legacy_text=True) if params.get("sigma_yield") is not None else None
+        plane = _plane_traction(stress,params["plane_normal"]) if "plane_normal" in params else None
         if strength is not None and strength < 0:
             raise ValueError("Yield strength must be nonnegative")
         mean = (x+y+z)/3
@@ -1325,9 +1489,20 @@ def _mohr_stress(params):
             unit = max(map(abs, (a,b,c,xy,xz,yz)))
             tensor = np.array([[float(v/unit) for v in row] for row in
                                ((a,xy,xz), (xy,b,yz), (xz,yz,c))])
-            spectrum = np.linalg.eigvalsh(tensor)
+            spectrum, principal_axes = np.linalg.eigh(tensor)
+            # Each body diagonal in the principal frame defines an octahedral plane.
+            # Remove hydrostatic stress first so a large common pressure cannot
+            # conceal errors in the Cartesian traction or its tangential part.
+            normals = principal_axes @ (np.array([[1., 1., 1., 1.],
+                                                   [1., 1., -1., -1.],
+                                                   [1., -1., 1., -1.]]) / math.sqrt(3.))
+            traction = tensor @ normals
+            normal_part = np.sum(normals * traction, axis=0)
+            shear = traction - normals * normal_part
+            oct_residual = max(np.max(np.abs(normal_part)),
+                               np.max(np.abs(np.sum(shear*shear,axis=0) - float(2*j2/(3*unit**2)))))
             ref_gap = _rounded_stress_root(lambda t: gap(unit*t))
-            residual = max(abs(float(spectrum.sum())),
+            residual = max(float(oct_residual), abs(float(spectrum.sum())),
                            abs(float(spectrum @ spectrum)/2 - float(j2/unit**2)),
                            abs(float(np.prod(spectrum)) - float(j3/unit**3)),
                            abs(float(spectrum[-1]-spectrum[0])-ref_gap))
@@ -1335,9 +1510,12 @@ def _mohr_stress(params):
                 "tau_max_inplane": _rounded_stress_root(lambda t: positive_sqrt(ux*ux/4+xy*xy, t)),
                 "tau_max_abs": _rounded_stress_root(lambda t: gap(2*t)),
                 "theta_p_deg": angle, "sigma_von_mises": _rounded_stress_root(vm),
+                "sigma_oct": _rounded_stress_root(lambda t: sign(mean-t)),
+                "tau_oct": _rounded_stress_root(lambda t: positive_sqrt(2*j2/3, t)),
+                **({"plane_traction": plane} if plane is not None else {}),
                 "safety_factor_vm": safety(vm), "safety_factor_tresca": safety(gap),
                 "residual": residual, "verified": residual < 1e-11}
-    except (ArithmeticError, ValueError) as exc:
+    except (ArithmeticError, TypeError, ValueError) as exc:
         return {"verified": False, "error": str(exc)}
 
 
@@ -2067,6 +2245,9 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
                 concentration *= Fraction(t0_k)/Fraction(inlet_t)
             return _constant_rate_pfr(params, concentration, f_a0, v0, order_n,
                                       k_at_temp(inlet_t), inlet_t, heat_rise)
+        from hamon_pfr_trajectory import solve_variable_rate_pfr
+        return solve_variable_rate_pfr(params, c_a0, f_a0, v0, order_n, inlet_t,
+                                       heat_rise, eps_a, gas_phase, t0_k)
 
     elif reactor_type not in ("cstr", "cstr_series"):
         raise ValueError(f"Unsupported reactor_type: {reactor_type}")
@@ -2083,9 +2264,6 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
             return 0.0
         if reactor_type == "cstr":
             return f_a0 * x_conv / rate_minus_ra(x_conv)
-        if reactor_type == "pfr":
-            val, _ = integrate.quad(lambda xi: f_a0 / rate_minus_ra(xi), 0.0, x_conv, epsabs=1e-12, epsrel=1e-12, limit=200)
-            return float(val)
         raise ValueError(f"Unsupported reactor_type: {reactor_type}")
 
     cstr_branches = None
@@ -2183,31 +2361,6 @@ def solve_reactor_kinetics(params: Mapping[str, Any]) -> Dict[str, Any]:
             if type(branch) is not int or not 0 <= branch < len(cstr_branches):
                 raise ValueError("steady_state_branch must be 'all' or a valid ascending zero-based branch index")
             x_out = cstr_branches[branch]["conversion_X"]
-        elif vol_m3 <= 0.0:
-            x_out = 0.0
-        else:
-            fn_v = lambda x: volume_for_conversion(x) - vol_m3
-            limit = Fraction(1)
-            if heat_rise < 0:
-                limit = min(limit, -Fraction(inlet_t)/Fraction(heat_rise))
-            if eps_a < 0:
-                limit = min(limit, -1/Fraction(eps_a))
-            # Search only through the actual physical domain. A temperature
-            # or expansion singularity beyond the outlet is not traversed.
-            largest = float(limit)
-            closed = (limit == 1 and order_n == 0 and 1+Fraction(eps_a) > 0 and
-                      Fraction(inlet_t)+Fraction(heat_rise) > 0)
-            if not closed and Fraction(largest) >= limit:
-                largest = math.nextafter(largest, 0.)
-            gap = float(limit)
-            for _ in range(60):
-                gap *= .5
-                x_hi = min(float(limit)-gap, largest)
-                if fn_v(x_hi) >= 0.0:
-                    break
-                if x_hi == largest:
-                    raise ValueError("no representable PFR outlet in the physical integration interval")
-            x_out = float(optimize.brentq(fn_v, 0.0, x_hi, xtol=1e-13, rtol=1e-13))
         if cstr_branches is not None:
             residual = cstr_branches[branch]["residual"]
         else:

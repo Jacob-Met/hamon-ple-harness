@@ -43,7 +43,7 @@ def tool_events(model):
     yield "message_stop", {}
 
 
-async def replay(root, label, instruction, ask_reference, tokenizer):
+async def replay(root, label, instruction, ask_reference, tokenizer, model):
     import harness
     from fin_provider_replay import events
     observations, errors = [], []
@@ -56,14 +56,15 @@ async def replay(root, label, instruction, ask_reference, tokenizer):
             headers = dict(line.lower().split(": ",1) for line in head[1:] if ": " in line)
             raw = await reader.readexactly(int(headers["content-length"]))
             req = json.loads(raw)
-            assert req["stream"] is True
+            assert req["stream"] is True and req["model"] == model
             msg = req["messages"][0]["content"]
             prompt = msg if isinstance(msg,str) else "\n".join(p["text"] for p in msg if p["type"]=="text")
             assert instruction in prompt
             tool = next(t for t in req["tools"] if t["name"] == TOOL)
             guide = tool["description"]
             record = dict(request_bytes=len(raw), guide_bytes=len(guide.encode()),
-                          guide_sha256=digest(guide.encode()), budget=req["thinking"]["budget_tokens"],
+                          guide_sha256=digest(guide.encode()), model=req["model"],
+                          thinking=req.get("thinking"), output_config=req.get("output_config"),
                           max_tokens=req["max_tokens"], tool_names=[t["name"] for t in req["tools"]],
                           presolved="Deterministic engineering calculation for the inline request" in prompt)
             if tokenizer:
@@ -94,7 +95,7 @@ async def replay(root, label, instruction, ask_reference, tokenizer):
         async with await asyncio.start_server(respond, "127.0.0.1", 0) as server:
             port = server.sockets[0].getsockname()[1]
             env=dict(HOME=home,PATH=os.environ["PATH"],ANTHROPIC_BASE_URL=f"http://127.0.0.1:{port}",
-                     ANTHROPIC_API_KEY="loopback-fixture",MODEL_NAME="claude-sonnet-4-5")
+                     ANTHROPIC_API_KEY="loopback-fixture",MODEL_NAME=model)
             session=SimpleNamespace(instruction=instruction,workdir="/workspace/task",mcp_servers=[],
                 final_message="",time_left=lambda:None,usage=AsyncMock(),log=AsyncMock())
             # The measured condition has no live project files. Delivery tools
@@ -117,6 +118,8 @@ def main():
     parser.add_argument("--root",type=Path,default=Path(__file__).resolve().parents[1])
     parser.add_argument("--bpe",action="store_true")
     parser.add_argument("--reference",action="store_true")
+    parser.add_argument("--model",choices=("claude-opus-5-5", "claude-sonnet-4-5"),
+                        default="claude-opus-5-5",help="Registered Opus or the historical finite-budget Sonnet control")
     parser.add_argument("--only",help="Run one named archive or synthetic control")
     args=parser.parse_args()
     root=args.root.resolve()
@@ -140,7 +143,7 @@ def main():
     for label,instruction in corpus.items():
         if args.only and label!=args.only:
             continue
-        result=asyncio.run(replay(root,label,instruction,label=="synthetic-reference",tokenizer))
+        result=asyncio.run(replay(root,label,instruction,label=="synthetic-reference",tokenizer,args.model))
         print(json.dumps(result,sort_keys=True),flush=True)
 
 

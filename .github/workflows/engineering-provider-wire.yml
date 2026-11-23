@@ -10,7 +10,12 @@ permissions:
   contents: read
 jobs:
   compare:
+    strategy:
+      matrix:
+        model: ["claude-opus-5-5", "claude-sonnet-4-5"]
     runs-on: ubuntu-latest
+    env:
+      REPLAY_MODEL: ${{ matrix.model }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -38,12 +43,12 @@ jobs:
           mkdir wire-results
           git rev-parse HEAD > wire-results/candidate.commit
           git -C "$RUNNER_TEMP/stock" rev-parse HEAD > wire-results/stock.commit
-          python ship/replay_engineering_provider_wire.py --root "$RUNNER_TEMP/stock" --bpe > wire-results/stock.jsonl
-          python ship/replay_engineering_provider_wire.py --reference --bpe > wire-results/candidate.jsonl
-          python ship/compare_engineering_provider_wire.py wire-results/{stock,candidate}.jsonl | tee wire-results/comparison.json
+          python ship/replay_engineering_provider_wire.py --root "$RUNNER_TEMP/stock" --model "$REPLAY_MODEL" --bpe > wire-results/stock.jsonl
+          python ship/replay_engineering_provider_wire.py --reference --model "$REPLAY_MODEL" --bpe > wire-results/candidate.jsonl
+          python ship/compare_engineering_provider_wire.py wire-results/{stock,candidate}.jsonl --model "$REPLAY_MODEL" | tee wire-results/comparison.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: public-engineering-wire-requests
+          name: public-engineering-wire-requests-${{ matrix.model }}
           path: wire-results
           if-no-files-found: warn
