@@ -73,3 +73,32 @@ class MinorExchangeTest(unittest.TestCase):
             for direction, datum in ((1, 0.0), (-1, 12.0)):
                 with self.subTest(bias=bias, direction=direction, datum=datum):
                     check_exchange(bias, direction, datum)
+
+    def test_small_net_boundary_supply_between_rounded_through_flows(self):
+        ctx = mp.clone()
+        ctx.dps = 80
+        diameter, gravity = ctx.mpf(0.02), ctx.mpf(9.80665)
+        r = 256 * ctx.mpf(1e-6) / (ctx.pi * gravity * diameter**4)
+        k = 160 / (gravity * ctx.pi**2 * diameter**4)
+
+        def inverse(head_drop):
+            return 2 * head_drop / (r + ctx.sqrt(r*r + 4*k*abs(head_drop)))
+
+        for low in (1e-20, -1e-20):
+            with self.subTest(low=low):
+                heads = {"A": 0.01, "B": 0.005, "C": low}
+                inflow = inverse(ctx.mpf(heads["A"]) - ctx.mpf(heads["B"]))
+                outflow = inverse(ctx.mpf(heads["B"]) - ctx.mpf(low))
+                self.assertEqual(float(outflow), float(inflow))
+                expected = float(outflow - inflow)
+                self.assertNotEqual(expected, 0.0)
+                case = {
+                    "nodes": [{"id": name, "fixed_head_m": h} for name, h in heads.items()],
+                    "pipes": [{"id": a+b, "from": a, "to": b, "length_m": 2,
+                               "diameter_m": 0.02, "minor_loss_K": 20}
+                              for a, b in (("A", "B"), ("B", "C"))],
+                }
+                result = verify_pipe_network(case)
+                self.assertTrue(result["conservation_verified"], result)
+                self.assertTrue(math.isclose(result["reservoir_supplies_m3_s"]["B"],
+                                             expected, rel_tol=1e-12))
