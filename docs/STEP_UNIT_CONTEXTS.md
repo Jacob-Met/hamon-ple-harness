@@ -19,7 +19,10 @@ Missing references, cycles, nonpositive conversion factors, conflicting length
 assignments, unsupported unit definitions, dimensional mismatches, and scales
 outside the finite positive binary64 range withhold geometric properties. An
 explicit finite positive `unit_scale_m` remains an intentional override. IFC
-continues to use its existing typed project-unit resolver.
+continues to use its existing typed project-unit resolver. Selection of a STEP
+BRep happens before source-specific unit resolution, so unrelated IFC records
+cannot choose its units or return properties for a different product. Mixed
+STEP/IFC primitive-only sources require an explicit supported solid definition.
 
 ## Legacy inputs and provenance
 

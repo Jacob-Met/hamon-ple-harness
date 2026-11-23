@@ -204,10 +204,14 @@ class StepUnitContextTests(unittest.TestCase):
             "#999006=IFCRECTANGLEPROFILEDEF(.AREA.,$,#999005,1.,1.);",
             "#999007=IFCDIRECTION((0.,0.,1.));",
             "#999008=IFCEXTRUDEDAREASOLID(#999006,#999002,#999007,1.);",
-            "#999009=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#999008));",
+            "#999009=IFCSHAPEREPRESENTATION(#999012,'Body','SweptSolid',(#999008));",
             "#999010=IFCPRODUCTDEFINITIONSHAPE($,$,(#999009));",
             "#999011=IFCBUILDINGELEMENTPROXY('foreign',$,$,$,$,#999003,#999010,$,$);",
+            "#999012=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#999002,$);",
         ]
+        foreign = self.verify("DATA;" + "".join(ifc) + "ENDSEC;")
+        self.assertTrue(foreign["conservation_verified"], foreign)
+        self.assertEqual(foreign["volume_m3"], 1.)
         self.assert_cube(self.verify(add_records(text, ifc), solid_entity_id=solid), .001)
         primitive = "DATA;#1=CARTESIAN_POINT('',(0.,0.,0.));#2=AXIS2_PLACEMENT_3D('',#1,$,$);" \
                     "#3=BLOCK('',#2,2.,2.,2.);#4=SI_UNIT(.MILLI.,.METRE.);" \

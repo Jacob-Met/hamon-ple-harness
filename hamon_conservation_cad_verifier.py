@@ -876,7 +876,12 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError("unit_scale_m must be finite and positive")
         unit_metadata = {"unit_scale_source": "explicit_override"}
 
-    if any(kind.startswith("IFC") for kind, _ in entities.values()):
+    selected_solid, face_occurrences = _step_solid_faces(entities, spec.get("solid_entity_id"))
+    has_ifc = any(kind.startswith("IFC") for kind, _ in entities.values())
+    if selected_solid is None and has_ifc:
+        if any(kind in {"BLOCK", "RIGHT_CIRCULAR_CYLINDER", "EXTRUDED_AREA_SOLID"}
+               for kind, _ in entities.values()):
+            raise ValueError("Mixed STEP/IFC primitives require an explicit supported solid definition")
         from hamon_ifc_spatial_clash import _detect_length_unit_scale, parse_ifc_entities
         typed = parse_ifc_entities(step_text)
         if spec.get("unit_scale_m") is None:
@@ -885,8 +890,7 @@ def verify_step_cad_geometry(spec: Dict[str, Any]) -> Dict[str, Any]:
         if occurrences is not None:
             return _cad_report(*occurrences, unit_scale, len(entities))
 
-    selected_solid, face_occurrences = _step_solid_faces(entities, spec.get("solid_entity_id"))
-    if spec.get("unit_scale_m") is None and not any(kind.startswith("IFC") for kind, _ in entities.values()):
+    if spec.get("unit_scale_m") is None and (selected_solid is not None or not has_ifc):
         from hamon_step_units import resolve_step_length_scale
         geometry_ids = ([selected_solid] if selected_solid is not None else
                         [eid for eid, (kind, _) in entities.items()
