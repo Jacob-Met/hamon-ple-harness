@@ -1053,12 +1053,25 @@ def solve_truss_2d(spec: dict[str, Any]) -> dict[str, Any]:
         label = "N_" + str(element["id"]) + "_N"
         if label in members:
             raise ValueError("Truss member IDs must identify distinct output forces")
-        members[label] = _TrussMember(
+        if ("E_pa" in element) != ("A_m2" in element):
+            raise ValueError("Truss material requires both E_pa and A_m2")
+        if "E_pa" in element:
+            modulus, area = element["E_pa"], element["A_m2"]
+        else:
+            modulus, area = element.get("EA", 2e8), 1.0
+        member = _TrussMember(
             {"i": index[element["n1"]], "j": index[element["n2"]],
-             "E_pa": element.get("EA", 2e8), "A_m2": 1.0,
+             "E_pa": modulus, "A_m2": area,
              "alpha_per_K": element.get("alpha_per_K", 0.0), "dT_K": element.get("dT_K", 0.0)},
             points, minimum_length=0.0,
         )
+        if "EA" in element and "E_pa" in element:
+            # EA is a binary64 shorthand. Keep the exact represented factor
+            # product for mechanics, and compare its rounded value to the alias.
+            rigidity = float(element["EA"])
+            if not math.isfinite(rigidity) or rigidity <= 0 or rigidity != float(modulus) * float(area):
+                raise ValueError("EA must agree with E_pa times A_m2")
+        members[label] = member
     if not members:
         raise ValueError("At least one truss member is required")
 
