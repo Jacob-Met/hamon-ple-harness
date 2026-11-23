@@ -228,9 +228,53 @@ class BoardDomainTests(unittest.TestCase):
         for inner in (rectangle(2,3,0,1),rectangle(1,3,0,1),
                       rectangle(1,1.999999999,0,1),
                       outline([(-.5,-.5),(.5,.5),(-.5,.5),(.5,-.5)]),
-                      rounded_rectangle(".1")):
+                      rounded_rectangle(".1")[:-1]):
             result = self.query(rectangle()+inner)
             self.assertEqual(result["board_domain"]["status"],"unresolved")
+            self.assertFalse(result["contacts"])
+
+    def test_four_quarters_on_a_removed_rounded_rectangle(self):
+        outer = rectangle(-3, 7, -3, 7)
+        hole = rounded_rectangle(1)
+        for version in (hole, reverse_rows(hole), hole[::2] + hole[1::2]):
+            _, drawing = board(outer + version)
+            domain, info = nominal_board_domain(dimension_records(drawing))
+            self.assertEqual(info["hole_quarter_count"], 4)
+            self.assertEqual(len(set(map(tuple, info["hole_quarter_sources"]))), 4)
+            self.assertLessEqual(info["hole_arc_error_upper_bound_nm"], 1)
+            for cx, cy, sx, sy in ((1,1,-1,-1), (3,1,1,-1), (3,3,1,1), (1,3,-1,1)):
+                for offset, radius, label in ((800000,50000,"material"),
+                                              (600000,25000,"hole"),
+                                              (720000,25000,"straddles")):
+                    center = Point(cx*1_000_000+sx*offset, cy*1_000_000+sy*offset)
+                    self.assertEqual(domain.covers(center) and center.distance(domain.boundary)>radius,
+                                     label == "material")
+                    self.assertEqual(domain.distance(center)>radius, label == "hole")
+
+    def test_removed_rounded_rectangle_refuses_unresolved_tangent_bridge(self):
+        near = rounded_rectangle(1)
+        for row in near:
+            for axis in ("x1", "x2"):
+                x = F(row.get(axis))
+                if x >= 3:
+                    row.set(axis, str(float(x - 2 + F(4, 1_000_000))))
+        result = self.query(rectangle(-3,7,-3,7) + near)
+        self.assertEqual(result["board_domain"]["status"], "unresolved")
+        self.assertFalse(result["contacts"])
+
+    def test_removed_multi_quarter_requires_exact_isolated_tangencies(self):
+        outer = rectangle(-3, 7, -3, 7)
+        for mutation in ("reverse_arc", "wrong_sweep", "two_quarters"):
+            hole = rounded_rectangle(1)
+            if mutation == "reverse_arc":
+                hole[1].set("curve", "-90")
+            elif mutation == "wrong_sweep":
+                hole[3].set("curve", "89.999")
+            else:
+                for i in (1,3):
+                    hole[i].set("curve", "0")
+            result = self.query(outer+hole)
+            self.assertEqual(result["board_domain"]["status"], "unresolved")
             self.assertFalse(result["contacts"])
 
     def test_convex_quarters_have_the_independently_known_circle_margin(self):

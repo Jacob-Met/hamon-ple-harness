@@ -321,3 +321,7 @@ authentic Due outline by 120 mm preserves 605 matching contact declarations
 and 163 matching net declarations while removing all routed and planted
 cross-net witnesses. These are local source-geometry checks. They establish
 no manufactured-board result or hosted PLE score.
+
+A simple rounded rectangular Dimension opening can have four equal-radius 90-degree arcs joined by four straight tangent segments. The report identifies each source arc separately. The removed polygon encloses the true opening using tangent intersections, with at most 1 nm of arc error before the 2 nm outward guard. Overlapping corners, broken tangencies, and unresolved straight bridges still produce an unresolved result. This is a statement about nominal artwork.
+
+Run `python ship/verify_eagle_rounded_rectangle_hole.py --repo . --out OUT --raw RAW` to check the four corners in the original and reflected 3:4:5 frames, and clear/clipped manufacturer routes on Arduino Due N$3 and Feather MISO. The drawing variants retain all authentic copper, pads and vias. The independent geometric checks cover the full disks, in-plane route segments, and plated transitions carried by reported witnesses.
