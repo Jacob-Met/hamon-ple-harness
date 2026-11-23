@@ -293,34 +293,55 @@ def _extrude_polygon_2d(poly2d: np.ndarray, origin: np.ndarray, x_ax: np.ndarray
 
 
 def _axis2_frame(entities: Dict[int, Tuple[str, List[str]]], aid: Optional[int], scale: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    origin = np.zeros(3, dtype=np.float64)
-    z_ax = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-    x_ax = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-    if aid is not None and aid in entities:
-        et, args = entities[aid]
-        if et in ("AXIS2_PLACEMENT_3D", "IFCAXIS2PLACEMENT3D"):
-            # STEP representation items start with a name; IFC placements
-            # start with Location. Both then carry Axis and RefDirection.
-            placement = args[1:] if et == "AXIS2_PLACEMENT_3D" else args
-            pid = _ref_id(placement[0]) if placement else None
-            if pid and pid in entities:
-                origin = np.array(_num_list(entities[pid][1][-1])[:3], dtype=np.float64) * scale
-            if len(placement) >= 2 and _ref_id(placement[1]) in entities:
-                zv = np.array(_num_list(entities[_ref_id(placement[1])][1][-1])[:3], dtype=np.float64)  # type: ignore[index]
-                if np.linalg.norm(zv) > 1e-12:
-                    z_ax = zv / np.linalg.norm(zv)
-            if len(placement) >= 3 and _ref_id(placement[2]) in entities:
-                xv = np.array(_num_list(entities[_ref_id(placement[2])][1][-1])[:3], dtype=np.float64)  # type: ignore[index]
-                xv = xv - np.dot(xv, z_ax) * z_ax
-                if np.linalg.norm(xv) > 1e-12:
-                    x_ax = xv / np.linalg.norm(xv)
-    if abs(np.dot(x_ax, z_ax)) > 0.99:
-        cand = np.array([0.0, 1.0, 0.0]) if abs(z_ax[1]) < 0.9 else np.array([1.0, 0.0, 0.0])
-        x_ax = cand - np.dot(cand, z_ax) * z_ax
-        x_ax /= np.linalg.norm(x_ax)
-    y_ax = np.cross(z_ax, x_ax)
-    y_ax /= np.linalg.norm(y_ax)
-    return origin, x_ax, y_ax, z_ax
+    """Build a rigid frame from typed coordinates and scale-free direction ratios."""
+    from hamon_ifc_spatial_clash import _placement_normal, _unit_ratios
+    kind, args = entities.get(aid, (None, []))
+    if kind not in {"AXIS2_PLACEMENT_3D", "IFCAXIS2PLACEMENT3D"}:
+        raise ValueError("Analytic solid requires a defined three-dimensional placement")
+    is_ifc = kind == "IFCAXIS2PLACEMENT3D"
+    placement = args if is_ifc else args[1:]
+    if len(args) != (3 if is_ifc else 4):
+        raise ValueError("Analytic placement must have location, axis and reference direction")
+
+    def vector(reference, expected, arity, default=None):
+        if reference == "$" and default is not None:
+            return np.asarray(default, dtype=float)
+        entity_kind, values = entities.get(_ref_id(reference), (None, []))
+        if entity_kind != expected or len(values) != arity:
+            raise ValueError("Analytic placement references a missing or wrongly typed coordinate")
+        token = values[-1].strip()
+        if not (token.startswith("(") and token.endswith(")")):
+            raise ValueError("Analytic placement requires three finite coordinate values")
+        try:
+            result = np.asarray([float(value) for value in _split_step_top_args(token[1:-1])])
+        except (ValueError, OverflowError) as exc:
+            raise ValueError("Analytic placement requires finite coordinates") from exc
+        if result.shape != (3,) or not np.isfinite(result).all():
+            raise ValueError("Analytic placement requires three finite coordinate values")
+        if default is not None and not np.any(result):
+            raise ValueError("Analytic placement direction must be nonzero")
+        return result
+
+    origin = vector(placement[0], "IFCCARTESIANPOINT" if is_ifc else "CARTESIAN_POINT",
+                    1 if is_ifc else 2) * scale
+    if not np.isfinite(origin).all():
+        raise ValueError("Analytic placement origin is outside the finite range")
+    direction_kind = "IFCDIRECTION" if is_ifc else "DIRECTION"
+    arity = 1 if is_ifc else 2
+    z = vector(placement[1], direction_kind, arity, (0., 0., 1.))
+    x = vector(placement[2], direction_kind, arity, (1., 0., 0.))
+    z_axis = _unit_ratios(z)
+    y_axis = _placement_normal(z, x)
+    if y_axis is None:
+        if placement[2] != "$" and (not is_ifc or placement[1] != "$"):
+            raise ValueError("Analytic placement has parallel declared axes")
+        # An omitted STEP reference uses global X unless Z is parallel to it.
+        # Preserve the existing IFC convention when its other axis is omitted.
+        y_axis = _placement_normal(z, np.array([1., 0., 0.]))
+        if y_axis is None:
+            y_axis = _placement_normal(z, np.array([0., 1., 0.]))
+    x_axis = _unit_ratios(np.cross(y_axis, z_axis))
+    return origin, x_axis, y_axis, z_axis
 
 
 def _compute_mesh_mass_properties(vertices: np.ndarray, faces: np.ndarray, density_kg_m3: float,
@@ -462,7 +483,10 @@ def _rectangular_sweep(entities, et, args, unit_scale, frame=None, magnification
     pos_id = _ref_id(args[1] if et == "IFCEXTRUDEDAREASOLID" else args[2])
     depth = float(args[3]) * unit_scale
     if frame is None:
-        frame = _axis2_frame(entities, pos_id, unit_scale)
+        if et == "IFCEXTRUDEDAREASOLID" and args[1] == "$":
+            frame = (np.zeros(3), *np.eye(3))
+        else:
+            frame = _axis2_frame(entities, pos_id, unit_scale)
     origin, x_ax, y_ax, z_ax = frame
     if prof_id in entities:
         pet, pargs = entities[prof_id]
