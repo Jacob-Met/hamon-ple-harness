@@ -277,6 +277,10 @@ class Run:
     self.history: bytes | None = None
     self.archive_watch = None
 
+  def has_unresolved_tools(self):
+    return self.tool_turn is not None and (
+        self.invalid_tail or self.expected_calls != self.observed_results.keys())
+
   async def on_event(self, event: dict[str, Any]) -> None:
     """Processes a parsed JSON event from Pi, updating final message and usage.
 
@@ -600,6 +604,7 @@ async def solve(session: taskbridge.Session) -> str:
             session_dir, run.tool_turn, run.observed_results, run.expected_calls, run.history,
             budget_id=run.budget_id)
       can_continue = (run.tool_turn is None or tool_session is not None) and not delivery_budget_exhausted(session, run.budget_steps)
+      unresolved_archive = bool(archive_plan and run.tool_turn is not None and tool_session is None)
       participant_followup = False
       if delivery_targets and before_delivery is not None:
         after_delivery = await delivery_guard.snapshot(session, delivery_targets)
@@ -609,11 +614,13 @@ async def solve(session: taskbridge.Session) -> str:
           # A completed staging directory can be committed even if Pi ended after
           # an unacknowledged tool request. Independently re-read the graded path.
           terminal.invalidate()
-          recovery = archive_contract.recovery_command(
-              archive_plan[1], delivery_targets[0]["path"], before_delivery, after_delivery)
-          if await archive_contract.run_command(session, recovery):
+          recovery = (archive_plan[1] + " --first-only" if unresolved_archive else
+                      archive_contract.recovery_command(archive_plan[1], delivery_targets[0]["path"],
+                                                        before_delivery, after_delivery))
+          published_now = await archive_contract.run_command(session, recovery)
+          if published_now or unresolved_archive:
             published = await delivery_guard.snapshot(session, delivery_targets)
-            if published:
+            if published or unresolved_archive:
               terminal.observe(published)
               after_delivery = published
               issues = delivery_guard.compare(before_delivery, published)
@@ -647,7 +654,8 @@ async def solve(session: taskbridge.Session) -> str:
             raise
           except Exception as exc:
             await session.log("pi-archive-refine: stopped with " + type(exc).__name__)
-          recovered = await archive_contract.recover_after_refinement(session, command)
+          unresolved_archive = run.has_unresolved_tools()
+          recovered = await archive_contract.recover_after_refinement(session, command, first_only=unresolved_archive)
           await session.log("delivery_gate: archive_after_refinement=" + (recovered or "unverified"))
           if recovered in {"published", "restored"}:
             detail = ("The saved complete version was restored." if recovered == "restored"
@@ -660,7 +668,7 @@ async def solve(session: taskbridge.Session) -> str:
         if issues:
           await session.log("delivery_gate: incomplete=" + str(len(issues)))
           # A cheap task-native deterministic pass precedes another model call.
-          if materialize_candidates and before_generators is not None:
+          if materialize_candidates and before_generators is not None and not unresolved_archive:
             after_generators = await delivery_guard.snapshot(
                 session,
                 delivery_materialize.snapshot_targets(materialize_candidates),
@@ -690,20 +698,49 @@ async def solve(session: taskbridge.Session) -> str:
               issues = delivery_guard.compare(before_delivery, after_delivery)
               await session.log("delivery_gate: post_materialize=" + str(len(issues)))
           delivery_time = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC)
-          if (issues or (working_copy and terminal.filing)) and can_continue and not delivery_budget_exhausted(session, run.budget_steps) and (delivery_time is None or delivery_time >= MIN_DELIVERY_RUN_SEC):
+          # An interrupted tool request cannot be resumed. A new participant
+          # session can still inspect the task files and author a missing local
+          # archive. Never carry a pending command or its presumed result across.
+          enough_time = delivery_time is None or delivery_time >= MIN_DELIVERY_RUN_SEC
+          fresh_plan = None
+          if (unresolved_archive and enough_time and not delivery_budget_exhausted(session, run.budget_steps)
+              and not session.mcp_servers and not run.invalid_tail
+              and run.expected_calls.difference(run.observed_results)
+              and before_delivery.get(delivery_targets[0]["path"], {}).get("state") == "missing"
+              and (after_delivery or {}).get(delivery_targets[0]["path"], {}).get("state") == "missing"):
+            # A late tool may still be editing the original private stage. Give
+            # this pass a distinct stage and never modify its predecessor.
+            fresh_plan = await archive_contract.provision(session, delivery_targets, deadline=monotonic() + 12)
+            delivery_time = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC)
+          if ((issues or (working_copy and terminal.filing)) and (can_continue or fresh_plan)
+              and not delivery_budget_exhausted(session, run.budget_steps)
+              and (delivery_time is None or delivery_time >= MIN_DELIVERY_RUN_SEC)):
             # Each task has its own temporary session directory. Continue the
             # actual calculation history if Pi persisted it before the cutoff.
-            resume = any(session_dir.glob("*.jsonl"))
+            resume = not fresh_plan and any(session_dir.glob("*.jsonl"))
             terminal.invalidate()
             instruction = delivery_guard.repair_instruction(issues) if issues else "\n\nThe working copy was recovered locally."
             if working_copy:
               instruction += terminal.copy_instruction(working_copy)
-            if archive_plan:
+            if fresh_plan:
+              stage, publisher = fresh_plan
+              publisher += " --first-only"
+              instruction += (
+                  "\nAn earlier tool request has no confirmed outcome. Inspect the destination "
+                  f"and the existing project work, including {archive_plan[0]}, read-only. "
+                  f"Write the required members only in a new staging directory, {stage}. "
+                  "Use the project inputs and existing engineering results. Do not repeat the "
+                  "interrupted operation, modify the prior stage, or write directly to the target. "
+                  "Publish once with the following command. If the destination already exists, "
+                  "leave it in place.\n" + publisher)
+            elif archive_plan:
               instruction += archive_contract.first_instruction(*archive_plan)
             if not resume:
               instruction = session.instruction + instruction
             participant_followup = True
-            run.archive_watch = first_publication
+            # A new session cannot acknowledge a call from the previous one.
+            run.archive_watch = (archive_contract.FirstPublication((stage, publisher))
+                                 if fresh_plan else first_publication)
             await taskbridge.run_process(
                 [*argv, "--continue"] if resume else argv,
                 session,
@@ -715,14 +752,20 @@ async def solve(session: taskbridge.Session) -> str:
                 log_prefix="pi-delivery-repair: ",
             )
             run.archive_watch = None
+            unresolved_archive = unresolved_archive or bool(archive_plan and run.has_unresolved_tools())
             after_repair = await delivery_guard.snapshot(session, delivery_targets)
             terminal.observe(after_repair)
             still_missing = delivery_guard.compare(before_delivery, after_repair)
             if still_missing and archive_plan:
               # The final repair can finish the staged members just before its cutoff.
               # The participant's last turn is not responsible for committing them.
-              recovery = archive_contract.recovery_command(
-                  archive_plan[1], delivery_targets[0]["path"], before_delivery, after_repair)
+              if fresh_plan:
+                recovery = publisher
+              elif unresolved_archive:
+                recovery = archive_plan[1] + " --first-only"
+              else:
+                recovery = archive_contract.recovery_command(
+                    archive_plan[1], delivery_targets[0]["path"], before_delivery, after_repair)
               if await archive_contract.run_command(session, recovery):
                 after_repair = await delivery_guard.snapshot(session, delivery_targets)
                 terminal.observe(after_repair)
@@ -746,7 +789,8 @@ async def solve(session: taskbridge.Session) -> str:
       # The repair/finalization turn may have written a generator without running
       # it. Recover only fresh versions for known incomplete explicit outputs,
       # then independently inspect the actual artifacts before returning done.
-      if materialize_candidates and before_generators is not None:
+      if (materialize_candidates and before_generators is not None and not unresolved_archive
+          and not (archive_plan and run.has_unresolved_tools())):
         left = session.time_left()
         budget = 90 if left is None else min(90, max(0, left - 1))
         final_deadline = monotonic() + budget
