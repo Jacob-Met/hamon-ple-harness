@@ -26,3 +26,7 @@ verify-pipe-meshes:
 .PHONY: verify-drainage-front
 verify-drainage-front:
 	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m pytest -q tests/test_consolidation_front.py tests/test_layered_consolidation_transient.py
+
+.PHONY: verify-ifc-indexed-arcs
+verify-ifc-indexed-arcs:
+	OPENBLAS_NUM_THREADS=1 uv run --no-project --with-requirements requirements.txt python -m unittest discover -s tests -p 'test_ifc_indexed_arcs.py' -v
