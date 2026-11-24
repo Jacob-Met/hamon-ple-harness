@@ -542,8 +542,8 @@ def _triangulate_simple_polygon_2d(pts: np.ndarray) -> List[Tuple[int, int, int]
     return tris
 
 
-def _extrude_polygon_2d(outer_pts: np.ndarray, sweep: np.ndarray, inner_pts: Optional[np.ndarray] = None, *, bounded_cap=False) -> Tuple[np.ndarray, np.ndarray]:
-    if _signed_area_2d(outer_pts - outer_pts[0]) < 0:
+def _extrude_polygon_2d(outer_pts: np.ndarray, sweep: np.ndarray, inner_pts: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
+    if _signed_area_2d(outer_pts) < 0:
         outer_pts = outer_pts[::-1].copy()
 
     if inner_pts is not None and len(inner_pts) >= 3:
@@ -576,16 +576,7 @@ def _extrude_polygon_2d(outer_pts: np.ndarray, sweep: np.ndarray, inner_pts: Opt
             return verts, np.array(faces, dtype=np.int32)
 
     k = len(outer_pts)
-    if bounded_cap:
-        index = {tuple(point): i for i, point in enumerate(outer_pts)}
-        cap_tris = []
-        for triangle in _bounded_face_triangles([outer_pts]):
-            a, b, c = (index[tuple(point)] for point in triangle)
-            if _signed_area_2d(outer_pts[[a, b, c]] - outer_pts[a]) < 0:
-                b, c = c, b
-            cap_tris.append((a, b, c))
-    else:
-        cap_tris = _triangulate_simple_polygon_2d(outer_pts)
+    cap_tris = _triangulate_simple_polygon_2d(outer_pts)
     bottom = np.column_stack([outer_pts, np.zeros(k)])
     top = bottom + sweep
     verts = np.vstack([bottom, top])
@@ -600,90 +591,6 @@ def _extrude_polygon_2d(outer_pts: np.ndarray, sweep: np.ndarray, inner_pts: Opt
     if sweep[2] < 0:
         faces = [(a, c, b) for (a, b, c) in faces]
     return verts, np.array(faces, dtype=np.int32)
-
-
-def _indexed_arc_points(start, middle, end):
-    """Sample through the specified interior point in source order, including major arcs."""
-    u, v = middle - start, end - start
-    scale = max(np.max(np.abs(u)), np.max(np.abs(v)))
-    if not 0. < scale < math.inf:
-        raise UnresolvedSolidGeometry("degenerate IFC indexed arc")
-    u, v = u / scale, v / scale
-    det = u[0] * v[1] - u[1] * v[0]
-    if abs(det) <= 64 * np.finfo(float).eps * np.linalg.norm(u) * np.linalg.norm(v):
-        raise UnresolvedSolidGeometry("collinear or ill-conditioned IFC indexed arc")
-    u2, v2 = np.dot(u, u), np.dot(v, v)
-    offset = np.array([v[1] * u2 - u[1] * v2, u[0] * v2 - v[0] * u2]) / (2 * det)
-    radius = np.linalg.norm(offset) * scale
-    if not 0. < radius < math.inf:
-        raise UnresolvedSolidGeometry("unrepresentable IFC indexed arc radius")
-    orientation = math.copysign(1., det)
-    result = []
-    for first, last in ((start, middle), (middle, end)):
-        # Work about each interval's start. sin(x/2)^2 avoids cancellation in
-        # cos(x)-1 for shallow arcs and keeps the original segment endpoints.
-        radial = (first - start) / scale - offset
-        target = (last - start) / scale - offset
-        angle = math.atan2(radial[0]*target[1] - radial[1]*target[0], np.dot(radial, target))
-        sweep = orientation * ((orientation * angle) % math.tau)
-        if not 0 < abs(sweep) < math.tau:
-            raise UnresolvedSolidGeometry("unresolved IFC indexed arc sweep")
-        count = math.ceil(abs(sweep) / math.radians(2))
-        tangent = np.array([-radial[1], radial[0]])
-        for index in range(1, count):
-            t = sweep * index / count
-            result.append(first + scale * (math.sin(t)*tangent - 2*math.sin(t/2)**2*radial))
-        result.append(last)
-    return result
-
-
-def _indexed_profile_ring(entities, args, unit_scale):
-    if len(args) != 3 or args[2] is True:
-        raise UnresolvedSolidGeometry("invalid or self-intersecting IFC indexed profile")
-    try:
-        attrs = _required_ifc_entity(entities, args[0], "IFCCARTESIANPOINTLIST2D")
-        points = np.asarray(attrs[0], dtype=float) * unit_scale
-    except (TypeError, ValueError, IndexError) as exc:
-        raise UnresolvedSolidGeometry("invalid IFC indexed profile points") from exc
-    if points.ndim != 2 or points.shape[1] != 2 or not np.isfinite(points).all():
-        raise UnresolvedSolidGeometry("expected finite 2D IFC indexed profile points")
-    segments = args[1]
-    if segments is None:
-        ring = points
-    else:
-        if not isinstance(segments, list) or not segments:
-            raise UnresolvedSolidGeometry("empty IFC indexed profile segments")
-        ring = []
-        previous = None
-        for segment in segments:
-            if not isinstance(segment, tuple) or len(segment) != 2:
-                raise UnresolvedSolidGeometry("invalid IFC indexed profile segment")
-            kind, typed = segment
-            if not isinstance(typed, list) or len(typed) != 1 or not isinstance(typed[0], list):
-                raise UnresolvedSolidGeometry("invalid IFC segment index list")
-            indices = typed[0]
-            if (len(indices) < 2 or any(type(i) is not int or not 1 <= i <= len(points) for i in indices)
-                    or (previous is not None and indices[0] != previous)):
-                raise UnresolvedSolidGeometry("disconnected or out-of-range IFC segment indices")
-            if not ring:
-                ring.append(points[indices[0] - 1])
-            if kind == "IFCARCINDEX" and len(indices) == 3:
-                ring.extend(_indexed_arc_points(*(points[i - 1] for i in indices)))
-            elif kind == "IFCLINEINDEX":
-                ring.extend(points[i - 1] for i in indices[1:])
-            else:
-                raise UnresolvedSolidGeometry("unsupported IFC segment type or arc length")
-            previous = indices[-1]
-            if len(ring) > 4097:
-                raise UnresolvedSolidGeometry("IFC indexed profile exceeds tessellation budget")
-    if len(ring) > 4097:
-        raise UnresolvedSolidGeometry("IFC indexed profile exceeds tessellation budget")
-    if len(ring) < 4 or not np.array_equal(ring[0], ring[-1]):
-        raise UnresolvedSolidGeometry("IFC indexed area profile must form a closed boundary")
-    ring = np.asarray(ring[:-1])
-    if len(set(map(tuple, ring))) != len(ring):
-        raise UnresolvedSolidGeometry("repeated vertex in IFC indexed area profile")
-    return ring
 
 
 def _profile_polygons_2d(entities: Dict[int, Tuple[str, List[Any]]], pref: Any, unit_scale: float, circle_segments: int = 64) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], np.ndarray]:
@@ -755,8 +662,34 @@ def _profile_polygons_2d(entities: Dict[int, Tuple[str, List[Any]]], pref: Any, 
                     pts.pop()
                 if len(pts) >= 3:
                     return np.array(pts, dtype=np.float64), None, pos_mat
-            elif ctype == "IFCINDEXEDPOLYCURVE":
-                return _indexed_profile_ring(entities, cargs, unit_scale), None, pos_mat
+            elif ctype == "IFCINDEXEDPOLYCURVE" and cargs:
+                lref = cargs[0]
+                if isinstance(lref, tuple) and lref[0] == "ref" and lref[1] in entities:
+                    list_type, largs = entities[lref[1]]
+                    if list_type != "IFCCARTESIANPOINTLIST2D" or not largs:
+                        raise UnresolvedSolidGeometry("Indexed profile needs an IFC 2D point list")
+                    if len(cargs) > 2 and cargs[2] is True:
+                        raise UnresolvedSolidGeometry("Self-intersecting IFC indexed profile")
+                    points = largs[0]
+                    if len(cargs) > 1 and cargs[1] is not None:
+                        from hamon_ifc_indexed_curves import ordered_segments
+                        try:
+                            edges = ordered_segments(points, cargs[1])
+                        except (TypeError, ValueError) as exc:
+                            raise UnresolvedSolidGeometry(str(exc)) from exc
+                        if any(len(edge) == 3 for edge in edges):
+                            raise UnresolvedSolidGeometry("Circular IFC profile requires the source BRep route")
+                        points = [edge[0] for edge in edges]
+                        from shapely import Polygon
+                        polygon = Polygon(points) if len(points) >= 3 else None
+                        if polygon is None or not polygon.is_valid or polygon.area == 0:
+                            raise UnresolvedSolidGeometry("Invalid straight indexed profile boundary")
+                    elif len(points) > 1 and points[0] == points[-1]:
+                        points = points[:-1]
+                    else:
+                        raise UnresolvedSolidGeometry("Unsegmented IFC indexed profile is not closed")
+                    if len(points) >= 3:
+                        return np.asarray(points, dtype=np.float64) * unit_scale, None, pos_mat
     return None, None, pos_mat
 
 
@@ -1312,7 +1245,7 @@ def _advanced_brep_mesh(model, step):
 
 def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, unit_scale: float,
                         mass_issues: Optional[List[str]] = None,
-                        active_items: frozenset = frozenset(), advanced_model=None) -> List[Tuple[np.ndarray, np.ndarray]]:
+                        active_items: frozenset = frozenset(), advanced_mesh=None) -> List[Tuple[np.ndarray, np.ndarray]]:
     if not (isinstance(iref, tuple) and iref[0] == "ref" and iref[1] in entities):
         return []
     if iref[1] in active_items or len(active_items) >= 128:
@@ -1320,7 +1253,7 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
     active_items = active_items | {iref[1]}
     itype, args = entities[iref[1]]
     if itype == "IFCCSGSOLID" and len(args) == 1:
-        return _extract_solid_item(entities, args[0], unit_scale, mass_issues, active_items, advanced_model)
+        return _extract_solid_item(entities, args[0], unit_scale, mass_issues, active_items, advanced_mesh)
     if itype == "IFCBLOCK" and len(args) == 4:
         try:
             location, _, _ = _required_ifc_entity(entities, args[0], "IFCAXIS2PLACEMENT3D")
@@ -1343,7 +1276,7 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
         operands = []
         issues = []
         for reference in args[1:]:
-            pieces = _extract_solid_item(entities, reference, unit_scale, issues, active_items, advanced_model)
+            pieces = _extract_solid_item(entities, reference, unit_scale, issues, active_items, advanced_mesh)
             if not pieces or issues:
                 raise UnresolvedSolidGeometry("unresolved physical Boolean operand")
             operands.append(_boolean_meshes(pieces) if len(pieces) > 1 else pieces[0])
@@ -1369,10 +1302,7 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
         sweep = (prof_mat[:3, :3].T @ direction) * depth
         if not np.isfinite(sweep).all() or sweep[2] == 0:
             raise UnresolvedSolidGeometry("IFC sweep is not representable as a finite solid")
-        profile_kind, profile_attrs = entities[args[0][1]]
-        indexed = (profile_kind == "IFCARBITRARYCLOSEDPROFILEDEF"
-                   and entities[profile_attrs[2][1]][0] == "IFCINDEXEDPOLYCURVE")
-        verts, faces = _extrude_polygon_2d(outer, sweep, inner_pts=inner, bounded_cap=indexed)
+        verts, faces = _extrude_polygon_2d(outer, sweep, inner_pts=inner)
         verts = _apply_transform(verts, solid_mat @ prof_mat)
         return [(verts, faces)]
 
@@ -1391,7 +1321,7 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
                     _, rargs = entities[rep_ref[1]]
                     if len(rargs) >= 4 and isinstance(rargs[3], list):
                         for sub in rargs[3]:
-                            sub_meshes = _extract_solid_item(entities, sub, unit_scale, mass_issues, active_items, advanced_model)
+                            sub_meshes = _extract_solid_item(entities, sub, unit_scale, mass_issues, active_items, advanced_mesh)
                             if not sub_meshes:
                                 raise UnresolvedSolidGeometry("unresolved physical item in mapped representation")
                             for (vv, ff) in sub_meshes:
@@ -1412,8 +1342,8 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
     if itype == "IFCPOLYGONALFACESET":
         return _polygonal_solid_mesh(entities, args, unit_scale)
 
-    if itype == "IFCADVANCEDBREP" and advanced_model is not None:
-        return [_advanced_brep_mesh(advanced_model(), iref[1])]
+    if itype == "IFCADVANCEDBREP" and advanced_mesh is not None:
+        return [advanced_mesh(iref[1])]
     if itype == "IFCFACETEDBREPWITHVOIDS":
         return _faceted_void_solid_mesh(entities, args, unit_scale)
     if itype == "IFCFACETEDBREP":
@@ -1687,6 +1617,10 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
         except (ImportError, RuntimeError, ValueError) as exc:
             raise UnresolvedSolidGeometry("advanced BRep requires a readable IFC kernel model") from exc
 
+    @cache
+    def advanced_mesh(step):
+        return _advanced_brep_mesh(advanced_model(), step)
+
     for eid, etype, args, rargs in _product_shapes(entities):
         if eid in participants:
             _require_single_swept_body(entities, eid)
@@ -1708,7 +1642,7 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
             if rep_ident in ("AXIS", "FOOTPRINT", "BOX"):
                 continue
             for item_ref in sr_args[3]:
-                item_meshes = _extract_solid_item(entities, item_ref, unit_scale, mass_issues, advanced_model=advanced_model)
+                item_meshes = _extract_solid_item(entities, item_ref, unit_scale, mass_issues, advanced_mesh=advanced_mesh)
                 if rep_ident == "BODY" and not item_meshes:
                     raise UnresolvedSolidGeometry(f"unsupported or empty physical Body item on #{eid}")
                 for (v_local, f_local) in item_meshes:
@@ -2185,6 +2119,15 @@ def detect_ifc_clashes(
     required_clearance_m: float = 0.0,
     cross_discipline_only: bool = False,
 ) -> Dict[str, Any]:
+    if "IFCARCINDEX" in ifc_text.upper():
+        from hamon_ifc_indexed_curves import curved_scene, has_direct_arc
+        entities = parse_ifc_entities(ifc_text)
+        if has_direct_arc(entities, _product_shapes(entities)):
+            try:
+                return curved_scene(ifc_text, _product_shapes(entities, strict=True),
+                                    required_clearance_m, cross_discipline_only, _infer_discipline)
+            except (ImportError, RuntimeError, ValueError, TypeError, AttributeError, IndexError, ArithmeticError) as exc:
+                raise UnresolvedSolidGeometry(f"Unresolved IFC curved Body: {exc}") from exc
     solids = load_ifc_solids(ifc_text)
     # Bounds can prove clearance and eliminate candidates for the minimum.
     # Only a narrow-phase result supplies an attainable distance and witness.
@@ -2226,7 +2169,6 @@ def detect_ifc_clashes(
         quantity = {"total_solid_volume_m3": None, "volume_status": "unresolved",
                     "volume_reason": str(exc)}
     return {
-        "geometry_basis": "triangulated boundaries; curves use chords and advanced BRep surfaces use planar facets",
         "solid_count": len(solids),
         "pair_count": len(results),
         "hard_clash_count": len(hard),

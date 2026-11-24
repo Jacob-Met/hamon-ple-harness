@@ -27,13 +27,6 @@ jobs:
             --output "$RUNNER_TEMP/annex-e-twisted-cube.ifc"
           test "$(git hash-object "$RUNNER_TEMP/annex-e-twisted-cube.ifc")" = 1f0e5b59bc1890d081350bc5d8fe692985f424b9
           PLE_ANNEX_E_TWISTED_CUBE="$RUNNER_TEMP/annex-e-twisted-cube.ifc" python -m unittest discover -s tests -p test_ifc_advanced_brep.py -v
-      - name: Published Geometry Gym IFC4 slab with indexed circular edges
-        run: |
-          curl --fail --silent --show-error --location --retry 2 --max-time 30 \
-            https://raw.githubusercontent.com/buildingsmart-community/IfcScript/8edfee3119500f4adb741c0578a4bd272d018586/Examples/Slab.ifc \
-            --output "$RUNNER_TEMP/geometry-gym-slab.ifc"
-          test "$(git hash-object "$RUNNER_TEMP/geometry-gym-slab.ifc")" = 1f06237af16acc62f6188aaaaa0d001b9e506aa9
-          PLE_GEOMETRY_GYM_SLAB="$RUNNER_TEMP/geometry-gym-slab.ifc" python -m unittest discover -s tests -p test_ifc_indexed_arcs.py -v
       - name: System PDF vector tools for real two-sheet drawing contract
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends poppler-utils
       - name: Independent stadium copper and task provisioning controls
@@ -43,6 +36,8 @@ jobs:
       - name: Isolated filesystem for real Pi delivery recovery
         run: sudo install -d -m 755 -o "$(id -un)" /filesystem
       - run: python -m unittest discover -s tests -v
+      - name: Published Janbu slices through the real registered Pi tool (not scored)
+        run: python ship/verify_janbu_registered.py
       - name: All public delivery schemas over real loopback Pi SSE (not scored)
         run: python tests/replay_empty_worlds.py
       - name: Registered thin polygon pressure and support-distance controls
