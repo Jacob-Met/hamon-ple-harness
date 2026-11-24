@@ -17,8 +17,7 @@ import replay_engineering_provider_wire as wire
 from test_janbu_slices import seequent
 
 
-async def main():
-    payload = {"mode": "civil_geotech", "spec": {**seequent(), "required_factor_of_safety": 1.25}}
+async def registered_answer(payload, label):
     reference_events = wire.tool_events
     original_digest = wire.digest
     answers = []
@@ -34,21 +33,26 @@ async def main():
         # Observe those bytes before the digest without changing its fingerprint.
         if data.startswith(b"{"):
             candidate = json.loads(data)
-            if candidate.get("calculation") == "janbu_slices":
+            if candidate.get("calculation") == payload["spec"]["calculation"]:
                 answers.append(candidate)
         return original_digest(data)
 
     with (patch.object(wire, "tool_events", issue_slope_call),
           patch.object(wire, "digest", observe_result)):
-        trial = await wire.replay(ROOT, "seequent-janbu", "Check the specified slope.",
+        trial = await wire.replay(ROOT, label, "Check the specified slope.",
                                   True, None, "claude-opus-5-5")
     assert len(trial["requests"]) == 2 and len(answers) == 1, trial
-    answer = answers[0]
+    return answers[0], len(trial["requests"])
+
+
+async def main():
+    payload = {"mode": "civil_geotech", "spec": {**seequent(), "required_factor_of_safety": 1.25}}
+    answer, requests = await registered_answer(payload, "seequent-janbu")
     assert answer["method"] == "janbu_simplified_uncorrected"
     assert answer["verified"] and answer["base_contact_verified"] and answer["conservation_verified"]
     assert not answer["meets_required_factor"] and len(answer["slices"]) == 29
     assert math.isclose(answer["factor_of_safety"], 1.1247783031418455, rel_tol=0, abs_tol=1e-12)
-    print(json.dumps({"requests": 2, "slices": 29, "factor_of_safety": answer["factor_of_safety"],
+    print(json.dumps({"requests": requests, "slices": 29, "factor_of_safety": answer["factor_of_safety"],
                       "meets_required_factor": answer["meets_required_factor"]}))
 
 
