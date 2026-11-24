@@ -5,6 +5,7 @@ Public-case source: MATPOWER/matpower@b6c85b0323d20fb801cab3377c803a285d730847.
 The case parser reads literal numeric matrices; it does not execute MATLAB.
 """
 import argparse
+import ast
 import cmath
 import copy
 import importlib.util
@@ -17,10 +18,34 @@ import sys
 
 
 def load(name, path):
+    path = Path(path).resolve()
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
-    spec.loader.exec_module(module)
+    # An older standalone solver needs no companion. A modular solver must use
+    # its own source tree's helper, never an already cached candidate version.
+    dependency = "hamon_ac_sparse"
+    imports_helper = any(isinstance(node, ast.ImportFrom) and node.module == dependency
+                         for node in ast.parse(path.read_text()).body)
+    if not imports_helper:
+        spec.loader.exec_module(module)
+        return module
+    helper_path = path.with_name(dependency + ".py")
+    if not helper_path.is_file():
+        raise ImportError(f"AC source requires its own companion: {helper_path}")
+    missing = object()
+    previous = sys.modules.get(dependency, missing)
+    helper_spec = importlib.util.spec_from_file_location(dependency, helper_path)
+    helper = importlib.util.module_from_spec(helper_spec)
+    try:
+        sys.modules[dependency] = helper
+        helper_spec.loader.exec_module(helper)
+        spec.loader.exec_module(module)
+    finally:
+        if previous is missing:
+            sys.modules.pop(dependency, None)
+        else:
+            sys.modules[dependency] = previous
     return module
 
 
