@@ -57,8 +57,18 @@ def replay(name, directory):
         else:
             solid.Outer.CfsFaces = faces + faces[:1]
         result = run_router_ifc_clash({"ifc_text": model.to_string()})
-        assert not result["ok"] and result["total_solid_volume_m3"] is None, result
-        refusals[damage] = result["status"]
+        if damage == "second_product" and result["ok"]:
+            # The multi-product mesh path can qualify both occurrences, but
+            # must not apply an exact one-product result to the entire model.
+            assert result["solid_count"] == 2, result
+            assert "source_advanced_brep_step_id" not in result, result
+            assert result.get("volume_method") != "ifcopenshell_reoriented_closed_brep", result
+            measured = result["total_solid_volume_m3"]
+            assert math.isclose(measured, 2 * volume, rel_tol=.002), result
+            refusals[damage] = {"route": "multi_product_mesh", "volume_m3": measured}
+        else:
+            assert not result["ok"] and result["total_solid_volume_m3"] is None, result
+            refusals[damage] = result["status"]
     return {"source_sha256": expected_hash, "registered": original, "refusals": refusals}
 
 
