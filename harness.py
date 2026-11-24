@@ -294,7 +294,8 @@ class Run:
     if kind == "message_end" and message.get("role") == "toolResult":
       if self.tool_turn is not None:
         call_id = message.get("toolCallId")
-        if call_id not in self.expected_calls or call_id in self.observed_results:
+        if (not isinstance(call_id, str) or call_id not in self.expected_calls
+            or call_id in self.observed_results):
           self.invalid_tail = True
         else:
           self.observed_results[call_id] = message_digest(message)
@@ -342,6 +343,13 @@ class Run:
       )
     elif kind in ("auto_retry_start", "compaction_start"):
       await self.session.log(f"pi: {kind} {json.dumps(event)[:300]}")
+
+  def pending_tool_batch(self) -> bool:
+    """A complete declared batch is still waiting for at least one result."""
+    return (
+        self.history is not None and self.tool_turn is not None and bool(self.expected_calls)
+        and not self.invalid_tail and self.observed_results.keys() != self.expected_calls
+    )
 
   async def on_line(self, line: bytes) -> None:
     """Parses a raw stdout line from Pi as JSON and forwards it to `on_event`.
@@ -580,6 +588,8 @@ async def solve(session: taskbridge.Session) -> str:
           on_line=run.on_line,
           stdin=first_request.encode(),
           stop_before_sec=reserve_window,
+          tool_batch_pending=run.pending_tool_batch if checked_delivery else None,
+          tool_batch_reserve_sec=STOP_BEFORE_SEC if checked_delivery else None,
           log_prefix="pi: ",
       )
       first_publication = run.archive_watch
@@ -748,9 +758,14 @@ async def solve(session: taskbridge.Session) -> str:
           if final_issues:
             generator_probes = delivery_materialize.snapshot_targets(materialize_candidates)
             member_paths = sorted(first_publication.required_outputs) if archive_plan else []
-            if len(generator_probes) + len(member_paths) > delivery_guard.MAX_TARGETS:
+            members_absent_at_start = bool(member_paths) and (
+                before_delivery.get(delivery_targets[0]["path"], {}).get("loose_members_initially_absent") is True
+            )
+            loose_probes = []
+            if not members_absent_at_start:
+              if len(generator_probes) + len(member_paths) > delivery_guard.MAX_TARGETS:
                 member_paths = []
-            loose_probes = [{"path": path, "kind": "file"} for path in member_paths]
+              loose_probes = [{"path": path, "kind": "file"} for path in member_paths]
             after_generators = await delivery_guard.snapshot(
                 session, generator_probes + loose_probes, deadline=final_deadline - 10,
             )
@@ -765,7 +780,8 @@ async def solve(session: taskbridge.Session) -> str:
               )
               if member_paths and any(row["state"] == "executed" for row in observed):
                 await archive_contract.publish_generated(
-                    session, archive_plan[1], member_paths, after_generators, deadline=final_deadline - 10,
+                    session, archive_plan[1], member_paths, after_generators,
+                    initially_absent=members_absent_at_start, deadline=final_deadline - 10,
                 )
               terminal.observe(await delivery_guard.snapshot(
                   session, delivery_targets, deadline=final_deadline,

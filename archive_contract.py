@@ -214,12 +214,15 @@ async def run_command(session, command):
     return await _command_result(session, command) is not None
 
 
-async def publish_generated(session, command, paths, before, *, deadline):
-    """Publish only a complete set of freshly produced loose members."""
-    if not paths or not before:
+async def publish_generated(session, command, paths, before, *, deadline, initially_absent=False):
+    """Accept task-created members, or require individual changes since the pre-generator probe."""
+    if not paths or (not initially_absent and not before):
         return
     prior = {}
     for path in paths:
+        if initially_absent:
+            prior[Path(path).name] = None
+            continue
         row = before.get(path) or {}
         if row.get("state") in {"missing", "empty"}:
             prior[Path(path).name] = None

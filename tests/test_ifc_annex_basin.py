@@ -110,9 +110,12 @@ console.log(JSON.stringify(result.details));
                                       "native_area_m2": native.area().to_double(),
                                       "native_faces": native.num_faces(), "result": reply}, sort_keys=True))
                     if kind == "advanced-brep":
-                        self.assertFalse(reply["ok"], reply)
-                        self.assertIn("source edge #532 twice in the same direction", reply["reason"])
-                        self.assertIsNone(reply["total_solid_volume_m3"])
+                        self.assertTrue(reply["ok"], reply)
+                        self.assertEqual(reply["source_face_count"], 5)
+                        self.assertAlmostEqual(reply["total_solid_volume_m3"], integrated,
+                                               delta=integrated * .0001)
+                        self.assertGreater(abs(kernel-integrated), .4*integrated)
+                        self.assertGreater(abs(samples[-1]["volume_m3"]-integrated), integrated)
                         continue
                     self.assertTrue(reply["ok"], reply)
                     self.assertEqual(reply["solid_count"], 1)
