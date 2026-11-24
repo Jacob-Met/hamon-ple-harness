@@ -22,7 +22,7 @@ For exactly antipodal endpoints, supply a nonzero `plane_normal` perpendicular t
 
 ## Computation and evidence
 
-The solver uses the Lancaster–Blanchard time equation and radial/transverse velocity reconstruction described by [Izzo, *Revisiting Lambert’s Problem*](https://arxiv.org/abs/1403.2705), equation 18 and Algorithm 1. It brackets the monotone zero-revolution branch in the elliptic and hyperbolic domains, with the analytic parabolic limit. Intermediate arithmetic uses a private 90-decimal-digit context and bounded loops.
+The solver uses the Lancaster–Blanchard time equation and radial/transverse velocity reconstruction described by [Izzo, *Revisiting Lambert’s Problem*](https://arxiv.org/abs/1403.2705), equation 18 and Algorithm 1. It brackets the monotone zero-revolution branch in the elliptic and hyperbolic domains, with the analytic parabolic limit. For 1–32 complete revolutions, it first isolates the time curve's stationary minimum using equation 22. It then brackets the requested root on just one side of that minimum, so a root iteration cannot silently switch solutions. Intermediate arithmetic uses a private 90-decimal-digit context and bounded loops.
 
 After rounding the velocities to their JSON binary64 representation, a separate universal-Kepler initial-value calculation propagates the **published departure velocity** for the supplied flight time. The certificate includes arrival-position error, arrival-velocity error, time residuals, and energy and angular-momentum differences. `endpoint_verified` requires all normalized residuals below 1e-10. The arrival-position error is normalized by the arrival radius, so a large departure radius cannot hide a missed small destination.
 
@@ -32,9 +32,27 @@ The regression course derives elliptic endpoints from eccentric anomaly, hyperbo
 
 ## Scope
 
-This is an unperturbed point-mass two-body model with zero complete revolutions. It supports elliptic, parabolic and hyperbolic transfers and explicitly chosen arc directions. It does not establish three-body dynamics, collision clearance, perturbations, thrust, launch constraints, or mission feasibility. `conic_periapsis_m` describes the full fitted conic; that periapsis need not occur during the selected arc.
+This is an unperturbed point-mass two-body model with zero to 32 complete revolutions. It supports elliptic, parabolic and hyperbolic transfers and explicitly chosen arc directions. It does not establish three-body dynamics, collision clearance, perturbations, thrust, launch constraints, or mission feasibility. `conic_periapsis_m` describes the full fitted conic; that periapsis need not occur during the selected arc.
 
-Only `revolutions=0` is accepted. Additional physical parameters are refused rather than silently discarded. Numerical range, ambiguity or iteration-budget failures return `verified=false`; a small conservation residual alone cannot certify an unresolved endpoint.
+The default remains `revolutions=0`. For a positive integer count up to 32, `revolution_branch` is mandatory: `lower_x` or `upper_x` selects the smaller or larger Lancaster–Blanchard x root on either side of the minimum-time point. These labels choose solutions, not a minimum-delta-v mission. The short/long geometric arc choice remains separate. `minimum_tof_s` reports the branch-pair threshold rounded to binary64; a time below the true computed threshold is refused, without a permissive rounding tolerance. A rounded threshold may itself lie just below the true value. Supplying a branch for zero revolutions is refused. Additional physical parameters are refused rather than silently discarded. Numerical range, ambiguity or iteration-budget failures return `verified=false`; a small conservation residual alone cannot certify an unresolved endpoint.
 
 The existing `orbital_transfer` subkind retains circular Hohmann sizing. It now refuses Lambert position/time/branch parameters, which it previously ignored. Select `lambert_transfer` to solve those boundary conditions. This implementation and its synthetic tests do not constitute a new scored PLE evaluation.
 
+
+## Complete-revolution evidence
+
+The independent endpoint replay uses the published departure velocity. Its
+specific energy also determines the orbital period, and the elapsed number of
+whole periods must equal the requested revolution count. This prevents endpoint
+agreement on another revolution branch from being certified. The result exposes
+`propagated_revolutions`, `revolution_count_verified`, and
+`swept_angle_rad` including complete turns; `transfer_angle_rad` remains the
+geometric endpoint angle.
+
+Four published 36,000-second transfers from Der's AMOS 2011 example are checked
+against their tabulated velocities, independently transcribed in the
+[source-pinned LambertHub reference](https://github.com/jorgepiloto/lamberthub/blob/5010709b000bb6b29831ad628fa4b1ce1f519036/tests/test_multirev_solvers.py).
+Both explicit roots, short and long geometric arcs, infeasible flight times,
+and the minimum-time bifurcation are covered. Circular trajectories independently
+check the revolution count through 32 complete turns. These are physical solver
+and protocol checks; they do not measure an organizer score.
