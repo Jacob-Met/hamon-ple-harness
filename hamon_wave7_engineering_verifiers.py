@@ -1687,6 +1687,14 @@ def solve_lagrangian_orbital(params: Mapping[str, Any]) -> Dict[str, Any]:
     if subkind == "lagrangian_modes":
         return _lagrangian_modes(params)
 
+    cr3bp_fields = {"mass_ratio", "flight_time_tu", "initial_state", "target_state", "target_lagrange"}
+    if subkind == "cr3bp_transfer" or cr3bp_fields.intersection(params):
+        from hamon_cr3bp import verify_cr3bp_transfer
+        if "subkind" in params and subkind != "cr3bp_transfer":
+            return {"domain": "lagrangian_orbital", "subkind": subkind, "verified": False,
+                    "error": "conflicting_orbital_models"}
+        return verify_cr3bp_transfer(params)
+
     if subkind == "orbital_transfer":
         return _orbital_transfer(params)
 
@@ -2289,7 +2297,7 @@ def infer_wave7_domain(text_or_domain: str) -> Optional[str]:
         return "thermo_cycles"
     if any(k in s for k in ("epsilon-ntu", "ntu", "heat exchanger", "shell_tube", "radiosity", "view factor", "oppenheim", "gray enclosure", "radiation_network")):
         return "exchangers_radiation"
-    if any(k in s for k in ("euler_rigid_body", "rigid body", "principal inertia", "lagrangian", "eigenmode", "natural frequenc", "hohmann", "vis-viva", "orbital_transfer")):
+    if any(k in s for k in ("euler_rigid_body", "rigid body", "principal inertia", "lagrangian", "eigenmode", "natural frequenc", "hohmann", "vis-viva", "orbital_transfer", "cr3bp", "circular restricted three-body", "circular restricted three body")):
         return "lagrangian_orbital"
     if any(k in s for k in ("nernst", "faraday", "overpotential", "electrochem", "mccabe-thiele", "mccabe", "fenske", "underwood", "distillation", "equilibrium_flash")):
         return "electrochem_separations"
@@ -2299,10 +2307,12 @@ def infer_wave7_domain(text_or_domain: str) -> Optional[str]:
 def dispatch_wave7_verifier(domain_or_spec: Any, params: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     if isinstance(domain_or_spec, Mapping):
         spec = domain_or_spec
-        domain = infer_wave7_domain(str(spec.get("domain") or spec.get("kind") or spec.get("prompt") or ""))
+        requested = str(spec.get("domain") or spec.get("kind") or spec.get("prompt") or "")
+        domain = infer_wave7_domain(requested)
         eff_params = dict(spec.get("params") or spec)
     else:
-        domain = infer_wave7_domain(str(domain_or_spec))
+        requested = str(domain_or_spec)
+        domain = infer_wave7_domain(requested)
         eff_params = dict(params or {})
 
     if domain == "thermo_cycles":
@@ -2310,6 +2320,10 @@ def dispatch_wave7_verifier(domain_or_spec: Any, params: Optional[Mapping[str, A
     if domain == "exchangers_radiation":
         return solve_exchanger_or_radiation(eff_params)
     if domain == "lagrangian_orbital":
+        if any(term in requested.lower() for term in ("cr3bp", "circular restricted three-body", "circular restricted three body")):
+            if str(eff_params.get("subkind", "cr3bp_transfer")).lower() != "cr3bp_transfer":
+                return {"domain": domain, "verified": False, "error": "conflicting_orbital_models"}
+            eff_params.setdefault("subkind", "cr3bp_transfer")
         return solve_lagrangian_orbital(eff_params)
     if domain == "electrochem_separations":
         return solve_electrochem_or_separation(eff_params)
