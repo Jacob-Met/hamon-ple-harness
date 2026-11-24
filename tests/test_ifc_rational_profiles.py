@@ -58,6 +58,38 @@ class RationalProfile(unittest.TestCase):
                 self.assertTrue(report["ok"], report)
                 self.assertAlmostEqual(report["total_solid_volume_m3"], .2*reference_area(weight), delta=2e-8)
 
+    def test_reverse_orientation_and_concave_control_polygon(self):
+        f = model(.5)
+        ring = f.by_type("IfcRationalBSplineCurveWithKnots")[0]
+        ring.ControlPointsList = tuple(reversed(ring.ControlPointsList))
+        ring.WeightsData = tuple(reversed(ring.WeightsData))
+        result = public(f)
+        self.assertTrue(result["ok"], result)
+        self.assertAlmostEqual(result["total_solid_volume_m3"], .2*reference_area(.5), delta=2e-8)
+        # Pull the north-west outer control into the diamond without opening
+        # or crossing the ring. A control hull alone cannot certify its chords.
+        ring.ControlPointsList[3].Coordinates = (-.1, -.1)
+        result = public(f)
+        self.assertFalse(result["ok"], result)
+        self.assertIsNone(result["total_solid_volume_m3"])
+
+    def test_hole_in_peer_profile_never_certifies_solid_material(self):
+        f = model(.5)
+        make = f.create_entity
+        base = f.by_type("IfcExtrudedAreaSolid")[0]
+        corners = [make("IfcCartesianPoint", xy) for xy in
+                   ((-.1,-.1),(.1,-.1),(.1,.1),(-.1,.1))]
+        hole = make("IfcPolyline", [*corners, corners[0]])
+        profile = make("IfcArbitraryProfileDefWithVoids", "AREA", None, base.SweptArea.OuterCurve, [hole])
+        body = make("IfcExtrudedAreaSolid", profile, base.Position, base.ExtrudedDirection, base.Depth)
+        ctx = f.by_type("IfcProject")[0].RepresentationContexts[0]
+        rep = make("IfcShapeRepresentation", ctx, "Body", "SweptSolid", [body])
+        make("IfcColumn", ifcopenshell.guid.new(), None, "void peer", None, None,
+             f.by_type("IfcSlab")[0].ObjectPlacement, make("IfcProductDefinitionShape",None,None,[rep]))
+        result = public(f)
+        self.assertFalse(result["ok"], result)
+        self.assertIsNone(result["total_solid_volume_m3"])
+
     def test_gap_contact_and_overlap(self):
         for gap, status in ((.025, "clearance_violation"), (.3, "clear"),
                             (0., "hard_clash"), (-.05, "hard_clash")):
@@ -88,6 +120,10 @@ class RationalProfile(unittest.TestCase):
                 boundary = (weight+.5)/(weight+1)
                 distance = max(0., math.sqrt(2)*(.745-boundary))
                 self.assertAlmostEqual(result["min_clearance_m"], distance, places=7)
+                lo,hi = result["all_pairs"][0]["distance_bounds_m"]
+                self.assertLessEqual(lo, distance+8*math.ulp(distance))
+                self.assertGreaterEqual(hi, distance-8*math.ulp(distance))
+                self.assertLessEqual(hi-lo, 1e-8)
 
     def test_open_crossing_or_unsupported_span_abstains(self):
         for change in ("open", "crossing", "weight-ratio", "knot-span"):

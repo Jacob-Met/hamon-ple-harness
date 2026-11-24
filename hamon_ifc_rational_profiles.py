@@ -50,9 +50,10 @@ def rational_profile_area(curve):
         raise ValueError("Repeated rational profile control vertex")
     direction = 0
     # Every directed side of the control polygon must support its convex hull.
-    # Ordered distinct hull points preclude crossing spans. A span with positive
-    # weights lies in its own control triangle; adjacent triangles meet at most
-    # on their shared endpoint for this cyclic convex polygon.
+    # Positive weights keep each span in its control triangle. A quadratic
+    # rational span has the signed curvature of that triangle and follows the
+    # adjacent control edges at its endpoints. The cyclic support test below
+    # therefore implies one convex boundary; only then are chords inner bounds.
     for a,b in zip(boundary, boundary[1:]+boundary[:1]):
         for c in boundary:
             turn = _cross(a,b,c)
@@ -194,7 +195,7 @@ def _distance(left, right, clearance):
 def rational_scene(model, bodies, scale, required_clearance, cross_only, discipline):
     from ifcopenshell.util.placement import get_axis2placement, get_local_placement
     length = Fraction(str(scale))
-    if not 0 < length or len(bodies)>32 or not math.isfinite(required_clearance):
+    if not 0 < length or len(bodies)>32 or not math.isfinite(required_clearance) or required_clearance < 0:
         raise ValueError("Outside bounded rational scene or units")
     products = []
     for product,kind,args,reps,items,ring in bodies:
@@ -216,7 +217,8 @@ def rational_scene(model, bodies, scale, required_clearance, cross_only, discipl
         matrix = get_local_placement(product.ObjectPlacement)
         if item.Position is not None:
             matrix = matrix @ get_axis2placement(item.Position)
-        if ring is not None and ring.is_a()=="IfcRationalBSplineCurveWithKnots":
+        if (ring is not None and ring.is_a()=="IfcRationalBSplineCurveWithKnots"
+                and profile.is_a()=="IfcArbitraryClosedProfileDef"):
             area = rational_profile_area(ring)
             coords = [p.Coordinates for p in ring.ControlPointsList]
             weights = [_number(w) for w in ring.WeightsData]
