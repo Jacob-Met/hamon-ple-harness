@@ -9,60 +9,56 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: 4d095659eba9602158919e9211c47268adcf1026
+      - uses: actions/checkout@v4
+        with:
           ref: 04814d8e8e84981f840bb37423c66146ec372ed8
+          path: controls
+          sparse-checkout: tests/test_ifc_volume_only_opening_admission.py
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install --disable-pip-version-check -r requirements.txt
-      - name: Explore source topology and two authentic role counterfactuals
+      - name: Run independent regression on the exact solver
+        run: |
+          test "$(git rev-parse HEAD)" = 4d095659eba9602158919e9211c47268adcf1026
+          test "$(git hash-object controls/tests/test_ifc_volume_only_opening_admission.py)" = fb587625d2e33c891c0b7dcdc50c9f49534e3a7d
+          PYTHONPATH=.:tests python -m unittest discover -s controls/tests -p 'test_ifc_volume_only_opening_admission.py' -v
+      - name: Counterfactual opening use of the two unchanged FZK meshes
         run: |
           curl -fsSL --retry 3 --max-time 45 https://raw.githubusercontent.com/IfcOpenShell/IfcOpenShell/90c840c68fb35a54e1a61505c6417ab854f826a5/docs/ifcopenshell-cpp/models/AC20-FZK-Haus.ifc -o "$RUNNER_TEMP/fzk.ifc"
           PYTHONPATH=tests:. python - <<'PY'
-          import os, pathlib, hashlib
+          import os, pathlib, hashlib, math
           from dataclasses import replace
-          from test_ifc_volume_only_opening_admission import triangle
+          import numpy as np
           from test_ifc_finite_halfspace_openings import Source
           import hamon_ifc_spatial_clash as r
           import hamon_ifc_partial as h
-          a=[(0.,0.),(2.,0.),(0.,2.)]
-          c=[(.25,.25),(.75,.25),(.25,.75)]
-          for name,b in {
-            'hyp-mid':[(1.,1.),(2.,1.),(1.,2.)],
-            'shared-out':[(2.,0.),(3.,0.),(3.,-1.)],
-            'shared-overlap':[(2.,0.),(3.,1.),(1.,1.)],
-            'zero-opposite':[(0.,0.),(-1.,0.),(0.,-1.)],
-            'zero-overlap-aabb':[(0.,0.),(-2.,1.),(-1.,-1.)],
-          }.items():
-              scene=Source()
-              tri=[triangle(scene,a),triangle(scene,b),triangle(scene,c,.5,1.)]
-              scene.product('IFCWALL',tri)
-              try:
-                  m,=scene.solids()
-                  print(name,m.certified_union_volume_m3,m.volume_m3(),m.material_face_counts,m.metadata,flush=True)
-              except Exception as e:
-                  print(name,type(e).__name__,str(e),flush=True)
           source=pathlib.Path(os.environ['RUNNER_TEMP'],'fzk.ifc').read_bytes()
           assert hashlib.sha256(source).hexdigest()=='ea6f04eaf92fac4d7ad0038bc3d2dfea4c094dd3f516ecc33c50bf1835ca108d'
           rows,meshes,*_=h._inventory(source.decode())
+          scene=Source()
+          scene.product('IFCWALL',[scene.box()])
+          plain,=scene.solids()
+          plain=replace(plain,vertices=plain.vertices+100.)
           for step in [66459,74280]:
-              m=meshes[step]
-              print('window',step,m.certified_union_volume_m3,m.material_face_counts,m.volume_m3(),flush=True)
-              # Keep the authored window unchanged. Pair with a disjoint original
-              # wall for a role counterfactual specific to boundary admission.
-              scene=Source()
-              scene.product('IFCWALL',[scene.box()])
-              plain,=scene.solids()
-              plain=replace(plain,vertices=plain.vertices+100.)
+              window=meshes[step]
+              assert len(window.material_face_counts)==11
+              assert math.isclose(window.volume_m3(),0.0298949822468136,rel_tol=0,abs_tol=1e-12)
+              assert window.certified_union_volume_m3==window.volume_m3()
+              print('original-window',step,'volume',window.volume_m3(),'faces',window.material_face_counts)
+              assert (window.aabb_max < plain.aabb_min).any()
               for role in ('host','cutter'):
-                  a,b=(m,plain) if role=='host' else (plain,m)
+                  a,b=(window,plain) if role=='host' else (plain,window)
                   a=replace(a,metadata={'step_id':1},ifc_type='IFCWALL')
                   b=replace(b,metadata={'step_id':2},ifc_type='IFCOPENINGELEMENT')
+                  ent={1:('IFCWALL',[None]*6),2:('IFCOPENINGELEMENT',[None]*6)}
                   try:
-                      out=r._physical_occurrences([a,b],{1:('IFCWALL',[None]*6),2:('IFCOPENINGELEMENT',[None]*6)},1.,{1:{2}})
-                      print('role',step,role,'accepted',[(z.volume_m3(),z.metadata) for z in out],flush=True)
-                  except ValueError as exc:
-                      print('role',step,role,type(exc).__name__,str(exc),flush=True)
+                      r._physical_occurrences([a,b],ent,1.,{1:{2}})
+                  except r.UnresolvedOpening as error:
+                      assert 'Unqualified compound' in str(error),error
+                      print('declined',step,role,str(error))
+                  else:
+                      raise AssertionError(('volume-only source admitted',step,role))
           PY
-      - name: Run positive union and pre-subtraction role admission controls
-        if: always()
-        run: python -m unittest discover -s tests -p test_ifc_volume_only_opening_admission.py -v
