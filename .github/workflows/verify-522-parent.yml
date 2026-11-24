@@ -1,0 +1,43 @@
+name: Check PR 522 parent regressions
+on:
+  push:
+    branches: [p1/verify-522-parent-regressions]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: a3e4866b6970205e360e6420a48e3967d8ff187e
+      - uses: actions/checkout@v4
+        with:
+          ref: 077d180090fa04a7198a542daf5b196b6b298919
+          path: candidate
+      - name: Run exact parent counterexamples
+        run: |
+          python - <<'PY'
+          import importlib.util, pathlib, subprocess, unittest
+          from hamon_eagle_outlined import paired_voltages
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()=='a3e4866b6970205e360e6420a48e3967d8ff187e'
+          path=pathlib.Path('candidate/tests/test_eagle_outlined_voltages.py')
+          assert subprocess.check_output(['git','hash-object',str(path)],text=True).strip()=='eabe4a0ad546427d91d1903530ebaec6a7878377'
+          spec=importlib.util.spec_from_file_location('controls',path)
+          m=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(m)
+          for method in ['test_two_arrows_cannot_split_one_concatenated_word','test_unexplained_suffix_or_extra_ink_is_not_ignored']:
+              result=unittest.TestResult()
+              m.OutlinedVoltageTests(method).run(result)
+              print(method,'failures',len(result.failures),'errors',len(result.errors))
+              assert result.failures and not result.errors
+          marks,words=m.packed_words()
+          for label,edge in [('stem',[((25,0),(25,6))]),('underscore',[((24,-1),(28,-1))])]:
+              actual=m.names(marks,words[0]+words[1]+m.vertical_word(edge,-6.7))
+              print(label,actual)
+              assert actual==['+5V','+3V3']
+          phrase=words[0]+m.vertical_word(m.THREE_V_THREE,9.4-18*1.1)
+          print('concatenation',m.names(marks,phrase))
+          assert m.names(marks,phrase)==['+5V','+3V3']
+          PY
