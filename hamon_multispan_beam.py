@@ -1,4 +1,5 @@
 """Euler–Bernoulli beam on vertical seats with independent unilateral contact."""
+from bisect import bisect_right
 from fractions import Fraction
 from itertools import accumulate, combinations
 
@@ -41,6 +42,34 @@ def _assemble(lengths, loads, rigidities):
     return stiffness, force
 
 
+def _point_forces(spec, x):
+    records = spec.get("point_loads", [])
+    if not isinstance(records, list):
+        raise ValueError("point_loads must be a list of x_m and downward_N records")
+    forces = {}
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {"x_m", "downward_N"}:
+            raise ValueError("each point load needs exactly x_m and downward_N")
+        position = _number(record["x_m"])
+        if not x[0] <= position <= x[-1]:
+            raise ValueError("point load is outside the beam")
+        forces[position] = forces.get(position, ZERO) + _number(record["downward_N"])
+    return {position: force for position, force in forces.items() if force}
+
+
+def _apply_point_forces(applied, x, points):
+    # The virtual work of a point force is its force times the interpolated
+    # displacement. Use cubic Hermite functions for the four element DOFs.
+    for position, force in points.items():
+        span = min(bisect_right(x, position) - 1, len(x) - 2)
+        length = x[span + 1] - x[span]
+        t = (position - x[span]) / length
+        u = 1 - t
+        weights = (u*u*(1 + 2*t), length*t*u*u, t*t*(3 - 2*t), -length*t*t*u)
+        for local, weight in enumerate(weights):
+            applied[2*span + local] -= force * weight
+
+
 def _solve(stiffness, applied, active, levels):
     prescribed = {2*i:levels[i] for i in active}
     free = [i for i in range(len(applied)) if i not in prescribed]
@@ -72,7 +101,7 @@ def _solve(stiffness, applied, active, levels):
     return motion[::2], motion[1::2], reactions[::2]
 
 
-def _certify(x, loads, rigidities, levels, active, bilateral, v, rotations, reactions):
+def _certify(x, loads, rigidities, levels, active, bilateral, v, rotations, reactions, points):
     gaps = [position-level for position,level in zip(v,levels)]
     for i in range(len(x)):
         if i in bilateral:
@@ -87,24 +116,37 @@ def _certify(x, loads, rigidities, levels, active, bilateral, v, rotations, reac
 
     # Independent from FEM: integrate shear and moment along each loaded
     # span and reconstruct the complete nodal displacement and rotation.
-    checked_v, checked_r = _station_motion(x, loads, rigidities, active, reactions, levels)
-    if v != checked_v or rotations != checked_r:
+    cuts = sorted(set(x).union(points))
+    cut_index = {position: i for i, position in enumerate(cuts)}
+    stations = [cut_index[position] for position in x]
+    net_forces = [-points.get(position, ZERO) for position in cuts]
+    cut_levels = [ZERO] * len(cuts)
+    for index, reaction, level in zip(stations, reactions, levels):
+        net_forces[index] += reaction
+        cut_levels[index] = level
+    span_at = [bisect_right(x, start) - 1 for start in cuts[:-1]]
+    line_loads = [loads[i] for i in span_at]
+    section_ei = [rigidities[i] for i in span_at]
+    checked_v, checked_r = _station_motion(
+        cuts, line_loads, section_ei, [stations[i] for i in active], net_forces, cut_levels
+    )
+    if any(v[i] != checked_v[k] or rotations[i] != checked_r[k] for i,k in enumerate(stations)):
         raise ValueError("integrated beam shape disagrees with Hermite solution")
     shear = moment = ZERO
     extrema = [ZERO]
     node_moments = [ZERO]
-    for i,q in enumerate(loads):
-        length = x[i+1]-x[i]
-        shear += reactions[i]
+    for i,q in enumerate(line_loads):
+        length = cuts[i+1]-cuts[i]
+        shear += net_forces[i]
         if q and 0 < shear/q < length:
             extrema.append(moment+shear**2/(2*q))
         moment += shear*length-q*length**2/2
         shear -= q*length
         extrema.append(moment)
         node_moments.append(moment)
-    if moment != 0 or shear+reactions[-1] != 0:
+    if moment != 0 or shear+net_forces[-1] != 0:
         raise ValueError("global moment or force imbalance")
-    return gaps, node_moments, max(extrema), -min(extrema)
+    return gaps, [node_moments[i] for i in stations], max(extrema), -min(extrema)
 
 
 def solve_multispan(spec):
@@ -127,6 +169,8 @@ def solve_multispan(spec):
         raise ValueError("at most eight unilateral seats are supported")
     x = list(accumulate(lengths, initial=ZERO))
     stiffness, applied = _assemble(lengths,loads,rigidities)
+    points = _point_forces(spec, x)
+    _apply_point_forces(applied, x, points)
     # Most loaded beams retain every seat. Enumerate the remaining
     # contacts as distinct active sets, checking the actual sign and gap.
     for count in reversed(range(len(bearings)+1)):
@@ -135,7 +179,7 @@ def solve_multispan(spec):
             if len(active)<2:
                 continue
             v, rotation, reaction = _solve(stiffness,applied,active,levels)
-            checked = _certify(x,loads,rigidities,levels,active,bilateral,v,rotation,reaction)
+            checked = _certify(x,loads,rigidities,levels,active,bilateral,v,rotation,reaction,points)
             if checked is None:
                 continue
             gap, moments, sag, hog = checked

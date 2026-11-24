@@ -1336,7 +1336,7 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
                 "error": message, "conservation_verified": False}
 
     calculation = spec.get("calculation")
-    multispan_fields = {"spans_m", "udl_N_m", "span_EI_Nm2"}
+    multispan_fields = {"spans_m", "udl_N_m", "span_EI_Nm2", "point_loads"}
     if calculation != "continuous_beam_multispan" and multispan_fields.intersection(spec):
         return unsupported("per-span arrays require calculation=continuous_beam_multispan")
     if "supports" in spec and calculation == "continuous_beam_2span":
@@ -1993,6 +1993,9 @@ def verify_circuit_conservation(spec: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def verify_civil_geotech_balance(spec: Dict[str, Any]) -> Dict[str, Any]:
+    if spec.get("calculation") == "janbu_slices":
+        from hamon_janbu_slices import verify_janbu_slices
+        return verify_janbu_slices(spec)
     if spec.get("calculation") == "channel_specific_energy":
         from hamon_channel_specific_energy import specific_energy
         return specific_energy(spec)
@@ -2440,7 +2443,7 @@ def run_router_conservation_cad_verifier(payload: Dict[str, Any]) -> Dict[str, A
         elif spec.get("netlist") or spec.get("branches") or fname.endswith((".cir", ".sp", ".spice", ".net")): mode = "circuit"
         elif "lhs" in spec and "rhs" in spec: mode = "dimensional"
         elif spec.get("calculation") in ("diaphragm_membrane", "continuous_beam_2span", "continuous_beam_multispan") or ("span_m" in spec and "E_Pa" in spec): mode = "structural"
-        elif spec.get("calculation") in ("bishop_slip_circle", "channel_specific_energy", "layered_footing_settlement", "layered_consolidation_transient", "layered_consolidation_1d", "consolidation_1d", "consolidation_history_1d", "rankine_layers", "at_rest_plane_stress", "bearing_capacity", "rigid_strip_contact", "rigid_rectangle_contact", "rigid_triangle_contact", "rigid_polygon_contact", "rigid_zoned_contact", "compaction_acceptance") or any(k in spec for k in ("cut_bank_m3", "footing_B_m", "channel_B_m", "settlement_layers")): mode = "civil_geotech"
+        elif spec.get("calculation") in ("janbu_slices", "bishop_slip_circle", "channel_specific_energy", "layered_footing_settlement", "layered_consolidation_transient", "layered_consolidation_1d", "consolidation_1d", "consolidation_history_1d", "rankine_layers", "at_rest_plane_stress", "bearing_capacity", "rigid_strip_contact", "rigid_rectangle_contact", "rigid_triangle_contact", "rigid_polygon_contact", "rigid_zoned_contact", "compaction_acceptance") or any(k in spec for k in ("cut_bank_m3", "footing_B_m", "channel_B_m", "settlement_layers")): mode = "civil_geotech"
         elif any(k in spec for k in ("inlets", "outlets", "pipe_D_m", *_HX_INPUTS, "UA_W_K")): mode = "thermal_fluid"
         elif spec.get("file_b64"):
             mode = "step_cad" if "ISO-10303-21" in base64.b64decode(spec["file_b64"])[:512].decode("utf-8", errors="replace") else "circuit"
