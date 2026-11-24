@@ -12,6 +12,10 @@ verify-provider-wire:
 verify-wave8-history:
 	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m pytest -q tests/test_drained_layer_history.py tests/test_wave8_certified_budget.py tests/test_wave8_certified_envelopes.py tests/test_wave8_participant_handoff.py
 
+.PHONY: verify-indexed-profiles
+verify-indexed-profiles:
+	$(PYTHON) -m unittest discover -s tests -p 'test_ifc_indexed_curves.py' -v
+
 .PHONY: verify-distillation
 verify-distillation:
 	$(PYTHON) -m unittest discover -s tests -p 'test_distillation*.py' -v
