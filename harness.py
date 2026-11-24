@@ -464,7 +464,14 @@ async def solve(session: taskbridge.Session) -> str:
       session_args = ["--session-dir", str(session_dir)]
       # A generator written during this task can deterministically finish an
       # exact requested artifact; inherited unchanged scripts are never run.
-      materialize_candidates = delivery_materialize.candidates(delivery_targets)
+      materialize_candidates = delivery_materialize.candidates(
+          delivery_targets,
+          archive_members=archive_contract.declared_members(session.instruction, delivery_targets)
+              if engineering_cli_note else (),
+          witness=bool(engineering_cli_note and working_copy and terminal.filing
+                       and "witness" in session.instruction.lower()
+                       and "commissioning" in session.instruction.lower()),
+      )
       before_generators = await delivery_guard.snapshot(
           session, delivery_materialize.snapshot_targets(materialize_candidates),
           deadline=observation_deadline,
@@ -479,6 +486,7 @@ async def solve(session: taskbridge.Session) -> str:
       )
       if working_copy:
         delivery_note = terminal.copy_instruction(working_copy)
+      delivery_note += delivery_materialize.draft_note(materialize_candidates)
       first_request = session.instruction
       if archive_plan:
         first_request += archive_contract.first_instruction(*archive_plan)

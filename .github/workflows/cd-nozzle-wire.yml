@@ -24,7 +24,7 @@ jobs:
           path: probe
       - uses: actions/checkout@v4
         with:
-          ref: ${{ matrix.arm == 'stock' && '72a1d094b8f7a4c3ad7386f832647136c89b491e' || github.event.pull_request.head.sha }}
+          ref: ${{ matrix.arm == 'stock' && '053dd5f0ff394063ffb5723b63962394150ad5f8' || github.event.pull_request.head.sha }}
           path: work
       - uses: actions/setup-python@v5
         with:
