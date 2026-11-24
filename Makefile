@@ -1,5 +1,9 @@
 PYTHON ?= python3
 
+.PHONY: verify-cd-nozzle-shock
+verify-cd-nozzle-shock:
+	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m unittest discover -s tests -p 'test_cd_nozzle_shock.py' -v
+
 .PHONY: verify-multispan-contact
 verify-multispan-contact:
 	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m unittest discover -s tests -p 'test_multispan_contact.py' -v
