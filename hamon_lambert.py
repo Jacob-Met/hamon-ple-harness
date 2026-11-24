@@ -1,8 +1,9 @@
-"""Zero-revolution two-body Lambert transfers with independent endpoint replay.
+"""Branch-selected two-body Lambert transfers with independent endpoint replay.
 
 The time equation and radial/transverse reconstruction follow Izzo (2015),
 https://arxiv.org/abs/1403.2705, equation 18 and Algorithm 1.
-A bracket, rather than an unconstrained Newton step, stays on the M=0 branch.
+Brackets isolate the zero-revolution branch and both roots for 1..32 complete
+revolutions. The minimum-time bifurcation is solved before choosing either root.
 The returned binary64 velocities are separately propagated with universal
 Kepler variables. Conservation alone cannot establish a specified arrival.
 """
@@ -100,7 +101,9 @@ def _propagate(ctx, r0, v0, dt):
     return r, v, abs(elapsed(chi)-dt)/dt
 
 
-def _time_of_flight(ctx, x, lam):
+def _time_of_flight(ctx, x, lam, revolutions=0):
+    if revolutions and not -1 < x < 1:
+        raise ArithmeticError("revolving_transfer_requires_elliptic_branch")
     if x == 1:
         return ctx.mpf(2)/3*(1-lam**3)
     delta = (1-x)*(1+x)
@@ -110,7 +113,7 @@ def _time_of_flight(ctx, x, lam):
         psi = ctx.atan2((y-lam*x)*ctx.sqrt(delta), x*y+lam*delta)
     else:
         psi = ctx.asinh((y-lam*x)*ctx.sqrt(-delta))
-    return (psi/ctx.sqrt(abs(delta))-x+lam*y)/delta
+    return ((psi+revolutions*ctx.pi)/ctx.sqrt(abs(delta))-x+lam*y)/delta
 
 
 def _solve_x(ctx, lam, target):
@@ -143,6 +146,68 @@ def _solve_x(ctx, lam, target):
     raise ArithmeticError("lambert_iteration_budget")
 
 
+def _minimum_revolving_time(ctx, lam, revolutions):
+    """Isolate the positive stationary point using Izzo equation 22."""
+    def derivative(x):
+        delta = (1-x)*(1+x)
+        y = ctx.sqrt(1-lam*lam*delta)
+        elapsed = _time_of_flight(ctx, x, lam, revolutions)
+        return (3*elapsed*x-2+2*lam**3*x/y)/delta
+
+    # T'(0)=-2; the derivative tends to positive infinity toward x=1.
+    lo, hi = ctx.zero, ctx.mpf("0.5")
+    for _ in range(64):
+        if derivative(hi) > 0:
+            break
+        hi = (1+hi)/2
+    else:
+        raise ArithmeticError("lambert_minimum_bracket_budget")
+    for _ in range(180):
+        mid = (lo+hi)/2
+        if derivative(mid) < 0:
+            lo = mid
+        else:
+            hi = mid
+    minimum_x = (lo+hi)/2
+    return minimum_x, _time_of_flight(ctx, minimum_x, lam, revolutions)
+
+
+def _solve_revolving_x(ctx, lam, target, revolutions, branch, minimum_x, minimum):
+    """Bracket one side of the minimum; an iteration never changes branches."""
+    if target < minimum:
+        raise ValueError("tof_below_multi_revolution_minimum")
+    if target == minimum:
+        return minimum_x, 0, ctx.zero
+    if branch == "lower_x":
+        lo, hi = ctx.zero, minimum_x
+        for _ in range(240):
+            if _time_of_flight(ctx, lo, lam, revolutions) >= target:
+                break
+            lo = (lo-1)/2
+        else:
+            raise ArithmeticError("lambert_left_branch_budget")
+    else:
+        lo, hi = minimum_x, (minimum_x+1)/2
+        for _ in range(240):
+            if _time_of_flight(ctx, hi, lam, revolutions) >= target:
+                break
+            hi = (hi+1)/2
+        else:
+            raise ArithmeticError("lambert_right_branch_budget")
+    for iteration in range(320):
+        x = (lo+hi)/2
+        elapsed = _time_of_flight(ctx, x, lam, revolutions)
+        relative = abs(elapsed-target)/target
+        if relative <= ctx.mpf("1e-45"):
+            return x, iteration+1, relative
+        move_low = elapsed > target if branch == "lower_x" else elapsed < target
+        if move_low:
+            lo = x
+        else:
+            hi = x
+    raise ArithmeticError("lambert_revolving_iteration_budget")
+
+
 def solve_lambert_transfer(params):
     result = {"domain": "lagrangian_orbital", "subkind": "lambert_transfer",
               "model": "unperturbed_two_body_point_mass", "revolutions": 0,
@@ -150,7 +215,7 @@ def solve_lambert_transfer(params):
     ctx = mp.clone()
     ctx.dps = 90
     allowed = {"domain", "subkind", "mu", "r1_m", "r2_m", "tof_s",
-               "transfer_path", "plane_normal", "revolutions",
+               "transfer_path", "plane_normal", "revolutions", "revolution_branch",
                "proposed_v1_m_s", "proposed_v2_m_s"}
     try:
         if not isinstance(params, Mapping):
@@ -158,8 +223,14 @@ def solve_lambert_transfer(params):
         if set(params)-allowed:
             raise ValueError("unsupported_lambert_parameters:"+",".join(sorted(set(params)-allowed)))
         count = params.get("revolutions", 0)
-        if type(count) is not int or count != 0:
-            raise ValueError("only_zero_revolution_transfers_supported")
+        if type(count) is not int or not 0 <= count <= 32:
+            raise ValueError("revolutions_must_be_an_integer_from_0_to_32")
+        branch = params.get("revolution_branch")
+        if count and branch not in ("lower_x", "upper_x"):
+            raise ValueError("multi_revolution_transfer_requires_explicit_branch")
+        if not count and "revolution_branch" in params:
+            raise ValueError("zero_revolution_transfer_has_one_branch")
+        result["revolutions"] = count
         mu, dt = (ctx.mpf(_finite(params[k])) for k in ("mu", "tof_s"))
         if mu <= 0 or dt <= 0:
             raise ValueError("mu_and_tof_must_be_positive")
@@ -198,8 +269,18 @@ def solve_lambert_transfer(params):
         lam = ctx.sqrt(lam_squared)
         if path == "long":
             lam = -lam
-        target = dt*ctx.sqrt(2*mu/semiperimeter**3)
-        x, iterations, time_residual = _solve_x(ctx, lam, target)
+        time_scale = ctx.sqrt(2*mu/semiperimeter**3)
+        target = dt*time_scale
+        if count:
+            minimum_x, minimum = _minimum_revolving_time(ctx, lam, count)
+            minimum_seconds = float(minimum/time_scale)
+            if not math.isfinite(minimum_seconds) or minimum_seconds <= 0:
+                raise ArithmeticError("minimum_transfer_time_outside_numeric_range")
+            result.update(revolution_branch=branch, minimum_tof_s=minimum_seconds)
+            x, iterations, time_residual = _solve_revolving_x(
+                ctx, lam, target, count, branch, minimum_x, minimum)
+        else:
+            x, iterations, time_residual = _solve_x(ctx, lam, target)
         y = ctx.sqrt(1-lam*lam*(1-x*x))
         rho = (a-b)/chord
         sigma_squared = (1-rho)*(1+rho)
@@ -237,12 +318,22 @@ def solve_lambert_transfer(params):
         energy_scale = max(ctx.one, a/b, _dot(ctx, vv1, vv1)/2, _dot(ctx, vv2, vv2)/2)
         energy_error = abs(energy1-energy2)/energy_scale
         residual = max(time_residual, kepler_residual, endpoint_error, velocity_error, angular_error, energy_error)
-        certificate = residual < ctx.mpf("1e-10")
+        alpha = -2*energy1
+        propagated_revolutions = (
+            int(ctx.floor(normalized_dt*alpha**ctx.mpf("1.5")/(2*ctx.pi)))
+            if alpha > 0 else 0)
+        revolution_verified = propagated_revolutions == count
+        certificate = residual < ctx.mpf("1e-10") and revolution_verified
         evec = [v-u for v, u in zip(_cross(vv1, h1), rr1)]
         eccentricity = _norm(ctx, evec)
         pericenter = a*hnorm*hnorm/(1+eccentricity)
         result.update(
             transfer_path=path, v1_m_s=v1, v2_m_s=v2,
+            root_parameter_x=publish(x),
+            propagated_revolutions=propagated_revolutions,
+            revolution_count_verified=bool(revolution_verified),
+            swept_angle_rad=publish(
+                (short_angle if path == "short" else 2*ctx.pi-short_angle)+2*ctx.pi*count),
             tof_s=float(dt), transfer_angle_rad=publish(
                 short_angle if path == "short" else 2*ctx.pi-short_angle),
             eccentricity=publish(eccentricity), conic_periapsis_m=publish(pericenter),
@@ -266,7 +357,9 @@ def solve_lambert_transfer(params):
             result["claims"] = claims
             result["verified"] = bool(certificate and all(c["passed"] for c in claims.values()))
         if not certificate:
-            result["error"] = "published_velocity_does_not_close_transfer"
+            result["error"] = ("published_velocity_does_not_close_transfer"
+                               if revolution_verified else
+                               "published_velocity_has_wrong_revolution_count")
     except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
         result.update(verified=False, error=str(exc))
     return result
