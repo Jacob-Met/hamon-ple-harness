@@ -4,6 +4,7 @@ on:
     paths:
       - "hamon_eagle_schematic.py"
       - "hamon_eagle_outlined.py"
+      - "tests/test_outlined_origins.py"
       - "hamon_drawing.py"
       - "ship/verify_eagle_outlined.py"
       - "ship/verify_eagle_schematic.py"
@@ -24,7 +25,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends poppler-utils
           python -m pip install --disable-pip-version-check 'pypdf>=6.21,<7'
-      - name: Run the manufacturer drawing and ten physical edits
+      - name: Run the manufacturer drawing and thirteen physical edits
         run: |
           set -euo pipefail
           fixture="$RUNNER_TEMP/arduino-due-drawing"
@@ -34,4 +35,6 @@ jobs:
           curl --fail --silent --show-error --location --retry 2 --max-time 45 \
             https://docs.arduino.cc/static/f051671bbed80ddf7352991d62cb0d5c/A000056-cad-files.zip \
             --output "$fixture/due.zip"
+          python -m unittest discover -s tests -p test_outlined_origins.py -v
           python ship/verify_eagle_outlined.py "$fixture/due.pdf" "$fixture/due.zip" --controls
+
