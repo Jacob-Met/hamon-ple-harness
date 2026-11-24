@@ -97,7 +97,7 @@ def _indexed_area(curve):
     return convex_arc_area(ordered_segments(points, segments))
 
 
-def has_direct_arc(entities, product_rows):
+def has_direct_arc(entities, product_rows, *, include_revolutions=False):
     """Choose the native route only for an arc referenced from an actual Body."""
     def fields(ref, kind):
         if isinstance(ref, tuple) and len(ref) == 2 and ref[0] == "ref":
@@ -112,6 +112,8 @@ def has_direct_arc(entities, product_rows):
             if len(rep) < 4 or str(rep[1]).upper() != "BODY" or not isinstance(rep[3], list):
                 continue
             for item in rep[3]:
+                if include_revolutions and fields(item, "IFCREVOLVEDAREASOLID"):
+                    return True
                 sweep = fields(item, "IFCEXTRUDEDAREASOLID")
                 profile = fields(sweep[0], "IFCARBITRARYCLOSEDPROFILEDEF") if sweep else []
                 curve = fields(profile[2], "IFCINDEXEDPOLYCURVE") if len(profile) > 2 else []
@@ -119,6 +121,54 @@ def has_direct_arc(entities, product_rows):
                         isinstance(s, tuple) and s[0] == "IFCARCINDEX" for s in curve[1]):
                     return True
     return False
+
+
+def _revolved_measure(item, scale, angle_scale):
+    """Pappus volume for a symmetric section revolved around a disjoint in-plane axis."""
+    profile = item.SweptArea
+    kind = profile.is_a()
+    if kind == "IfcCircleProfileDef":
+        radius = profile.Radius
+        if not 0 < radius < math.inf:
+            raise ValueError("Invalid revolved circular section")
+        area = math.pi * radius**2
+    elif kind in ("IfcIShapeProfileDef", "IfcRectangleProfileDef"):
+        if kind == "IfcIShapeProfileDef":
+            width, depth = profile.OverallWidth, profile.OverallDepth
+            web, flange = profile.WebThickness, profile.FlangeThickness
+            fillet = profile.FilletRadius or 0.
+            if (not 0 < web < width < math.inf or not 0 < 2*flange < depth < math.inf
+                    or not 0 <= fillet <= min((width-web)/2, (depth-2*flange)/2)
+                    or (profile.FlangeEdgeRadius or 0.) or (profile.FlangeSlope or 0.)):
+                raise ValueError("Unqualified revolved I-section radii, dimensions or slope")
+            area = 2*width*flange + (depth-2*flange)*web + (4-math.pi)*fillet**2
+        else:
+            width, depth = profile.XDim, profile.YDim
+            if not (0 < width < math.inf and 0 < depth < math.inf):
+                raise ValueError("Invalid revolved rectangular section")
+            area = width * depth
+    else:
+        raise ValueError("Unqualified revolved section profile")
+    center = profile.Position.Location.Coordinates if profile.Position else (0., 0.)
+    x_axis = (profile.Position.RefDirection.DirectionRatios
+              if profile.Position and profile.Position.RefDirection else (1., 0.))
+    origin = item.Axis.Location.Coordinates
+    axis = item.Axis.Axis.DirectionRatios if item.Axis.Axis else (0., 0., 1.)
+    if (len(origin) != 3 or len(axis) != 3 or len(center) != 2 or len(x_axis) != 2
+            or not all(map(math.isfinite, (*center, *x_axis, *origin, *axis)))
+            or origin[2] != 0. or axis[2] != 0. or not math.hypot(*axis) or not math.hypot(*x_axis)):
+        raise ValueError("Revolution axis must be a finite line in the profile plane")
+    nx, ny = -axis[1]/math.hypot(*axis), axis[0]/math.hypot(*axis)
+    distance = abs((center[0]-origin[0])*nx + (center[1]-origin[1])*ny)
+    if kind == "IfcCircleProfileDef":
+        support = radius
+    else:
+        x, y = (v/math.hypot(*x_axis) for v in x_axis)
+        support = (width*abs(nx*x+ny*y) + depth*abs(-nx*y+ny*x))/2
+    angle = item.Angle * angle_scale
+    if not distance > support or not 0 < angle <= math.tau:
+        raise ValueError("Revolution crosses its axis or has an invalid sweep angle")
+    return area * distance * angle * scale**3, int(angle == math.tau)
 
 
 def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipline):
@@ -131,6 +181,7 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
     model = ifcopenshell.file.from_string(ifc_text)
     bodies = []
     has_arc = False
+    has_revolution = False
     for step, kind, args, _ in product_rows:
         product = model.by_id(step)
         reps = [rep for rep in product.Representation.Representations
@@ -138,6 +189,7 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
         items = [item for rep in reps for item in rep.Items]
         ring = None
         for item in items:
+            has_revolution |= item.is_a() == "IfcRevolvedAreaSolid"
             if item.is_a() == "IfcExtrudedAreaSolid" and item.SweptArea.is_a() == "IfcArbitraryClosedProfileDef":
                 candidate = item.SweptArea.OuterCurve
                 if candidate.is_a("IfcIndexedPolyCurve") and candidate.Segments and any(
@@ -145,8 +197,8 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
                     ring = candidate
                     has_arc = True
         bodies.append((product, kind, args, reps, items, ring))
-    if not has_arc:
-        raise ValueError("Source and native parsers disagree on the indexed arc roster")
+    if not (has_arc or has_revolution):
+        raise ValueError("Source and native parsers disagree on the curved sweep roster")
     if model.by_type("IfcRelVoidsElement"):
         raise ValueError("Indexed-curve BRep does not qualify relational openings")
     scale = calculate_unit_scale(model)
@@ -158,27 +210,31 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
     for product, kind, args, reps, items, ring in bodies:
         if (len(reps) != 1 or str(reps[0].RepresentationIdentifier).upper() != "BODY"
                 or str(reps[0].RepresentationType).upper() != "SWEPTSOLID"
-                or len(items) != 1 or items[0].is_a() != "IfcExtrudedAreaSolid"):
-            raise ValueError("Indexed-curve scenes require one direct extruded Body per product")
+                or len(items) != 1 or items[0].is_a() not in ("IfcExtrudedAreaSolid", "IfcRevolvedAreaSolid")):
+            raise ValueError("Curved sweep scenes require one direct swept Body per product")
         item = items[0]
-        if ring is not None:
-            area = _indexed_area(ring)
-        elif item.SweptArea.is_a() == "IfcRectangleProfileDef":
-            dims = item.SweptArea.XDim, item.SweptArea.YDim
-            if not all(math.isfinite(d) and d > 0 for d in dims):
-                raise ValueError("Invalid rectangular peer dimensions")
-            area = math.prod(dims)
-        elif item.SweptArea.is_a() == "IfcCircleProfileDef":
-            if not math.isfinite(item.SweptArea.Radius) or item.SweptArea.Radius <= 0:
-                raise ValueError("Invalid circular peer radius")
-            area = math.pi * item.SweptArea.Radius**2
+        genus = 0
+        if item.is_a() == "IfcRevolvedAreaSolid":
+            expected, genus = _revolved_measure(item, scale, calculate_unit_scale(model, "PLANEANGLEUNIT"))
         else:
-            raise ValueError("Unqualified peer profile in indexed-curve scene")
-        ratios = item.ExtrudedDirection.DirectionRatios
-        if (len(ratios) != 3 or not all(math.isfinite(v) for v in ratios) or ratios[2] == 0
-                or not math.isfinite(item.Depth) or item.Depth <= 0):
-            raise ValueError("Invalid indexed-scene extrusion depth or direction")
-        expected = area * scale**2 * (item.Depth * scale) * abs(ratios[2]) / math.hypot(*ratios)
+            if ring is not None:
+                area = _indexed_area(ring)
+            elif item.SweptArea.is_a() == "IfcRectangleProfileDef":
+                dims = item.SweptArea.XDim, item.SweptArea.YDim
+                if not all(math.isfinite(d) and d > 0 for d in dims):
+                    raise ValueError("Invalid rectangular peer dimensions")
+                area = math.prod(dims)
+            elif item.SweptArea.is_a() == "IfcCircleProfileDef":
+                if not math.isfinite(item.SweptArea.Radius) or item.SweptArea.Radius <= 0:
+                    raise ValueError("Invalid circular peer radius")
+                area = math.pi * item.SweptArea.Radius**2
+            else:
+                raise ValueError("Unqualified peer profile in indexed-curve scene")
+            ratios = item.ExtrudedDirection.DirectionRatios
+            if (len(ratios) != 3 or not all(math.isfinite(v) for v in ratios) or ratios[2] == 0
+                    or not math.isfinite(item.Depth) or item.Depth <= 0):
+                raise ValueError("Invalid indexed-scene extrusion depth or direction")
+            expected = area * scale**2 * (item.Depth * scale) * abs(ratios[2]) / math.hypot(*ratios)
         element = geom.create_shape(settings, product, geometry_library="opencascade")
         if element is None:
             raise ValueError("OpenCASCADE could not construct the source Body")
@@ -187,7 +243,7 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
             raise ValueError("BRep does not identify its single source Body item")
         shape = geometry.item(0)
         volume = shape.volume().to_double()
-        if (not shape.is_manifold() or shape.surface_genus() != 0 or not math.isfinite(volume)
+        if (not shape.is_manifold() or shape.surface_genus() != genus or not math.isfinite(volume)
                 or volume <= 0 or not math.isclose(volume, expected, rel_tol=1e-9, abs_tol=0)):
             raise ValueError("BRep volume disagrees with the source extrusion or lacks a closed boundary")
         volumes.append(volume)
@@ -229,4 +285,5 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
             "clearance_violation_count": len(violations), "min_clearance_m": min(
                 (r["min_distance_m"] for r in rows), default=None),
             "total_solid_volume_m3": math.fsum(volumes), "clashes": hard + violations, "all_pairs": rows,
-            "geometry_basis": "source-indexed circular arcs and OpenCASCADE solid BReps"}
+            "geometry_basis": ("source revolution measures and OpenCASCADE solid BReps" if has_revolution
+                               else "source-indexed circular arcs and OpenCASCADE solid BReps")}

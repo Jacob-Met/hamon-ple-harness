@@ -2202,10 +2202,11 @@ def detect_ifc_clashes(
     required_clearance_m: float = 0.0,
     cross_discipline_only: bool = False,
 ) -> Dict[str, Any]:
-    if "IFCARCINDEX" in ifc_text.upper():
+    upper = ifc_text.upper()
+    if "IFCARCINDEX" in upper or "IFCREVOLVEDAREASOLID" in upper:
         from hamon_ifc_indexed_curves import curved_scene, has_direct_arc
         entities = parse_ifc_entities(ifc_text)
-        if has_direct_arc(entities, _product_shapes(entities)):
+        if has_direct_arc(entities, _product_shapes(entities), include_revolutions=True):
             try:
                 return curved_scene(ifc_text, _product_shapes(entities, strict=True),
                                     required_clearance_m, cross_discipline_only, _infer_discipline)
