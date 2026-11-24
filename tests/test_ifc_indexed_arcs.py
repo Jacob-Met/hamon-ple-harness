@@ -1,5 +1,9 @@
 """IFC4 indexed curve sweeps through the public spatial router and OpenCASCADE."""
 import importlib.util
+import json
+import os
+import subprocess
+import sys
 import math
 from pathlib import Path
 import tempfile
@@ -104,3 +108,55 @@ class IndexedArcSweeps(unittest.TestCase):
                         self.assertAlmostEqual(kernel_volume, expected, delta=.0011)
                         report = run_router_ifc_clash({"path": str(path)})
                         self.assertAlmostEqual(report["total_solid_volume_m3"], kernel_volume, delta=.0011)
+
+    @unittest.skipUnless(os.getenv("PLE_GEOMETRY_GYM_SLAB"), "published IFC fixture is staged by CI")
+    def test_published_geometry_gym_slab_through_registered_tool(self):
+        import ifcopenshell
+        import ifcopenshell.geom
+        import ifcopenshell.util.shape as quantities
+        from test_wired_router_e2e import _start_mock_relay
+
+        source = Path(os.environ["PLE_GEOMETRY_GYM_SLAB"]).resolve()
+        root = Path(__file__).resolve().parents[1]
+        slab_model = ifcopenshell.open(str(source))
+        slab, = slab_model.by_type("IfcSlab")
+        settings = ifcopenshell.geom.settings()
+        settings.set("mesher-linear-deflection", .00001)
+        shape = ifcopenshell.geom.create_shape(settings, slab)
+        kernel = quantities.get_volume(shape.geometry)
+
+        # The plan is a 1 m x 4 m rectangle with a 0.4 m sagitta on each
+        # long side. The negative extrusion is 200 mm deep.
+        radius = (2**2 + .4**2) / (.8)
+        sweep = 2 * math.asin(2 / radius)
+        expected = .2 * (4 + radius**2 * (sweep - math.sin(sweep)))
+        self.assertAlmostEqual(kernel, expected, delta=.0001)
+        commands = []
+        relay = _start_mock_relay(source.parent, commands)
+        try:
+            script = """
+import register from './task-tools.ts';
+const tools = new Map();
+register({registerTool(tool) { tools.set(tool.name, tool); }, on() {}});
+const result = await tools.get('hamon_ifc_spatial_clash').execute(
+  'slab', {path: process.argv[1]}, null, () => {}, {});
+console.log(JSON.stringify(result.details));
+"""
+            env = {**os.environ, "TASK_RELAY_URL": f"http://127.0.0.1:{relay.server_address[1]}",
+                   "TASK_WORKDIR": str(source.parent), "TASK_HARNESS_PYTHON": sys.executable,
+                   "TASK_HARNESS_SRC": str(root)}
+            proc = subprocess.run(["node", "--experimental-strip-types", "--input-type=module",
+                                   "-e", script, source.name], cwd=root, env=env,
+                                  text=True, capture_output=True, timeout=30, check=True)
+            report = json.loads(proc.stdout.strip().splitlines()[-1])
+            self.assertTrue(report["ok"], report)
+            self.assertEqual(report["solid_count"], 1)
+            self.assertEqual(commands, ["read_file"])
+            self.assertAlmostEqual(report["total_solid_volume_m3"], expected, delta=.001)
+            print(json.dumps({"source": "Geometry Gym IfcScript Slab.ifc",
+                              "registered_volume_m3": report["total_solid_volume_m3"],
+                              "kernel_volume_m3": kernel, "analytic_volume_m3": expected,
+                              "control_polygon_volume_m3": 1.12}, sort_keys=True))
+        finally:
+            relay.shutdown()
+            relay.server_close()

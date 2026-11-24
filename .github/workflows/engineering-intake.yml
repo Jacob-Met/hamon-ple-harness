@@ -20,6 +20,13 @@ jobs:
           cache: npm
       - name: Install the actual registered tool runtime
         run: npm ci --no-fund --no-audit
+      - name: Published Geometry Gym IFC4 slab with indexed circular edges
+        run: |
+          curl --fail --silent --show-error --location --retry 2 --max-time 30 \
+            https://raw.githubusercontent.com/buildingsmart-community/IfcScript/8edfee3119500f4adb741c0578a4bd272d018586/Examples/Slab.ifc \
+            --output "$RUNNER_TEMP/geometry-gym-slab.ifc"
+          test "$(git hash-object "$RUNNER_TEMP/geometry-gym-slab.ifc")" = 1f06237af16acc62f6188aaaaa0d001b9e506aa9
+          PLE_GEOMETRY_GYM_SLAB="$RUNNER_TEMP/geometry-gym-slab.ifc" python -m unittest discover -s tests -p test_ifc_indexed_arcs.py -v
       - name: System PDF vector tools for real two-sheet drawing contract
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends poppler-utils
       - name: Independent stadium copper and task provisioning controls
