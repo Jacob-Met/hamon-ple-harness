@@ -200,6 +200,37 @@ class InlineProtocol(unittest.IsolatedAsyncioTestCase):
                 finally:
                     release.set()
 
+    async def test_bare_presolve_yields_to_cancellation_before_model_start(self):
+        text = json.dumps(PIPE)
+        session = mock.Mock(instruction=text, workdir="/filesystem", mcp_servers=[],
+                            cancelled=asyncio.Event(), log=mock.AsyncMock())
+        session.time_left.return_value = 120
+        loop = asyncio.get_running_loop()
+        release = threading.Event()
+        verify = router.route_from_intake_prompt
+
+        def cancel():
+            session.cancelled.set()
+            release.set()
+
+        def physical_verifier(*args, **kwargs):
+            loop.call_soon_threadsafe(cancel)
+            if not release.wait(1):
+                raise AssertionError("bare presolve blocked the task event loop")
+            result = verify(*args, **kwargs)
+            self.assertTrue(result["presolve_verified"])
+            return result
+
+        with (mock.patch.object(engineering_intake, "intake_for_prompt", return_value=json.dumps(EMPTY)),
+              mock.patch.object(engineering_intake, "provision_engineering_cli", return_value=""),
+              mock.patch.object(harness, "configure", return_value=("anthropic", "claude-opus-5-5")),
+              mock.patch.object(router, "route_from_intake_prompt", side_effect=physical_verifier) as route,
+              mock.patch.object(harness.taskbridge, "run_process") as model):
+            with self.assertRaises(harness.taskbridge.Cancelled):
+                await harness.solve(session)
+            route.assert_called_once()
+            model.assert_not_called()
+
     @unittest.skipUnless(Path(harness.PI).is_file(), "requires the pinned Pi runtime")
     async def test_paired_actual_sse_requests_and_exact_replies(self):
         rows = []

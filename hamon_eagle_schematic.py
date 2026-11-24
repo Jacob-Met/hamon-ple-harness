@@ -892,7 +892,7 @@ def _outlined_supplies(paths, wire_ink, pitch, wires, membership):
     return merged, marks, {k: sorted(v) for k, v in anchors.items()}
 
 
-def _geometry_wires(svg):
+def _geometry_wires(svg, cross_references=None):
     """Identify a single wire ink by repeated on-grid, same-ink, branched junctions."""
     root = ElementTree.fromstring(svg)
     if (any(drawing.local(el.tag) == "style" for el in root.iter()) or
@@ -998,6 +998,9 @@ def _geometry_wires(svg):
     wires, membership, profile = found[0]
     membership, marks, anchors = _outlined_supplies(
         paths, profile["stroke"], max(profile["pitch_pt"]), wires, membership)
+    if cross_references is not None:
+        cross_references.extend(outlined.cross_references(
+            paths, profile["stroke"], max(profile["pitch_pt"]), wires))
     return wires, membership, profile, marks, anchors
 
 
@@ -1058,12 +1061,14 @@ def page_connectivity(filename, page=1):
         if _license_appendix(stock, svg):
             return {**result, "status": "text_only_license", "wires": [], "wire_groups": [],
                     "group_count": 0, "supply_glyphs": [], "printed_equivalence_anchors": {}}
-        evidence = None if stock["embedded_images"] else _geometry_wires(svg)
+        cross_references = []
+        evidence = None if stock["embedded_images"] else _geometry_wires(svg, cross_references)
         if evidence:
             wires, membership, profile, marks, anchors = evidence
             return {**result, "status": "candidate_evidence", "wires": wires, "wire_groups": membership,
                     "scope": "Page-local grid wires, witnessed junctions, and registered outlined signal and supply names. Device pins require separate evidence.",
-                    "junction_grid": profile, "group_count": len(set(membership)), "supply_glyphs": marks,
+                    "outlined_cross_references": cross_references, "junction_grid": profile,
+                    "group_count": len(set(membership)), "supply_glyphs": marks,
                     "wire_end_label_witnesses": [], "printed_equivalence_anchors": anchors}
         return {**result, "status": "unresolved_profile", "wire_groups": None}
     _word_directions(stock["words"], glyphs)
@@ -1126,6 +1131,28 @@ def _stitch_pages(pages):
                     continue
                 by_name[name].add(component)
 
+    # A framed reference is directional. Promote it only when another wire tip
+    # names this sheet and this physically printed zone, and vice versa.
+    framed = defaultdict(list)
+    for page in pages:
+        for reference in page.get("outlined_cross_references", []):
+            component = (page["page"], page["wire_groups"][reference["wire_index"]])
+            framed[reference["name"]].append((component, reference))
+    frame_evidence = {}
+    for name, refs in framed.items():
+        if len(refs) != 2 or _GROUND_NAME.fullmatch(name) or _POWER_NAME.fullmatch(name):
+            continue
+        (ca, a), (cb, b) = refs
+        if (ca[0] == cb[0] or (a["target_page"], a["target_zone"]) != (cb[0], b["zone"])
+                or (b["target_page"], b["target_zone"]) != (ca[0], a["zone"])
+                or not by_name[name] <= {ca, cb}
+                or any(set(by_component[c]) - {name} for c in (ca, cb))):
+            continue
+        for component, reference in refs:
+            by_name[name].add(component)
+            by_component[component][name].add(reference["wire_index"])
+        frame_evidence[name] = [dict(page=c[0], **r) for c,r in refs]
+
     canonical = {}
     links = []
     for name, components in sorted(by_name.items()):
@@ -1138,6 +1165,8 @@ def _stitch_pages(pages):
             continue
         canonical.update(dict.fromkeys(components, min(components)))
         link = {"name": name, "page_groups": sorted(components)}
+        if name in frame_evidence:
+            link["reciprocal_cross_references"] = frame_evidence[name]
         if traced_ground:
             link["ground_bar_witnesses"] = [
                 {"page": page, "group": group,

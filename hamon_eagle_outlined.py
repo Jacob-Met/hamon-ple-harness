@@ -332,3 +332,153 @@ def paired_voltages(marks, lettering, components):
 def anchored_voltage(mark, lettering):
     """Read a single arrow only when its complete caption has no unexplained ink."""
     return paired_voltages([mark], lettering, [0])[0]
+
+
+def _border_character(edges, bounds):
+    left, top, right, bottom = bounds
+    strokes = [edge for edge in edges if all(
+        left < x < right and top < y < bottom for x, y in edge)]
+    if not 1 <= len(strokes) <= 20:
+        return None
+    xs, ys = zip(*(p for edge in strokes for p in edge))
+    unit = (max(ys) - min(ys)) / 6
+    if unit <= 0:
+        return None
+    origin, baseline = min(xs), max(ys)
+    lattice = [tuple(((x-origin)/unit, (baseline-y)/unit) for x, y in edge) for edge in strokes]
+    if any(abs(v-round(v)) > .20 for edge in lattice for p in edge for v in p):
+        return None
+    shape = tuple(sorted(tuple(sorted(tuple(round(v) for v in point) for point in edge)) for edge in lattice))
+    return _ALPHABET.get(shape)
+
+
+def _border_divisions(horizontal, span, borders, edges):
+    lo, hi = span
+    ticks = defaultdict(lambda: defaultdict(set))
+    for a, b in edges:
+        (x, y), (u, v) = (a, b) if horizontal else (a[::-1], b[::-1])
+        if x != u or not lo < x < hi:
+            continue
+        for border, direction in zip(borders, (-1, 1)):
+            if y == border and (v-y)*direction > 0:
+                ticks[x][direction].add(round(abs(v-y), 1))
+            if v == border and (y-v)*direction > 0:
+                ticks[x][direction].add(round(abs(y-v), 1))
+    sizes = defaultdict(list)
+    for coordinate, sides in ticks.items():
+        for size in sides[-1] & sides[1]:
+            sizes[size].append(coordinate)
+    for size, coordinates in sizes.items():
+        bounds = [lo, *sorted(coordinates), hi]
+        widths = [b-a for a,b in zip(bounds, bounds[1:])]
+        if 2 <= len(widths) <= 26 and max(widths)-min(widths) < .02*min(widths) and size < .25*min(widths):
+            yield size, bounds
+
+
+def _sheet_frames(paths, wires):
+    pens = defaultdict(list)
+    for color, items in paths.items():
+        for element, matrix in items:
+            points = drawing._path_points(element.get("d", ""))
+            if not points or len(points) != 2:
+                continue
+            edge = tuple(tuple(round(v, 2) for v in drawing.transform_point(matrix,p)) for p in points)
+            pens[color, element.get("stroke-width")].append(edge)
+    xs, ys = zip(*(p for wire in wires for p in wire))
+    min_width, min_height = .6*(max(xs)-min(xs)), .6*(max(ys)-min(ys))
+    for (color, _), edges in pens.items():
+        segments = {tuple(sorted(edge)) for edge in edges}
+        wide = [(a,b) for a,b in segments if a[1] == b[1] and b[0]-a[0] > min_width]
+        if len(wide) > 32:
+            continue
+        for a, b in wide:
+            for c, d in wide:
+                if (c[0] != a[0] or d[0] != b[0] or c[1]-a[1] <= min_height
+                        or (a,c) not in segments or (b,d) not in segments):
+                    continue
+                x_span, y_span = (a[0], b[0]), (a[1], c[1])
+                columns = list(_border_divisions(True, x_span, y_span, edges))
+                rows = list(_border_divisions(False, y_span, x_span, edges))
+                if len(columns) == len(rows) == 1:
+                    labels = [edge for (ink,_), strokes in pens.items() if ink == color for edge in strokes]
+                    yield labels, columns[0], rows[0]
+
+
+def _printed_zone(frame, tip):
+    labels, (height, xs), (width, ys) = frame
+    def interval(bounds, value):
+        return next(((a,b) for a,b in zip(bounds,bounds[1:]) if a+.1 < value < b-.1), None)
+    column, row = interval(xs, tip[0]), interval(ys, tip[1])
+    if not column or not row:
+        return None
+    left, right = column
+    top, bottom = row
+    digits = [_border_character(labels, (left,a,right,b))
+              for a,b in ((ys[0]-height,ys[0]),(ys[-1],ys[-1]+height))]
+    letters = [_border_character(labels, (a,top,b,bottom))
+               for a,b in ((xs[0]-width,xs[0]),(xs[-1],xs[-1]+width))]
+    if (digits[0] and digits[0].isdigit() and digits[0] == digits[1]
+            and letters[0] and letters[0].isalpha() and letters[0] == letters[1]):
+        return digits[0] + letters[0]
+    return None
+
+
+def _pointed_frames(strokes, endpoints, pitch):
+    for lines in strokes.values():
+        neighbors = defaultdict(set)
+        for a, b in lines:
+            a, b = (tuple(round(v,2) for v in point) for point in (a,b))
+            neighbors[a].add(b)
+            neighbors[b].add(a)
+        for tip in endpoints.keys() & neighbors.keys():
+            if len(endpoints[tip]) != 1 or len(neighbors[tip]) != 2:
+                continue
+            a, b = sorted(neighbors[tip])
+            if (a[0] != b[0] or abs(tip[0]-a[0]) < .3*pitch
+                    or abs(a[1]+b[1]-2*tip[1]) > .04
+                    or any(abs(abs(tip[0]-x)-abs(tip[1]-y)) > .04 for x,y in (a,b))):
+                continue
+            a_back, b_back = neighbors[a]-{tip}, neighbors[b]-{tip}
+            if len(a_back) != 1 or len(b_back) != 1:
+                continue
+            c, d = next(iter(a_back)), next(iter(b_back))
+            if (neighbors[c] != {a,d} or neighbors[d] != {b,c} or c[0] != d[0]
+                    or c[1] != a[1] or d[1] != b[1] or (tip[0]-a[0])*(a[0]-c[0]) <= 0
+                    or not 2*pitch < abs(a[0]-c[0]) < 28*pitch):
+                continue
+            yield tip, (min(a[0],c[0]), min(a[1],b[1]), max(a[0],c[0]), max(a[1],b[1]))
+
+
+def cross_references(paths, wire_ink, pitch, wires):
+    """Read a pointed wire-terminal caption and independently read its own border zone."""
+    if sum(map(len, paths.values())) > 65000:
+        return []
+    _, strokes = letter_strokes(paths, wire_ink, pitch)
+    endpoints = defaultdict(list)
+    for index, line in enumerate(wires):
+        for point in line:
+            endpoints[tuple(round(v,2) for v in point)].append(index)
+    pointed = list(_pointed_frames(strokes, endpoints, pitch))
+    if not pointed or len(pointed) > 128:
+        return []
+    frames = list(_sheet_frames(paths, wires))
+    if len(frames) != 1:
+        return []
+    references = []
+    for tip, (left,top,right,bottom) in pointed:
+        # Mixed pens, an unreadable stroke, or an incomplete glyph withhold the whole caption.
+        in_frame = [[line for line in pen if all(left+.03<x<right-.03 and top+.03<y<bottom-.03
+                                                  for x,y in line)] for pen in strokes.values()]
+        words = [word for word in in_frame if word]
+        if len(words) != 1 or not 4 <= len(words[0]) <= 140:
+            continue
+        edges = words[0]
+        caption = _signal_word(edges, max(y for line in edges for _,y in line), pitch)
+        parsed = re.fullmatch(r"([A-Z][A-Z0-9_().+-]*)/([1-9][0-9]?)\.([1-9][A-Z])", caption or "")
+        zone = _printed_zone(frames[0], tip)
+        if parsed and zone:
+            name, destination, target_zone = parsed.groups()
+            references.append({"name": name, "wire_index": endpoints[tip][0], "tip": list(tip),
+                               "zone": zone, "target_page": int(destination), "target_zone": target_zone})
+    return references
+
