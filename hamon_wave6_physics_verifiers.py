@@ -650,6 +650,15 @@ def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any
     gamma = float(params.get("gamma", 1.4))
     r_gas = float(params.get("R", 287.05))
 
+    if subkind == "fanno_rayleigh":
+        from hamon_coupled_duct import coupled_duct
+        try:
+            constants = _ideal_gas_constants(params, gamma, r_gas, "Coupled duct")
+        except (ValueError, TypeError, ArithmeticError) as exc:
+            return {"domain": "compressible_acoustics", "subkind": subkind,
+                    "verified": False, "error": str(exc)}
+        return coupled_duct(params, constants)
+
     if subkind == "isentropic":
         return _isentropic_nozzle(params, gamma, r_gas)
 
@@ -679,9 +688,15 @@ def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any
             return dict(out, error=str(exc))
 
     if subkind == "fanno":
+        if params.get("q_J_kg", 0) != 0:
+            return {"domain": "compressible_acoustics", "subkind": subkind, "verified": False,
+                    "error": "Fanno is adiabatic; use fanno_rayleigh for simultaneous heat and friction"}
         return _fanno_duct(params, gamma, r_gas)
 
     if subkind == "rayleigh":
+        if params.get("f", 0) != 0:
+            return {"domain": "compressible_acoustics", "subkind": subkind, "verified": False,
+                    "error": "Rayleigh is frictionless; use fanno_rayleigh for simultaneous heat and friction"}
         return _rayleigh_duct(params, gamma, r_gas)
 
     if subkind == "acoustics":
