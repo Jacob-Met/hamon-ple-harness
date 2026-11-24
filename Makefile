@@ -38,3 +38,8 @@ verify-drainage-front:
 .PHONY: verify-workbook-units
 verify-workbook-units:
 	$(PYTHON) -m unittest discover -s tests -p 'test_xlsx*.py' -v
+
+.PHONY: verify-xlsx-unit-graph
+verify-xlsx-unit-graph:
+	@set -eu; output=$$(mktemp -d); trap 'rm -rf -- "$$output"' EXIT; \
+	$(PYTHON) ship/verify_xlsx_unit_graph.py --out "$$output" --min-memory-gib 4

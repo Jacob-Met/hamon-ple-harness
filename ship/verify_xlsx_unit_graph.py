@@ -112,6 +112,18 @@ def cases():
                     factors = {"g":sp.Rational(1,1000), "kg":sp.Rational(1),
                                "lbm":1/legacy_lbm_per_kg}
                     legacy_expected[f"A{len(rows)}"] = sp.Rational(5,2)*factors[source]/factors[target]
+    # NASA's worked value is rounded to 30.2 kPa. Compare the unrounded
+    # pressure with a dimensioned SymPy expression at the published inputs.
+    # https://www.nasa.gov/wp-content/uploads/2023/06/principles-of-flight-in-action-9-12.pdf
+    density = sp.Rational("0.74") * u.kilogram / u.meter**3
+    speed = sp.Rational("285.8") * u.meter / u.second
+    pressure = convert_to(density * speed**2 / 2, u.pascal) / (1000 * u.pascal)
+    rows.extend([
+        ('CONVERT((CONVERT(0.74,"kg","kg")/CONVERT(1,"m","m")^3)*'
+         '(CONVERT(285.8,"m","m")/CONVERT(1,"sec","sec"))^2/2,"Pa","kPa")', pressure),
+        ("-2^2", sp.Integer(4)), ("2^3^2", sp.Integer(64)),
+        ("2^(3^2)", sp.Integer(512)), ("4/2^-2", sp.Integer(16)),
+    ])
     # Independent quantities establish the composite unit frames as well as numbers.
     assert sp.simplify(convert_to(u.centimeter*u.meter/u.centimeter, u.meter)/u.meter) == 1
     assert sp.simplify(convert_to(u.inch*u.centimeter/u.inch, u.meter)/u.meter) == sp.Rational(1,100)
@@ -182,6 +194,7 @@ def main():
         (f'CONVERT({converted_cm},"cm","mm")', 4000, "matched"),
         ('CONVERT(CONVERT(6,"kN","N")/CONVERT(4,"cm2","m^2"),"kPa","MPa")',
          15000, "unit_scale_mismatch"),
+        ('CONVERT(Inputs!A2^0,"Pa","kPa")', .001, "dimension_mismatch"),
     ]
     write_workbook(source_frames, [(formula, value) for formula, value, _ in controls])
     command = [executable, f"-env:UserInstallation={(args.out/'calc-profile').resolve().as_uri()}",
@@ -234,7 +247,7 @@ def main():
     unverified = sum(audit[kind]["counts"]["unverified"] for kind in ("arithmetic_audit","conversion_audit"))
     assert matched+len(engine_variants) == len(rows) and unverified == len(engine_variants), audit
     # Alter only a separate control copy; preserve the engine-produced package unchanged.
-    stale_cells = ("A1","A5","A6","A9","A17")
+    stale_cells = ("A1","A5","A6","A9","A17",f"A{len(rows)-4}")
     for address in stale_cells:
         value = cells[address].find(f"{{{MAIN}}}v")
         value.text = str(float(value.text)*1.125)
