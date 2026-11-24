@@ -1,7 +1,7 @@
 """Signed half-space and complete polygon opening controls through the ordinary IFC reader."""
 import unittest
 
-from hamon_ifc_spatial_clash import load_ifc_solids
+from hamon_ifc_spatial_clash import evaluate_pair_clash, load_ifc_solids
 
 
 class Source:
@@ -129,6 +129,20 @@ class PolygonClipTests(unittest.TestCase):
         scene.void(wall, opening)
         solid, = scene.solids()
         self.assertAlmostEqual(solid.volume_m3(), 8. - .5 * 1.6**2 * 2., places=10)
+
+    def test_contact_witness_does_not_certify_material_intersection(self):
+        for left in (1., .5):
+            with self.subTest(left=left):
+                scene = Source()
+                scene.product("IFCWALL", [scene.box()])
+                ring = scene.ring([(left, -.5), (2., -.5), (2., .5), (left, .5)])
+                profile = scene.add(f"IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#{ring})")
+                scene.product("IFCDUCTSEGMENT", [scene.prism(profile, 1.)])
+                pair = evaluate_pair_clash(*scene.solids())
+                self.assertEqual(pair.status, "hard_clash")
+                self.assertEqual(pair.min_distance_m, 0.)
+                self.assertIsNotNone(pair.contact_evidence)
+                self.assertEqual(pair.material_interference, "unverified")
 
     def test_face_sharing_items_in_one_opening_are_distinct_cutters(self):
         scene = Source()

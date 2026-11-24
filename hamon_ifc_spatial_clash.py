@@ -143,6 +143,7 @@ class ClashResult:
     distance_lower_bound_m: Optional[float] = None
     closest_points_m: Optional[Tuple[Tuple[float, ...], Tuple[float, ...]]] = None
     contact_evidence: Optional[str] = None
+    material_interference: Optional[str] = None
 
 
 
@@ -2331,6 +2332,7 @@ def evaluate_pair_clash(mesh_a: SolidMesh3D, mesh_b: SolidMesh3D, required_clear
                         witness_point_m=tuple(map(float, hit)),
                         closest_points_m=(tuple(map(float, hit)),) * 2,
                         contact_evidence="triangle_boundary_intersection",
+                        material_interference="unverified",
                         required_clearance_m=required_clearance_m,
                     )
         a_parts = _material_boundaries(mesh_a)
@@ -2351,6 +2353,7 @@ def evaluate_pair_clash(mesh_a: SolidMesh3D, mesh_b: SolidMesh3D, required_clear
                             witness_point_m=witness,
                             closest_points_m=(witness, witness),
                             contact_evidence="containment_witness",
+                            material_interference="unverified",
                             required_clearance_m=required_clearance_m,
                         )
 
@@ -2390,6 +2393,7 @@ def evaluate_pair_clash(mesh_a: SolidMesh3D, mesh_b: SolidMesh3D, required_clear
         status=status,
         min_distance_m=float(best_dist),
         contact_evidence="surface_distance_within_tolerance" if status == "hard_clash" else None,
+        material_interference="unverified" if status == "hard_clash" else None,
         overlap_aabb_volume_m3=ov_vol if status == "hard_clash" else 0.0,
         witness_point_m=tuple(map(float, 0.5 * (best_a + best_b))),
         closest_points_m=(tuple(map(float, best_a)), tuple(map(float, best_b))),
