@@ -565,6 +565,63 @@ def _power_frame(frame, power):
     return _bounded_frame(unit)
 
 
+def _parse_scalar_formula(key, expression, literals):
+    tokens, symbols, references = [], {}, {}
+    pos = 0
+    while pos < len(expression):
+        token = _ARITHMETIC_TOKEN.match(expression, pos)
+        if token is None or len(tokens) >= 96:
+            raise ValueError("unsupported_or_oversize_formula")
+        pos = token.end()
+        if token["space"]:
+            continue
+        if token["convert"]:
+            tokens.append("_convert")
+            continue
+        if token["operator"]:
+            tokens.append(token["operator"])
+            continue
+        if token["unit"]:
+            tokens.append(token["unit"])
+            continue
+        operand = f"v{len(symbols)+len(references)}"
+        try:
+            if token["number"]:
+                number = float(token["number"])
+                if not math.isfinite(number) or 0 < abs(number) < sys.float_info.min:
+                    raise ValueError("unsupported_operand_range")
+                symbols[operand] = _FormulaNumber(number, _COEFFICIENT)
+            else:
+                name = token["ref_sheet"] or key[0]
+                if name.startswith("'"):
+                    name = name[1:-1].replace("''", "'")
+                sheets = [s for s in literals if s == name or (
+                    s.isascii() and name.isascii() and s.lower() == name.lower())]
+                if len(sheets) != 1:
+                    raise ValueError("unknown_or_ambiguous_worksheet")
+                references[operand] = (sheets[0], _address(*_grid_position(token["ref_start"])))
+        except (ValueError, ArithmeticError) as exc:
+            # Keep valid expression syntax available to the structural
+            # pass; numeric/reference availability is an evaluation error.
+            symbols[operand] = exc
+        tokens.append(operand)
+    tree = _excel_expression(tokens)
+    # An explicit dimensional contradiction does not depend on a cached
+    # number, a present input, or successful evaluation of a dependency.
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "_convert" and len(node.args) == 3 and not node.keywords
+                and all(isinstance(arg, ast.Constant) and type(arg.value) is str
+                        for arg in node.args[1:])):
+            from_name, to_name = (arg.value for arg in node.args[1:])
+            source, target = _CONVERT_UNITS.get(from_name), _CONVERT_UNITS.get(to_name)
+            if source is not None and target is not None and source.dim != target.dim:
+                raise _FormulaConflict(key, "dimension_mismatch", "incompatible_conversion_dimensions",
+                                       from_unit=from_name, to_unit=to_name, dimension_mismatch=True)
+    return tree, symbols, references
+
+
+
 def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
     """Evaluate one dependency graph for ordinary arithmetic and CONVERT calls.
 
@@ -579,64 +636,9 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
     parsed, values, reverse, waiting = {}, {}, {}, {}
     operations = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv}
 
-    def parse(key, expression):
-        tokens, symbols, references = [], {}, {}
-        pos = 0
-        while pos < len(expression):
-            token = _ARITHMETIC_TOKEN.match(expression, pos)
-            if token is None or len(tokens) >= 96:
-                raise ValueError("unsupported_or_oversize_formula")
-            pos = token.end()
-            if token["space"]:
-                continue
-            if token["convert"]:
-                tokens.append("_convert")
-                continue
-            if token["operator"]:
-                tokens.append(token["operator"])
-                continue
-            if token["unit"]:
-                tokens.append(token["unit"])
-                continue
-            operand = f"v{len(symbols)+len(references)}"
-            try:
-                if token["number"]:
-                    number = float(token["number"])
-                    if not math.isfinite(number) or 0 < abs(number) < sys.float_info.min:
-                        raise ValueError("unsupported_operand_range")
-                    symbols[operand] = _FormulaNumber(number, _COEFFICIENT)
-                else:
-                    name = token["ref_sheet"] or key[0]
-                    if name.startswith("'"):
-                        name = name[1:-1].replace("''", "'")
-                    sheets = [s for s in literals if s == name or (
-                        s.isascii() and name.isascii() and s.lower() == name.lower())]
-                    if len(sheets) != 1:
-                        raise ValueError("unknown_or_ambiguous_worksheet")
-                    references[operand] = (sheets[0], _address(*_grid_position(token["ref_start"])))
-            except (ValueError, ArithmeticError) as exc:
-                # Keep valid expression syntax available to the structural
-                # pass; numeric/reference availability is an evaluation error.
-                symbols[operand] = exc
-            tokens.append(operand)
-        tree = _excel_expression(tokens)
-        # An explicit dimensional contradiction does not depend on a cached
-        # number, a present input, or successful evaluation of a dependency.
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                    and node.func.id == "_convert" and len(node.args) == 3 and not node.keywords
-                    and all(isinstance(arg, ast.Constant) and type(arg.value) is str
-                            for arg in node.args[1:])):
-                from_name, to_name = (arg.value for arg in node.args[1:])
-                source, target = _CONVERT_UNITS.get(from_name), _CONVERT_UNITS.get(to_name)
-                if source is not None and target is not None and source.dim != target.dim:
-                    raise _FormulaConflict(key, "dimension_mismatch", "incompatible_conversion_dimensions",
-                                           from_unit=from_name, to_unit=to_name, dimension_mismatch=True)
-        return tree, symbols, references
-
     for key, row in producers.items():
         try:
-            parsed[key] = parse(key, row[0])
+            parsed[key] = _parse_scalar_formula(key, row[0], literals)
         except (ValueError, SyntaxError, ArithmeticError) as exc:
             values[key] = exc
     for key in parsed:
@@ -910,6 +912,62 @@ def witness_equipment(pdf, filename, edition, sheet, title_sheet, equipment_type
     return result
 
 
+_ARITHMETIC_GRAPH_LIMIT = 256
+_ARITHMETIC_INDEX_LIMIT = 4096
+
+
+def _audit_scalar_components(arithmetic, conversions, literals):
+    """Evaluate independent producer graphs without treating cached formulas as literals."""
+    if len(arithmetic) <= _ARITHMETIC_GRAPH_LIMIT:
+        return _scalar_formula_audit(arithmetic, conversions, literals)
+
+    conversion_by_cell = {(row[0], row[1]): row for row in conversions}
+    parents = {key: key for key in (*arithmetic, *conversion_by_cell)}
+
+    def root(key):
+        while parents[key] != key:
+            parents[key] = parents[parents[key]]
+            key = parents[key]
+        return key
+
+    # Only formula-to-formula edges join components. Many independent cost
+    # rows can read the same literal markup table without joining each other.
+    # Discard each parsed tree here; full numeric trees live one component at a time.
+    for key in parents:
+        expression = arithmetic[key][0] if key in arithmetic else conversion_by_cell[key][2]
+        try:
+            _, _, references = _parse_scalar_formula(key, expression, literals)
+        except (ValueError, SyntaxError, ArithmeticError):
+            continue
+        group = root(key)
+        for dependency in references.values():
+            if dependency in parents:
+                parents[root(dependency)] = group
+
+    groups = {}
+    for key in parents:
+        groups.setdefault(root(key), []).append(key)
+
+    reports = {"arithmetic": [], "conversion": []}
+    for keys in groups.values():
+        local_arithmetic = {}
+        local_conversions = []
+        for key in keys:
+            if key in conversion_by_cell:
+                local_conversions.append(conversion_by_cell[key])
+            elif len(local_arithmetic) < _ARITHMETIC_GRAPH_LIMIT:
+                local_arithmetic[key] = arithmetic[key]
+            else:
+                reports["arithmetic"].append({
+                    "sheet": key[0], "cell": key[1], "cached": arithmetic[key][1],
+                    "status": "unverified", "reason": "arithmetic_component_limit",
+                })
+        local = _scalar_formula_audit(local_arithmetic, local_conversions, literals)
+        for kind in reports:
+            reports[kind].extend(local[kind])
+    return reports
+
+
 def xlsx_audit(filename: str):
     """Audit declared worksheet cells and formula caches without evaluating a workbook."""
     manifest = {"file": filename, "kind": "xlsx-formula-audit", "sheets": [], "other_sheets": []}
@@ -917,7 +975,7 @@ def xlsx_audit(filename: str):
     lookups = []
     conversions = []
     arithmetic = {}
-    arithmetic_total = 0
+    arithmetic_total = arithmetic_index_omitted = 0
     conversion_total = lookup_total = indexed = 0
     complete_index = True
     with zipfile.ZipFile(filename) as archive:
@@ -1002,8 +1060,11 @@ def xlsx_audit(filename: str):
                                                 _typed_numeric_cache(cell, value, ns)))
                     if not expression.upper().startswith(("CONVERT(", "VLOOKUP(", "HLOOKUP(", "INDEX(")):
                         arithmetic_total += 1
-                        if (complete_index and full_precision and formula_type == "normal"
-                                and len(expression) <= 512 and len(arithmetic) + len(sheet_arithmetic) < 256):
+                        eligible = (complete_index and full_precision and formula_type == "normal"
+                                    and len(expression) <= 512)
+                        if eligible and len(arithmetic) + len(sheet_arithmetic) >= _ARITHMETIC_INDEX_LIMIT:
+                            arithmetic_index_omitted += 1
+                        elif eligible:
                             # Typed string and Boolean results are physically distinct
                             # from a missing numeric cache. A date may use another encoding.
                             typed_cache = None
@@ -1069,7 +1130,7 @@ def xlsx_audit(filename: str):
                 counts[result["status"]] += 1
             examples.append({"sheet": name, "cell": address, **result})
     manifest["lookup_audit"] = {"counts": counts, "examples": examples}
-    reconstructed = (_scalar_formula_audit(arithmetic, conversions, literals)
+    reconstructed = (_audit_scalar_components(arithmetic, conversions, literals)
                      if complete_index and full_precision else {"conversion": [], "arithmetic": []})
     for kind, total in (("conversion", conversion_total), ("arithmetic", arithmetic_total)):
         counts = {"matched": 0, "mismatch": 0, "unverified": total}
@@ -1080,7 +1141,18 @@ def xlsx_audit(filename: str):
             if record["status"] != "unverified":
                 counts["unverified"] -= 1
                 counts[record["status"]] = counts.get(record["status"], 0) + 1
-        manifest[kind + "_audit"] = {"counts": counts, "examples": examples}
+        report = {"counts": counts, "examples": examples}
+        if kind == "arithmetic":
+            limited = sum(record.get("reason") == "arithmetic_component_limit" for record in examples)
+            if limited or arithmetic_index_omitted:
+                report["limits"] = {"component_omitted": limited, "index_omitted": arithmetic_index_omitted}
+            if len(examples) > _ARITHMETIC_GRAPH_LIMIT:
+                # Count every result, but keep the output bounded and show contradictions first.
+                priority = {"dimension_mismatch": 0, "unit_scale_mismatch": 0, "mismatch": 0,
+                            "unverified": 1, "matched": 2}
+                report["examples"] = sorted(examples, key=lambda row: priority[row["status"]])[:_ARITHMETIC_GRAPH_LIMIT]
+                report["examples_omitted"] = len(examples) - len(report["examples"])
+        manifest[kind + "_audit"] = report
     manifest["note"] = ("Checked numeric formulas are reconstructed from literal inputs. Explicit conversion units "
                         "establish dimensions and exact multiplicative unit scales. Unverified caches can be stale.")
     return manifest
