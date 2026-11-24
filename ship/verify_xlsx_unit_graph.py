@@ -85,6 +85,17 @@ def cases():
         ('CONVERT(Inputs!A3*2,"cm^2","m2")', 4*ratio("cm2", "m2")),
         ('CONVERT(A15/A16,"Pa","MPa")', sp.simplify(stress / units["MPa"])),
     ])
+    # Engineering LibreTexts, Strength of Materials, Ch. 5, Example 5.1.
+    # Use the published dimensions and concentration factor only in this qualification.
+    net_area = 15*u.millimeter*(100 - 20)*u.millimeter
+    average_mpa = sp.simplify(convert_to(50000*u.newton/net_area, u.pascal) / units["MPa"])
+    rows.extend([
+        ('CONVERT(50,"kN","N")', 50*ratio("kN", "N")),
+        ('CONVERT(CONVERT(15,"mm","mm")*(CONVERT(100,"mm","mm")-'
+         'CONVERT(20,"mm","mm")),"mm2","m^2")', sp.Rational(1200, 10**6)),
+        ('CONVERT(A18/A19,"Pa","MPa")', average_mpa),
+        ('A20*2.525', average_mpa*sp.Rational("2.525")),
+    ])
     # Independent reproduction of the pinned Calc 24.2 conversion table,
     # separate from SymPy's exact SI definition and the production evaluator.
     # https://github.com/LibreOffice/core/blob/libreoffice-24.2.7.2/scaddins/source/analysis/analysishelper.cxx
@@ -211,6 +222,14 @@ def main():
                                     "calc_legacy_exact":str(alternate), "calc_value":actual})
         comparisons.append({"cell":f"A{index}", "source_formula":formula,
                             "sympy_exact":str(expected), "calc_value":actual})
+    # The published average has one decimal place and the peak is rounded to whole MPa.
+    average, peak = (comparisons[i-1]["calc_value"] for i in (20, 21))
+    assert round(average, 1) == 41.7 and round(peak) == 105, (average, peak)
+    published_plate = {
+        "source": "https://eng.libretexts.org/Bookshelves/Mechanical_Engineering/Strength_of_Materials/05:_Axial_Loading",
+        "example": "5.1", "calc_average_MPa": average, "published_average_MPa": 41.7,
+        "calc_peak_MPa": peak, "published_peak_MPa": 105,
+    }
     matched = sum(audit[kind]["counts"]["matched"] for kind in ("arithmetic_audit","conversion_audit"))
     unverified = sum(audit[kind]["counts"]["unverified"] for kind in ("arithmetic_audit","conversion_audit"))
     assert matched+len(engine_variants) == len(rows) and unverified == len(engine_variants), audit
@@ -237,7 +256,7 @@ def main():
         "fresh_formulas_compared":len(rows), "fresh_formulas_matched":matched,
         "engine_specific_lbm_variants":engine_variants, "fresh_guard":guard["ok"],
         "stale_guard":stale_guard["ok"], "stale_mismatch_cells":mismatches,
-        "source_frame_controls":frames,
+        "source_frame_controls":frames, "published_plate":published_plate,
         "comparisons":comparisons,
     }
     (args.out/"report.json").write_text(json.dumps(result,indent=2)+"\n")
