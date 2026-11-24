@@ -1336,8 +1336,22 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
                 "error": message, "conservation_verified": False}
 
     calculation = spec.get("calculation")
-    if calculation in ("diaphragm_membrane", "continuous_beam_2span"):
-        if calculation == "diaphragm_membrane":
+    multispan_fields = {"spans_m", "udl_N_m", "span_EI_Nm2"}
+    if calculation != "continuous_beam_multispan" and multispan_fields.intersection(spec):
+        return unsupported("per-span arrays require calculation=continuous_beam_multispan")
+    if "supports" in spec and calculation == "continuous_beam_2span":
+        return unsupported("use support_conditions for the two-span beam")
+    if calculation not in ("continuous_beam_2span", "continuous_beam_multispan") and (
+        "support_conditions" in spec or "support_settlements_m" in spec or "supports" in spec
+    ):
+        return unsupported("this calculation cannot apply these support specifications")
+    if calculation in ("diaphragm_membrane", "continuous_beam_2span", "continuous_beam_multispan"):
+        if calculation == "continuous_beam_multispan":
+            allowed = multispan_fields | {"mode", "calculation", "support_conditions", "support_settlements_m"}
+            if spec.keys() - allowed:
+                return unsupported("unexpected multi-span fields: " + ", ".join(sorted(spec.keys() - allowed)))
+            from hamon_multispan_beam import solve_multispan as solve
+        elif calculation == "diaphragm_membrane":
             from hamon_diaphragm import solve_diaphragm as solve
         else:
             from hamon_dual_verifier import solve_continuous_beam_2span_dual as solve
@@ -2422,7 +2436,7 @@ def run_router_conservation_cad_verifier(payload: Dict[str, Any]) -> Dict[str, A
         elif spec.get("calculation") in ("ac_power_flow", "symmetrical_fault"): mode = "circuit"
         elif spec.get("netlist") or spec.get("branches") or fname.endswith((".cir", ".sp", ".spice", ".net")): mode = "circuit"
         elif "lhs" in spec and "rhs" in spec: mode = "dimensional"
-        elif spec.get("calculation") in ("diaphragm_membrane", "continuous_beam_2span") or ("span_m" in spec and "E_Pa" in spec): mode = "structural"
+        elif spec.get("calculation") in ("diaphragm_membrane", "continuous_beam_2span", "continuous_beam_multispan") or ("span_m" in spec and "E_Pa" in spec): mode = "structural"
         elif spec.get("calculation") in ("channel_specific_energy", "layered_footing_settlement", "layered_consolidation_transient", "layered_consolidation_1d", "consolidation_1d", "consolidation_history_1d", "rankine_layers", "at_rest_plane_stress", "bearing_capacity", "rigid_strip_contact", "rigid_rectangle_contact", "rigid_triangle_contact", "rigid_polygon_contact", "rigid_zoned_contact", "compaction_acceptance") or any(k in spec for k in ("cut_bank_m3", "footing_B_m", "channel_B_m", "settlement_layers")): mode = "civil_geotech"
         elif any(k in spec for k in ("inlets", "outlets", "pipe_D_m", *_HX_INPUTS, "UA_W_K")): mode = "thermal_fluid"
         elif spec.get("file_b64"):

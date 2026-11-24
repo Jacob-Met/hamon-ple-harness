@@ -340,6 +340,7 @@ function _registerPleWave3DomainTools(pi: any) {
       return { content: [{ type: "text", text: JSON.stringify(details, null, 2) }], details };
     },
   };
+  engineeringSolver.description += " For a beam on two to twelve unequal spans use structural with spec.calculation=continuous_beam_multispan, per-span arrays spans_m, udl_N_m (positive downward) and span_EI_Nm2. The optional station maps or ordered arrays support_conditions and support_settlements_m specify vertical seats and positive downward settlements. Up to eight seats can be compression_only. The result gives signed reactions, moments, gaps and contact states for every station.";
   pi.registerTool({
     ...engineeringSolver,
     description: "Verify engineering calculations, CAD/STEP geometry and conservation residuals. Families and input selectors are listed in mode and spec. Call with only mode=reference for complete input conventions, examples, numerical limits and solver-specific options.",
