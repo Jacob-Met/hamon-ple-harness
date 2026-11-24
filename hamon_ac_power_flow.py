@@ -3,8 +3,10 @@
 import math
 
 import numpy as np
+from scipy import sparse
 from scipy.optimize import least_squares, root
 from scipy.special import expit
+from hamon_ac_sparse import linear_step, rectangular_current_solve
 
 
 def number(value):
@@ -81,7 +83,19 @@ def network(spec):
             number(b.get("shunt_g_pu", 0)), number(b.get("shunt_b_pu", 0))
         )
     reference = math.radians(number(buses[slack].get("va_deg", 0)))
-    ybus = np.diag(shunt)
+    # Keep small-system arithmetic stable; large sparse networks must never
+    # allocate an n-by-n dense admittance or finite-difference Jacobian.
+    # Reactive-limit switching retains its established dense solver. The sparse
+    # qualification covers fixed PV magnitudes and fixed PQ injections.
+    use_sparse = nb >= 128 and not limits
+    ybus = sparse.diags(shunt, format="lil") if use_sparse else np.diag(shunt)
+
+    def diagonal(values):
+        return sparse.diags(values, format="csr") if use_sparse else np.diag(values)
+
+    def blocks(rows):
+        return sparse.bmat(rows, format="csc") if use_sparse else np.block(rows)
+
     a = []
     b = []
     admittance = []
@@ -130,6 +144,8 @@ def network(spec):
     if len(seen) != nb:
         raise ValueError("Every bus must be connected to the slack bus")
     f, t, y, tap, yc = map(np.asarray, (a, b, admittance, ratio, charging))
+    if use_sparse:
+        ybus = ybus.tocsr()
 
     def branch_currents(voltage):
         tapped = voltage[f] / tap
@@ -176,12 +192,12 @@ def network(spec):
             tolerances = np.r_[power_tolerances(voltage, p, nonslack), q_tolerance]
             if norm < 1e-11 and np.all(np.abs(res) <= tolerances):
                 return voltage
-            vd = np.diag(voltage)
-            iv = np.diag(current)
+            vd = diagonal(voltage)
+            iv = diagonal(current)
             da = 1j * vd @ np.conj(iv - ybus @ vd)
-            unit = np.diag(voltage / np.abs(voltage))
+            unit = diagonal(voltage / np.abs(voltage))
             dm = vd @ np.conj(ybus @ unit) + np.conj(iv) @ unit
-            jac = np.block(
+            jac = blocks(
                 [
                     [
                         da.real[np.ix_(nonslack, nonslack)],
@@ -190,7 +206,7 @@ def network(spec):
                     [da.imag[np.ix_(pq, nonslack)], dm.imag[np.ix_(pq, pq)]],
                 ]
             )
-            correction = np.linalg.solve(jac, res)
+            correction = linear_step(jac, res)
             for step in range(20):
                 angles = np.angle(voltage)
                 magnitudes = np.abs(voltage)
@@ -433,9 +449,15 @@ def network(spec):
         return np.r_[pq_res.real, pq_res.imag, pv_p, np.abs(v[pv]) ** 2 - vset[pv] ** 2]
 
     z0 = np.r_[initial[nonslack].real, initial[nonslack].imag]
-    independent = root(balance, z0, tol=1e-11)
-    other = unpack(independent.x)
-    independent_res = float(np.linalg.norm(balance(independent.x), np.inf))
+    if use_sparse:
+        independent_x = rectangular_current_solve(
+            z0, unpack, balance, branch_currents, nonslack, pq, pv,
+            p, q, shunt, f, t, y, tap, yc,
+        )
+    else:
+        independent_x = root(balance, z0, tol=1e-11).x
+    other = unpack(independent_x)
+    independent_res = float(np.linalg.norm(balance(independent_x), np.inf))
     current, send, receive = branch_currents(voltage)
     sf = voltage[f] * np.conj(send)
     st = voltage[t] * np.conj(receive)
