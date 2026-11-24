@@ -16,8 +16,9 @@ numerical cross-verification suite for Physical Engineering's Last Exam (PLE):
        unity-feedback closed-loop stability, and static DC gain.
      - State-space exact Faddeev-LeVerrier characteristic polynomial, Cayley-Hamilton
        residual, numerical pole diagnostics and algebraic controllability/observability ranks of the supplied
-       finite binary64 coefficients, and exact symmetric continuous Lyapunov
-       certificates for stability (Q=I) and the requested forcing matrix Q.
+       finite binary64 coefficients. Continuous Lyapunov or discrete Stein equations
+       certify stability (Q=I) and solve for user-specified Q. Discrete time also
+       checks the strict Schur criterion on the exact characteristic polynomial.
   3. Psychrometrics (`verify_psychrometric_process`):
      - ASHRAE Fundamentals (Hyland-Wexler 1983) saturation vapor pressure over ice & liquid,
        moist-air state inversion (from RH, wet-bulb, dew-point, or humidity ratio),
@@ -163,7 +164,7 @@ def _claim_measure(value):
         return None, "below_float_range" if value < 1 else "above_float_range"
 
 
-def _check_claimed(result: Dict[str, Any], spec: Dict[str, Any]) -> None:
+def _check_claimed(result: Dict[str, Any], spec: Dict[str, Any], *, exact_booleans=False) -> None:
     if "claimed_field" not in spec and "claimed_value" not in spec:
         return
     field = spec.get("claimed_field")
@@ -184,6 +185,12 @@ def _check_claimed(result: Dict[str, Any], spec: Dict[str, Any]) -> None:
     if not all(math.isfinite(v) for v in (actual, claimed, rtol, atol)) or rtol < 0 or atol < 0:
         result.update(passed=False, reason=f"Claimed {field} requires finite values and finite nonnegative tolerances")
         return
+    if exact_booleans and isinstance(result[field], bool):
+        value = spec["claimed_value"]
+        if type(value) not in (bool, int, float) or value not in (0, 1):
+            result.update(passed=False, reason=f"Claimed {field} must be true, false, 1 or 0")
+            return
+        atol = rtol = 0.0
 
     actual_exact = Fraction(actual)
     error = abs(actual_exact - Fraction(claimed))
@@ -1342,8 +1349,22 @@ def _state_pole_diagnostics(coeffs, matrix_scale):
     return sorted(poles), "finite_approximation", zeros
 
 
-def _symmetric_lyapunov_solutions(a, forcings):
-    """Solve AᵀP + PA = −Q on symmetric matrices, sharing elimination across Qs."""
+def _schur_stable_exact(coefficients):
+    """Strict Schur recursion for a real monic polynomial in descending powers."""
+    denominator = max(value.denominator for value in coefficients)
+    row = _primitive_integer_vector([int(value * denominator) for value in coefficients])
+    while len(row) > 1:
+        leading, constant = row[0], row[-1]
+        if abs(constant) >= abs(leading):
+            return False
+        # Divide (leading * poly - constant * reversed_poly) by z.
+        row = _primitive_integer_vector([leading * v - constant * w
+                                         for v, w in zip(row[:-1], reversed(row))])
+    return True
+
+
+def _symmetric_lyapunov_solutions(a, forcings, *, discrete=False):
+    """Solve the continuous Lyapunov or discrete Stein equation for symmetric P."""
     n = len(a)
     coords = [(i, j) for i in range(n) for j in range(i, n)]
     width = len(coords)
@@ -1352,9 +1373,16 @@ def _symmetric_lyapunov_solutions(a, forcings):
     rows = []
     for i, j in coords:
         row = [Fraction(0)] * width
-        for k in range(n):
-            row[indices[k, j]] += a[k][i]
-            row[indices[i, k]] += a[k][j]
+        if discrete:
+            # Aᵀ P A - P = -Q. Symmetric unknowns share a column.
+            row[indices[i, j]] -= 1
+            for k in range(n):
+                for l in range(n):
+                    row[indices[k, l]] += a[k][i] * a[l][j]
+        else:
+            for k in range(n):
+                row[indices[k, j]] += a[k][i]
+                row[indices[i, k]] += a[k][j]
         row.extend(-q[i][j] for q in forcings)
         # The input coefficients are dyadic. Multiplying the entire equation,
         # including both right-hand sides, clears every denominator exactly.
@@ -1411,17 +1439,24 @@ def _positive_definite_exact(matrix):
     return True
 
 
-def _lyapunov_certificate(a, q, solution):
+def _lyapunov_certificate(a, q, solution, *, discrete=False):
     status, p = solution
     if p is None:
         return {"solution_status": status, "P_exact": None, "positive_definite": None,
                 "residual_exact": None}
     # Check the full original matrix equation independently of the triangular solve.
     n = len(a)
-    zero_residual = all(
-        q[i][j] + sum(a[k][i] * p[k][j] + p[i][k] * a[k][j] for k in range(n)) == 0
-        for i in range(n) for j in range(n)
-    )
+    if discrete:
+        pa = [[sum(p[i][k] * a[k][j] for k in range(n)) for j in range(n)] for i in range(n)]
+        zero_residual = all(
+            q[i][j] + sum(a[k][i] * pa[k][j] for k in range(n)) == p[i][j]
+            for i in range(n) for j in range(n)
+        )
+    else:
+        zero_residual = all(
+            q[i][j] + sum(a[k][i] * p[k][j] + p[i][k] * a[k][j] for k in range(n)) == 0
+            for i in range(n) for j in range(n)
+        )
     return {"solution_status": status, "P_exact": [[_fraction_text(v) for v in row] for row in p],
             "positive_definite": _positive_definite_exact(p), "residual_exact": zero_residual}
 
@@ -1509,6 +1544,20 @@ def _transfer_pole_diagnostics(monic):
 
 def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "transfer_function" if "den" in spec else "state_space")).strip().lower()
+    timebase = spec.get("timebase", "continuous")
+    if timebase not in ("continuous", "discrete"):
+        return {"passed": False, "domain": "control", "mode": mode,
+                "reason": "timebase must be continuous or discrete"}
+    discrete = timebase == "discrete"
+    if discrete and mode != "state_space":
+        return {"passed": False, "domain": "control", "mode": mode,
+                "reason": "Discrete-time control requires a state_space transition matrix"}
+    if "sample_time_s" in spec:
+        sample_time = spec["sample_time_s"]
+        if (not discrete or type(sample_time) not in (float, int)
+                or not 0 < sample_time < math.inf):
+            return {"passed": False, "domain": "control", "mode": mode,
+                    "reason": "sample_time_s requires timebase=discrete and a finite positive period"}
 
     if mode == "transfer_function":
         try:
@@ -1657,13 +1706,11 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
                         "reason": "Matrix Q must be symmetric"}
 
         forcings = [identity] if q == identity else [identity, q]
-        solutions = _symmetric_lyapunov_solutions(a_exact, forcings)
-        stability = _lyapunov_certificate(a_exact, identity, solutions[0])
+        solutions = _symmetric_lyapunov_solutions(a_exact, forcings, discrete=discrete)
+        stability = _lyapunov_certificate(a_exact, identity, solutions[0], discrete=discrete)
         requested = (stability if len(solutions) == 1 else
-                     _lyapunov_certificate(a_exact, q, solutions[1]))
-        # A is Hurwitz exactly when the identity forcing has a positive-definite
-        # solution. For Hurwitz A the Lyapunov operator is invertible.
-        hurwitz = stability["positive_definite"] is True and stability["residual_exact"] is True
+                     _lyapunov_certificate(a_exact, q, solutions[1], discrete=discrete))
+        stable = stability["positive_definite"] is True and stability["residual_exact"] is True
         p_mat, float_status = _lyapunov_float_matrix(solutions[-1][1])
 
         passed = (ch_residual == 0
@@ -1678,7 +1725,7 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             "cayley_hamilton_residual": float(ch_residual),
             "cayley_hamilton_residual_exact": _fraction_text(ch_residual),
             "cayley_hamilton_residual_basis": "char_poly_exact",
-            "hurwitz_stable": hurwitz,
+            ("schur_stable" if discrete else "hurwitz_stable"): stable,
             "controllable": controllable,
             "controllability_rank": ctrl_rank,
             "observable": observable,
@@ -1694,11 +1741,22 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             "eigenvalues_status": pole_status,
             "zero_eigenvalue_multiplicity": zero_multiplicity,
         }
+        if discrete:
+            spectral = _schur_stable_exact(coefficients)
+            res.update(timebase="discrete", sample_time_s=spec.get("sample_time_s"),
+                       lyapunov_equation="A^T P A - P = -Q",
+                       schur_recursion_stable=spectral)
+            if spectral != stable:
+                res.update(passed=False, reason="Exact Schur and Stein stability checks disagree")
+                return res
+            if spec.get("claimed_field") == "sample_time_s":
+                res.update(passed=False, reason="sample_time_s is supplied metadata. Claim a computed result.")
+                return res
         if ("claimed_value" in spec and spec.get("claimed_field") == "lyapunov_pd"
                 and res["lyapunov_pd"] is None):
             res.update(passed=False, reason="No unique symmetric P exists for this definiteness claim")
         else:
-            _check_claimed(res, spec)
+            _check_claimed(res, spec, exact_booleans=discrete)
         return res
 
     return {"passed": False, "domain": "control", "mode": mode, "reason": f"Unknown control mode: {mode}"}
@@ -2685,3 +2743,4 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
