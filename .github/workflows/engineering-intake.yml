@@ -29,6 +29,8 @@ jobs:
       - name: Isolated filesystem for real Pi delivery recovery
         run: sudo install -d -m 755 -o "$(id -un)" /filesystem
       - run: python -m unittest discover -s tests -v
+      - name: Published Janbu slices through the real registered Pi tool (not scored)
+        run: python ship/verify_janbu_registered.py
       - name: All public delivery schemas over real loopback Pi SSE (not scored)
         run: python tests/replay_empty_worlds.py
       - name: Registered thin polygon pressure and support-distance controls
