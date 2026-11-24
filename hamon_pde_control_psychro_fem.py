@@ -2715,27 +2715,91 @@ def _cst_mesh(nodes, elements):
     return triangles
 
 
-def _cst_response(spec):
+def _q4_mesh(nodes, elements):
+    quads = []
+    for row in elements:
+        if not isinstance(row, (list, tuple)) or len(row) != 4:
+            raise ValueError("each Q4 element must have four consecutive boundary nodes")
+        ids = tuple(_cst_index(i, len(nodes)) for i in row)
+        turns = [_cst_cross(nodes[ids[j-1]], nodes[ids[j]], nodes[ids[(j+1) % 4]])
+                 for j in range(4)]
+        if all(value < 0 for value in turns):
+            ids = (ids[0], ids[3], ids[2], ids[1])
+        elif not all(value > 0 for value in turns):
+            raise ValueError("folded or degenerate bilinear Q4 mapping")
+        quads.append(ids)
+    # Convex planar quads are exactly the union of two triangles. The
+    # triangulation is used only for overlap and hanging-node checks.
+    _cst_mesh(nodes, [tri for a,b,c,d in quads for tri in ((a,b,c), (a,c,d))])
+    return quads
+
+
+def _q4_gradient_numerators(points, xi, eta):
+    """Return det J and det J times each physical shape gradient, affine in xi,eta."""
+    signs = ((-1,-1), (1,-1), (1,1), (-1,1))
+    dxi = [Fraction(sx*(1 + sy*eta), 4) for sx,sy in signs]
+    deta = [Fraction(sy*(1 + sx*xi), 4) for sx,sy in signs]
+    x_xi, y_xi = (sum(p[k]*d for p,d in zip(points,dxi)) for k in (0,1))
+    x_eta, y_eta = (sum(p[k]*d for p,d in zip(points,deta)) for k in (0,1))
+    det = x_xi*y_eta - y_xi*x_eta
+    columns = []
+    for dx, de in zip(dxi, deta):
+        gx, gy = y_eta*dx - y_xi*de, x_xi*de - x_eta*dx
+        columns.extend(((gx, 0, gy), (0, gy, gx)))
+    return det, columns
+
+
+def _q4_pairs(nodes, quad, thickness):
+    """Pair opposite 2x2 Gauss points and sum their conjugates over the rationals."""
+    points = [nodes[i] for i in quad]
+    det, mids = _q4_gradient_numerators(points, 0, 0)
+    dofs = [j for i in quad for j in (2*i, 2*i+1)]
+    center = [(j, tuple(v/det for v in mid)) for j, mid in zip(dofs, mids)]
+    pairs = []
+    for sign in (-1, 1):
+        corner_det, corners = _q4_gradient_numerators(points, 1, sign)
+        slope_det = corner_det - det
+        # At (r,sign*r) and (-r,-sign*r), r^2=1/3. After dividing by
+        # det +/- slope_det*r, the three coefficients integrate 1,r,r^2.
+        denom = det*det - slope_det*slope_det/3
+        w0 = 2*thickness*det/denom
+        w1 = -2*thickness*slope_det/(3*denom)
+        cols = [(j, mid, tuple(x-y for x,y in zip(corner, mid)))
+                for j,mid,corner in zip(dofs,mids,corners)]
+        pairs.append(((w0, w1, w0/3), cols))
+    return center, pairs
+
+
+def _q4_pair_work(weights, a, slope_a, stress_b, slope_stress_b):
+    w0, w1, w2 = weights
+    return sum((w0*x+w1*y)*s + (w1*x+w2*y)*t
+               for x,y,s,t in zip(a,slope_a,stress_b,slope_stress_b))
+
+
+def _plane_mesh_response(spec):
     """Small homogeneous, isotropic, small-strain meshes with nodal forces in SI."""
-    mode = "cst_2d"
+    mode = spec["mode"].strip().lower()
     identity = {"domain": "fem", "mode": mode}
     try:
         allowed = {"domain", "mode", "kinematics", "nodes", "elements", "loads", "supports",
                    "E_Pa", "nu", "thickness_m", "claimed_field", "claimed_value", "rtol", "atol"}
         if set(spec) - allowed:
-            raise ValueError("unsupported CST input: " + ", ".join(sorted(set(spec)-allowed)))
+            raise ValueError("unsupported plane elasticity input: " + ", ".join(sorted(set(spec)-allowed)))
         kin = spec["kinematics"]
         e, nu, t = (_cst_number(spec[k]) for k in ("E_Pa", "nu", "thickness_m"))
         if kin not in ("plane_stress", "plane_strain") or e <= 0 or not -1 < nu < Fraction(1, 2) or t <= 0:
             raise ValueError("invalid isotropic material, thickness or plane assumption")
         if not 3 <= len(spec["nodes"]) <= 64 or not 1 <= len(spec["elements"]) <= 128:
-            raise ValueError("requires 3 to 64 nodes and 1 to 128 triangular elements")
+            raise ValueError("requires 3 to 64 nodes and 1 to 128 elements")
         nodes = []
         for point in spec["nodes"]:
             if len(point) != 2:
                 raise ValueError("each node requires exactly two coordinates in metres")
             nodes.append(tuple(_cst_number(x) for x in point))
-        triangles = _cst_mesh(nodes, spec["elements"])
+        if mode == "q4_2d":
+            triangles, quads = [], _q4_mesh(nodes, spec["elements"])
+        else:
+            triangles, quads = _cst_mesh(nodes, spec["elements"]), []
         loads = [Fraction(0)] * (2 * len(nodes))
         prescribed = {}
         for row in spec.get("loads", []):
@@ -2782,11 +2846,22 @@ def _cst_response(spec):
                 kij = volume * sum(x*y for x,y in zip(bi, db))
                 stiffness[i][j] = stiffness[i].get(j, 0) + kij
         blocks.append((volume, columns))
+    quad_blocks = []
+    for quad in quads:
+        center, pairs = _q4_pairs(nodes, quad, t)
+        for weights, columns in pairs:
+            for j, mid_j, slope_j in columns:
+                d_mid, d_slope = stress(mid_j), stress(slope_j)
+                for i, mid_i, slope_i in columns:
+                    kij = _q4_pair_work(weights, mid_i, slope_i, d_mid, d_slope)
+                    stiffness[i][j] = stiffness[i].get(j, 0) + kij
+        quad_blocks.append((center, pairs))
+
     equations = [({i: 1}, prescribed[i]) if i in prescribed else (stiffness[i], loads[i])
                  for i in range(size)]
     u = _beam_system(equations, size)
     if u is None:
-        return {**identity, "passed": False, "reason": "singular constrained CST system"}
+        return {**identity, "passed": False, "reason": "singular constrained plane elasticity system"}
 
     internal = [Fraction(0)] * size
     strains, stresses, out_of_plane = [], [], []
@@ -2800,6 +2875,19 @@ def _cst_response(spec):
         strains.append(strain)
         stresses.append(sigma)
         out_of_plane.append(0 if kin == "plane_stress" else coupling*(strain[0]+strain[1]))
+    for center, pairs in quad_blocks:
+        center_strain = [sum(u[j]*b[k] for j,b in center) for k in range(3)]
+        strains.append(center_strain)
+        stresses.append(stress(center_strain))
+        out_of_plane.append(0 if kin == "plane_stress" else coupling*(center_strain[0]+center_strain[1]))
+        for weights, columns in pairs:
+            mid = [sum(u[j]*b[k] for j,b,_ in columns) for k in range(3)]
+            slope = [sum(u[j]*b[k] for j,_,b in columns) for k in range(3)]
+            d_mid, d_slope = stress(mid), stress(slope)
+            energy += _q4_pair_work(weights, mid, slope, d_mid, d_slope)/2
+            for j, b, db in columns:
+                internal[j] += _q4_pair_work(weights, b, db, d_mid, d_slope)
+
     reactions = [f-p for f,p in zip(internal, loads)]
     force_work = sum(f*d for f,d in zip(loads,u))/2
     support_work = sum(reactions[i]*d for i,d in prescribed.items())/2
@@ -2819,6 +2907,8 @@ def _cst_response(spec):
         return {**identity, "passed": False, "reason": "response outside binary64 range",
                 "range_field": field, "range_index": index}
     result = {**identity, "kinematics": kin, "passed": verified, **rendered}
+    if mode == "q4_2d":
+        result.update(integration="2x2_gauss", element_stress_strain_location="natural_center")
     _check_claimed(result, spec, exact_booleans=True)
     return result
 
@@ -2826,8 +2916,8 @@ def _cst_response(spec):
 def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "truss_2d")).strip().lower()
 
-    if mode == "cst_2d":
-        return _cst_response(spec)
+    if mode in ("cst_2d", "q4_2d"):
+        return _plane_mesh_response(spec)
 
     if mode == "truss_2d":
         return _truss_response(spec)
@@ -2864,7 +2954,7 @@ def verify_wave5_engineering(spec: Dict[str, Any]) -> Dict[str, Any]:
         return verify_control_system(spec)
     if mode in ("state", "adiabatic_mixing", "cooling_coil"):
         return verify_psychrometric_process(spec)
-    if mode in ("cst_2d", "truss_2d", "euler_bernoulli_beam_1d", "continuous_beam_multispan"):
+    if mode in ("cst_2d", "q4_2d", "truss_2d", "euler_bernoulli_beam_1d", "continuous_beam_multispan"):
         return verify_fem_structure(spec)
     return {"passed": False, "reason": f"Unrecognized Wave-5 engineering domain/mode: domain={domain!r} mode={mode!r}"}
 
