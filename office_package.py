@@ -264,3 +264,149 @@ def workbook_parts(archive):
                        "part": _xlsx_target(workbook, rel.get("Target", ""))})
     return workbook, result
 
+
+
+def _table_text(element, ns):
+    """Rich or plain spreadsheet text, excluding phonetic annotations."""
+    if element is None:
+        return ""
+    return "".join(child.text or "" for child in element.findall(ns + "t")) + "".join(
+        run.findtext(ns + "t", "") for run in element.findall(ns + "r"))
+
+
+def table_signatures(archive):
+    """Return bounded structural fingerprints for visible row-one worksheet tables."""
+    import hashlib
+    import json
+    from posixpath import basename, dirname, join
+
+    def fingerprint(value):
+        return hashlib.sha256(json.dumps(value, separators=(",", ":")).encode()).hexdigest()
+
+    if sum(info.file_size for info in archive.infolist()) > 8_000_000:
+        raise OverflowError("table inspection budget")
+    workbook, sheets = workbook_parts(archive)
+    if not workbook:
+        raise ValueError("table requires a complete workbook")
+    rels = _xlsx_relationships(archive, join(dirname(workbook), "_rels", basename(workbook) + ".rels"))
+    string_parts = [rel for rel in rels.values()
+                    if rel.get("Type") in {r + "/sharedStrings" for r in _DOCUMENT_RELS}]
+    strings = []
+    if string_parts:
+        rel = string_parts[0]
+        if len(string_parts) != 1 or rel.get("TargetMode", "Internal") != "Internal":
+            raise ValueError("ambiguous shared strings")
+        root = _xlsx_xml(archive, _xlsx_target(workbook, rel["Target"]), 8_000_000)
+        ns = root.tag.removesuffix("sst")
+        strings = [_table_text(si, ns) for si in root.findall(ns + "si")]
+    tables = {}
+    for sheet in sheets:
+        if sheet["kind"] != "worksheet" or sheet["state"] != "visible":
+            continue
+        root = _xlsx_xml(archive, sheet["part"], 8_000_000)
+        ns = root.tag.removesuffix("worksheet")
+        header, formulas, records = {}, set(), set()
+        previous_row = 0
+        for row in root.findall(ns + "sheetData/" + ns + "row"):
+            number = int(row.get("r", previous_row + 1))
+            if number <= previous_row:
+                raise ValueError("ambiguous worksheet rows")
+            previous_row = number
+            values = {}
+            for cell in row.findall(ns + "c"):
+                ref = cell.get("r", "")
+                match = re.fullmatch(r"([A-Z]{1,3})([1-9][0-9]*)", ref)
+                if not match:
+                    raise OverflowError("implicit cell positions unsupported for table comparison")
+                if int(match[2]) != number or match[1] in values:
+                    raise ValueError("ambiguous worksheet cells")
+                formula = cell.find(ns + "f")
+                kind = cell.get("t")
+                value = cell.findtext(ns + "v", "")
+                if formula is not None and ((formula.text or "").strip() or formula.get("t") == "shared"):
+                    formulas.add(ref)
+                    value = "=" + (formula.text or "")
+                elif kind == "s" and value:
+                    if not value.isdigit() or int(value) >= len(strings):
+                        raise ValueError("invalid shared string index")
+                    value = strings[int(value)]
+                elif kind == "inlineStr":
+                    value = _table_text(cell.find(ns + "is"), ns)
+                elif kind == "e":
+                    value = ""
+                if value.strip():
+                    values[match[1]] = value.strip()
+            if number == 1:
+                header = values
+            elif len(header) >= 2:
+                record = sorted((k, v) for k, v in values.items() if k in header)
+                if len(record) >= 2:
+                    records.add(fingerprint(record))
+        if len(header) >= 2:
+            key = fingerprint([sheet["name"], sorted(header.items())])
+            if key in tables:
+                raise ValueError("duplicate table identity")
+            tables[key] = {"formulas": sorted(formulas), "rows": sorted(records)}
+    return tables
+
+
+def discover_table_contracts(root, roles):
+    """Freeze an unambiguous matching input before participant execution."""
+    import os
+    import zipfile
+
+    results = {name: {"unavailable": True} for name in roles}
+    candidates = {name: [] for name in roles}
+    if not root.is_dir() or root == root.parent or root.is_symlink():
+        return results
+    def fail(exc):
+        raise exc
+    def words(stem):
+        return re.findall(r"[a-z0-9]+", stem.casefold())
+    visited = 0
+    try:
+        for directory, folders, files in os.walk(root, onerror=fail):
+            visited += len(files) + len(folders)
+            if visited > 4096:
+                return results
+            folders[:] = [d for d in folders if not d.startswith(".") and
+                          not (pathlib.Path(directory) / d).is_symlink()]
+            for filename in files:
+                path = pathlib.Path(directory) / filename
+                tokens = words(path.stem)
+                if "template" not in tokens or path.is_symlink():
+                    continue
+                for name in roles:
+                    out = pathlib.PurePosixPath(name)
+                    role = words(out.stem)
+                    if path.suffix.lower() == out.suffix.lower() and any(
+                            tokens[i:i+len(role)] == role for i in range(len(tokens))):
+                        candidates[name].append(path)
+    except OSError:
+        return results
+    for name, matches in candidates.items():
+        if len(matches) != 1:
+            continue
+        try:
+            source = matches[0]
+            if not source.is_file() or source.stat().st_size > 2_000_000:
+                continue
+            with zipfile.ZipFile(source) as book:
+                tables = table_signatures(book)
+            if len(tables) == 1:
+                key, table = next(iter(tables.items()))
+                if len(table["formulas"]) <= 128 and len(table["rows"]) <= 128:
+                    results[name] = {"key": key, **table, "minimum": roles[name]}
+        except (ValueError, OverflowError, LookupError, OSError, ET.ParseError, zipfile.BadZipFile):
+            continue
+    return results
+
+
+def verify_table_contract(archive, contract):
+    table = table_signatures(archive).get(contract["key"])
+    if table is None:
+        raise ValueError("template worksheet or ordered headers differ")
+    if not set(contract["formulas"]).issubset(table["formulas"]):
+        raise ValueError("template formula cells missing")
+    if len(table["rows"]) < contract["minimum"] or not (set(table["rows"]) - set(contract["rows"])):
+        raise ValueError("insufficient populated template rows")

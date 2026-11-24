@@ -272,7 +272,7 @@ def file_format_state(p, size, root_members=None):
     return {"state": "ready"}
 
 # Executed in the evaluator's task container. The only transport payload is
-# file status, size and a fingerprint (no task document bodies or metadata).
+# file status, size and fingerprints (including requested template table shapes).
 REMOTE_PROBE = r'''
 import csv
 import hashlib
@@ -380,7 +380,16 @@ for item in targets[:24]:
     elif kind == "dir":
         result[path] = scan_dir(p)
     else:
-        result[path] = scan_file(p, item.get("root_members"), item.get("observe_loose_baseline", False))
+        spec = item.get("root_members")
+        contracts = {}
+        if item.get("template_roles"):
+            root = Path(item["template_root"])
+            if regular(root) and root in p.parents:
+                contracts = discover_table_contracts(root, item["template_roles"])
+                spec = {name: contracts.get(name) for name in spec}
+        result[path] = scan_file(p, spec, item.get("observe_loose_baseline", False))
+        if contracts:
+            result[path]["template_contracts"] = contracts
 print(json.dumps(result,separators=(",",":")))
 '''
 
@@ -391,7 +400,10 @@ async def snapshot(session: Any, targets: list[dict[str, str]], *,
     if not targets:
         return {}
     members = archive_contract.declared_members(getattr(session, "instruction", ""), targets)
-    probe_targets = [{**targets[0], "root_members": members}] if members else targets
+    roles = archive_contract.table_roles(getattr(session, "instruction", ""), members)
+    probe_targets = [{**targets[0], "root_members": archive_contract.member_spec(session, members)}] if members else targets
+    if roles and targets[0].get("observe_loose_baseline"):
+        probe_targets[0].update(template_root=session.workdir, template_roles=roles)
     argv = shlex.quote(json.dumps(probe_targets, separators=(",",":")))
     cmd = "python3 -c " + shlex.quote(REMOTE_PROBE) + " " + argv
     try:
@@ -411,6 +423,8 @@ async def snapshot(session: Any, targets: list[dict[str, str]], *,
         data = json.loads(reply.get("output") or "")
         if not isinstance(data, dict):
             return None
+        if roles and targets[0].get("observe_loose_baseline"):
+            session._delivery_tables = data.get(targets[0]["path"], {}).pop("template_contracts", {})
         return data
     except Cancelled:
         raise
