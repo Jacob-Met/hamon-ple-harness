@@ -1215,7 +1215,7 @@ def _advanced_brep_mesh(model, step):
 
         settings.set("iterator-output", wrapper.TRIANGULATED)
         # A dimensionless scale relative to V/A keeps mm and metre models comparable.
-        settings.set("mesher-linear-deflection", .0005 * exact_volume / exact_area)
+        settings.set("mesher-linear-deflection", .003 * exact_volume / exact_area)
         settings.set("mesher-angular-deflection", .1)
         mesh_element = ifcopenshell.geom.create_shape(settings, proxy)
         mesh = mesh_element.geometry
@@ -1223,13 +1223,8 @@ def _advanced_brep_mesh(model, step):
         triangles = np.asarray(mesh.faces, dtype=np.int32).reshape(-1, 3)
         if not (0 < len(triangles) <= 250000 and np.isfinite(vertices).all()):
             raise UnresolvedSolidGeometry("invalid or oversized advanced BRep tessellation")
-        seeds, closed, coherent = _closed_surface_components(vertices, triangles)
-        if len(seeds) != 1 or len(closed) != len(triangles) or not coherent:
-            raise UnresolvedSolidGeometry(
-                f"advanced BRep tessellation has {len(seeds)} closed shells, "
-                f"{len(closed)}/{len(triangles)} closed faces, coherent={coherent}; "
-                f"native manifold={native.is_manifold()}, signed volume={exact_volume}"
-            )
+        from hamon_shell_relations import certify_exterior_shell
+        certify_exterior_shell(vertices, triangles)
         a, b, c = (vertices[triangles[:, i]] - vertices[triangles[0, 0]] for i in range(3))
         volume = float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6)
         area = float(np.linalg.norm(np.cross(b - a, c - a), axis=1).sum() / 2)

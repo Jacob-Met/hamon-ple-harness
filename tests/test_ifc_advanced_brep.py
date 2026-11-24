@@ -3,6 +3,9 @@ import json
 import os
 from pathlib import Path
 import unittest
+import subprocess
+import sys
+import tempfile
 
 import numpy as np
 
@@ -41,3 +44,36 @@ class PublishedAdvancedBrep(unittest.TestCase):
             result = run_router_ifc_clash({"ifc_text": self.source.replace(shell, altered)})
             self.assertFalse(result["ok"], result)
             self.assertIsNone(result["total_solid_volume_m3"])
+
+    def test_registered_tool_reads_the_unmodified_annex_e_exchange_file(self):
+        from test_wired_router_e2e import _start_mock_relay
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as folder:
+            work = Path(folder)
+            (work / "cube.ifc").write_bytes(Path(os.environ["PLE_ANNEX_E_TWISTED_CUBE"]).read_bytes())
+            calls = []
+            relay = _start_mock_relay(work, calls)
+            try:
+                script = """
+import register from './task-tools.ts';
+const tools = new Map();
+register({registerTool(t) { tools.set(t.name,t); }, on() {}});
+const result = await tools.get('hamon_ifc_spatial_clash').execute(
+    'annex-e', {path:'cube.ifc'}, null, () => {}, {});
+console.log(JSON.stringify(result.details));
+"""
+                env = {**os.environ, "TASK_WORKDIR": folder, "TASK_HARNESS_PYTHON": sys.executable,
+                       "TASK_HARNESS_SRC": str(root),
+                       "TASK_RELAY_URL": f"http://127.0.0.1:{relay.server_address[1]}"}
+                output = subprocess.run(["node", "--experimental-strip-types", "--input-type=module",
+                                         "-e", script], cwd=root, env=env, text=True,
+                                        capture_output=True, timeout=90, check=True)
+                report = json.loads(output.stdout.strip().splitlines()[-1])
+                self.assertTrue(report["ok"], report)
+                self.assertEqual(calls, ["read_file"])
+                self.assertEqual(report["solid_count"], 1)
+                self.assertAlmostEqual(report["total_solid_volume_m3"], 5 / 6, delta=.00167)
+                print("registered Annex E volume m3", report["total_solid_volume_m3"])
+            finally:
+                relay.shutdown()
+                relay.server_close()
