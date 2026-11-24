@@ -36,4 +36,37 @@ An optional symmetric `Q` changes the right-hand side in the reported `lyapunov_
 
 The regression test compares all four entries of each solution with an independent SciPy solve and verifies the exact matrix identity entry by entry. The SciPy example illustrates why a unique solution alone cannot certify stability. SciPy uses the equation `A X Aᵀ − X + Q = 0` for real inputs. [SciPy solver and worked example](https://docs.scipy.org/doc/scipy/reference/generated/scipy.linalg.solve_discrete_lyapunov.html)
 
-These comparisons measure results on public matrices. The change has no measured organizer development-set or leaderboard score.
+## Direct JSON delivery
+
+For a complete inline calculation with no task files, MCP inputs or separate deliverables,
+the harness can return the certified JSON directly. Put the exact cover below before
+the request shown above:
+
+```text
+Run the calculation below and return its JSON result.
+```
+
+The direct path admits one or two states, identity forcing, and an optional sampling
+period. Every nonzero matrix coefficient must have magnitude between `1e-100` and
+`1e6`. Additional matrices, custom forcing, scalar claims, larger systems and other
+instructions remain available through the ordinary participant/tool route.
+
+The admission check independently reconstructs the characteristic polynomial, applies
+strict Jury inequalities to both the submitted decimal coefficients and their binary64
+values, checks that the symmetric Stein operator is invertible, and replays the full
+matrix identity using exact rational arithmetic. It also checks the displayed solution
+against the exact one. Decimal lexemes that lose precision in JSON decoding, source
+stability that changes after binary64 conversion, and nonunique equations use the
+participant route. For example, the source matrix `[[0.1,0.9],[0.3,0.7]]` fixes `[1,1]`
+exactly and is refused by the direct path even though its binary64 representation is
+strictly stable. Approximate pole diagnostics remain labelled as approximations.
+
+The WebSocket regression uses the actual harness and Pi process with a local model
+receiver. Both published examples produce terminal JSON with zero model requests;
+unsupported or additional obligations retain the participant turn. This measures
+protocol behavior. These public-matrix comparisons and protocol checks do not establish
+an organizer development-set or leaderboard score.
+
+Run `python qualification/discrete_control_audit.py .` from the repository root
+for the independent admission panel and deliberately corrupted-certificate controls.
+

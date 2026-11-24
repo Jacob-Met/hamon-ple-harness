@@ -283,12 +283,14 @@ def _wave8_request(instruction):
     dimensional_jackets = [i for i, req in enumerate(requests)
                            if isinstance(req, dict) and req.get("mode") == "reactor_kinetics"
                            and isinstance(req.get("spec"), dict) and "heat_transfer" in req["spec"]]
-    if activity_requests or dimensional_jackets:
+    control_requests = [i for i, req in enumerate(requests)
+                        if isinstance(req, dict) and req.get("mode") == "control"]
+    if activity_requests or dimensional_jackets or control_requests:
         # The text is the source of the certificate. Refuse a numeric lexeme
         # rounded to a different decimal value by the ordinary JSON decoder.
         literal = json.loads(text, parse_float=Decimal)
         literal_requests = literal if isinstance(literal, list) else [literal]
-        for i in activity_requests + dimensional_jackets:
+        for i in activity_requests + dimensional_jackets + control_requests:
             parsed = json.loads(json.dumps(requests[i], allow_nan=False), parse_float=Decimal)
             if parsed != literal_requests[i]:
                 return None
@@ -532,6 +534,133 @@ def _coil_product_certificate(req):
     return result
 
 
+def _small_discrete_stable(a):
+    """Independent strict Jury inequalities for one or two real states."""
+    if len(a) == 1:
+        return abs(a[0][0]) < 1
+    trace = a[0][0] + a[1][1]
+    determinant = a[0][0] * a[1][1] - a[0][1] * a[1][0]
+    return (1 - trace + determinant > 0
+            and 1 + trace + determinant > 0 and 1 - determinant > 0)
+
+
+def _discrete_control_certificate(req):
+    """Replay a bounded identity-forced Stein result before direct JSON delivery.
+
+    The solver certifies its binary64 coefficients. The instruction parser also
+    preserves each source decimal value, so Jury checks can refuse a stability
+    verdict that changes when those decimals are converted to binary64.
+    """
+    spec = req["spec"]
+    required = {"mode", "timebase", "A"}
+    if (not required <= spec.keys() <= required | {"sample_time_s"}
+            or spec["mode"] != "state_space" or spec["timebase"] != "discrete"):
+        return None
+    raw = spec["A"]
+    if (not isinstance(raw, list) or len(raw) not in (1, 2)
+            or any(not isinstance(row, list) or len(row) != len(raw) for row in raw)
+            or any(type(v) not in (int, float) or not math.isfinite(v)
+                   or abs(v) > 1e6 or (v != 0 and abs(v) < 1e-100)
+                   for row in raw for v in row)):
+        return None
+    if "sample_time_s" in spec:
+        period = spec["sample_time_s"]
+        if type(period) not in (int, float) or not math.isfinite(period) or period <= 0:
+            return None
+    source = [[Fraction(str(v)) for v in row] for row in raw]
+    a = [[Fraction(float(v)) for v in row] for row in raw]
+    stable = _small_discrete_stable(a)
+    if _small_discrete_stable(source) != stable:
+        return None
+    # The symmetric Stein operator is invertible iff no pair of poles has
+    # product one. Check its determinant independently of the solver's status.
+    for matrix in (source, a):
+        if len(matrix) == 1:
+            determinant = 1 - matrix[0][0] ** 2
+        else:
+            trace = matrix[0][0] + matrix[1][1]
+            det = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0]
+            determinant = (1 - det) * (1 - trace + det) * (1 + trace + det)
+        if determinant == 0:
+            return None
+    result = dispatch_ple_tool("hamon_conservation_cad_verifier", req)
+    if (not isinstance(result, dict) or result.get("passed") is not True
+            or result.get("domain") != "control" or result.get("mode") != "state_space"
+            or result.get("timebase") != "discrete"
+            or "sample_time_s" not in result
+            or type(result["sample_time_s"]) is not type(spec.get("sample_time_s"))
+            or result.get("sample_time_s") != spec.get("sample_time_s")
+            or result.get("lyapunov_equation") != "A^T P A - P = -Q"
+            or result.get("schur_stable") is not stable
+            or result.get("schur_recursion_stable") is not stable
+            or result.get("cayley_hamilton_residual_exact") != "0"
+            or "hurwitz_stable" in result):
+        return None
+    n = len(a)
+    polynomial = ([Fraction(1), -a[0][0]] if n == 1 else
+                  [Fraction(1), -a[0][0] - a[1][1],
+                   a[0][0] * a[1][1] - a[0][1] * a[1][0]])
+    encoded_polynomial = result.get("char_poly_exact")
+    if (not isinstance(encoded_polynomial, list) or len(encoded_polynomial) != n + 1
+            or any(type(v) is not str or len(v) > 2048 for v in encoded_polynomial)
+            or any(str(Fraction(v)) != v for v in encoded_polynomial)
+            or [Fraction(v) for v in encoded_polynomial] != polynomial
+            or result.get("char_poly_float_status") != "finite"
+            or result.get("char_poly") != [float(v) for v in polynomial]):
+        return None
+    certificate = result.get("stability_certificate")
+    if (not isinstance(certificate, dict)
+            or certificate.get("solution_status") != "unique"
+            or certificate.get("residual_exact") is not True
+            or certificate.get("positive_definite") is not stable
+            or result.get("lyapunov_solution_status") != "unique"
+            or result.get("lyapunov_residual_exact") is not True
+            or result.get("lyapunov_pd") is not stable
+            or result.get("lyapunov_P_exact") != certificate.get("P_exact")):
+        return None
+    encoded = certificate.get("P_exact")
+    if (not isinstance(encoded, list) or len(encoded) != n
+            or any(not isinstance(row, list) or len(row) != n for row in encoded)
+            or any(type(v) is not str or len(v) > 2048 for row in encoded for v in row)):
+        return None
+    p = [[Fraction(v) for v in row] for row in encoded]
+    if any(str(v) != text for row, texts in zip(p, encoded) for v, text in zip(row, texts)):
+        return None
+    if any(p[i][j] != p[j][i] for i in range(n) for j in range(n)):
+        return None
+    # Full matrix replay uses a separate expression, not the solver's elimination.
+    if any(sum(a[k][i] * p[k][l] * a[l][j] for k in range(n) for l in range(n))
+           - p[i][j] + int(i == j) != 0 for i in range(n) for j in range(n)):
+        return None
+    positive = p[0][0] > 0 and (n == 1 or p[0][0] * p[1][1] - p[0][1] * p[1][0] > 0)
+    if positive is not stable:
+        return None
+    rendered_p = result.get("lyapunov_P")
+    if (result.get("lyapunov_float_status") != "finite"
+            or not isinstance(rendered_p, list) or len(rendered_p) != n
+            or any(not isinstance(row, list) or len(row) != n for row in rendered_p)
+            or any(type(v) is not float for row in rendered_p for v in row)
+            or rendered_p != [[float(v) for v in row] for row in p]):
+        return None
+    # Pole values remain approximate diagnostics. Check their symmetric sums
+    # against the independently reconstructed characteristic polynomial.
+    poles = result.get("eigenvalues_real_imag")
+    if (result.get("eigenvalues_status") != "finite_approximation"
+            or not isinstance(poles, list) or len(poles) != n
+            or any(not isinstance(row, list) or len(row) != 2 for row in poles)
+            or any(type(v) not in (int, float) or not math.isfinite(v)
+                   for row in poles for v in row)):
+        return None
+    roots = [complex(*row) for row in poles]
+    comparisons = [(sum(roots), -float(polynomial[1]))]
+    if n == 2:
+        comparisons.append((roots[0] * roots[1], float(polynomial[2])))
+    if any(abs(observed - expected) > 1e-12 + 1e-10 * abs(expected)
+           for observed, expected in comparisons):
+        return None
+    return result
+
+
 def _wave8_result(req):
     """Check one existing operation and its physical residuals."""
     if (
@@ -541,6 +670,8 @@ def _wave8_result(req):
     ):
         return None
     spec = req["spec"]
+    if req["mode"] == "control":
+        return _discrete_control_certificate(req)
     if req["mode"] == "psychrometrics":
         return _coil_product_certificate(req)
     if req["mode"] == "reactor_kinetics":
@@ -801,4 +932,5 @@ from hamon_wave7_engineering_verifiers import (
     dispatch_wave7_verifier,
     infer_wave7_domain,
 )
+
 

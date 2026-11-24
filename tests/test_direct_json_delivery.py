@@ -32,6 +32,12 @@ def case(delta):
     }}
 
 
+def control_case(a, **extra):
+    return {"mode": "control", "spec": {
+        "mode": "state_space", "timebase": "discrete", "A": a, **extra,
+    }}
+
+
 async def exchange(port, workdir, instruction):
     probe = "cd " + shlex.quote(str(workdir)) + " && python3 -c " + shlex.quote(engineering_intake.REMOTE_PROBE)
     counts = {"probes": 0, "writes": 0, "usage": 0}
@@ -100,6 +106,39 @@ class DirectJsonDelivery(unittest.IsolatedAsyncioTestCase):
                                 settlement = u*5*0.25/1.8*math.log10(1 + delta/100000)
                                 self.assertTrue(math.isclose(row["settlement_at_time_m"], settlement, rel_tol=1e-8))
 
+                        # Published CTMS sampled plant and SciPy's documented
+                        # discrete Lyapunov example, transposed for A^T P A.
+                        import numpy as np
+                        from scipy.linalg import solve_discrete_lyapunov
+                        ctms = control_case([[.9990, .0095], [-.1903, .9039]], sample_time_s=.01)
+                        scipy_case = control_case([[.2, .7], [.5, -.9]])
+                        for data, stable in ((ctms, True), (scipy_case, False)):
+                            answer, counts = await exchange(port, folder, SINGLE + "\n" + json.dumps(data))
+                            self.assertEqual(counts, {"probes": 1, "writes": 0, "usage": 0})
+                            self.assertEqual(stream.requests, 0)
+                            row = json.loads(answer)
+                            self.assertIs(row["schur_stable"], stable)
+                            self.assertNotIn("hurwitz_stable", row)
+                            expected = solve_discrete_lyapunov(np.array(data["spec"]["A"]).T, np.eye(2))
+                            np.testing.assert_allclose(row["lyapunov_P"], expected, rtol=1e-10, atol=1e-12)
+                        answer, counts = await exchange(port, folder, BATCH + "\n" + json.dumps([scipy_case, ctms]))
+                        self.assertEqual(counts, {"probes": 1, "writes": 0, "usage": 0})
+                        self.assertEqual(stream.requests, 0)
+                        self.assertEqual([r["schur_stable"] for r in json.loads(answer)], [False, True])
+
+                        fallback_controls = (
+                            control_case([[.1, .9], [.3, .7]]),  # decimal unit pole
+                            control_case([[2, 0], [0, .5]]),  # nonunique Stein solution
+                            control_case([[.5]], timebase="continuous"),
+                            control_case([[.5]], claimed_field="schur_stable", claimed_value=False),
+                        )
+                        for number, data in enumerate(fallback_controls, 1):
+                            answer, counts = await exchange(port, folder, SINGLE + "\n" + json.dumps(data))
+                            self.assertEqual(answer, FALLBACK)
+                            self.assertEqual(stream.requests, number)
+                            self.assertGreater(counts["usage"], 0)
+
+                        previous_requests = stream.requests
                         for number, text in enumerate((
                                 json.dumps(case(50000)),
                                 SINGLE + "\n" + json.dumps(case(50000)) + "\nExplain the assumptions.",
@@ -109,5 +148,11 @@ class DirectJsonDelivery(unittest.IsolatedAsyncioTestCase):
                                 (folder / "survey.txt").write_text("independent project input\n")
                             answer, counts = await exchange(port, folder, text)
                             self.assertEqual(answer, FALLBACK)
-                            self.assertEqual(stream.requests, number)
+                            self.assertEqual(stream.requests, previous_requests + number)
                             self.assertGreater(counts["usage"], 0)
+
+                        answer, counts = await exchange(port, folder, SINGLE + "\n" + json.dumps(ctms))
+                        self.assertEqual(answer, FALLBACK)
+                        self.assertEqual(stream.requests, previous_requests + 5)
+                        self.assertGreater(counts["usage"], 0)
+
