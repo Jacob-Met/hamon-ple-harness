@@ -67,6 +67,28 @@ class RationalProfile(unittest.TestCase):
                 self.assertEqual(report["all_pairs"][0]["status"], status)
                 self.assertAlmostEqual(report["min_clearance_m"], max(0., gap), places=8)
 
+    def test_identical_control_polygon_changes_lateral_material(self):
+        # At x=y the rational boundary is exactly (w+1/2)/(w+1).
+        # The 10 mm probe lies outside the w=1/2 solid, inside w=2.
+        for weight, expected in ((.5, "clear"), (2., "hard_clash")):
+            f = model(weight)
+            make = f.create_entity
+            p = make("IfcCartesianPoint", (.75, .75, .05))
+            loc = make("IfcLocalPlacement", None, make("IfcAxis2Placement3D", p))
+            profile = make("IfcRectangleProfileDef", "AREA", None, None, .01, .01)
+            body = make("IfcExtrudedAreaSolid", profile, None, make("IfcDirection", (0., 0., 1.)), .1)
+            ctx = f.by_type("IfcProject")[0].RepresentationContexts[0]
+            rep = make("IfcShapeRepresentation", ctx, "Body", "SweptSolid", [body])
+            make("IfcColumn", ifcopenshell.guid.new(), None, "probe", None, None, loc,
+                 make("IfcProductDefinitionShape", None, None, [rep]))
+            with self.subTest(weight=weight):
+                result = public(f)
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["all_pairs"][0]["status"], expected)
+                boundary = (weight+.5)/(weight+1)
+                distance = max(0., math.sqrt(2)*(.745-boundary))
+                self.assertAlmostEqual(result["min_clearance_m"], distance, places=7)
+
     def test_open_crossing_or_unsupported_span_abstains(self):
         for change in ("open", "crossing", "weight-ratio", "knot-span"):
             f = model(.5)

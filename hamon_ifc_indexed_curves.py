@@ -155,6 +155,9 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
     if model.by_type("IfcRelVoidsElement"):
         raise ValueError("Indexed-curve BRep does not qualify relational openings")
     scale = calculate_unit_scale(model)
+    if "rational" in curved_types:
+        from hamon_ifc_rational_profiles import rational_scene
+        return rational_scene(model, bodies, scale, required_clearance, cross_only, discipline)
     settings = geom.settings()
     settings.set("iterator-output", wrapper.NATIVE)
     settings.set("use-world-coords", True)
@@ -166,10 +169,7 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
                 or len(items) != 1 or items[0].is_a() != "IfcExtrudedAreaSolid"):
             raise ValueError("Indexed-curve scenes require one direct extruded Body per product")
         item = items[0]
-        if ring is not None and ring.is_a() == "IfcRationalBSplineCurveWithKnots":
-            from hamon_ifc_rational_profiles import rational_profile_area
-            area = rational_profile_area(ring)
-        elif ring is not None:
+        if ring is not None:
             area = _indexed_area(ring)
         elif item.SweptArea.is_a() == "IfcRectangleProfileDef":
             dims = item.SweptArea.XDim, item.SweptArea.YDim
@@ -237,6 +237,4 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
             "clearance_violation_count": len(violations), "min_clearance_m": min(
                 (r["min_distance_m"] for r in rows), default=None),
             "total_solid_volume_m3": math.fsum(volumes), "clashes": hard + violations, "all_pairs": rows,
-            "geometry_basis": ("source rational quadratic profiles and OpenCASCADE solid BReps"
-                               if "rational" in curved_types else
-                               "source-indexed circular arcs and OpenCASCADE solid BReps")}
+            "geometry_basis": "source-indexed circular arcs and OpenCASCADE solid BReps"}
