@@ -307,3 +307,19 @@ def test_dimensional_jacket_rejects_extra_inputs_and_marginal_classification():
     assert not router._bounded_jacket_stability(row)
     row.update(linear_stability="nonhyperbolic", determinant_bounds_s_inv2=[0, 0])
     assert not router._bounded_jacket_stability(row)
+
+
+def test_notre_dame_printed_equilibrium_and_jacobian():
+    import numpy as np
+    middle = json.loads(_dimensional_route(_notre_dame_jacket(300))["presolve_result_json"])["steady_states"][1]
+    # Public notebook cell 30 rounds its middle branch to two decimal places.
+    assert middle["C_A_mol_m3"] / 1000 == pytest.approx(.50, abs=.005)
+    assert middle["exit_T_K"] == pytest.approx(350.08, abs=.005)
+    low = json.loads(_dimensional_route(_notre_dame_jacket(290))["presolve_result_json"])["steady_states"][0]
+    # Cell 36 prints the forward-difference A matrix at the first 290 K coolant.
+    # Convert the SI Jacobian back to the notebook's mol/L, K and minutes.
+    a = np.asarray(low["jacobian"]) * 60
+    a[0, 1] /= 1000
+    a[1, 0] *= 1000
+    np.testing.assert_allclose(a, [[-1.05041791, -.00429658087], [10.5476802, -2.19318466]],
+                               rtol=3e-6, atol=1e-8)
