@@ -1114,7 +1114,7 @@ def _faceted_solid_mesh(entities, args, unit_scale):
 
 
 def _faceted_void_solid_mesh(entities, args, unit_scale):
-    """Certify convex oriented shells before retaining their signed boundaries as one Body."""
+    """Certify embedded oriented shells before retaining their signed boundaries as one Body."""
     def fail(reason):
         raise UnresolvedSolidGeometry("faceted BREP with voids: " + reason)
 
@@ -1126,56 +1126,11 @@ def _faceted_void_solid_mesh(entities, args, unit_scale):
     if len(set(refs)) != len(refs):
         fail("shell referenced more than once")
     shells = [_faceted_solid_mesh(entities, [ref], unit_scale)[0] for ref in refs]
-    if sum(len(faces) for _, faces in shells) * sum(len(points) for points, _ in shells) > 2_000_000:
-        fail("shell relation exceeds the bounded convex certificate")
-
-    # Use a common integer lattice for the finite coordinates passed to the mesh
-    # consumers. A zero projection is real contact, even at a survey-scale origin.
-    denominator = max(float(x).as_integer_ratio()[1]
-                      for points, _ in shells for x in points.flat)
-
-    def integer(x):
-        n, d = float(x).as_integer_ratio()
-        return n * (denominator // d)
-
-    def dot(a, b):
-        return sum(x * y for x, y in zip(a, b))
-
-    certificates = []
-    for index, (vertices, faces) in enumerate(shells):
-        seeds, closed, coherent = _closed_surface_components(vertices, faces)
-        if len(seeds) != 1 or len(closed) != len(faces) or not coherent:
-            fail("each shell must be a single closed oriented component")
-        points = [tuple(integer(x) for x in row) for row in vertices]
-        planes = set()
-        for i, j, k in faces:
-            a, b, c = points[i], points[j], points[k]
-            u = tuple(y - x for x, y in zip(a, b))
-            v = tuple(y - x for x, y in zip(a, c))
-            n = (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
-            divisor = math.gcd(*n) * (-1 if index else 1)
-            if not divisor:
-                fail("degenerate shell triangle")
-            outward = tuple(x // divisor for x in n)
-            planes.add((outward, dot(outward, a)))
-        for normal, offset in planes:
-            projections = [dot(normal, point) - offset for point in points]
-            if max(projections) > 0 or min(projections) >= 0:
-                fail("shell lacks the required convexity or winding")
-        certificates.append((points, planes))
-
-    outer_planes = certificates[0][1]
-    for i, (points, planes) in enumerate(certificates[1:], 1):
-        if any(dot(normal, point) >= offset for normal, offset in outer_planes for point in points):
-            fail("void shell is not strictly inside the outer shell")
-        for other_points, other_planes in certificates[1:i]:
-            # A strictly separating face is sufficient. Unresolved edge-edge
-            # separations retain the refusal; touching and nested voids cannot pass.
-            separated = any(all(dot(normal, point) > offset for point in other)
-                            for own, other in ((planes, other_points), (other_planes, points))
-                            for normal, offset in own)
-            if not separated:
-                fail("void shells lack a certified strict separation")
+    from hamon_shell_relations import certify_void_shells
+    try:
+        certify_void_shells(shells)
+    except ValueError as exc:
+        fail(str(exc))
 
     faces, offset = [], 0
     for vertices, triangles in shells:
