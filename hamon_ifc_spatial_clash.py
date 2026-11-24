@@ -2020,7 +2020,7 @@ def detect_ifc_clashes(
         try:
             curve_report = curved_scene(ifc_text, _product_shapes(parse_ifc_entities(ifc_text)),
                                         required_clearance_m, cross_discipline_only, _infer_discipline)
-        except (ImportError, RuntimeError, ValueError, TypeError, IndexError, ArithmeticError) as exc:
+        except (ImportError, RuntimeError, ValueError, TypeError, AttributeError, IndexError, ArithmeticError) as exc:
             raise UnresolvedSolidGeometry(f"Unresolved IFC curved Body: {exc}") from exc
         if curve_report is not None:
             return curve_report
