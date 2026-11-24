@@ -48,6 +48,7 @@ _GLYPHS = {
     "U": ["46 41 30 10 01 06"],
     "V": ["46 42 20 02 06"],
     "W": ["46 40 22 00 06"],
+    "w": ["04 01 10 21 30 41 44"],
     "X": ["00 46", "06 40"],
     "x": ["00 44", "04 40"],
 }
@@ -62,6 +63,12 @@ def _edges(strokes):
 
 
 _ALPHABET = {_edges(strokes): letter for letter, strokes in _GLYPHS.items()}
+_GLYPH_SHAPES = {
+    tuple(sorted(tuple((x-min(p[0] for line in shape for p in line),
+                       y-min(p[1] for line in shape for p in line)) for x, y in edge)
+                 for edge in shape))
+    for shape in _ALPHABET
+}
 _RGB = re.compile(r"rgb\(([\d.]+)%,\s*([\d.]+)%,\s*([\d.]+)%\)")
 
 
@@ -96,15 +103,78 @@ class LetterStrokes:
     """Bound nearby searches without depending on SVG path order."""
     def __init__(self, segments):
         self.cells = defaultdict(list)
-        for a, b in segments:
+        self.lines = [tuple(tuple(p) for p in edge) for edge in segments]
+        touching = defaultdict(list)
+        for index, (a, b) in enumerate(self.lines):
             x = (a[0] + b[0]) / 2
             y = (a[1] + b[1]) / 2
-            self.cells[math.floor(x / 16), math.floor(y / 16)].append((a, b))
+            self.cells[math.floor(x / 16), math.floor(y / 16)].append(index)
+            touching[a].append(index)
+            touching[b].append(index)
+        # Follow whole endpoint components before any spatial crop. A clipped
+        # fragment of a neighboring glyph cannot explain a word's extra ink.
+        self.component_ids, self.components = {}, []
+        for first in range(len(self.lines)):
+            if first in self.component_ids:
+                continue
+            component, pending = [], [first]
+            self.component_ids[first] = len(self.components)
+            while pending:
+                index = pending.pop()
+                component.append(self.lines[index])
+                for point in self.lines[index]:
+                    for other in touching[point]:
+                        if other not in self.component_ids:
+                            self.component_ids[other] = len(self.components)
+                            pending.append(other)
+            self.components.append(tuple(component))
 
-    def nearby(self, tip, radius):
+    def _nearby_indices(self, tip, radius):
         for x in range(math.floor((tip[0] - radius) / 16), math.floor((tip[0] + radius) / 16) + 1):
             for y in range(math.floor((tip[1] - radius) / 16), math.floor((tip[1] + radius) / 16) + 1):
                 yield from self.cells[x, y]
+
+    def nearby(self, tip, radius):
+        return (self.lines[index] for index in self._nearby_indices(tip, radius))
+
+    def connected_nearby(self, tip, radius):
+        return (self.components[index] for index in
+                sorted({self.component_ids[i] for i in self._nearby_indices(tip, radius)}))
+
+
+def _glyph_shape(lines, direction, units):
+    dx, dy = direction
+    sx, sy = units
+    projected = [tuple(((dx*x+dy*y)/sx, (dy*x-dx*y)/sy) for x, y in edge) for edge in lines]
+    left = min(x for edge in projected for x, _ in edge)
+    low = min(y for edge in projected for _, y in edge)
+    shifted = [tuple((x-left, y-low) for x, y in edge) for edge in projected]
+    if any(abs(v-round(v)) > .32 for edge in shifted for point in edge for v in point):
+        return None
+    return tuple(sorted(tuple(sorted((round(x), round(y)) for x, y in edge)) for edge in shifted))
+
+
+def _orthogonal_glyph_ink(components, direction, units):
+    """Explain ink with complete, distinguishably orthogonal font glyphs only.
+
+    This gives no electrical name or attachment to an annotation. Collinear
+    fragments and glyphs that also fit the word's own orientation are excluded.
+    """
+    perpendicular = (0, -1) if direction[0] else (1, 0)
+    maximum = max(map(len, _GLYPH_SHAPES))
+    ink = set()
+    for lines in components:
+        if len(lines) > maximum:
+            continue
+        shape = _glyph_shape(lines, perpendicular, units[::-1])
+        if shape not in _GLYPH_SHAPES or _glyph_shape(lines, direction, units) in _GLYPH_SHAPES:
+            continue
+        points = [point for edge in shape for point in edge]
+        a, b = points[0], next(point for point in points if point != points[0])
+        if all((x-a[0])*(b[1]-a[1]) == (y-a[1])*(b[0]-a[0]) for x, y in points):
+            continue
+        ink.update(tuple(sorted(edge)) for edge in lines)
+    return frozenset(ink)
 
 
 def _signal_word(edges, baseline, pitch):
@@ -228,8 +298,8 @@ def wire_words(wires, segments, pitch):
                                       or (start >= left and end <= right))
                         yield index, name, (vertical, occurrence), registered
 
-def _fit_voltage(nearby, center, direction, units, name):
-    """Compare the entire word and both adjacent-cell margins to the exact font."""
+def _fit_voltage(nearby, center, direction, units, name, orthogonal=()):
+    """Fit a complete word, retaining ink without a full orthogonal glyph witness."""
     dx, dy = direction
     sx, sy = units
     extent = 6*len(name)-2
@@ -237,23 +307,37 @@ def _fit_voltage(nearby, center, direction, units, name):
         tuple((6*i+x, y) for x, y in edge)
         for i, letter in enumerate(name) for edge in _edges(_GLYPHS[letter])
     }
-    physical, actual, adjacent = [], [], []
+    physical, actual, extra = [], [], []
+    adjacent = {offset: [] for offset in (-6, extent+2)}
     for a, b in nearby:
         edge = []
         for point in (a, b):
             x, y = point[0]-center[0], point[1]-center[1]
             edge.append((2+(dx*x+dy*y)/sx, 3+(dy*x-dx*y)/sy))
-        if not any(-2.4 < x < extent+2.4 and -.32 < y < 6.32 for x, y in edge):
+        # Include the entire previous and following character cell. A lone
+        # surviving stroke of a damaged suffix must also remain unexplained.
+        if not any(-6.4 < x < extent+6.4 and -1.32 < y < 6.32 for x, y in edge):
             continue
-        quantized = tuple(sorted((round(x), round(y)) for x, y in edge))
         stroke = tuple(sorted((a, b)))
-        if quantized in expected and all(abs(v-round(v)) <= .32 for p in edge for v in p):
-            actual.append(quantized)
+        rounded = tuple(sorted((round(x), round(y)) for x, y in edge))
+        on_grid = all(abs(v-round(v)) <= .32 for p in edge for v in p)
+        if on_grid:
+            for offset, strokes in adjacent.items():
+                if all(offset <= x <= offset+4 and 0 <= y <= 6 for x, y in rounded):
+                    strokes.append(tuple((x-offset, y) for x, y in rounded))
+        if on_grid and rounded in expected:
+            if stroke in orthogonal:
+                return None
+            actual.append(rounded)
             physical.append(stroke)
-        else:
-            adjacent.append(stroke)
+        elif stroke not in orthogonal:
+            extra.append(stroke)
+    # Another arrow cannot turn a continuous name into two shorter names.
+    # Additional neighboring ink cannot hide a complete continuation glyph.
+    if any(set(shape) <= set(strokes) for shape in _ALPHABET for strokes in adjacent.values()):
+        return None
     if len(actual) == len(expected) and set(actual) == expected:
-        return tuple(sorted(physical)), frozenset(adjacent)
+        return tuple(sorted(physical)), frozenset(extra)
 
 
 def _voltage_candidates(mark, lettering):
@@ -262,6 +346,7 @@ def _voltage_candidates(mark, lettering):
     stem = math.dist(foot, tip)
     along = tuple((b-a)/stem for a, b in zip(foot, tip))
     nearby = list(lettering.nearby(tip, 4*stem))
+    components = tuple(lettering.connected_nearby(tip, 4*stem))
     crosses = defaultdict(list)
     for a, b in nearby:
         delta = tuple(y-x for x, y in zip(a, b))
@@ -279,6 +364,7 @@ def _voltage_candidates(mark, lettering):
                 continue
             for dx, dy in ((1, 0), (0, -1)):
                 sx, sy = (width/4, height/4) if dx else (height/4, width/4)
+                orthogonal = _orthogonal_glyph_ink(components, (dx, dy), (sx, sy))
                 for name in ("+5V", "+3V3"):
                     distance = (3*len(name)-3)*sx
                     mx, my = center[0]+dx*distance-tip[0], center[1]+dy*distance-tip[1]
@@ -289,7 +375,7 @@ def _voltage_candidates(mark, lettering):
                     else:
                         placed = -.90 < forward < .55 and .85 < abs(across) < 1.90
                     if placed:
-                        occurrence = _fit_voltage(nearby, center, (dx, dy), (sx, sy), name)
+                        occurrence = _fit_voltage(nearby, center, (dx, dy), (sx, sy), name, orthogonal)
                         if occurrence:
                             matches.add((name, *occurrence))
     return matches
