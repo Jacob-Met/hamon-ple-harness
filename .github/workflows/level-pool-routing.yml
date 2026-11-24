@@ -23,7 +23,7 @@ jobs:
           path: probe
       - uses: actions/checkout@v4
         with:
-          ref: ${{ matrix.arm == 'stock' && 'c9d5f1eab0cdcf88f8fd38816a50951792a35c75' || github.event.pull_request.head.sha }}
+          ref: ${{ matrix.arm == 'stock' && '6fab909279fb3fb497f7df8c335c4a30a3a1bcbb' || github.event.pull_request.head.sha }}
           path: work
       - uses: actions/setup-node@v4
         with:

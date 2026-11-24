@@ -1485,6 +1485,8 @@ async def run_process(
     stdin: bytes | None = None,
     on_line: Any = None,
     stop_before_sec: float = 60,
+    tool_batch_pending: Any = None,
+    tool_batch_reserve_sec: float | None = None,
     log_prefix: str = "",
 ) -> Finished:
   """Runs an agent subprocess until exit, cancellation, or `stop_before_sec`.
@@ -1501,6 +1503,10 @@ async def run_process(
     stdin: Optional bytes to write to the subprocess's standard input.
     on_line: Optional async callback `on_line(line_bytes)` for stdout lines.
     stop_before_sec: Seconds to reserve before the session deadline.
+    tool_batch_pending: Optional predicate confirming a declared tool batch
+      whose results are not all acknowledged. Checked once at the soft cutoff.
+    tool_batch_reserve_sec: Final reserve for that batch only. Both deadlines
+      are fixed from the initial time budget; a stalled model gets no extension.
     log_prefix: Prefix prepended to stderr lines sent to the task log.
 
   Returns:
@@ -1552,8 +1558,16 @@ async def run_process(
       *([pump_out()] if on_line else []),
       *([feed()] if stdin is not None else []),
   )
+  started_at = loop.time()
   left = session.time_left()
   run_for = time_share(left, stop_before_sec)
+  batch_deadline = None
+  if (run_for is not None and tool_batch_pending is not None
+      and tool_batch_reserve_sec is not None
+      and math.isfinite(tool_batch_reserve_sec) and tool_batch_reserve_sec >= 0):
+    batch_for = time_share(left, tool_batch_reserve_sec)
+    if batch_for is not None and batch_for > run_for:
+      batch_deadline = started_at + batch_for
 
   async def cleanup():
     try:
@@ -1578,10 +1592,22 @@ async def run_process(
       # The outer session keeps a grace period for returning an existing
       # summary. Stop this subprocess before it can spend that period on a turn.
       raise Cancelled()
+    if (not ready and batch_deadline is not None
+        and batch_deadline > loop.time() and tool_batch_pending()):
+      # Latch this permission once. The last result can precede the private
+      # session marker and abort tail; do not kill Pi in that flush interval.
+      # The delivery extension stops at the acknowledged turn boundary.
+      ready, _ = await asyncio.wait(
+          waiters, timeout=max(0, batch_deadline - loop.time()),
+          return_when=asyncio.FIRST_COMPLETED,
+      )
+      if cancel_event is not None and cancel_event.is_set():
+        raise Cancelled()
     if not ready:
       stopped = True
+      remaining = session.time_left()
       await session.log(
-          f"{log_prefix}stopped {max(left, 0) - run_for:.0f} s before the time"
+          f"{log_prefix}stopped {max(remaining or 0, 0):.0f} s before the time"
           " limit"
       )
   finally:

@@ -11,6 +11,7 @@ Last Exam (PLE).
 from __future__ import annotations
 
 import math
+from functools import cache
 import re
 import struct
 from dataclasses import dataclass, field
@@ -1157,9 +1158,89 @@ def _faceted_void_solid_mesh(entities, args, unit_scale):
     return [(np.vstack([vertices for vertices, _ in shells]), np.vstack(faces))]
 
 
+def _advanced_brep_mesh(model, step):
+    """Accept a single closed shell only when the source, CAD shape and mesh agree."""
+    from collections import Counter
+    import ifcopenshell.geom
+    import ifcopenshell.ifcopenshell_wrapper as wrapper
+
+    try:
+        item = model.by_id(step)
+        faces = item.Outer.CfsFaces
+        if not 1 <= len(faces) <= 2048 or len({face.id() for face in faces}) != len(faces):
+            raise UnresolvedSolidGeometry("invalid advanced BRep face inventory")
+        edge_uses = Counter()
+        for face in faces:
+            if not face.is_a("IfcAdvancedFace") or not face.Bounds:
+                raise UnresolvedSolidGeometry("unverified advanced BRep face")
+            for bound in face.Bounds:
+                loop = bound.Bound
+                if not loop.is_a("IfcEdgeLoop") or not loop.EdgeList:
+                    raise UnresolvedSolidGeometry("unverified advanced BRep edge loop")
+                edge_uses.update(edge.EdgeElement.id() for edge in loop.EdgeList)
+        if not edge_uses or any(count != 2 for count in edge_uses.values()):
+            raise UnresolvedSolidGeometry("advanced BRep shell does not close on its source edges")
+
+        settings = ifcopenshell.geom.settings()
+        settings.set("iterator-output", wrapper.NATIVE)
+        # Native iterator output is exposed on product elements. Isolate this
+        # exact item from siblings, placements and opening relationships.
+        contexts = [ctx for ctx in model.by_type("IfcGeometricRepresentationContext", False)
+                    if ctx.CoordinateSpaceDimension == 3]
+        if len(contexts) != 1:
+            raise UnresolvedSolidGeometry("advanced BRep needs one 3D model context")
+        rep = model.create_entity("IfcShapeRepresentation", contexts[0], "Body", "AdvancedBrep", (item,))
+        definition = model.create_entity("IfcProductDefinitionShape", Representations=(rep,))
+        import ifcopenshell.guid
+        proxy = model.create_entity("IfcBuildingElementProxy", GlobalId=ifcopenshell.guid.new(),
+                                    Representation=definition)
+        native_element = ifcopenshell.geom.create_shape(settings, proxy)
+        brep = native_element.geometry
+        if brep.size() != 1:
+            raise UnresolvedSolidGeometry("expected one native advanced BRep")
+        native = brep.item(0)
+        native_count = native.num_faces()
+        # OCC may retain coincident but separately indexed source seams. The
+        # tessellation below must independently close using exact positions.
+        if native_count != len(faces):
+            raise UnresolvedSolidGeometry(
+                f"native advanced BRep has {native_count}/{len(faces)} faces, "
+                f"manifold={native.is_manifold()}, area={native.area().to_double()}, "
+                f"signed volume={native.volume().to_double()}"
+            )
+        exact_volume = native.volume().to_double()
+        exact_area = native.area().to_double()
+        if not (0 < exact_volume < math.inf and 0 < exact_area < math.inf):
+            raise UnresolvedSolidGeometry("advanced BRep lacks positive finite kernel measures")
+
+        settings.set("iterator-output", wrapper.TRIANGULATED)
+        # A dimensionless scale relative to V/A keeps mm and metre models comparable.
+        settings.set("mesher-linear-deflection", .003 * exact_volume / exact_area)
+        settings.set("mesher-angular-deflection", .1)
+        mesh_element = ifcopenshell.geom.create_shape(settings, proxy)
+        mesh = mesh_element.geometry
+        vertices = np.asarray(mesh.verts, dtype=float).reshape(-1, 3)
+        triangles = np.asarray(mesh.faces, dtype=np.int32).reshape(-1, 3)
+        if not (0 < len(triangles) <= 250000 and np.isfinite(vertices).all()):
+            raise UnresolvedSolidGeometry("invalid or oversized advanced BRep tessellation")
+        from hamon_shell_relations import certify_exterior_shell
+        certify_exterior_shell(vertices, triangles)
+        a, b, c = (vertices[triangles[:, i]] - vertices[triangles[0, 0]] for i in range(3))
+        volume = float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6)
+        area = float(np.linalg.norm(np.cross(b - a, c - a), axis=1).sum() / 2)
+        if not (math.isclose(volume, exact_volume, rel_tol=.002)
+                and math.isclose(area, exact_area, rel_tol=.002)):
+            raise UnresolvedSolidGeometry("advanced BRep tessellation disagrees with native material measures")
+        return vertices, triangles
+    except (AttributeError, ImportError, RuntimeError, ValueError, TypeError) as exc:
+        if isinstance(exc, UnresolvedSolidGeometry):
+            raise
+        raise UnresolvedSolidGeometry(f"advanced BRep conversion failed: {exc}") from exc
+
+
 def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, unit_scale: float,
                         mass_issues: Optional[List[str]] = None,
-                        active_items: frozenset = frozenset()) -> List[Tuple[np.ndarray, np.ndarray]]:
+                        active_items: frozenset = frozenset(), advanced_mesh=None) -> List[Tuple[np.ndarray, np.ndarray]]:
     if not (isinstance(iref, tuple) and iref[0] == "ref" and iref[1] in entities):
         return []
     if iref[1] in active_items or len(active_items) >= 128:
@@ -1167,7 +1248,7 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
     active_items = active_items | {iref[1]}
     itype, args = entities[iref[1]]
     if itype == "IFCCSGSOLID" and len(args) == 1:
-        return _extract_solid_item(entities, args[0], unit_scale, mass_issues, active_items)
+        return _extract_solid_item(entities, args[0], unit_scale, mass_issues, active_items, advanced_mesh)
     if itype == "IFCBLOCK" and len(args) == 4:
         try:
             location, _, _ = _required_ifc_entity(entities, args[0], "IFCAXIS2PLACEMENT3D")
@@ -1190,7 +1271,7 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
         operands = []
         issues = []
         for reference in args[1:]:
-            pieces = _extract_solid_item(entities, reference, unit_scale, issues, active_items)
+            pieces = _extract_solid_item(entities, reference, unit_scale, issues, active_items, advanced_mesh)
             if not pieces or issues:
                 raise UnresolvedSolidGeometry("unresolved physical Boolean operand")
             operands.append(_boolean_meshes(pieces) if len(pieces) > 1 else pieces[0])
@@ -1235,7 +1316,7 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
                     _, rargs = entities[rep_ref[1]]
                     if len(rargs) >= 4 and isinstance(rargs[3], list):
                         for sub in rargs[3]:
-                            sub_meshes = _extract_solid_item(entities, sub, unit_scale, mass_issues, active_items)
+                            sub_meshes = _extract_solid_item(entities, sub, unit_scale, mass_issues, active_items, advanced_mesh)
                             if not sub_meshes:
                                 raise UnresolvedSolidGeometry("unresolved physical item in mapped representation")
                             for (vv, ff) in sub_meshes:
@@ -1256,6 +1337,8 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
     if itype == "IFCPOLYGONALFACESET":
         return _polygonal_solid_mesh(entities, args, unit_scale)
 
+    if itype == "IFCADVANCEDBREP" and advanced_mesh is not None:
+        return [advanced_mesh(iref[1])]
     if itype == "IFCFACETEDBREPWITHVOIDS":
         return _faceted_void_solid_mesh(entities, args, unit_scale)
     if itype == "IFCFACETEDBREP":
@@ -1521,6 +1604,18 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
     related = _opening_relationships(entities)
     participants = set(related).union(*related.values())
 
+    @cache
+    def advanced_model():
+        try:
+            import ifcopenshell
+            return ifcopenshell.file.from_string(ifc_text)
+        except (ImportError, RuntimeError, ValueError) as exc:
+            raise UnresolvedSolidGeometry("advanced BRep requires a readable IFC kernel model") from exc
+
+    @cache
+    def advanced_mesh(step):
+        return _advanced_brep_mesh(advanced_model(), step)
+
     for eid, etype, args, rargs in _product_shapes(entities):
         if eid in participants:
             _require_single_swept_body(entities, eid)
@@ -1542,7 +1637,7 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
             if rep_ident in ("AXIS", "FOOTPRINT", "BOX"):
                 continue
             for item_ref in sr_args[3]:
-                item_meshes = _extract_solid_item(entities, item_ref, unit_scale, mass_issues)
+                item_meshes = _extract_solid_item(entities, item_ref, unit_scale, mass_issues, advanced_mesh=advanced_mesh)
                 if rep_ident == "BODY" and not item_meshes:
                     raise UnresolvedSolidGeometry(f"unsupported or empty physical Body item on #{eid}")
                 for (v_local, f_local) in item_meshes:
@@ -2014,6 +2109,94 @@ def evaluate_pair_clash(mesh_a: SolidMesh3D, mesh_b: SolidMesh3D, required_clear
     )
 
 
+def _single_advanced_brep_takeoff(ifc_text):
+    """Measure one placed curved Body when no pairwise clearance is required."""
+    import ifcopenshell
+    import ifcopenshell.geom
+    from ifcopenshell import ifcopenshell_wrapper
+
+    model = ifcopenshell.file.from_string(ifc_text)
+    products = [p for p in model.by_type("IfcProduct") if p.Representation]
+    if len(products) != 1 or getattr(products[0], "HasOpenings", ()):
+        return None
+    product = products[0]
+    bodies = [r for r in product.Representation.Representations
+              if r.RepresentationIdentifier not in ("Axis", "Box", "FootPrint")]
+    if len(bodies) != 1:
+        return None
+    rep = bodies[0]
+    visited = set()
+    while rep.RepresentationIdentifier == "Body" and len(rep.Items) == 1:
+        if rep.id() in visited:
+            return None
+        visited.add(rep.id())
+        item = rep.Items[0]
+        if not item.is_a("IfcMappedItem"):
+            break
+        rep = item.MappingSource.MappedRepresentation
+    else:
+        return None
+
+    # A missing edge or disconnected boundary must not become a new solid
+    # merely because the converter can close a nearby gap while sewing.
+    if item.is_a() != "IfcAdvancedBrep" or not item.Outer.is_a("IfcClosedShell"):
+        return None
+    faces = item.Outer.CfsFaces
+    ids = {face.id() for face in faces}
+    if not ids or len(ids) != len(faces):
+        return None
+    edge_faces = {}
+    for face in faces:
+        if not face.is_a("IfcAdvancedFace") or not face.Bounds:
+            return None
+        for bound in face.Bounds:
+            loop = bound.Bound
+            if not loop.is_a("IfcEdgeLoop") or not loop.EdgeList:
+                return None
+            for edge in loop.EdgeList:
+                edge_faces.setdefault(edge.EdgeElement.id(), []).append(face.id())
+    neighbors = {fid: set() for fid in ids}
+    for uses in edge_faces.values():
+        if len(uses) != 2:
+            return None
+        first, second = uses
+        neighbors[first].add(second)
+        neighbors[second].add(first)
+    reached = set()
+    pending = [next(iter(ids))]
+    while pending:
+        face_id = pending.pop()
+        if face_id not in reached:
+            reached.add(face_id)
+            pending.extend(neighbors[face_id] - reached)
+    if reached != ids:
+        return None
+
+    settings = ifcopenshell.geom.settings()
+    settings.set("iterator-output", ifcopenshell_wrapper.NATIVE)
+    settings.set("reorient-shells", True)
+    settings.set("use-world-coords", True)
+    element = ifcopenshell.geom.create_shape(settings, product)
+    geometry = element.geometry
+    if geometry.size() != 1:
+        return None
+    shape = geometry.item(0)
+    if not shape.is_manifold() or shape.num_faces() != len(faces):
+        return None
+    volume = shape.volume().to_double()
+    area = shape.area().to_double()
+    if not all(math.isfinite(v) and v > 0 for v in (volume, area)):
+        return None
+    return {
+        "solid_count": 1, "pair_count": 0, "hard_clash_count": 0,
+        "clearance_violation_count": 0, "min_clearance_m": None,
+        "clashes": [], "all_pairs": [], "total_solid_volume_m3": volume,
+        "total_surface_area_m2": area, "source_product_step_id": product.id(),
+        "source_advanced_brep_step_id": item.id(), "source_face_count": len(faces),
+        "volume_method": "ifcopenshell_reoriented_closed_brep",
+    }
+
+
 def detect_ifc_clashes(
     ifc_text: str,
     required_clearance_m: float = 0.0,
@@ -2028,7 +2211,17 @@ def detect_ifc_clashes(
                                     required_clearance_m, cross_discipline_only, _infer_discipline)
             except (ImportError, RuntimeError, ValueError, TypeError, AttributeError, IndexError, ArithmeticError) as exc:
                 raise UnresolvedSolidGeometry(f"Unresolved IFC curved Body: {exc}") from exc
-    solids = load_ifc_solids(ifc_text)
+    try:
+        solids = load_ifc_solids(ifc_text)
+    except UnresolvedSolidGeometry:
+        if "IFCADVANCEDBREP" in ifc_text.upper():
+            try:
+                takeoff = _single_advanced_brep_takeoff(ifc_text)
+            except (ImportError, RuntimeError, ValueError, TypeError, AttributeError):
+                takeoff = None
+            if takeoff is not None:
+                return takeoff
+        raise
     # Bounds can prove clearance and eliminate candidates for the minimum.
     # Only a narrow-phase result supplies an attainable distance and witness.
     use_broadphase = len(solids) > 25

@@ -18,4 +18,5 @@ install: >-
   npm ci --prefix {src} --no-fund --no-audit
   && uv venv --python 3.12 /opt/harness/venv
   && uv pip install --python /opt/harness/venv/bin/python -r {src}/requirements.txt
+  && /opt/harness/venv/bin/python {src}/engineering_intake.py --build-toolkit {src}/engineering-toolkit.zip
 serve: /opt/harness/venv/bin/python {src}/serve.py

@@ -42,6 +42,28 @@ class PassiveAcousticInterface(unittest.TestCase):
                     actual = result[key]
                     self.assertLessEqual(abs(actual - expected), 5 * math.ulp(expected), (key,actual,expected))
 
+    def test_integer_impedances_preserve_signed_reflection_and_decibel_loss(self):
+        for exponent in (53, 100, 536, 537, 538):
+            high = 2**exponent + 1
+            low = high - 1
+            for a, b in ((low, high), (high, low)):
+                with self.subTest(exponent=exponent, rising=b > a):
+                    result = solve(rho1=a, c1=1, rho2=b, c2=1)
+                    self.assertTrue(result["verified"], result)
+                    # Compute power directly from the unrounded impedances,
+                    # independently of the reflected-power log-series path.
+                    with localcontext() as context:
+                        context.prec = 410
+                        power = Decimal(4*a*b) / Decimal((a+b)**2)
+                        loss = float(-10 * power.log10())
+                    self.assertEqual(result["pressure_reflection_R"], (b-a)/(a+b))
+                    if exponent == 53:
+                        oblique = solve(rho1=a, c1=1, rho2=b, c2=1, incidence_sine=0)
+                        self.assertTrue(oblique["verified"], oblique)
+                        self.assertEqual(result["pressure_reflection_R"], oblique["pressure_reflection_R"])
+                    self.assertAlmostEqual(result["transmission_loss_dB"], loss,
+                                           delta=math.ulp(loss) if exponent < 500 else 0)
+
     def test_reciprocal_power_scattering(self):
         for ratio in (0.01, 0.75, 1.0, 1.5, 100.0):
             forward = solve(rho1=1, c1=1, rho2=ratio, c2=1)
