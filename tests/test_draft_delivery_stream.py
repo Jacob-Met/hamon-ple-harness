@@ -63,6 +63,7 @@ class AuthoredDraftStream(unittest.IsolatedAsyncioTestCase):
             dest.parent.mkdir()
             draft = dest.with_name(dest.name + ".draft.json")
             author = json.dumps(content)
+            self.enterContext(mock.patch.object(existing, "GENERATOR", author))
             stream = existing.RepairStream(draft)
             observed = []
             proxy = await asyncio.start_server(stream.respond, "127.0.0.1", 0)
@@ -74,7 +75,7 @@ class AuthoredDraftStream(unittest.IsolatedAsyncioTestCase):
                        "MODEL_BASE_URL": url + "/v1", "MODEL_API_KEY": "fixture"}
                 async def entry(ws):
                     await harness.taskbridge._session(ws, harness.solve)
-                with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(existing, "GENERATOR", author):
+                with mock.patch.dict(os.environ, env, clear=True):
                     async with serve(entry, "127.0.0.1", 0) as service:
                         async with connect("ws://127.0.0.1:" + str(service.sockets[0].getsockname()[1])) as ws:
                             await ws.send(json.dumps({"type": "task", "instruction": prompt, "workdir": str(root),
