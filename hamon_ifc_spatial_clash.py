@@ -679,6 +679,10 @@ def _profile_polygons_2d(entities: Dict[int, Tuple[str, List[Any]]], pref: Any, 
                         if any(len(edge) == 3 for edge in edges):
                             raise UnresolvedSolidGeometry("Circular IFC profile requires the source BRep route")
                         points = [edge[0] for edge in edges]
+                        from shapely import Polygon
+                        polygon = Polygon(points) if len(points) >= 3 else None
+                        if polygon is None or not polygon.is_valid or polygon.area == 0:
+                            raise UnresolvedSolidGeometry("Invalid straight indexed profile boundary")
                     elif len(points) > 1 and points[0] == points[-1]:
                         points = points[:-1]
                     else:
@@ -2018,7 +2022,7 @@ def detect_ifc_clashes(
     if "IFCARCINDEX" in ifc_text.upper():
         from hamon_ifc_indexed_curves import curved_scene
         try:
-            curve_report = curved_scene(ifc_text, _product_shapes(parse_ifc_entities(ifc_text)),
+            curve_report = curved_scene(ifc_text, _product_shapes(parse_ifc_entities(ifc_text), strict=True),
                                         required_clearance_m, cross_discipline_only, _infer_discipline)
         except (ImportError, RuntimeError, ValueError, TypeError, AttributeError, IndexError, ArithmeticError) as exc:
             raise UnresolvedSolidGeometry(f"Unresolved IFC curved Body: {exc}") from exc

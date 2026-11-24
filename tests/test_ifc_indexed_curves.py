@@ -1,5 +1,11 @@
 """Check indexed arc extrusions through the registered clash engine's public receiver."""
+import json
 import math
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
 import ifcopenshell
@@ -79,3 +85,35 @@ class IndexedCurves(unittest.TestCase):
         collinear = list(POINTS)
         collinear[2] = (1, 2)
         self.assertFalse(check(fixture(collinear, EDGES))["ok"])
+
+    def test_registered_relay_reads_source_curve(self):
+        root = Path(__file__).resolve().parents[1]
+        if not (root / "node_modules").is_dir():
+            self.skipTest("registered Node receiver runs in the complete CI checkout")
+        from test_wired_router_e2e import _start_mock_relay
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            (work / "indexed.ifc").write_text(fixture(POINTS, EDGES))
+            calls = []
+            relay = _start_mock_relay(work, calls)
+            try:
+                script = """
+import register from './task-tools.ts';
+const tools = new Map();
+register({registerTool(t) {tools.set(t.name,t)}, on() {}});
+const r = await tools.get('hamon_ifc_spatial_clash').execute(
+    'source-arc', {path:'indexed.ifc'}, null, () => {}, {});
+console.log(JSON.stringify(r.details));
+"""
+                env = {**os.environ, "TASK_WORKDIR": temp, "TASK_HARNESS_PYTHON": sys.executable,
+                       "TASK_HARNESS_SRC": str(root),
+                       "TASK_RELAY_URL": f"http://127.0.0.1:{relay.server_address[1]}"}
+                run = subprocess.run(["node", "--experimental-strip-types", "--input-type=module", "-e", script],
+                                     env=env, cwd=root, text=True, capture_output=True, timeout=30, check=True)
+                data = json.loads(run.stdout.strip().splitlines()[-1])
+                self.assertTrue(data["ok"], data)
+                self.assertAlmostEqual(data["total_solid_volume_m3"], AREA*.2, places=10)
+                self.assertEqual(calls, ["read_file"])
+            finally:
+                relay.shutdown()
+                relay.server_close()
