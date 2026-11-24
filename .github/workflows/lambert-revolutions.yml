@@ -1,0 +1,59 @@
+name: Registered Lambert multi-revolution qualification
+on:
+  push:
+    branches: [p2-multirev-oracle-b1e9]
+  pull_request:
+    paths:
+      - hamon_lambert.py
+      - task-tools.ts
+      - ship/verify_lambert_revolutions.py
+      - .github/workflows/lambert-revolutions.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [stock, candidate]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: probe
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.arm == 'stock' && 'a3e4866b6970205e360e6420a48e3967d8ff187e' || github.event_name == 'push' && '270b9f7bcfe49e5304206abab31249724a226cd0' || github.event.pull_request.head.sha || github.sha }}
+          path: work
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: jorgepiloto/lamberthub
+          ref: 5010709b000bb6b29831ad628fa4b1ce1f519036
+          path: oracle
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m pip install -r work/requirements.txt ./oracle pytest
+      - run: npm ci --no-audit --no-fund
+        working-directory: work
+      - name: Compare registered velocity pairs and independently propagate the orbits
+        env:
+          ARM: ${{ matrix.arm }}
+        run: |
+          args=()
+          if [[ "$ARM" == stock ]]; then args+=(--stock); fi
+          python probe/ship/verify_lambert_revolutions.py --root work --oracle-source oracle --output "$ARM.json" "${args[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambert-multirev-${{ matrix.arm }}
+          path: ${{ matrix.arm }}.json
+          if-no-files-found: error
