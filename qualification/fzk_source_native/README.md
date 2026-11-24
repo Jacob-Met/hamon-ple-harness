@@ -11,7 +11,10 @@ Native parts must form closed, valid solids. Body parts are combined by a
 native material union before per-occurrence volume is reported. Summing
 overlapping window components is not accepted. The oracle also measures gross
 walls, opening-subtracted walls, and all 22 window components. It checks
-material intersections both at the source tolerance and at 10 nm.
+material intersections both at the original source context precision and in a
+separate native conversion whose in-memory context precision is 10 nm; every
+authored coordinate remains unchanged. This second conversion is a sensitivity
+variant, not a change to the downloaded public file.
 
 The historical source investigation found 81 independently measurable physical
 occurrences and one unresolved stair, STEP #14502. The intact model has 82
@@ -29,3 +32,10 @@ A workflow run qualifies only its exact source commit. Reconstructed code
 receives no credit from measurements of an earlier lost local candidate.
 This is engineering source qualification, not an organizer score, hidden-task
 accuracy measurement, or portal submission.
+
+The registered candidate step reads the complete original 2.5 MB file once via
+its ordinary TypeScript task receiver. It compares every reported physical
+quantity with the independent native table, accounts for all requested pairs,
+and requires the one unresolved stair and whole-model uncertainty to stay
+explicit. The full pair matrix is not independently verified by the native
+oracle; only the two wall/window relations have native intersection evidence.

@@ -34,6 +34,7 @@ class SolidMesh3D:
     # Each extracted IFC solid contributes material. Boundary shells within
     # one solid can enclose voids; independently supplied solids form a union.
     material_face_counts: Tuple[int, ...] = ()
+    certified_union_volume_m3: Optional[float] = None
 
     @property
     def aabb_min(self) -> np.ndarray:
@@ -88,6 +89,8 @@ class SolidMesh3D:
         return weight / 6, tuple(float(x) for x in centroid)
 
     def volume_m3(self) -> float:
+        if self.certified_union_volume_m3 is not None:
+            return self.certified_union_volume_m3
         if self.metadata.get("mass_issue"):
             raise UnresolvedMeshMass(self.metadata["mass_issue"])
         if len(self.faces) == 0:
@@ -98,6 +101,8 @@ class SolidMesh3D:
         return float(abs(np.sum(six_volumes)) / 6.0)
 
     def surface_area_m2(self) -> float:
+        if self.certified_union_volume_m3 is not None:
+            raise UnresolvedMeshMass("Only union volume is certified; component surface area overlaps")
         if len(self.faces) == 0:
             return 0.0
         v0 = self.vertices[self.faces[:, 0]]
@@ -107,6 +112,8 @@ class SolidMesh3D:
         return float(np.sum(areas))
 
     def centroid_m(self) -> Tuple[float, float, float]:
+        if self.certified_union_volume_m3 is not None:
+            raise UnresolvedMeshMass("Only union volume is certified; centroid is unresolved")
         if self.metadata.get("mass_issue"):
             raise UnresolvedMeshMass(self.metadata["mass_issue"])
         if len(self.faces) == 0:
@@ -745,6 +752,14 @@ class UnresolvedSolidGeometry(ValueError):
     """A physical Body was present but could not supply verified solid geometry."""
 
 
+class _VolumeOnlyUnion(UnresolvedSolidGeometry):
+    """A kernel union has qualified volume but no position-welded output surface."""
+
+    def __init__(self, volume_m3):
+        super().__init__("Only indexed material-union volume is certified")
+        self.volume_m3 = volume_m3
+
+
 _EMPTY_CLIP = (np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.int32))
 
 
@@ -880,6 +895,13 @@ def _boolean_meshes(meshes, operator="UNION", *, allow_empty=False):
         faces = np.asarray(output.tri_verts, dtype=np.int32)
         _, closed, coherent = _closed_surface_components(vertices, faces)
         if not np.isfinite(vertices).all() or len(closed) != len(faces) or not coherent:
+            if operator == "UNION":
+                from hamon_ifc_indexed_union import certified_indexed_union_volume
+                volume = certified_indexed_union_volume(
+                    vertices, faces, kernel_volume=float(result.volume()),
+                    operand_volumes=[float(part.volume()) for part in operands],
+                    world_vertices=vertices * scale + low, scale=scale)
+                raise _VolumeOnlyUnion(volume)
             raise UnresolvedSolidGeometry("Boolean result lacks a closed, consistently oriented boundary")
         return vertices * scale + low, faces
     except UnresolvedSolidGeometry:
@@ -1859,6 +1881,7 @@ def _gross_ifc_solids(entities, unit_scale, participants, products, advanced_mes
             world_mat = _resolve_local_placement(entities, args[5], unit_scale)
         has_empty = False
         mass_issues = []
+        certified_union_volume = None
         all_verts: List[np.ndarray] = []
         all_faces: List[np.ndarray] = []
         v_offset = 0
@@ -1902,6 +1925,10 @@ def _gross_ifc_solids(entities, unit_scale, participants, products, advanced_mes
                 try:
                     vertices, faces = _boolean_meshes(pieces)
                     all_verts, all_faces = [vertices], [faces]
+                except _VolumeOnlyUnion as exc:
+                    # Retain original component surfaces for geometric queries.
+                    # This exception never certifies an opening or clipping mesh.
+                    certified_union_volume = exc.volume_m3
                 except UnresolvedSolidGeometry as exc:
                     # Existing surface/containment queries remain useful. No
                     # additive mass is reported for an unqualified union.
@@ -1917,6 +1944,7 @@ def _gross_ifc_solids(entities, unit_scale, participants, products, advanced_mes
                 metadata={"step_id": eid, "unit_scale_m": unit_scale,
                           **({"mass_issue": mass_issues[0]} if mass_issues else {})},
                 material_face_counts=tuple(len(faces) for faces in all_faces),
+                certified_union_volume_m3=certified_union_volume,
             ))
         elif has_empty:
             empty.add(eid)
@@ -2580,6 +2608,12 @@ def run_router_ifc_clash(payload: dict) -> dict:
             else:
                 raise FileNotFoundError(f"IFC file not found: {payload.get('path')}")
             ifc_path = tmp_file
+
+        if type(payload.get("allow_partial", False)) is not bool:
+            raise ValueError("allow_partial must be Boolean")
+        if payload.get("allow_partial"):
+            from hamon_ifc_partial import partial_clash_report
+            return partial_clash_report(ifc_path.read_text(encoding="utf-8"), req_clear, cross_only)
 
         preferred = (
             "analyze_ifc_spatial_clash",

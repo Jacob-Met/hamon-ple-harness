@@ -49,8 +49,18 @@ jobs:
             "$RUNNER_TEMP/AC20-FZK-Haus.ifc" "$RUNNER_TEMP/fzk-source-native"
       - name: Install candidate runtime
         run: pip install --disable-pip-version-check -r requirements.txt 'pytest>=8,<10'
-      - name: Exercise finite halfspaces and malformed source controls
-        run: python -m pytest -q tests/test_ifc_finite_halfspace_openings.py
+      - name: Exercise finite halfspaces, indexed unions and malformed source controls
+        run: python -m pytest -q tests/test_ifc_finite_halfspace_openings.py tests/test_ifc_indexed_union_volume.py tests/test_ifc_partial.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install actual registered tool runtime
+        run: npm ci --no-fund --no-audit
+      - name: Compare the intact source through the registered receiver
+        run: |
+          python qualification/fzk_source_native/compare_registered.py \
+            "$RUNNER_TEMP/AC20-FZK-Haus.ifc" "$RUNNER_TEMP/fzk-source-native/native-results.json" "$RUNNER_TEMP/fzk-source-native"
       - name: Preserve machine-readable native evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -59,4 +69,6 @@ jobs:
           path: |
             ${{ runner.temp }}/fzk-source-native/manifest.json
             ${{ runner.temp }}/fzk-source-native/native-results.json
+            ${{ runner.temp }}/fzk-source-native/registered-reader.json
+            ${{ runner.temp }}/fzk-source-native/source-comparison.json
           if-no-files-found: error

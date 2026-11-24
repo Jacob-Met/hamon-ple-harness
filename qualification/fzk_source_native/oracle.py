@@ -32,7 +32,7 @@ def extract(source, out):
     manifest = {"source_sha256": SOURCE_SHA256,
                 "ifcopenshell_version": importlib.metadata.version("ifcopenshell"),
                 "physical_count": len(physical), "products": [], "gross": {}}
-    def export(product, gross=False):
+    def export(product, gross=False, prefix=""):
         settings = geom.settings()
         settings.set("iterator-output", ifc.ifcopenshell_wrapper.NATIVE)
         settings.set("use-world-coords", True)
@@ -44,7 +44,7 @@ def extract(source, out):
         rows = []
         for index in range(geometry.size()):
             part = geometry.item(index)
-            name = f"{product.id()}-{'gross' if gross else 'net'}-{index}.brep"
+            name = f"{prefix}{product.id()}-{'gross' if gross else 'net'}-{index}.brep"
             serialized = part.serialize()
             if isinstance(serialized, bytes):
                 (out / name).write_bytes(serialized)
@@ -64,6 +64,16 @@ def extract(source, out):
         assert model[opening].VoidsElements[0].RelatingBuildingElement.id() == host
         assert model[opening].HasFillings[0].RelatedBuildingElement.id() == window
         manifest["gross"][str(host)] = export(model[host], True)
+    # A separate importer conversion changes only source context precision.
+    # The downloaded exchange bytes and every authored coordinate remain intact.
+    precise = ifc.file.from_string(source.read_text())
+    for context in precise.by_type("IfcGeometricRepresentationContext", False):
+        if context.CoordinateSpaceDimension == 3:
+            context.Precision = 1e-8
+    manifest["context_precision_variant_m"] = 1e-8
+    manifest["precision_variant"] = {
+        str(step): export(precise[step], prefix="context-1e-8-")
+        for step in (60012, 66459, 67828, 74280)}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     print(json.dumps({"stage": "native_export", "source_sha256": SOURCE_SHA256,
                       "physical_count": len(physical),
@@ -74,15 +84,14 @@ def measure(source, out):
     from OCP.BRepTools import BRepTools
     from OCP.TopoDS import TopoDS, TopoDS_Shape
     from OCP.TopExp import TopExp_Explorer
-    from OCP.TopAbs import TopAbs_SOLID, TopAbs_SHELL, TopAbs_FACE, TopAbs_SHAPE
-    from OCP.BRepBuilderAPI import BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid, BRepBuilderAPI_Copy
+    from OCP.TopAbs import TopAbs_SOLID, TopAbs_SHELL, TopAbs_FACE
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid
     from OCP.BRepLib import BRepLib
     from OCP.BRepCheck import BRepCheck_Analyzer
     from OCP.BRepGProp import BRepGProp
     from OCP.GProp import GProp_GProps
     from OCP.BRepAlgoAPI import BRepAlgoAPI_Common, BRepAlgoAPI_Fuse
     from OCP.BRepExtrema import BRepExtrema_DistShapeShape
-    from OCP.ShapeFix import ShapeFix_ShapeTolerance
     checked_source(source)
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest["source_sha256"] == SOURCE_SHA256 and manifest["physical_count"] == 82
@@ -108,6 +117,8 @@ def measure(source, out):
     def read_closed(row):
         raw = TopoDS_Shape()
         assert BRepTools.Read_s(raw, str(out / row["file"]), BRep_Builder())
+        raw_faces = list(explore(raw, TopAbs_FACE))
+        assert len(raw_faces) == row["native_face_count"], "Native face inventory changed in serialization"
         solids = list(explore(raw, TopAbs_SOLID))
         if len(solids) == 1:
             solid = solids[0]
@@ -125,6 +136,7 @@ def measure(source, out):
                 builder.Add(shell)
             solid = builder.Solid()
             assert BRepLib.OrientClosedSolid_s(solid)
+        assert len(list(explore(solid, TopAbs_FACE))) == len(raw_faces), "Orphan or lost native faces"
         result = valid_closed(solid)
         assert math.isclose(result, abs(volume(raw, False)), rel_tol=1e-8, abs_tol=1e-12)
         return solid
@@ -147,11 +159,6 @@ def measure(source, out):
         common = volume(op.Shape())
         assert math.isfinite(common) and common >= -1e-12
         return {"common_m3": common, "distance_m": distance.Value()}
-    def tightened(shape):
-        copy = BRepBuilderAPI_Copy(shape).Shape()
-        ShapeFix_ShapeTolerance().SetTolerance(copy, 1e-8, TopAbs_SHAPE)
-        valid_closed(copy)
-        return copy
     report = {"source_sha256": SOURCE_SHA256,
               "ifcopenshell_version": manifest["ifcopenshell_version"],
               "ocp_version": importlib.metadata.version("cadquery-ocp"),
@@ -177,10 +184,13 @@ def measure(source, out):
         components = original_parts[window]
         assert len(components) == 11
         joined = union(components)
+        precise_net, = [read_closed(r) for r in manifest["precision_variant"][str(host)]]
+        precise_parts = [read_closed(r) for r in manifest["precision_variant"][str(window)]]
+        assert len(precise_parts) == len(components)
         rows = [{"volume_m3": valid_closed(part),
                  "gross": relation(gross, part), "net": relation(net, part),
-                 "net_tolerance_1e_8_m": relation(tightened(net), tightened(part))}
-                for part in components]
+                 "net_context_precision_1e_8_m": relation(precise_net, precise_parts[index])}
+                for index, part in enumerate(components)]
         report["openings"][str(host)] = {
             "opening_step_id": opening, "window_step_id": window,
             "gross_m3": valid_closed(gross), "net_m3": valid_closed(net),
@@ -191,7 +201,7 @@ def measure(source, out):
         assert math.isclose(valid_closed(net), 5.544406029727043, rel_tol=0, abs_tol=1e-9)
         assert math.isclose(valid_closed(joined), 0.0298949822468136, rel_tol=0, abs_tol=1e-11)
         assert all(abs(r["net"]["common_m3"]) <= 1e-12 for r in rows)
-        assert all(abs(r["net_tolerance_1e_8_m"]["common_m3"]) <= 1e-12 for r in rows)
+        assert all(abs(r["net_context_precision_1e_8_m"]["common_m3"]) <= 1e-12 for r in rows)
         assert all(math.isclose(r["gross"]["common_m3"], r["volume_m3"],
                                 rel_tol=1e-7, abs_tol=1e-12) for r in rows)
     known = {int(k): v for k, v in report["per_product"].items() if v["status"] == "known"}
