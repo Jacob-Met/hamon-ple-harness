@@ -2020,14 +2020,14 @@ def detect_ifc_clashes(
     cross_discipline_only: bool = False,
 ) -> Dict[str, Any]:
     if "IFCARCINDEX" in ifc_text.upper():
-        from hamon_ifc_indexed_curves import curved_scene
-        try:
-            curve_report = curved_scene(ifc_text, _product_shapes(parse_ifc_entities(ifc_text), strict=True),
-                                        required_clearance_m, cross_discipline_only, _infer_discipline)
-        except (ImportError, RuntimeError, ValueError, TypeError, AttributeError, IndexError, ArithmeticError) as exc:
-            raise UnresolvedSolidGeometry(f"Unresolved IFC curved Body: {exc}") from exc
-        if curve_report is not None:
-            return curve_report
+        from hamon_ifc_indexed_curves import curved_scene, has_direct_arc
+        entities = parse_ifc_entities(ifc_text)
+        if has_direct_arc(entities, _product_shapes(entities)):
+            try:
+                return curved_scene(ifc_text, _product_shapes(entities, strict=True),
+                                    required_clearance_m, cross_discipline_only, _infer_discipline)
+            except (ImportError, RuntimeError, ValueError, TypeError, AttributeError, IndexError, ArithmeticError) as exc:
+                raise UnresolvedSolidGeometry(f"Unresolved IFC curved Body: {exc}") from exc
     solids = load_ifc_solids(ifc_text)
     # Bounds can prove clearance and eliminate candidates for the minimum.
     # Only a narrow-phase result supplies an attainable distance and witness.

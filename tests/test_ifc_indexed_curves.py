@@ -113,6 +113,16 @@ class IndexedCurves(unittest.TestCase):
         collinear[2] = (1, 2)
         self.assertFalse(check(fixture(collinear, EDGES))["ok"])
 
+    def test_unreferenced_indexed_arc_does_not_replace_the_regular_mesh_route(self):
+        from unittest.mock import patch
+        text = fixture([(0, 0), (1, 0), (1, 1), (0, 1)], [("IfcLineIndex", (1, 2, 3, 4, 1))])
+        extra = "#9901=IFCCARTESIANPOINTLIST2D(((0.,0.),(1.,1.),(2.,0.)));\n" \
+                "#9902=IFCINDEXEDPOLYCURVE(#9901,(IFCARCINDEX((1,2,3))),.F.);\n"
+        text = text.replace("ENDSEC;\nEND-ISO", extra + "ENDSEC;\nEND-ISO")
+        self.assertIn("IFCARCINDEX", text)
+        with patch.dict(sys.modules, ifcopenshell=None):
+            self.assertAlmostEqual(check(text)["total_solid_volume_m3"], .2)
+
     def test_registered_relay_reads_source_curve(self):
         root = Path(__file__).resolve().parents[1]
         if not (root / "node_modules").is_dir():

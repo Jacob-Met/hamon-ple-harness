@@ -97,6 +97,30 @@ def _indexed_area(curve):
     return convex_arc_area(ordered_segments(points, segments))
 
 
+def has_direct_arc(entities, product_rows):
+    """Choose the native route only for an arc referenced from an actual Body."""
+    def fields(ref, kind):
+        if isinstance(ref, tuple) and len(ref) == 2 and ref[0] == "ref":
+            actual, args = entities.get(ref[1], (None, []))
+            if actual == kind:
+                return args
+        return []
+
+    for _, _, _, shape in product_rows:
+        for ref in shape[2]:
+            rep = fields(ref, "IFCSHAPEREPRESENTATION")
+            if len(rep) < 4 or str(rep[1]).upper() != "BODY" or not isinstance(rep[3], list):
+                continue
+            for item in rep[3]:
+                sweep = fields(item, "IFCEXTRUDEDAREASOLID")
+                profile = fields(sweep[0], "IFCARBITRARYCLOSEDPROFILEDEF") if sweep else []
+                curve = fields(profile[2], "IFCINDEXEDPOLYCURVE") if len(profile) > 2 else []
+                if len(curve) > 1 and isinstance(curve[1], list) and any(
+                        isinstance(s, tuple) and s[0] == "IFCARCINDEX" for s in curve[1]):
+                    return True
+    return False
+
+
 def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipline):
     """Measure direct curved Body occurrences using the source OCCT BRep, without tessellation."""
     import ifcopenshell
@@ -122,7 +146,7 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
                     has_arc = True
         bodies.append((product, kind, args, reps, items, ring))
     if not has_arc:
-        return None
+        raise ValueError("Source and native parsers disagree on the indexed arc roster")
     if model.by_type("IfcRelVoidsElement"):
         raise ValueError("Indexed-curve BRep does not qualify relational openings")
     scale = calculate_unit_scale(model)
