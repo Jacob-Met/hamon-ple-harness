@@ -748,9 +748,14 @@ async def solve(session: taskbridge.Session) -> str:
           if final_issues:
             generator_probes = delivery_materialize.snapshot_targets(materialize_candidates)
             member_paths = sorted(first_publication.required_outputs) if archive_plan else []
-            if len(generator_probes) + len(member_paths) > delivery_guard.MAX_TARGETS:
+            members_absent_at_start = bool(member_paths) and (
+                before_delivery.get(delivery_targets[0]["path"], {}).get("loose_members_initially_absent") is True
+            )
+            loose_probes = []
+            if not members_absent_at_start:
+              if len(generator_probes) + len(member_paths) > delivery_guard.MAX_TARGETS:
                 member_paths = []
-            loose_probes = [{"path": path, "kind": "file"} for path in member_paths]
+              loose_probes = [{"path": path, "kind": "file"} for path in member_paths]
             after_generators = await delivery_guard.snapshot(
                 session, generator_probes + loose_probes, deadline=final_deadline - 10,
             )
@@ -765,7 +770,8 @@ async def solve(session: taskbridge.Session) -> str:
               )
               if member_paths and any(row["state"] == "executed" for row in observed):
                 await archive_contract.publish_generated(
-                    session, archive_plan[1], member_paths, after_generators, deadline=final_deadline - 10,
+                    session, archive_plan[1], member_paths, after_generators,
+                    initially_absent=members_absent_at_start, deadline=final_deadline - 10,
                 )
               terminal.observe(await delivery_guard.snapshot(
                   session, delivery_targets, deadline=final_deadline,
