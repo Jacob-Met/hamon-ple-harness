@@ -97,8 +97,8 @@ def _indexed_area(curve):
     return convex_arc_area(ordered_segments(points, segments))
 
 
-def has_direct_arc(entities, product_rows):
-    """Choose the native route only for an arc referenced from an actual Body."""
+def has_direct_curved_profile(entities, product_rows):
+    """Choose the native route only for a supported curve referenced by an actual Body."""
     def fields(ref, kind):
         if isinstance(ref, tuple) and len(ref) == 2 and ref[0] == "ref":
             actual, args = entities.get(ref[1], (None, []))
@@ -114,6 +114,8 @@ def has_direct_arc(entities, product_rows):
             for item in rep[3]:
                 sweep = fields(item, "IFCEXTRUDEDAREASOLID")
                 profile = fields(sweep[0], "IFCARBITRARYCLOSEDPROFILEDEF") if sweep else []
+                if len(profile) > 2 and fields(profile[2], "IFCRATIONALBSPLINECURVEWITHKNOTS"):
+                    return True
                 curve = fields(profile[2], "IFCINDEXEDPOLYCURVE") if len(profile) > 2 else []
                 if len(curve) > 1 and isinstance(curve[1], list) and any(
                         isinstance(s, tuple) and s[0] == "IFCARCINDEX" for s in curve[1]):
@@ -130,7 +132,7 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
 
     model = ifcopenshell.file.from_string(ifc_text)
     bodies = []
-    has_arc = False
+    curved_types = set()
     for step, kind, args, _ in product_rows:
         product = model.by_id(step)
         reps = [rep for rep in product.Representation.Representations
@@ -143,13 +145,19 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
                 if candidate.is_a("IfcIndexedPolyCurve") and candidate.Segments and any(
                         part.is_a("IfcArcIndex") for part in candidate.Segments):
                     ring = candidate
-                    has_arc = True
+                    curved_types.add("arc")
+                elif candidate.is_a() == "IfcRationalBSplineCurveWithKnots":
+                    ring = candidate
+                    curved_types.add("rational")
         bodies.append((product, kind, args, reps, items, ring))
-    if not has_arc:
-        raise ValueError("Source and native parsers disagree on the indexed arc roster")
+    if not curved_types:
+        raise ValueError("Source and native parsers disagree on the curved profile roster")
     if model.by_type("IfcRelVoidsElement"):
         raise ValueError("Indexed-curve BRep does not qualify relational openings")
     scale = calculate_unit_scale(model)
+    if "rational" in curved_types:
+        from hamon_ifc_rational_profiles import rational_scene
+        return rational_scene(bodies, scale, required_clearance, cross_only, discipline)
     settings = geom.settings()
     settings.set("iterator-output", wrapper.NATIVE)
     settings.set("use-world-coords", True)
