@@ -245,3 +245,58 @@ def test_minimum_positive_rpm_retains_representable_power_and_blade_speed():
     result = verify_turbomachinery(spec)
     assert result["conservation_verified"]
     assert result["outlet"]["blade_speed_m_s"] == float(omega * Fraction(mass)) > 0
+
+
+@pytest.mark.parametrize("z,loss", [(-8, 0), (1, 9), (3, 0.75), (0, 0)])
+def test_pump_suction_measurement_referred_to_comparison_datum(z, loss):
+    spec = radial_case()
+    inlet = spec["suction_flange"]
+    inlet.update(gauge_elevation_above_npsh_datum_m=z, loss_to_npsh_datum_m=loss)
+    result = verify_turbomachinery(spec)
+    # Compute in pressure units first: stagnation, hydrostatic shift, loss, vapor.
+    g, rho = 9.80665, inlet["density_kg_m3"]
+    pa = (inlet["suction_absolute_pressure_Pa"] + rho * inlet["suction_velocity_m_s"]**2 / 2
+          + rho*g*(z-loss) - inlet["vapor_pressure_Pa"])
+    threshold = rho*g*inlet["required_npsh_m"]
+    assert result["available_npsh_m"] == pytest.approx(pa/(rho*g))
+    assert result["npsh_margin_m"] == pytest.approx((pa-threshold)/(rho*g))
+    assert result["meets_required_npsh"] is (pa >= threshold)
+    assert result["conservation_verified"] is (pa >= threshold)
+
+
+def test_negative_intervening_head_loss_is_refused():
+    spec = radial_case()
+    spec["suction_flange"]["loss_to_npsh_datum_m"] = -0.1
+    assert not verify_turbomachinery(spec)["ok"]
+
+
+@pytest.mark.parametrize("sg,absolute_psi,vapor_psi,speed_fps,height_ft,loss_ft,published_ft,tol_ft", [
+    (0.914, 70 + 12.69, 77.68, 6.28, 5, 0.1, 18.17, 0.05),
+    (0.500, 152 + 14, 163, 4.54, -2, 0, 12, 0.5),
+])
+def test_published_suction_gauge_examples(sg, absolute_psi, vapor_psi, speed_fps,
+                                         height_ft, loss_ft, published_ft, tol_ft):
+    # EPRI 1026475, Appendix B, example 5; Henshaw, What Is NPSH?, problem 2.
+    # Both publications round their customary-unit conversion factors and answers.
+    ft, psi = 0.3048, 6894.757293168
+    spec = radial_case()
+    spec["suction_flange"] = {
+        "density_kg_m3": 1000 * sg, "suction_absolute_pressure_Pa": absolute_psi * psi,
+        "vapor_pressure_Pa": vapor_psi * psi, "suction_velocity_m_s": speed_fps * ft,
+        "gauge_elevation_above_npsh_datum_m": height_ft * ft,
+        "loss_to_npsh_datum_m": loss_ft * ft, "required_npsh_m": 0,
+    }
+    original = verify_turbomachinery(spec)
+    assert original["available_npsh_m"] / ft == pytest.approx(published_ft, abs=tol_ft)
+
+
+def test_measurements_at_two_stations_recover_same_datum_head():
+    spec = radial_case()
+    inlet = spec["suction_flange"]
+    reference = verify_turbomachinery(spec)
+    # Moving upstream by 2 m in elevation and 0.5 m in dissipated head reduces
+    # the static pressure by rho*g*1.5 when the measured velocities agree.
+    inlet["suction_absolute_pressure_Pa"] -= inlet["density_kg_m3"] * 9.80665 * 1.5
+    inlet.update(gauge_elevation_above_npsh_datum_m=2, loss_to_npsh_datum_m=0.5)
+    upstream = verify_turbomachinery(spec)
+    assert upstream["available_npsh_m"] == pytest.approx(reference["available_npsh_m"], abs=1e-12)

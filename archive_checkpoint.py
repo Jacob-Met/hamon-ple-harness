@@ -100,13 +100,10 @@ def _hydrate_stage_from_output_dir(stage: Path, output_dir: Path, names: list[st
             shutil.copy2(src, dst)
 
 
-def _replace_synced(candidate: Path, target: Path, *, create_only: bool = False) -> None:
+def _replace_synced(candidate: Path, target: Path) -> None:
     with candidate.open("rb") as f:
         os.fsync(f.fileno())
-    if create_only:
-        os.link(candidate, target)
-    else:
-        os.replace(candidate, target)
+    os.replace(candidate, target)
     directory_fd = os.open(target.parent, os.O_RDONLY)
     try:
         os.fsync(directory_fd)
@@ -153,15 +150,14 @@ def recover(stage: Path, target: Path, names: list[str]) -> str:
     return "published"
 
 
-def publish(stage: Path, target: Path, names: list[str], *, prior_members=None) -> None:
+def publish(stage: Path, target: Path, names: list[str], *, after_empty=False, prior_members=None) -> None:
     if not names or len(names) != len(set(names)) or any(
         not n or n in {".", ".."} or "/" in n or "\\" in n for n in names
     ):
         raise ValueError("expected distinct root filenames")
-    if prior_members is not None:
-        if set(prior_members) != set(names) or target.is_symlink() or target.exists():
-            raise ValueError("expected a missing archive and a complete prior member observation")
-    elif not target.exists():
+    if prior_members is not None and set(prior_members) != set(names):
+        raise ValueError("incomplete prior observation of generated members")
+    if prior_members is None and not after_empty and not target.exists():
         _hydrate_stage_from_output_dir(stage, target.parent, names)
     sources = [stage / n for n in names]
     if any(not _valid_regular_file(p) for p in sources):
@@ -193,9 +189,53 @@ def publish(stage: Path, target: Path, names: list[str], *, prior_members=None) 
                             digest.update(block)
                     if digest.hexdigest() == previous:
                         raise ValueError(f"unchanged generator output: {name}")
-        _replace_synced(candidate, target, create_only=prior_members is not None)
+        if after_empty or prior_members is not None:
+            _install_over_empty(candidate, target, names)
+        else:
+            _replace_synced(candidate, target)
     finally:
         candidate.unlink(missing_ok=True)
+
+
+def _install_over_empty(candidate, target, names):
+    """Keep an independent atomic publication arriving before or during installation."""
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise ValueError("archive destination is not a regular file")
+    if target.exists() and target.stat().st_size:
+        verify(target, names)
+        return
+    with candidate.open("rb") as stream:
+        os.fsync(stream.fileno())
+    # Renaming onto an existing regular tempfile cannot move a directory.
+    with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".ple-prior-", delete=False) as f:
+        prior = Path(f.name)
+    parked = False
+    try:
+        try:
+            os.replace(target, prior)
+            parked = True
+        except FileNotFoundError:
+            pass
+        use_prior = parked and (prior.is_symlink() or not prior.is_file() or prior.stat().st_size != 0)
+        try:
+            os.link(prior if use_prior else candidate, target, follow_symlinks=False)
+        except FileExistsError:
+            pass
+        if target.is_symlink() or not target.is_file():
+            raise ValueError("archive destination is not a regular file")
+        verify(target, names)
+        directory_fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if parked:
+            try:
+                os.link(prior, target, follow_symlinks=False)
+            except FileExistsError:
+                pass
+        prior.unlink(missing_ok=True)
 
 
 def publish_loose(stage: Path, target: Path, names: list[str]) -> None:
@@ -205,6 +245,22 @@ def publish_loose(stage: Path, target: Path, names: list[str]) -> None:
     publish(target.parent, target, names)
     # Staging remains available for refinement; never overwrite existing work.
     _hydrate_stage_from_output_dir(stage, target.parent, names)
+
+
+def publish_after_empty(stage: Path, target: Path, names: list[str]) -> None:
+    """Recover a task-created empty target using a single complete source set."""
+    if target.is_symlink() or target.parent.is_symlink():
+        raise ValueError("refusing linked archive destination")
+    if target.exists() and not target.is_file():
+        raise ValueError("archive destination is not a regular file")
+    if target.exists() and target.stat().st_size != 0:
+        verify(target, names)
+        return
+    if not stage.is_symlink() and all(_valid_regular_file(stage / name) for name in names):
+        source = stage
+    else:
+        source = target.parent
+    publish(source, target, names, after_empty=True)
 
 
 if __name__ == "__main__":
@@ -221,6 +277,8 @@ if __name__ == "__main__":
         checkpoint(Path(stage), Path(target), members)
     elif sys.argv[2:] == ["--recover"]:
         print(json.dumps({"action": recover(Path(stage), Path(target), members)}))
+    elif sys.argv[2:] == ["--after-empty"]:
+        publish_after_empty(Path(stage), Path(target), members)
     elif sys.argv[2:] == ["--from-output"]:
         publish_loose(Path(stage), Path(target), members)
         print("PLE_ARCHIVE_PUBLISHED", end="")

@@ -204,7 +204,7 @@ _WAVE8_RECORD_KEYS = {
     "inlet": _STATION_KEYS,
     "outlet": _STATION_KEYS,
     "stage_boundary_speeds_m_s": "inlet outlet",
-    "suction_flange": "density_kg_m3 suction_absolute_pressure_Pa vapor_pressure_Pa suction_velocity_m_s required_npsh_m",
+    "suction_flange": "density_kg_m3 suction_absolute_pressure_Pa vapor_pressure_Pa suction_velocity_m_s required_npsh_m gauge_elevation_above_npsh_datum_m loss_to_npsh_datum_m",
     "fault_impedance_pu": "real imag",
     "prefault_positive_voltage_pu": "real imag",
 }
@@ -453,6 +453,50 @@ def _jacketed_cstr_certificate(spec):
     return result
 
 
+def _coil_product_certificate(req):
+    """Replay the inlet/outlet states and verify separate water and energy balances."""
+    spec = req["spec"]
+    required = {"mode", "inlet", "outlet", "condensate_phase"}
+    optional = {"p_atm_pa", "domain", "m_da_kg_s", "v_dot_in_m3_s", "t_condensate_c",
+                "ice_mass_fraction", "load_split"}
+    if (not required <= spec.keys() <= required | optional
+            or spec.get("mode") != "cooling_coil"
+            or spec.get("domain", req["mode"]) != req["mode"]):
+        return None
+    result = dispatch_ple_tool("hamon_conservation_cad_verifier", req)
+    phase = spec["condensate_phase"]
+    if (result.get("passed") is not True or result.get("phase_source") != "supplied"
+            or result.get("domain") != req["mode"] or result.get("mode") != "cooling_coil"
+            or result.get("condensate_phase") != phase):
+        return None
+    from hamon_pde_control_psychro_fem import _ice_enthalpy_kj_kg, _psychro_state
+    pressure = spec.get("p_atm_pa", 101325.)
+    inlet, outlet = (_psychro_state(spec[name], pressure, ice_below_c=.01)
+                     for name in ("inlet", "outlet"))
+    if not inlet["passed"] or not outlet["passed"]:
+        return None
+    flow = (spec["m_da_kg_s"] if "m_da_kg_s" in spec
+            else spec["v_dot_in_m3_s"]/inlet["v_m3_per_kgda"])
+    t = spec.get("t_condensate_c", outlet["t_db_c"])
+    source = "supplied" if "t_condensate_c" in spec else "outlet_dry_bulb"
+    if result["water_temperature_source"] != source:
+        return None
+    fraction = spec.get("ice_mass_fraction", float(phase == "ice"))
+    removed = flow*(inlet["w_kg_per_kgda"]-outlet["w_kg_per_kgda"])
+    ice, liquid = fraction*removed, (1-fraction)*removed
+    product_h = (fraction*_ice_enthalpy_kj_kg(t) if fraction else 0.) + (1-fraction)*4.186*t
+    load = flow*(inlet["h_kj_per_kgda"]-outlet["h_kj_per_kgda"]) - removed*product_h
+    checks = ((flow, result["m_da_kg_s"]), (fraction, result["ice_mass_fraction"]),
+              (t, result["water_product_temperature_c"]), (product_h, result["water_product_enthalpy_kj_kg"]),
+              (removed, result["condensate_kg_s"]), (ice, result["deposited_ice_kg_s"]),
+              (liquid, result["drained_liquid_kg_s"]), (load, result["q_total_kw"]),
+              (result["q_sensible_kw"]+result["q_latent_kw"], result["q_total_kw"]))
+    if not all(math.isfinite(a) and math.isfinite(b) and math.isclose(a,b,rel_tol=1e-9)
+               for a,b in checks):
+        return None
+    return result
+
+
 def _wave8_result(req):
     """Check one existing operation and its physical residuals."""
     if (
@@ -462,6 +506,8 @@ def _wave8_result(req):
     ):
         return None
     spec = req["spec"]
+    if req["mode"] == "psychrometrics":
+        return _coil_product_certificate(req)
     if req["mode"] == "reactor_kinetics":
         return _jacketed_cstr_certificate(spec)
     if req["mode"] == "electrochem_separations":

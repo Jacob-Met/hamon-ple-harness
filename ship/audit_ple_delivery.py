@@ -85,7 +85,7 @@ def evaluate_task(name: str, prompt: str, files: dict[str, str],
     }
 
 
-def verify_export(root: Path, key: str, expected: str) -> dict:
+def verify_export(root: Path, key: str, expected: str, *, check_format=False, root_members=None) -> dict:
     """Join the frozen manifest to actual exported bytes by path AND Git blob ID."""
     if not exported_path(key) or not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{40}", expected):
         return {"state": "invalid_manifest_entry"}
@@ -105,9 +105,23 @@ def verify_export(root: Path, key: str, expected: str) -> dict:
         actual = git.hexdigest()
     except OSError:
         return {"state": "unavailable"}
-    return {"state": "verified" if actual == expected else "blob_mismatch",
-            "path": key, "expected_blob": expected, "actual_blob": actual,
-            "sha256": digest.hexdigest(), "bytes": size}
+    record = {"state": "verified" if actual == expected else "blob_mismatch",
+              "path": key, "expected_blob": expected, "actual_blob": actual,
+              "sha256": digest.hexdigest(), "bytes": size}
+    if check_format and actual == expected:
+        try:
+            record["format"] = delivery_guard.file_format_state(resolved, size, root_members)
+        except (OSError, ValueError):
+            record["format"] = {"state": "unknown"}
+    return record
+
+
+def output_state(record: dict) -> str:
+    if record["state"] != "verified":
+        return record["state"]
+    observed = record.get("format", {}).get("state")
+    return {None: "verified", "ready": "verified", "empty": "empty_export",
+            "invalid": "invalid_format"}.get(observed, "unverified_format")
 
 
 def custody(prompt: str, row: dict, verified: dict) -> list[dict]:
@@ -123,11 +137,11 @@ def custody(prompt: str, row: dict, verified: dict) -> list[dict]:
             named_path = expected
             record = verified.get(expected.lstrip("/"))
             local = [record] if record else []
-            state = record["state"] if record else "missing_export"
+            state = output_state(record) if record else "missing_export"
         elif destination:
             state = "destination_receipt_unverified"
         elif len(local) == 1:
-            state = local[0]["state"]
+            state = output_state(local[0])
         else:
             state = "ambiguous_exports" if local else "missing_export"
         results.append({"kind": "named_filing" if destination else "named_return",
@@ -140,10 +154,18 @@ def custody(prompt: str, row: dict, verified: dict) -> list[dict]:
             local = [value for key, value in verified.items() if ("/"+key).startswith(path.rstrip("/")+"/")]
             state = "missing_export"
             if local:
-                state = "verified" if all(v["state"] == "verified" for v in local) else "unverified_members"
+                states = {output_state(v) for v in local} - {"empty_export"}
+                if not states:
+                    state = "empty_export"
+                elif "blob_mismatch" in states:
+                    state = "blob_mismatch"
+                elif "invalid_format" in states:
+                    state = "invalid_format"
+                else:
+                    state = "verified" if states == {"verified"} else "unverified_members"
         else:
             local = [verified[path.lstrip("/")]] if path.lstrip("/") in verified else []
-            state = local[0]["state"] if local else "missing_export"
+            state = output_state(local[0]) if local else "missing_export"
         results.append({"kind": target["kind"], "destination": path, "state": state, "exports": local})
     return results
 
@@ -153,7 +175,7 @@ def delivery_status(evidence: list[dict]) -> str:
     states = {item["state"] for item in evidence}
     if states == {"verified"}:
         return "verified"
-    if states.intersection({"missing_export", "blob_mismatch"}):
+    if states.intersection({"missing_export", "blob_mismatch", "empty_export", "invalid_format"}):
         return "incomplete"
     return "unverified"
 
@@ -187,8 +209,19 @@ def run(root: Path) -> dict:
             if not isinstance(files, dict):
                 raise ValueError("historical files map malformed")
             row = evaluate_task(name, first, files, record.get("reward"))
-            verified = {key: verify_export(trace.parent / "files", key, blob)
-                        for key, blob in files.items()}
+            targets = row["targets"]
+            members = delivery_guard.archive_contract.declared_members(first, targets)
+            named = named_return(first)
+            verified = {}
+            for key, blob in files.items():
+                path = exported_path(key)
+                is_output = path and (any(
+                    path == target["path"] or target["kind"] == "dir" and
+                    path.startswith(target["path"].rstrip("/") + "/") for target in targets)
+                    or named and Path(path).name == named["name"])
+                roots = members if members and path == targets[0]["path"] else None
+                verified[key] = verify_export(trace.parent / "files", key, blob,
+                                              check_format=bool(is_output), root_members=roots)
             for identity in verified.values():
                 state = identity["state"]
                 export_identity_counts[state] = export_identity_counts.get(state, 0) + 1

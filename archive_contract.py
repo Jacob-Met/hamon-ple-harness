@@ -203,6 +203,13 @@ async def _command_result(session, command, *, deadline=None):
     return None
 
 
+def recovery_command(command, target, before, after):
+    if ((before or {}).get(target, {}).get("loose_members_initially_absent") is True
+            and (after or {}).get(target, {}).get("state") == "empty"):
+        return command + " --after-empty"
+    return command
+
+
 async def run_command(session, command):
     return await _command_result(session, command) is not None
 

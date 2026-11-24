@@ -42,6 +42,31 @@ class ProvenanceGateTests(unittest.TestCase):
             self.assertEqual([v["path"] for v in report["diverged"]],["harness.py"])
             self.assertEqual(p.main([str(root)]),3)
 
+    def test_loaded_delivery_budget_extension_must_match_the_artifact_source(self):
+        tmp, root = self.make_project()
+        with tmp:
+            extension = "delivery-budget.ts"
+            original = (Path(__file__).resolve().parents[1] / extension).read_bytes()
+            (root / extension).write_bytes(original)
+            path = root / "artifacts" / "manifest.json"
+            manifest = json.loads(path.read_text())
+            manifest["harness"]["files"][extension] = "100644 " + p.blob_sha(original)
+            path.write_text(json.dumps(manifest))
+            self.assertEqual(p.evaluate(root)["status"], "fresh")
+
+            # The Pi extension is an executable input for checked-delivery tasks.
+            changed = b"export default function () {}\n"
+            self.assertNotEqual(original, changed)
+            (root / extension).write_bytes(changed)
+            result = p.evaluate(root)
+            self.assertEqual(result["status"], "stale")
+            self.assertEqual([row["path"] for row in result["diverged"]], [extension])
+
+            (root / extension).write_bytes(original)
+            del manifest["harness"]["files"][extension]
+            path.write_text(json.dumps(manifest))
+            self.assertIn(extension, p.evaluate(root)["missing_in_manifest"])
+
     def test_partial_export_reports_only_tasks_from_a_different_snapshot(self):
         tmp, root = self.make_project()
         with tmp:

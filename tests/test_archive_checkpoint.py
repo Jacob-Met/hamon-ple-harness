@@ -50,12 +50,15 @@ class ArchiveInterruption(unittest.TestCase):
                 archive_checkpoint.publish(root, target, names, prior_members={"result.json": None})
             self.assertFalse(target.exists())
             (root / names[0]).write_text('{"answer": 10}')
-            def competing_writer(candidate, destination):
-                destination.write_bytes(b"participant's own archive")
-                raise FileExistsError(str(destination))
-            with mock.patch.object(os, "link", side_effect=competing_writer), self.assertRaises(FileExistsError):
+            original_link = os.link
+            def competing_writer(candidate, destination, **kwargs):
+                with zipfile.ZipFile(destination, "w") as direct:
+                    direct.writestr("result.json", '{"answer": 42}')
+                return original_link(candidate, destination, **kwargs)
+            with mock.patch.object(os, "link", side_effect=competing_writer):
                 archive_checkpoint.publish(root, target, names, prior_members={"result.json": None})
-            self.assertEqual(target.read_bytes(), b"participant's own archive")
+            with zipfile.ZipFile(target) as direct:
+                self.assertEqual(json.loads(direct.read("result.json")), {"answer": 42})
 
     def test_raw_foundation_contract_and_ambiguity(self):
         text = public_task("foundation-strategy")
@@ -328,7 +331,7 @@ class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
                 return True
             targets = [dict(kind="file",path=str(target))]
             async def snapshot(_, ts, *, deadline=None):
-                if ts != targets:
+                if [{k: row[k] for k in ("kind", "path")} for row in ts] != targets:
                     return {}
                 return {str(target): {"state": "ready" if target.exists() else "missing",
                                       "fingerprint": "after" if target.exists() else ""}}
