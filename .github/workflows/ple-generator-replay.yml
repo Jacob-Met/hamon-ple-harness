@@ -5,6 +5,9 @@ on:
       - "ship/replay_public_generators.py"
       - "ship/verify_materializer_end_to_end.py"
       - "delivery_materialize.py"
+      - "hamon_delivery_draft.py"
+      - "tests/test_delivery_drafts.py"
+      - "tests/test_draft_delivery_stream.py"
       - "tests/test_delivery_materialize.py"
       - ".github/workflows/ple-generator-replay.yml"
   workflow_dispatch:
@@ -25,3 +28,32 @@ jobs:
         run: sudo mkdir -p /filesystem && sudo chown "$(id -u):$(id -g)" /filesystem
       - name: Cold end-to-end run through production materializer and task protocol
         run: python ship/verify_materializer_end_to_end.py
+
+  draft-delivery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install the submitted Pi and evaluator transport
+        run: |
+          npm ci --no-fund --no-audit
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          sudo mkdir -p /filesystem
+          sudo chown "$(id -u):$(id -g)" /filesystem
+      - name: Verify authored exports and submitted Pi cancellation
+        env:
+          PYTHONPATH: ".:tests"
+        run: |
+          python -m unittest -v test_delivery_drafts test_draft_delivery_stream test_loopback_sse_cancel
+      - name: Replay all 29 public prompts over loopback SSE
+        if: ${{ !cancelled() }}
+        env:
+          PYTHONPATH: ".:tests"
+        run: python tests/replay_empty_worlds.py

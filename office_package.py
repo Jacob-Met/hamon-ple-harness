@@ -1,4 +1,6 @@
 """Office package relationships, content types and XML parts. Standard library only."""
+import pathlib
+import re
 import xml.etree.ElementTree as ET
 
 
@@ -216,3 +218,49 @@ def check_office_package(archive, suffix):
             root_tag = ET.parse(stream, parser=ET.XMLParser(target=_RootTag())).getroot()
         if key in expected_roots and root_tag not in expected_roots[key]:
             raise ValueError("incorrect_word_document_root" if suffix == ".docx" else "incorrect_sheet_root")
+
+
+def workbook_parts(archive):
+    names = archive.namelist()
+    if len(names) != len(set(names)):
+        raise ValueError("Duplicate OOXML package member")
+    if "_rels/.rels" not in names and "xl/workbook.xml" not in names:
+        # Earlier callers also audit standalone worksheet fragments.
+        parts = sorted(n for n in names if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n))
+        if not parts:
+            raise ValueError("No workbook or standalone worksheet parts")
+        return None, [{"part": n, "kind": "worksheet", "name": None} for n in parts]
+    if "_rels/.rels" not in names:
+        workbook = "xl/workbook.xml"
+    else:
+        office = [r for r in _xlsx_relationships(archive, "_rels/.rels").values()
+                  if r.get("Type") in {base + "/officeDocument" for base in _DOCUMENT_RELS}]
+        if len(office) != 1 or office[0].get("TargetMode", "Internal") != "Internal":
+            raise ValueError("Expected exactly one internal workbook relationship")
+        workbook = _xlsx_target("", office[0].get("Target", ""))
+    root = _xlsx_xml(archive, workbook, 2_000_000)
+    ns = root.tag.removesuffix("workbook")
+    if ns not in {"{" + v + "}" for v in _SPREADSHEET_NS}:
+        raise ValueError(f"Invalid spreadsheet workbook: {workbook}")
+    sheets = root.find(ns + "sheets")
+    if sheets is None:
+        raise ValueError("Workbook is missing its sheets collection")
+    source = pathlib.PurePosixPath(workbook)
+    rels = _xlsx_relationships(archive, str(source.parent / "_rels" / (source.name + ".rels")))
+    result = []
+    for sheet in sheets.findall(ns + "sheet"):
+        ids = [sheet.get("{" + prefix + "}id") for prefix in _DOCUMENT_RELS]
+        ids = [rid for rid in ids if rid is not None]
+        if len(ids) != 1 or ids[0] not in rels:
+            raise ValueError(f"Unresolved relationship for sheet {sheet.get('name')!r}")
+        rel = rels[ids[0]]
+        if rel.get("TargetMode", "Internal") != "Internal":
+            raise ValueError(f"Workbook sheet {sheet.get('name')!r} has an external target")
+        base, _, kind = rel.get("Type", "").rpartition("/")
+        if base not in _DOCUMENT_RELS:
+            kind = rel.get("Type", "unknown")
+        result.append({"name": sheet.get("name"), "sheet_id": sheet.get("sheetId"),
+                       "state": sheet.get("state", "visible"), "kind": kind,
+                       "part": _xlsx_target(workbook, rel.get("Target", ""))})
+    return workbook, result
+
