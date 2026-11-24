@@ -49,6 +49,20 @@ def check(text, clearance=.05):
                                  "required_clearance_m": clearance})
 
 
+def side_probe(x):
+    f = ifcopenshell.file.from_string(fixture(POINTS, EDGES))
+    make = f.create_entity
+    project = f.by_type("IfcProject")[0]
+    center = make("IfcCartesianPoint", (x, 1., .05))
+    placement = make("IfcLocalPlacement", None, make("IfcAxis2Placement3D", center))
+    profile = make("IfcRectangleProfileDef", "AREA", None, None, .02, .02)
+    solid = make("IfcExtrudedAreaSolid", profile, None, make("IfcDirection", (0., 0., 1.)), .1)
+    rep = make("IfcShapeRepresentation", project.RepresentationContexts[0], "Body", "SweptSolid", [solid])
+    shape = make("IfcProductDefinitionShape", None, None, [rep])
+    make("IfcColumn", ifcopenshell.guid.new(), None, "probe", None, None, placement, shape)
+    return f.to_string()
+
+
 class IndexedCurves(unittest.TestCase):
     def test_authored_arc_direction_storage_permutation_and_units(self):
         for mm in (False, True):
@@ -72,6 +86,19 @@ class IndexedCurves(unittest.TestCase):
             self.assertTrue(r["ok"], r)
             self.assertEqual(r["all_pairs"][0]["status"], expected)
             self.assertAlmostEqual(r["min_clearance_m"], distance, places=9)
+
+    def test_probe_in_the_source_arc_segment_and_outside_its_tangent(self):
+        # At y=1 the old stored-point chords stop at x=1.2; the source circle
+        # extends beyond x=1.30. The apparently clear little column is inside it.
+        inside = check(side_probe(1.25), clearance=.02)
+        self.assertTrue(inside["ok"], inside)
+        self.assertEqual(inside["hard_clash_count"], 1)
+        outside = check(side_probe(1.34))
+        expected = math.hypot(1.33 + 3.8, 1.01 - 2.) - RADIUS
+        self.assertTrue(0. < expected < .05)
+        self.assertTrue(outside["ok"], outside)
+        self.assertEqual(outside["clearance_violation_count"], 1)
+        self.assertAlmostEqual(outside["min_clearance_m"], expected, places=9)
 
     def test_indexed_line_order_and_invalid_source_refusals(self):
         wrapped = [(1, 1), (0, 0), (17, 23), (1, 0), (0, 1)]

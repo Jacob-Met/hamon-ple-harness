@@ -175,17 +175,25 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
         for right, _, tree, right_discipline in shapes[i+1:]:
             if cross_only and left_discipline == right_discipline:
                 continue
-            # A missed range query supplies no distance. Enlarge the broad
-            # search until the kernel returns this exact peer and one extremum.
-            for exponent in range(13):
-                hits = tree.select(element, extend=10.0**exponent)
-                if hits:
-                    break
-            distances = tree.distances()
-            if ([p.id() for p in hits] != [right.id()] or len(distances) != 1
-                    or not math.isfinite(distances[0]) or distances[0] < 0):
-                raise ValueError("Source BRep minimum distance could not be established")
-            d = distances[0]
+            # Extrema on two closed boundaries can be positive when one solid is
+            # entirely inside the other. Test the common material first.
+            common = tree.select(element)
+            if common:
+                if [p.id() for p in common] != [right.id()]:
+                    raise ValueError("Unexpected peer in the BRep material intersection")
+                d = 0.0
+            else:
+                # A missed range query supplies no distance. Enlarge the broad
+                # search until the kernel returns this exact peer and one extremum.
+                for exponent in range(13):
+                    hits = tree.select(element, extend=10.0**exponent)
+                    if hits:
+                        break
+                distances = tree.distances()
+                if ([p.id() for p in hits] != [right.id()] or len(distances) != 1
+                        or not math.isfinite(distances[0]) or distances[0] < 0):
+                    raise ValueError("Source BRep minimum distance could not be established")
+                d = distances[0]
             status = ("hard_clash" if d <= 1e-9 else
                       "clearance_violation" if d < required_clearance - 1e-9 else "clear")
             rows.append({"element_a": left.GlobalId, "element_b": right.GlobalId, "status": status,
