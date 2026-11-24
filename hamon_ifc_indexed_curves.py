@@ -205,6 +205,8 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
     settings = geom.settings()
     settings.set("iterator-output", wrapper.NATIVE)
     settings.set("use-world-coords", True)
+    if has_revolution:
+        settings.set("reorient-shells", True)
     shapes = []
     volumes = []
     for product, kind, args, reps, items, ring in bodies:
@@ -245,7 +247,9 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
         volume = shape.volume().to_double()
         if (not shape.is_manifold() or shape.surface_genus() != genus or not math.isfinite(volume)
                 or volume <= 0 or not math.isclose(volume, expected, rel_tol=1e-9, abs_tol=0)):
-            raise ValueError("BRep volume disagrees with the source extrusion or lacks a closed boundary")
+            raise ValueError(f"Curved sweep BRep manifold={shape.is_manifold()}, "
+                             f"genus={shape.surface_genus()} (expected {genus}), "
+                             f"volume={volume:.16g} m³ (source {expected:.16g})")
         volumes.append(volume)
         tree = geom.tree()
         tree.add_element(element)
