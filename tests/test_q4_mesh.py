@@ -57,8 +57,11 @@ class BilinearMeshTests(unittest.TestCase):
                 det=xx*ye-xe*yx
                 ex=(ye*eta-yx*xi)/det
                 gamma=(xx*xi-xe*eta)/det
-                energy += (2*ex**2+gamma**2)*det/2
-        common={"kinematics":"plane_stress","nodes":nodes,"E_Pa":2,"nu":0,"thickness_m":1,
+                energy += ((16/5)*ex**2+(6/5)*gamma**2)*det/2
+        # The four-point integrals of ex^2 and gamma^2 are 28/33 and 76/33.
+        # This trapezoid therefore also has an independent rational reference.
+        self.assertAlmostEqual(energy, 452/165, places=14)
+        common={"kinematics":"plane_stress","nodes":nodes,"E_Pa":3,"nu":0.25,"thickness_m":1,
                 "supports":[{"node":i,"ux_m":u,"uy_m":0} for i,u in enumerate((1,-1,1,-1))]}
         for order in ([0,1,2,3],[0,3,2,1]):
             out=solve({**common,"elements":[order]})
