@@ -55,6 +55,13 @@ class CDNozzleShock(unittest.TestCase):
             self.assertEqual(r["regime"], "no_internal_shock_" + side + "_back_pressure")
             self.assertNotIn("shock_area_over_throat", r)
 
+    def test_unrepresentable_mach_abstains(self):
+        # With an extreme but finite supplied gamma, loss can remain above
+        # the target throughout the entire representable supersonic branch.
+        r = solve(gamma=1e100, back_to_total_pressure=.25)
+        self.assertFalse(r["verified"])
+        self.assertEqual(r["regime"], "unrepresentable_state")
+
     def test_independent_forward_prescribed_shock(self):
         for g in (1.2, 1.4, 5/3):
             a = (g-1)/2

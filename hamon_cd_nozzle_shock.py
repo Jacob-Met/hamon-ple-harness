@@ -1,5 +1,6 @@
 """Back-pressure-driven normal shock in a steady calorically perfect CD nozzle."""
 import math
+import sys
 
 from mpmath import mp
 
@@ -57,10 +58,17 @@ def internal_shock(params, gamma):
 
     # Downstream total pressure decreases monotonically with pre-shock Mach.
     lo, hi = ctx.one, ctx.mpf(2)
+    max_mach = ctx.mpf(sys.float_info.max)
     while jump(hi)[3] > target_pt:
         if upstream_area(hi) >= ae:
             return dict(out, regime="no_internal_shock_low_back_pressure")
-        lo, hi = hi, hi*2
+        if hi == max_mach:
+            return dict(out, regime="unrepresentable_state")
+        if hi == 1024 and jump(max_mach)[3] > target_pt:
+            if upstream_area(max_mach) >= ae:
+                return dict(out, regime="no_internal_shock_low_back_pressure")
+            return dict(out, regime="unrepresentable_state")
+        lo, hi = hi, min(hi*2, max_mach)
     for _ in range(230):
         mid = (lo + hi) / 2
         if jump(mid)[3] > target_pt:
