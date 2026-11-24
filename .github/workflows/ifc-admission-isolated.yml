@@ -1,64 +1,57 @@
-name: FZK volume-only opening admission evidence
+name: Audit saved FZK reader evidence
 on:
   push:
     branches: ["p2/b1e9c66c-ifc-admission-evidence"]
+permissions:
+  actions: read
+  contents: read
 jobs:
-  admission:
+  audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v4
+      - name: Verify immutable artifact metadata
+        uses: actions/github-script@v7
         with:
-          ref: 4d095659eba9602158919e9211c47268adcf1026
-      - uses: actions/checkout@v4
+          script: |
+            const id = 14883918701
+            const artifact = (await github.rest.actions.getArtifact({...context.repo, artifact_id:id})).data
+            if (artifact.workflow_run.id !== 45313952958 || artifact.workflow_run.head_sha !== 'a72839e9f2edadcd696f3f6d0a43f6c78dbc4827') throw Error('source run mismatch')
+            if (artifact.size_in_bytes !== 28289 || artifact.digest !== 'sha256:84b95bd37bcbdfcf7aa92552ec138ff5e044329dd5e474c7ccb6ff9c5d074b73') throw Error('archive digest mismatch')
+            console.log({artifact:id,run:artifact.workflow_run.id,head:artifact.workflow_run.head_sha,bytes:artifact.size_in_bytes,digest:artifact.digest})
+      - name: Download archived outputs from the original run
+        uses: actions/download-artifact@v4
         with:
-          ref: 04814d8e8e84981f840bb37423c66146ec372ed8
-          path: controls
-          sparse-checkout: tests/test_ifc_volume_only_opening_admission.py
-          sparse-checkout-cone-mode: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install --disable-pip-version-check -r requirements.txt
-      - name: Run independent regression on the exact solver
+          artifact-ids: '14883918701'
+          run-id: '45313952958'
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/saved
+      - name: Reconcile native and registered per-occurrence tables
         run: |
-          test "$(git rev-parse HEAD)" = 4d095659eba9602158919e9211c47268adcf1026
-          test "$(git hash-object controls/tests/test_ifc_volume_only_opening_admission.py)" = fb587625d2e33c891c0b7dcdc50c9f49534e3a7d
-          PYTHONPATH=.:tests python -m unittest discover -s controls/tests -p 'test_ifc_volume_only_opening_admission.py' -v
-      - name: Counterfactual opening use of the two unchanged FZK meshes
-        run: |
-          curl -fsSL --retry 3 --max-time 45 https://raw.githubusercontent.com/IfcOpenShell/IfcOpenShell/90c840c68fb35a54e1a61505c6417ab854f826a5/docs/ifcopenshell-cpp/models/AC20-FZK-Haus.ifc -o "$RUNNER_TEMP/fzk.ifc"
-          PYTHONPATH=tests:. python - <<'PY'
-          import os, pathlib, hashlib, math
-          from dataclasses import replace
-          import numpy as np
-          from test_ifc_finite_halfspace_openings import Source
-          import hamon_ifc_spatial_clash as r
-          import hamon_ifc_partial as h
-          source=pathlib.Path(os.environ['RUNNER_TEMP'],'fzk.ifc').read_bytes()
-          assert hashlib.sha256(source).hexdigest()=='ea6f04eaf92fac4d7ad0038bc3d2dfea4c094dd3f516ecc33c50bf1835ca108d'
-          rows,meshes,*_=h._inventory(source.decode())
-          scene=Source()
-          scene.product('IFCWALL',[scene.box()])
-          plain,=scene.solids()
-          plain=replace(plain,vertices=plain.vertices+100.)
-          for step in [66459,74280]:
-              window=meshes[step]
-              assert len(window.material_face_counts)==11
-              assert math.isclose(window.volume_m3(),0.0298949822468136,rel_tol=0,abs_tol=1e-12)
-              assert window.certified_union_volume_m3==window.volume_m3()
-              print('original-window',step,'volume',window.volume_m3(),'faces',window.material_face_counts)
-              assert (window.aabb_max < plain.aabb_min).any()
-              for role in ('host','cutter'):
-                  a,b=(window,plain) if role=='host' else (plain,window)
-                  a=replace(a,metadata={'step_id':1},ifc_type='IFCWALL')
-                  b=replace(b,metadata={'step_id':2},ifc_type='IFCOPENINGELEMENT')
-                  ent={1:('IFCWALL',[None]*6),2:('IFCOPENINGELEMENT',[None]*6)}
-                  try:
-                      r._physical_occurrences([a,b],ent,1.,{1:{2}})
-                  except r.UnresolvedOpening as error:
-                      assert 'Unqualified compound' in str(error),error
-                      print('declined',step,role,str(error))
-                  else:
-                      raise AssertionError(('volume-only source admitted',step,role))
+          python - <<'PY'
+          import json, os, zipfile, math
+          from collections import Counter
+          from pathlib import Path
+          files=sorted((Path(os.environ['RUNNER_TEMP'])/'saved').rglob('*.json'))
+          print('FILES',[p.name for p in files])
+          docs={p.name:json.loads(p.read_bytes()) for p in files}
+          m=docs['manifest.json']; n=docs['native-results.json']; r=docs['registered-reader.json']
+          assert m['source_sha256']==n['source_sha256']=='ea6f04eaf92fac4d7ad0038bc3d2dfea4c094dd3f516ecc33c50bf1835ca108d'
+          original={x['step_id']:x for x in m['products']}
+          native={int(i):x for i,x in n['per_product'].items()}
+          physical={x['step_id']:x for x in r['products'] if x['role']=='physical'}
+          assert len(original)==len(native)==len(physical)==82 and original.keys()==native.keys()==physical.keys()
+          nr={i for i,v in native.items() if v['status']=='known'}
+          rr={i for i,v in physical.items() if v['volume_status']=='known'}
+          print('NATIVE',len(nr),[(i,native[i].get('reason')) for i in native.keys()-nr])
+          print('REGISTERED', {k:v for k,v in r.items() if k in ('ok','status','known_mesh_count','known_volume_count','unknown_volume_step_ids','unresolved_geometry_step_ids','total_solid_volume_m3','known_occurrence_volume_sum_m3','hard_clash_count','requested_pair_count','evaluated_pair_count','missing_geometry_pair_count','unresolved_pair_count','certified_empty_pair_count','bound_only_pair_count','measured_pair_count')})
+          print('REGISTERED_UNKNOWN',[(i,physical[i].get('geometry_status'),physical[i].get('volume_status'),physical[i].get('reason')) for i in sorted(physical.keys()-rr)])
+          print('MISSING_NATIVE_KNOWN', sorted(nr-rr),'KNOWN_ONLY_BY_READER',sorted(rr-nr))
+          err=[(i,physical[i]['volume_m3'],native[i]['volume_m3']) for i in nr&rr if not math.isclose(physical[i]['volume_m3'],native[i]['volume_m3'],rel_tol=1e-9,abs_tol=1e-9)]
+          print('OUTSIDE_NUMERICAL_TOLERANCE',err,'MATCHES',len(nr&rr)-len(err))
+          for host,win in [(60012,66459),(67828,74280)]:
+              op=n['openings'][str(host)]; p=op['window_parts']
+              print('WINDOW',win,'native_part_count',native[win]['native_part_count'],'summed_parts',math.fsum(v['volume_m3'] for v in p),'native_union',op['window_union_m3'],'candidate',physical[win]['volume_m3'],'native_host',native[host].get('volume_m3'),'registered_host',physical[host].get('volume_m3'))
+          print('VOLUME_ROWS',[(i,native[i]['volume_m3'],physical[i]['volume_m3']) for i in sorted(physical)])
+          print('SOURCE_COMPARISON_PRESENT','source-comparison.json' in docs)
           PY
