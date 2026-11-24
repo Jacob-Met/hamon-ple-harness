@@ -49,3 +49,10 @@ class ConversionSourceTests(unittest.TestCase):
         rows, guard = self.evaluate("A1*Z1", ("kg","g"), 400000)
         self.assertTrue(guard["ok"])
         self.assertEqual(rows["B1"]["status"], "unverified")
+
+    def test_required_frame_survives_an_unlabelled_addend(self):
+        rows, guard = self.evaluate("A1+1", ("m","mm"), 201000)
+        self.assertFalse(guard["ok"])
+        self.assertEqual(rows["B1"]["status"], "unit_scale_mismatch")
+        self.assertEqual(rows["B1"]["required_scale_si"], "1/100")
+        self.assertEqual(rows["B1"]["declared_scale_si"], "1")
