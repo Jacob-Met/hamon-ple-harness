@@ -173,6 +173,27 @@ class PartialIfcTests(unittest.TestCase):
                     self.assertEqual(r["unresolved_geometry_step_ids"],[wall])
                     self.assertEqual((r["missing_geometry_pair_count"],r["all_pairs"]),(1,[]))
 
+    def test_polygonal_point_list_retains_step_numeric_types(self):
+        for coordinate, flag in (("1.", ".T."), (".T.", ".T."), ("'1.'", ".T."), ("1.", "'.F.'")):
+            with self.subTest(coordinate=coordinate, flag=flag):
+                s = PartialScene()
+                pts = s.add(f"IFCCARTESIANPOINTLIST3D(((0.,0.,0.),({coordinate},0.,0.),(0.,1.,0.),(0.,0.,1.)))")
+                faces = [s.add(f"IFCINDEXEDPOLYGONALFACE(({loop}))")
+                         for loop in ("1,3,2", "1,2,4", "2,3,4", "3,1,4")]
+                refs = ",".join(f"#{i}" for i in faces)
+                body = s.add(f"IFCPOLYGONALFACESET(#{pts},{flag},({refs}),$)")
+                wall = s.product("IFCWALL","polyhedral",[body])
+                s.product("IFCBEAM","probe",[s.box(1,10)])
+                report = s.partial()
+                if coordinate == "1." and flag == ".T.":
+                    self.assertTrue(report["ok"], report)
+                    self.assertAlmostEqual(rows(report)[wall]["volume_m3"], 1/6)
+                else:
+                    self.assertEqual(report["unresolved_geometry_step_ids"], [wall])
+                    self.assertEqual(report["missing_geometry_pair_count"], 1)
+                    self.assertEqual(report["all_pairs"], [])
+                    self.assertIsNone(report["total_solid_volume_m3"])
+
     def test_project_conversion_dimensions(self):
         for dims in ("1,0,0,0,0,0,0","0,0,1,0,0,0,0",None):
             with self.subTest(dims=dims):

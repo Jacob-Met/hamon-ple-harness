@@ -236,6 +236,17 @@ def _validate_body(entities, step, project_contexts, visited, active):
         if len(attrs) != 4 or any(reader._ifc_number(v) <= 0 for v in attrs[1:]):
             raise ValueError(f"Invalid block dimensions #{step}")
         reader._rigid_ifc_frame(entities, attrs[0], 1.)
+    elif kind in ("IFCCARTESIANPOINTLIST2D", "IFCCARTESIANPOINTLIST3D"):
+        dim = 2 if kind.endswith("2D") else 3
+        if not attrs or not isinstance(attrs[0], list) or not attrs[0]:
+            raise ValueError(f"Missing point-list coordinates on #{step}")
+        for point in attrs[0]:
+            if (not isinstance(point, list) or len(point) != dim
+                    or any(not math.isfinite(reader._ifc_number(v)) for v in point)):
+                raise ValueError(f"Invalid {dim}D point-list coordinates on #{step}")
+    elif kind == "IFCPOLYGONALFACESET":
+        if len(attrs) != 4 or (attrs[1] is not None and attrs[1] is not True):
+            raise ValueError(f"Unqualified polygonal face-set closure on #{step}")
     elif kind == "IFCTRIANGULATEDFACESET":
         _checked_triangulation(entities, step, attrs)
     elif kind in ("IFCCARTESIANPOINT", "IFCDIRECTION"):
