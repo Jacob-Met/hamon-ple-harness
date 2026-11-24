@@ -565,7 +565,7 @@ def _power_frame(frame, power):
     return _bounded_frame(unit)
 
 
-def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
+def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False, lookup_sources=None):
     """Evaluate one dependency graph for ordinary arithmetic and CONVERT calls.
 
     Topological evaluation preserves the 256-cell conversion-chain contract
@@ -646,6 +646,10 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
             reverse.setdefault(dependency, []).append(key)
 
     def reference(ref):
+        # Numeric lookup results are proved against the literal table before
+        # graph evaluation. Read the selected source cell, never the saved cache.
+        if lookup_sources is not None:
+            ref = lookup_sources.get(ref, ref)
         if ref in values:
             result = values[ref]
             if isinstance(result, Exception):
@@ -801,7 +805,7 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
     if not legacy_lbm and any('"lbm"' in row[0] for row in producers.values()):
         # Reconstruct the whole graph under one alternate numeric convention;
         # never use a saved intermediate to explain a downstream result.
-        alternate = _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=True)
+        alternate = _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=True, lookup_sources=lookup_sources)
         for kind, records in reports.items():
             for record, other in zip(records, alternate[kind]):
                 if record["status"] == "mismatch" and other["status"] == "matched":
@@ -948,6 +952,7 @@ def xlsx_audit(filename: str):
             cell_path = f"{ns}sheetData/{ns}row/{ns}c"
             unresolved_shared_followers = 0
             masters = _shared_lookup_masters(root.iterfind(cell_path), ns)
+            first_lookup = len(lookups)
             first_conversion = len(conversions)
             sheet_arithmetic = {}
             for cell in root.iterfind(cell_path):
@@ -1031,6 +1036,7 @@ def xlsx_audit(filename: str):
             # Rectangles never expand into coordinates, even for a whole worksheet.
             if derived_ranges is None:
                 sheet_values.clear()
+                del lookups[first_lookup:]
                 del conversions[first_conversion:]
                 sheet_arithmetic.clear()
             elif derived_ranges and complete_index:
@@ -1044,11 +1050,13 @@ def xlsx_audit(filename: str):
                             sheet_values[address] = None
                     sheet_arithmetic = {key: row for key, row in sheet_arithmetic.items()
                                         if not is_derived(key[1])}
+                    lookups[first_lookup:] = [row for row in lookups[first_lookup:] if not is_derived(row[1])]
                     conversions[first_conversion:] = [
                         row for row in conversions[first_conversion:] if not is_derived(row[1])
                     ]
                 except ValueError:
                     sheet_values.clear()
+                    del lookups[first_lookup:]
                     del conversions[first_conversion:]
                     sheet_arithmetic.clear()
             arithmetic.update(sheet_arithmetic)
@@ -1061,15 +1069,17 @@ def xlsx_audit(filename: str):
                                        "error_count": error_count})
     counts = {"matched": 0, "mismatch": 0, "unverified": lookup_total}
     examples = []
+    lookup_sources = {}
     if complete_index:
         for name, address, expression, cached in lookups:
             result = _verify_lookup(name, expression, cached, literals)
             if result["status"] != "unverified":
                 counts["unverified"] -= 1
                 counts[result["status"]] += 1
+                lookup_sources[(name, address)] = (result["source_sheet"], result["source_cell"])
             examples.append({"sheet": name, "cell": address, **result})
     manifest["lookup_audit"] = {"counts": counts, "examples": examples}
-    reconstructed = (_scalar_formula_audit(arithmetic, conversions, literals)
+    reconstructed = (_scalar_formula_audit(arithmetic, conversions, literals, lookup_sources=lookup_sources)
                      if complete_index and full_precision else {"conversion": [], "arithmetic": []})
     for kind, total in (("conversion", conversion_total), ("arithmetic", arithmetic_total)):
         counts = {"matched": 0, "mismatch": 0, "unverified": total}
