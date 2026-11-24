@@ -166,6 +166,7 @@ def main():
         (f'CONVERT({converted_cm},"m","mm")', 400000, "unit_scale_mismatch"),
         (f'CONVERT({converted_cm},"kg","g")', 400000, "dimension_mismatch"),
         (f'CONVERT({converted_cm},"cm","mm")', 4000, "matched"),
+        ('CONVERT(Inputs!A2^0,"Pa","kPa")', .001, "dimension_mismatch"),
     ]
     write_workbook(source_frames, [(formula, value) for formula, value, _ in controls])
     command = [executable, f"-env:UserInstallation={(args.out/'calc-profile').resolve().as_uri()}",
@@ -177,7 +178,7 @@ def main():
     frame_guard = audit_local_deliverable(frames_recalculated)
     assert not frame_guard["ok"], frame_guard
     frames = {r["cell"]: r for r in frame_audit["conversion_audit"]["examples"] if r["sheet"] == "Checks"}
-    assert set(frames) == {"A1", "A2", "A3"}
+    assert set(frames) == {f"A{i}" for i in range(1,len(controls)+1)}
     for index, (_, expected_value, expected_status) in enumerate(controls, 1):
         observed = frames[f"A{index}"]
         assert observed["cached"] == expected_value and observed["status"] == expected_status, observed

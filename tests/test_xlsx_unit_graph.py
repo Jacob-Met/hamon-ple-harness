@@ -57,6 +57,17 @@ class UnitGraphTests(unittest.TestCase):
         self.assertEqual(converted["Results","G1"]["status"], "dimension_mismatch")
         self.assertFalse(guard["ok"])
 
+    def test_unlabelled_measurement_to_zeroth_power_is_dimensionless(self):
+        audit, guard = self.evaluate([
+            ("A", None, 3), ("B", "A1^0", 1),
+            ("C", 'CONVERT(B1,"Pa","kPa")', .001)])
+        power = self.records(audit, "arithmetic")["Results","B1"]
+        self.assertEqual(power["si_dimension"], [0,0,0,0,0])
+        self.assertEqual(power["unit_scale_si"], "1")
+        self.assertEqual(self.records(audit, "conversion")["Results","C1"]["status"],
+                         "dimension_mismatch")
+        self.assertFalse(guard["ok"])
+
     def test_excel_power_precedence_and_bounded_domain(self):
         audit, _ = self.evaluate([
             ("A", "-2^2", 4), ("B", "2^3^2", 64), ("C", "2^(3^2)", 512),

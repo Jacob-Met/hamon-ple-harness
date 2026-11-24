@@ -548,6 +548,9 @@ def _excel_expression(tokens):
 
 
 def _power_frame(frame, power):
+    if frame is None and power == 0:
+        # Every nonzero measured quantity loses its unit in the zeroth power.
+        return _FormulaUnit(Fraction(1), ZERO)
     if not isinstance(frame, _FormulaUnit):
         return frame
     unit = _FormulaUnit(frame.scale ** power, tuple(e * power for e in frame.dimension))
