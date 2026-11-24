@@ -1,13 +1,10 @@
 """Check two authored-draft exports over the submitted Pi, SSE and evaluator socket."""
 import asyncio
 import base64
-import contextlib
 import json
 import os
 from pathlib import Path
 import shlex
-import shutil
-import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -18,7 +15,6 @@ from websockets.asyncio.server import serve
 
 import archive_checkpoint
 import archive_contract
-import delivery_guard
 import harness
 import hamon_witness_package
 import test_final_materialize_stream as existing
@@ -104,6 +100,9 @@ class AuthoredDraftStream(unittest.IsolatedAsyncioTestCase):
                                         reply["size"] = len(raw)
                                     elif m["type"] == "exec":
                                         args = shlex.split(m["command"])
+                                        if args[:3] == ["cd", str(root), "&&"]:
+                                            args = args[3:]
+                                            self.assertEqual(args, ["python3", "-c", harness.engineering_intake.REMOTE_PROBE])
                                         self.assertEqual(args[0], "python3")
                                         if args[1].startswith("/tmp/"):
                                             binfile = Path(args[1]).name

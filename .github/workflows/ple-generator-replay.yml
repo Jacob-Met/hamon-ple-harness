@@ -47,9 +47,13 @@ jobs:
           python -m pip install --disable-pip-version-check -r requirements.txt
           sudo mkdir -p /filesystem
           sudo chown "$(id -u):$(id -g)" /filesystem
-      - name: Verify authored exports, cancellation and all public empty worlds
+      - name: Verify authored exports and submitted Pi cancellation
         env:
           PYTHONPATH: ".:tests"
         run: |
           python -m unittest -v test_delivery_drafts test_draft_delivery_stream test_loopback_sse_cancel
-          python tests/replay_empty_worlds.py
+      - name: Replay all 29 public prompts over loopback SSE
+        if: ${{ !cancelled() }}
+        env:
+          PYTHONPATH: ".:tests"
+        run: python tests/replay_empty_worlds.py
