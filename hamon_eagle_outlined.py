@@ -155,7 +155,7 @@ def _decode_signal_grid(edges, left, baseline, step_x, step_y):
             return None
         word.append(letter)
     name = "".join(word)
-    return name if re.fullmatch(r"[A-Z0-9][A-Z0-9_+/().-]{1,23}", name) and re.search("[A-Z]", name) else None
+    return name if re.fullmatch(r"[+A-Z0-9][A-Z0-9_+/().-]{1,23}", name) and re.search("[A-Z]", name) else None
 
 
 def wire_words(wires, segments, pitch):

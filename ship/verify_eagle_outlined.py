@@ -66,6 +66,9 @@ def edited_pdf(source, destination, edit):
                     targets = {
                         "erase_mirrored_D": (0, ((3029, 2762), (3029, 2839))),
                         "erase_quarter_J": (1, ((5073, 12064), (5086, 12077))),
+                        "erase_wire_voltage_plus": (0, ((12182, 2081), (12234, 2081))),
+                        "erase_corroborating_voltage_plus": (0, ((16622, 2561), (16673, 2561))),
+                        "erase_vin_I_stem": (0, ((9033, 1922), (9033, 1999))),
                         "erase_small_reset_M": (1, ((5342, 3605), (5342, 3679))),
                     }
                     if edit in targets and i == targets[edit][0] and set(pair) == set(targets[edit][1]):
@@ -93,7 +96,9 @@ def edited_pdf(source, destination, edit):
                                "erase_voltage_stroke", "erase_signal_underscore"):
             require(ground_edits == (18 if edit == "move_ground_word_toward_MOSI" else 1),
                     "Expected original painted ground strokes missing")
-        if (edit, i) in (("erase_mirrored_D",0),("erase_quarter_J",1),("erase_small_reset_M",1)):
+        if (edit, i) in (("erase_mirrored_D",0),("erase_quarter_J",1),("erase_small_reset_M",1),
+                         ("erase_wire_voltage_plus",0), ("erase_corroborating_voltage_plus",0),
+                         ("erase_vin_I_stem",0)):
             require(ground_edits == 1, "Expected complete-word source stroke missing")
         if i < 2:
             require(dot_count == (94, 90)[i], "Physical source junction count changed")
@@ -129,7 +134,8 @@ def main():
         require(page["printed_equivalence_anchors"].get("GND") == indices, "Ground anchor roster changed")
     page1, page2 = baseline["pages"][:2]
     require(page1["printed_equivalence_anchors"]["+5V"] == [2, 4, 14, 16, 24, 28, 31, 40]
-            and page1["printed_equivalence_anchors"]["+3V3"] == [196, 202]
+            and page1["printed_equivalence_anchors"]["+3V3"] == [194, 196, 198, 202]
+            and page1["printed_equivalence_anchors"]["VIN"] == [172, 173, 175, 184]
             and page2["printed_equivalence_anchors"]["+3V3"] == [104, 109, 138, 142, 147, 148, 150, 153, 158, 160],
             "Complete voltage arrows no longer have the same physical endpoints")
     for page, tms, tck in ((page1, 230, 231), (page2, 178, 182)):
@@ -144,7 +150,8 @@ def main():
             for edit in ("recolor", "erase_one", "erase_terminal_mark", "erase_dots", "appendix_stroke",
                          "erase_ground_bar", "break_ground_G", "move_ground_word_toward_MOSI",
                          "erase_voltage_stroke", "erase_signal_underscore", "erase_mirrored_D",
-                         "erase_quarter_J", "erase_small_reset_M"):
+                         "erase_quarter_J", "erase_small_reset_M", "erase_wire_voltage_plus",
+                         "erase_corroborating_voltage_plus", "erase_vin_I_stem"):
                 path = Path(directory, edit + ".pdf")
                 edited_pdf(args.pdf, path, edit)
                 controls[edit] = read_pdf(path)
@@ -186,9 +193,14 @@ def main():
             separated = range(195, 202) if edit == "erase_voltage_stroke" else [230]
             for wire in separated:
                 expected[wire] = -1
+            if edit == "erase_voltage_stroke":
+                expected[194] = -2  # Its peer's island has lost the independent supply symbol.
             require(partition(sum(changed["document_wire_groups"], [])) == partition(expected),
                     f"{edit} changed an unrelated pair or retained the erased witness")
         for edit, separated in (
+                ("erase_wire_voltage_plus", [194]),
+                ("erase_corroborating_voltage_plus", [194]),
+                ("erase_vin_I_stem", list(range(175, 181))),
                 ("erase_mirrored_D", list(range(224, 230))),
                 ("erase_quarter_J", [468 + i for i in range(179, 182)]),
                 ("erase_small_reset_M", [468 + i for i in range(348, 354)])):
@@ -208,7 +220,7 @@ def main():
     require(len(truth) == 2, "Native sheet count differs")
     document = []
     other_islands = defaultdict(list)
-    for index, (sheet, expected) in enumerate(zip(truth, ((138, 133, 0, 241), (125, 125, 0, 0)))):
+    for index, (sheet, expected) in enumerate(zip(truth, ((138, 134, 0, 139), (125, 125, 0, 0)))):
         page = baseline["pages"][index]
         names = align(page["wires"], sheet)
         rows = list(zip(names, baseline["document_wire_groups"][index], strict=True))
@@ -221,10 +233,10 @@ def main():
         print(json.dumps({"page": index + 1, "wire_sections": len(names), **observed}))
     # Frozen after the PDF-only voltage and signal run, independent of numeric group IDs.
     other_roster = json.dumps(sorted(other_islands.values()), separators=(",", ":")).encode()
-    require(sha256(other_roster).hexdigest() == "966bc6ce0c6cfa1a81f5d69fe081f0e5f10a0f3c5e730cbb4d7177a9cf6ad86b",
+    require(sha256(other_roster).hexdigest() == "36b9f9f52db4d4dd37d09762f9fcf3f3987629236f1e408bf61d7dbe1749e7ea",
             "The partition of the 640 non-ground wire sections changed")
     result = counts(document)
-    require(result == {"nets": 176, "exact": 170, "false_connected": 0, "false_separated": 648},
+    require(result == {"nets": 176, "exact": 171, "false_connected": 0, "false_separated": 480},
             f"Document metric changed: {result}")
     pairs = sum(n * (n - 1) // 2 for n in Counter(name for name, _ in document).values())
     print(json.dumps({"document": result, "correct_pairs": pairs - result["false_separated"],
