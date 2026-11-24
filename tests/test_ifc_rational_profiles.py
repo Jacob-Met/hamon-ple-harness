@@ -1,5 +1,11 @@
 """Check rational quadratic Body sweeps through the public IFC clash receiver."""
+import json
 import math
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
 import ifcopenshell
@@ -77,6 +83,39 @@ class RationalProfile(unittest.TestCase):
                 result = public(f)
                 self.assertFalse(result["ok"], result)
                 self.assertIsNone(result["total_solid_volume_m3"])
+
+
+    def test_registered_relay_reads_rational_curve(self):
+        root = Path(__file__).resolve().parents[1]
+        if not (root / "node_modules").is_dir():
+            self.skipTest("registered Node receiver runs in the complete CI checkout")
+        from test_wired_router_e2e import _start_mock_relay
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            (work / "rational.ifc").write_text(model(.5).to_string())
+            calls = []
+            relay = _start_mock_relay(work, calls)
+            try:
+                script = """
+import register from './task-tools.ts';
+const tools = new Map();
+register({registerTool(t) {tools.set(t.name,t)}, on() {}});
+const r = await tools.get('hamon_ifc_spatial_clash').execute(
+    'source-nurbs', {path:'rational.ifc'}, null, () => {}, {});
+console.log(JSON.stringify(r.details));
+"""
+                env = {**os.environ, "TASK_WORKDIR": temp, "TASK_HARNESS_PYTHON": sys.executable,
+                       "TASK_HARNESS_SRC": str(root),
+                       "TASK_RELAY_URL": f"http://127.0.0.1:{relay.server_address[1]}"}
+                run = subprocess.run(["node", "--experimental-strip-types", "--input-type=module", "-e", script],
+                                     env=env, cwd=root, text=True, capture_output=True, timeout=30, check=True)
+                data = json.loads(run.stdout.strip().splitlines()[-1])
+                self.assertTrue(data["ok"], data)
+                self.assertAlmostEqual(data["total_solid_volume_m3"], .2*reference_area(.5), delta=2e-8)
+                self.assertEqual(calls, ["read_file"])
+            finally:
+                relay.shutdown()
+                relay.server_close()
 
 
 if __name__ == "__main__":

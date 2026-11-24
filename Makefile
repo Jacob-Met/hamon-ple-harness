@@ -43,3 +43,7 @@ verify-workbook-units:
 verify-xlsx-unit-graph:
 	@set -eu; output=$$(mktemp -d); trap 'rm -rf -- "$$output"' EXIT; \
 	$(PYTHON) ship/verify_xlsx_unit_graph.py --out "$$output" --min-memory-gib 4
+
+.PHONY: verify-rational-profiles
+verify-rational-profiles:
+	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m unittest discover -s tests -p 'test_ifc_rational_profiles.py' -v
