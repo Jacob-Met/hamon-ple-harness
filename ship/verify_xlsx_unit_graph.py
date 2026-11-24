@@ -175,9 +175,9 @@ def write_catalog_course(path):
         row = ET.SubElement(data, "row", r=str(i))
         for col, number in zip("ABCD", values):
             ET.SubElement(ET.SubElement(row, "c", r=f"{col}{i}"), "v").text = str(number)
-    formulas = ['6000/A2', 'CONVERT(A3,"cm^2","m^2")',
+    formulas = ['A5/A2', 'CONVERT(A3,"cm^2","m^2")',
                 'VLOOKUP(A4,Inputs!C1:D3,2,FALSE)',
-                'INDEX(Inputs!B1:B3,MATCH(Inputs!A1,Inputs!A1:A3,0))']
+                'INDEX(Inputs!B1:B3,MATCH(Inputs!A1,Inputs!A1:A3,0))', 'CONVERT(6,"kN","N")']
     write_workbook(path, [(formula,None) for formula in formulas], ET.tostring(root))
 
 
@@ -185,10 +185,14 @@ def check_catalog_course(path, output):
     fresh = xlsx_audit(path)
     records = {r["cell"]: r for kind in ("lookup","conversion","arithmetic")
                for r in fresh[kind+"_audit"]["examples"]}
-    assert len(records) == 4 and all(r["status"] == "matched" for r in records.values()), records
+    assert len(records) == 5 and all(r["status"] == "matched" for r in records.values()), records
     assert (records["A4"]["source_sheet"], records["A4"]["source_cell"]) == ("Inputs", "B1")
     assert (records["A3"]["source_sheet"], records["A3"]["source_cell"]) == ("Inputs", "D1")
     assert records["A2"]["expected"] == 0.0025 and records["A1"]["expected"] == 2400000
+    assert records["A5"]["expected"] == 6000
+    assert records["A2"]["si_dimension"] == [0, 2, 0, 0, 0]
+    assert records["A1"]["si_dimension"] == [1, -1, -2, 0, 0]
+    assert records["A1"]["unit_scale_si"] == "1"
     assert audit_local_deliverable(path)["ok"]
     # Keep the Calc file untouched. Remove both lookup caches, then plant
     # mutually consistent incorrect caches in the dependent conversion and load.

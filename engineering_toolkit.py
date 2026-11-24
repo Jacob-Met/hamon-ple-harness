@@ -201,7 +201,7 @@ _EXACT_LOOKUP = re.compile(
     rf"(?P<kind>[VH])LOOKUP\(\s*(?P<key>{_CELL_REF})\s*,\s*"
     rf"(?:(?P<sheet>'(?:[^']|'')+'|[A-Z_][A-Z0-9_.]*)!)?"
     rf"(?P<start>{_CELL_REF}):(?P<end>{_CELL_REF})\s*,\s*"
-    r"(?P<index>[1-9][0-9]{0,4})\s*,\s*(?:FALSE|0)\s*\)", re.I | re.ASCII)
+    r"(?P<index>[1-9][0-9]{0,4})\s*,\s*(?:FALSE(?:\(\s*\))?|0)\s*\)", re.I | re.ASCII)
 
 
 # Excel CONVERT unit tokens are case-sensitive. Only multiplicative units with

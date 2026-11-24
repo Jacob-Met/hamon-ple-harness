@@ -165,6 +165,21 @@ class LookupConsumerTests(unittest.TestCase):
                              ("mismatch",.0025,[0,2,0,0,0]))
             self.assertEqual(data["arithmetic_audit"]["examples"][0]["expected"], 2400000)
 
+    def test_saved_calc_exact_mode_and_approximate_controls(self):
+        table = "'Ratings 2026'!A1:B2"
+        catalog = [[("A", None, 1), ("B", None, 25)],
+                   [("A", None, 1), ("B", None, 30)]]
+        for mode in ("FALSE()", "TRUE()", "FALSE(1)", "1"):
+            with self.subTest(mode=mode):
+                audit = self.audit([[("A", None, 1), ("B", f"VLOOKUP(A1,{table},2,{mode})", 25),
+                                     ("C", "2*B1", 50)]], catalog)
+                lookup = audit["lookup_audit"]["examples"][0]
+                status = "matched" if mode == "FALSE()" else "unverified"
+                self.assertEqual(lookup["status"], status)
+                self.assertEqual(audit["arithmetic_audit"]["examples"][0]["status"], status)
+                if mode == "FALSE()":
+                    self.assertEqual(lookup["source_cell"], "B1")
+
     def test_cyclic_and_unresolved_preceding_key_leave_consumers_unverified(self):
         table = "'Ratings 2026'!A1:B3"
         for key_formula in (f"VLOOKUP(B1,{table},2,FALSE)", None):
