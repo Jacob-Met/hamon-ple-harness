@@ -22,21 +22,26 @@ jobs:
       - name: Independent spreadsheet engine and symbolic units
         timeout-minutes: 9
         run: |
-          # A regional EC2 mirror stalled on the core package until the whole
-          # job expired. Keep Ubuntu signature verification and use its HTTPS archive.
-          sudo python3 - <<'PY'
-          import re
-          from pathlib import Path
-          for path in (Path('/etc/apt/sources.list.d/ubuntu.sources'), Path('/etc/apt/sources.list')):
-              if path.is_file():
-                  original = path.read_text()
-                  revised = re.sub(r'http://[^/\s]+\.ec2\.archive\.ubuntu\.com/ubuntu/?',
-                                   'https://archive.ubuntu.com/ubuntu', original)
-                  if revised != original:
-                      path.write_text(revised)
-          PY
-          sudo env DEBIAN_FRONTEND=noninteractive timeout 90s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 update -qq
-          sudo env DEBIAN_FRONTEND=noninteractive timeout 360s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 install -y --no-install-recommends libreoffice-calc
+          # Use one signed source list for both commands. Hosted runners may
+          # enable additional regional mirrors outside the default sources file.
+          sources="$RUNNER_TEMP/ple-noble.sources"
+          cat > "$sources" <<'SOURCES'
+          Types: deb
+          URIs: https://archive.ubuntu.com/ubuntu
+          Suites: noble noble-updates
+          Components: main universe
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+          Types: deb
+          URIs: https://security.ubuntu.com/ubuntu
+          Suites: noble-security
+          Components: main universe
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          SOURCES
+          apt_options=(-o "Dir::Etc::sourcelist=$sources" -o "Dir::Etc::sourceparts=-"
+                       -o Acquire::https::Timeout=30 -o Acquire::Retries=1)
+          sudo timeout 90s apt-get "${apt_options[@]}" update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive timeout 360s apt-get "${apt_options[@]}" install -y --no-install-recommends libreoffice-calc
           pip install --disable-pip-version-check --timeout 30 --retries 1 sympy==1.14.0
       - name: Recalculate saved workbook and compare exact unit scales
         run: python ship/verify_xlsx_unit_graph.py --out "$RUNNER_TEMP/xlsx-unit-graph" --min-memory-gib 4

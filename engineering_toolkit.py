@@ -659,8 +659,15 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
                 elif actual.roots:
                     evidence["root_cells"] = [list(ref) for ref in actual.roots]
                 source_unit = _FormulaUnit(Fraction(source.val), source.dim)
-                if isinstance(actual.required_unit, _FormulaUnit) and actual.required_unit != source_unit:
-                    raise ValueError("upstream_unit_disagrees")
+                frame = actual.required_unit
+                if isinstance(frame, _FormulaUnit) and frame != source_unit:
+                    status = ("dimension_mismatch" if frame.dimension != source_unit.dimension
+                              else "unit_scale_mismatch")
+                    raise _FormulaConflict(key, status, "upstream_unit_disagrees", **evidence,
+                                           required_dimension=list(frame.dimension),
+                                           declared_dimension=list(source_unit.dimension),
+                                           required_scale_si=str(frame.scale),
+                                           declared_scale_si=str(source_unit.scale))
                 numeric_source = D(1)/_CALC_LBM_PER_KG if legacy_lbm and from_name == "lbm" else source.val
                 numeric_target = D(1)/_CALC_LBM_PER_KG if legacy_lbm and to_name == "lbm" else target.val
                 expected = float(D(actual.value)*numeric_source/numeric_target)
