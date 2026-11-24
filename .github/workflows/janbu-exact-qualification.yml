@@ -1,0 +1,35 @@
+name: Ordered Janbu exact revision qualification
+on:
+  push:
+    branches: ["p2/b1e9c66c-janbu-qualification"]
+jobs:
+  janbu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: f5dfa3e1e93fe4ab6e9bb979f09e2a36e74f9cd5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: pip install --disable-pip-version-check -r requirements.txt
+      - run: npm ci --no-fund --no-audit
+      - run: |
+          git rev-parse HEAD
+          python -m unittest discover -s tests -p 'test_janbu*.py' -v
+      - name: Record degree-angle and wet interface intervals
+        run: |
+          PYTHONPATH=tests:. python - <<'PY'
+          import json
+          from test_janbu_slices import ibaraki
+          from hamon_janbu_slices import verify_janbu_slices
+          for n, water in [(6,None),(33,4.)]:
+              result = verify_janbu_slices(dict(ibaraki(n, water), slice_order='toe_to_crest', required_factor_of_safety=1.4))
+              print(json.dumps({k: result[k] for k in ['verified','factor_of_safety_interval','tensile_interfaces','meets_required_factor']}))
+              print(json.dumps(result['interfaces'][-1]))
+          PY
