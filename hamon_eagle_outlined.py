@@ -214,7 +214,9 @@ def wire_words(wires, segments, pitch):
                             offsets.append((start-left)/pitch-.03)
                         if left-.08*pitch < end < right+.08*pitch:
                             offsets.append((right-end)/pitch-.03)
-                        registered = any(abs(v-round(v)) < .025 for v in offsets)
+                        # Label origins can occupy quarter-pitch drafting sites.
+                        # Keep the same absolute coordinate residual at each site.
+                        registered = any(abs(4*v-round(4*v)) < .100 for v in offsets)
                         yield index, name, (vertical, occurrence), registered
 
 def _fit_voltage(nearby, center, direction, units, name):

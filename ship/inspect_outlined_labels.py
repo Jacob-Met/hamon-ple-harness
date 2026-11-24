@@ -31,7 +31,7 @@ def main():
         _, segments = o.letter_strokes(paths, pg["junction_grid"]["stroke"], pitch)
         details = []
         for i,n,occ,r in o.wire_words(pg["wires"],segments,pitch):
-            if r:
+            if r and n not in ("TX","16U2-TX","UOTGID","XUSB","MASTER-RESET"):
                 continue
             vertical, edges = occ
             def project(point):
@@ -39,7 +39,7 @@ def main():
             wire = list(map(project, pg["wires"][i]))
             lo,hi = sorted(p[0] for p in wire)
             start,end = min(p[0] for e in edges for p in e),max(p[0] for e in edges for p in e)
-            details.append({"wire":i,"name":n,"line":wire,"ink_x":[start,end],"pitch":pitch,
+            details.append({"wire":i,"name":n,"registered":r,"line":wire,"ink_x":[start,end],"ink_y":[min(p[1] for e in edges for p in e),max(p[1] for e in edges for p in e)],"pitch":pitch,
                             "left_offset":(start-lo)/pitch,"right_offset":(hi-end)/pitch})
         print(json.dumps({"page":pg["page"],"unregistered":details}),flush=True)
     with ZipFile(args.archive) as archive:
@@ -48,6 +48,7 @@ def main():
     rows, groups = [], defaultdict(lambda:defaultdict(list))
     for page,(sheet,pred) in enumerate(zip(sheets,predicted["pages"]),1):
         names=align(pred["wires"],sheet)
+        print(json.dumps({"page":page,"native_unregistered":[(k,names[k]) for k in range(len(names)) if k in ({173,208,227,256,261,267,268,302,303,304,318,327,367,368,390,397,400} if page==1 else {179,183,187,189,404,244})]}),flush=True)
         for i,(name,g) in enumerate(zip(names,predicted["document_wire_groups"][page-1])):
             rows.append((name,g)); groups[name][g].append((page,i))
     print(json.dumps({"metric":counts(rows),"incomplete":{n:list(g.values()) for n,g in groups.items() if len(g)>1}}),flush=True)
