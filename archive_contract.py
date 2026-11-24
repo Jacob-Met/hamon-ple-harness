@@ -231,8 +231,9 @@ async def publish_generated(session, command, paths, before, *, deadline):
                           shlex.quote(json.dumps(prior)), deadline=deadline)
 
 
-async def recover_after_refinement(session, command):
-    reply = await _command_result(session, command + " --recover")
+async def recover_after_refinement(session, command, *, first_only=False):
+    mode = " --recover-first-only" if first_only else " --recover"
+    reply = await _command_result(session, command + mode)
     if reply is not None:
         try:
             outcome = json.loads(reply.get("output", ""))

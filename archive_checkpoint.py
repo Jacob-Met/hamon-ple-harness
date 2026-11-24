@@ -111,7 +111,19 @@ def _replace_synced(candidate: Path, target: Path) -> None:
         os.close(directory_fd)
 
 
-def _copy_verified(source: Path, target: Path, names: list[str], *, staged: Path | None = None) -> None:
+def _link_new_synced(candidate: Path, target: Path) -> None:
+    """Publish to an absent name without moving or opening any existing destination."""
+    with candidate.open("rb") as stream:
+        os.fsync(stream.fileno())
+    os.link(candidate, target)
+    directory_fd = os.open(target.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _copy_verified(source: Path, target: Path, names: list[str], *, staged: Path | None = None, first_only=False) -> None:
     if not _valid_regular_file(source):
         raise ValueError("missing regular archive checkpoint")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -123,7 +135,10 @@ def _copy_verified(source: Path, target: Path, names: list[str], *, staged: Path
             verify(candidate, names)
         else:
             verify_checkpoint(staged, candidate, names)
-        _replace_synced(candidate, target)
+        if first_only:
+            _link_new_synced(candidate, target)
+        else:
+            _replace_synced(candidate, target)
     finally:
         candidate.unlink(missing_ok=True)
 
@@ -133,7 +148,7 @@ def checkpoint(stage: Path, target: Path, names: list[str]) -> None:
     _copy_verified(target, stage.with_name(stage.name + ".checkpoint.zip"), names, staged=stage)
 
 
-def recover(stage: Path, target: Path, names: list[str]) -> str:
+def recover(stage: Path, target: Path, names: list[str], *, first_only=False) -> str:
     """Keep a complete result, publish complete staging, or restore the saved copy."""
     invalid = (ValueError, OSError, zipfile.BadZipFile, EOFError, RuntimeError, csv.Error)
     try:
@@ -142,22 +157,26 @@ def recover(stage: Path, target: Path, names: list[str]) -> str:
         pass
     else:
         return "kept"
+    if first_only and os.path.lexists(target):
+        raise FileExistsError("destination is occupied by an unresolved writer")
     try:
-        publish(stage, target, names)
+        publish(stage, target, names, first_only=first_only)
+    except FileExistsError:
+        raise
     except invalid:
-        _copy_verified(stage.with_name(stage.name + ".checkpoint.zip"), target, names)
+        _copy_verified(stage.with_name(stage.name + ".checkpoint.zip"), target, names, first_only=first_only)
         return "restored"
     return "published"
 
 
-def publish(stage: Path, target: Path, names: list[str], *, after_empty=False, prior_members=None) -> None:
+def publish(stage: Path, target: Path, names: list[str], *, after_empty=False, prior_members=None, first_only=False) -> None:
     if not names or len(names) != len(set(names)) or any(
         not n or n in {".", ".."} or "/" in n or "\\" in n for n in names
     ):
         raise ValueError("expected distinct root filenames")
     if prior_members is not None and set(prior_members) != set(names):
         raise ValueError("incomplete prior observation of generated members")
-    if prior_members is None and not after_empty and not target.exists():
+    if prior_members is None and not (after_empty or first_only) and not target.exists():
         _hydrate_stage_from_output_dir(stage, target.parent, names)
     sources = [stage / n for n in names]
     if any(not _valid_regular_file(p) for p in sources):
@@ -189,7 +208,11 @@ def publish(stage: Path, target: Path, names: list[str], *, after_empty=False, p
                             digest.update(block)
                     if digest.hexdigest() == previous:
                         raise ValueError(f"unchanged generator output: {name}")
-        if after_empty or prior_members is not None:
+        if first_only:
+            # The destination may be open for writing even when zero bytes are
+            # visible. Link the completed candidate only into an absent name.
+            _link_new_synced(candidate, target)
+        elif after_empty or prior_members is not None:
             _install_over_empty(candidate, target, names)
         else:
             _replace_synced(candidate, target)
@@ -275,11 +298,12 @@ if __name__ == "__main__":
         verify_checkpoint(Path(stage), Path(target), members)
     elif sys.argv[2:] == ["--checkpoint"]:
         checkpoint(Path(stage), Path(target), members)
-    elif sys.argv[2:] == ["--recover"]:
-        print(json.dumps({"action": recover(Path(stage), Path(target), members)}))
+    elif sys.argv[2:] in (["--recover"], ["--recover-first-only"]):
+        print(json.dumps({"action": recover(Path(stage), Path(target), members,
+                                           first_only=sys.argv[2] == "--recover-first-only")}))
     elif sys.argv[2:] == ["--first-only"]:
         # An earlier publisher may still finish after an interrupted request.
-        publish(Path(stage), Path(target), members, after_empty=True)
+        publish(Path(stage), Path(target), members, first_only=True)
         print("PLE_ARCHIVE_PUBLISHED", end="")
     elif sys.argv[2:] == ["--after-empty"]:
         publish_after_empty(Path(stage), Path(target), members)
