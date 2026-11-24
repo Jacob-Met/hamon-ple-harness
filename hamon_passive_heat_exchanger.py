@@ -5,6 +5,67 @@ from fractions import Fraction
 from mpmath import mp
 
 
+def _tube_number(value):
+    if isinstance(value, bool):
+        raise ValueError("Tube properties must be finite numbers")
+    x = float(value)
+    if not math.isfinite(x):
+        raise ValueError("Tube properties must be finite numbers")
+    return x
+
+
+def _tube_wire(value):
+    number = float(value)
+    if not math.isfinite(number) or (value and not number):
+        raise ValueError("Tube result outside the reporting range")
+    return number
+
+
+def tubular_resistance(model):
+    """Radial film, fouling and wall resistances times total active tube length."""
+    required = {"inner_diameter_m", "outer_diameter_m", "wall_k_W_mK",
+                "inner_h_W_m2K", "outer_h_W_m2K", "inner_fouling_m2K_W", "outer_fouling_m2K_W"}
+    if not isinstance(model, dict) or not required <= model.keys() or model.keys() - (required | {"total_length_m"}):
+        raise ValueError("tube_resistance requires the two diameters, wall k, both films and both fouling factors")
+    ctx = mp.clone()
+    ctx.dps = 80
+    values = {key: ctx.mpf(_tube_number(model[key])) for key in required}
+    di, do = values["inner_diameter_m"], values["outer_diameter_m"]
+    k, hi, ho = values["wall_k_W_mK"], values["inner_h_W_m2K"], values["outer_h_W_m2K"]
+    fi, fo = values["inner_fouling_m2K_W"], values["outer_fouling_m2K_W"]
+    if not 0 < di < do or min(k, hi, ho) <= 0 or min(fi, fo) < 0:
+        raise ValueError("Tube requires 0 < Di < Do, positive k and film coefficients, and nonnegative fouling")
+    pi_di, pi_do = ctx.pi * di, ctx.pi * do
+    terms = {"inner_film": 1/(hi*pi_di), "inner_fouling": fi/pi_di,
+             "wall": ctx.log1p((do-di)/di)/(2*ctx.pi*k),
+             "outer_fouling": fo/pi_do, "outer_film": 1/(ho*pi_do)}
+    clean = terms["inner_film"] + terms["wall"] + terms["outer_film"]
+    service = sum(terms.values())
+    result = {"inner_diameter_m": float(di), "outer_diameter_m": float(do),
+              "resistance_times_length_mK_W": {key: _tube_wire(v) for key, v in terms.items()},
+              "clean_UA_per_m_W_mK": _tube_wire(1/clean),
+              "service_UA_per_m_W_mK": _tube_wire(1/service),
+              "service_U_inner_W_m2K": _tube_wire(1/(service*pi_di)),
+              "service_U_outer_W_m2K": _tube_wire(1/(service*pi_do))}
+    if "total_length_m" in model:
+        length = _tube_number(model["total_length_m"])
+        if length <= 0:
+            raise ValueError("total_length_m must be positive")
+        result.update(total_length_m=length, rated_UA_W_K=_tube_wire(length/service),
+                      clean_UA_W_K=_tube_wire(length/clean))
+    return result
+
+
+def tube_extent(tube, ua):
+    """Required total active length and heat-transfer areas from a service UA."""
+    ctx = mp.clone()
+    ctx.dps = 80
+    length = ctx.mpf(ua)/tube["service_UA_per_m_W_mK"]
+    return {"required_total_length_m": _tube_wire(length),
+            "required_inner_area_m2": _tube_wire(ctx.pi*tube["inner_diameter_m"]*length),
+            "required_outer_area_m2": _tube_wire(ctx.pi*tube["outer_diameter_m"]*length)}
+
+
 def passive_exchanger(spec, *, sizing):
     from hamon_wave7_engineering_verifiers import _hx_eps_from_ntu
 
@@ -51,8 +112,15 @@ def passive_exchanger(spec, *, sizing):
         span = real(delta)
         inlet_h, inlet_c = real(hi), real(ci)
         result = {"arrangement": arr}
+        tube = tubular_resistance(spec["tube_resistance"]) if "tube_resistance" in spec else None
+        if tube is not None:
+            result["tube_resistance"] = tube
+            if "U_W_m2K" in spec and not math.isclose(read("U_W_m2K"), tube["service_U_outer_W_m2K"],
+                                                       rel_tol=1e-9, abs_tol=0):
+                raise ValueError("Supplied U disagrees with the service U on the outer area")
         if sizing:
-            ho, u = read("Th_out_K"), read("U_W_m2K")
+            ho = read("Th_out_K")
+            u = Fraction(tube["service_U_outer_W_m2K"]) if tube is not None else read("U_W_m2K")
             if min(ho, u) <= 0:
                 raise ValueError("Outlet absolute temperature and sizing U must be positive")
             q = ch*(hi-ho)
@@ -79,7 +147,12 @@ def passive_exchanger(spec, *, sizing):
             area = ua/real(u)
             result.update(LMTD_K=wire(mean), area_m2=wire(area), area_identifiable=True)
         else:
-            stated_ua = read("UA_W_K")
+            if tube is None:
+                stated_ua = read("UA_W_K")
+            else:
+                if "rated_UA_W_K" not in tube:
+                    raise ValueError("Tube rating requires total_length_m")
+                stated_ua = Fraction(tube["rated_UA_W_K"])
             if stated_ua < 0:
                 raise ValueError("A passive exchanger requires nonnegative UA")
             ua = real(stated_ua)
@@ -123,6 +196,14 @@ def passive_exchanger(spec, *, sizing):
                 out_h = inlet_h-duty/real(ch)
                 out_c = out_h-gap2 if arr == "parallel" else inlet_h-gap1
             result.update(effectiveness=wire(eps), NTU=wire(ntu), Th_out_K=wire(out_h))
+
+        if tube is not None:
+            if "UA_W_K" in spec and not math.isclose(read("UA_W_K"), wire(ua), rel_tol=1e-9, abs_tol=0):
+                raise ValueError("Supplied UA disagrees with the service duty or tube rating")
+            if sizing and "rated_UA_W_K" in tube and not math.isclose(wire(ua), tube["rated_UA_W_K"],
+                                                                    rel_tol=1e-9, abs_tol=0):
+                raise ValueError("Supplied total_length_m conflicts with the measured sizing duty")
+            tube.update(tube_extent(tube, wire(ua)))
 
         # An independent effectiveness-NTU law checks the measured sizing
         # state or high-precision forward rating at its dimensionless scale.
