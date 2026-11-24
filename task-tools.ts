@@ -66,7 +66,11 @@ interface RelayResponse {
 
 function relay(route: string, body: object): Promise<RelayResponse> {
 	const url = new URL(`${RELAY}/${route}`);
-	const data = Buffer.from(JSON.stringify(body));
+	// Every task-side command shares this process phase, including export and
+	// preflight tools. The relay computes the effective timeout at dispatch.
+	const request = route === "exec" && PHASE_DEADLINE !== null
+		? { ...body, phase_deadline_ms: PHASE_DEADLINE } : body;
+	const data = Buffer.from(JSON.stringify(request));
 	return new Promise((resolve, reject) => {
 		const req = http.request(
 			{
@@ -189,7 +193,7 @@ function _origRegisterTaskTools_registerTaskTools(pi: ExtensionAPI) {
 				exec: async (command, cwd, { onData, signal, timeout }) => {
 					if (signal?.aborted) throw new Error("aborted");
 					const limit = execLimit(timeout, MAX_EXEC_SEC);
-					const run = relay("exec", { command: `cd ${quote(cwd)} || exit 1\n${command}`, timeout_sec: limit, phase_deadline_ms: PHASE_DEADLINE });
+					const run = relay("exec", { command: `cd ${quote(cwd)} || exit 1\n${command}`, timeout_sec: limit });
 					// The relay cannot cancel an exec: an abort stops the wait, and the command runs on to its time limit.
 					const abort = new Promise<never>((_, reject) =>
 						signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }),
