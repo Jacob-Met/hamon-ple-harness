@@ -2109,6 +2109,94 @@ def evaluate_pair_clash(mesh_a: SolidMesh3D, mesh_b: SolidMesh3D, required_clear
     )
 
 
+def _single_advanced_brep_takeoff(ifc_text):
+    """Measure one placed curved Body when no pairwise clearance is required."""
+    import ifcopenshell
+    import ifcopenshell.geom
+    from ifcopenshell import ifcopenshell_wrapper
+
+    model = ifcopenshell.file.from_string(ifc_text)
+    products = [p for p in model.by_type("IfcProduct") if p.Representation]
+    if len(products) != 1 or getattr(products[0], "HasOpenings", ()):
+        return None
+    product = products[0]
+    bodies = [r for r in product.Representation.Representations
+              if r.RepresentationIdentifier not in ("Axis", "Box", "FootPrint")]
+    if len(bodies) != 1:
+        return None
+    rep = bodies[0]
+    visited = set()
+    while rep.RepresentationIdentifier == "Body" and len(rep.Items) == 1:
+        if rep.id() in visited:
+            return None
+        visited.add(rep.id())
+        item = rep.Items[0]
+        if not item.is_a("IfcMappedItem"):
+            break
+        rep = item.MappingSource.MappedRepresentation
+    else:
+        return None
+
+    # A missing edge or disconnected boundary must not become a new solid
+    # merely because the converter can close a nearby gap while sewing.
+    if item.is_a() != "IfcAdvancedBrep" or not item.Outer.is_a("IfcClosedShell"):
+        return None
+    faces = item.Outer.CfsFaces
+    ids = {face.id() for face in faces}
+    if not ids or len(ids) != len(faces):
+        return None
+    edge_faces = {}
+    for face in faces:
+        if not face.is_a("IfcAdvancedFace") or not face.Bounds:
+            return None
+        for bound in face.Bounds:
+            loop = bound.Bound
+            if not loop.is_a("IfcEdgeLoop") or not loop.EdgeList:
+                return None
+            for edge in loop.EdgeList:
+                edge_faces.setdefault(edge.EdgeElement.id(), []).append(face.id())
+    neighbors = {fid: set() for fid in ids}
+    for uses in edge_faces.values():
+        if len(uses) != 2:
+            return None
+        first, second = uses
+        neighbors[first].add(second)
+        neighbors[second].add(first)
+    reached = set()
+    pending = [next(iter(ids))]
+    while pending:
+        face_id = pending.pop()
+        if face_id not in reached:
+            reached.add(face_id)
+            pending.extend(neighbors[face_id] - reached)
+    if reached != ids:
+        return None
+
+    settings = ifcopenshell.geom.settings()
+    settings.set("iterator-output", ifcopenshell_wrapper.NATIVE)
+    settings.set("reorient-shells", True)
+    settings.set("use-world-coords", True)
+    element = ifcopenshell.geom.create_shape(settings, product)
+    geometry = element.geometry
+    if geometry.size() != 1:
+        return None
+    shape = geometry.item(0)
+    if not shape.is_manifold() or shape.num_faces() != len(faces):
+        return None
+    volume = shape.volume().to_double()
+    area = shape.area().to_double()
+    if not all(math.isfinite(v) and v > 0 for v in (volume, area)):
+        return None
+    return {
+        "solid_count": 1, "pair_count": 0, "hard_clash_count": 0,
+        "clearance_violation_count": 0, "min_clearance_m": None,
+        "clashes": [], "all_pairs": [], "total_solid_volume_m3": volume,
+        "total_surface_area_m2": area, "source_product_step_id": product.id(),
+        "source_advanced_brep_step_id": item.id(), "source_face_count": len(faces),
+        "volume_method": "ifcopenshell_reoriented_closed_brep",
+    }
+
+
 def detect_ifc_clashes(
     ifc_text: str,
     required_clearance_m: float = 0.0,
@@ -2123,7 +2211,17 @@ def detect_ifc_clashes(
                                     required_clearance_m, cross_discipline_only, _infer_discipline)
             except (ImportError, RuntimeError, ValueError, TypeError, AttributeError, IndexError, ArithmeticError) as exc:
                 raise UnresolvedSolidGeometry(f"Unresolved IFC curved Body: {exc}") from exc
-    solids = load_ifc_solids(ifc_text)
+    try:
+        solids = load_ifc_solids(ifc_text)
+    except UnresolvedSolidGeometry:
+        if "IFCADVANCEDBREP" in ifc_text.upper():
+            try:
+                takeoff = _single_advanced_brep_takeoff(ifc_text)
+            except (ImportError, RuntimeError, ValueError, TypeError, AttributeError):
+                takeoff = None
+            if takeoff is not None:
+                return takeoff
+        raise
     # Bounds can prove clearance and eliminate candidates for the minimum.
     # Only a narrow-phase result supplies an attainable distance and witness.
     use_broadphase = len(solids) > 25
