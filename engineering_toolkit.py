@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import ast
 import csv
-from collections import Counter
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, getcontext
 from fractions import Fraction
@@ -201,7 +201,7 @@ _EXACT_LOOKUP = re.compile(
     rf"(?P<kind>[VH])LOOKUP\(\s*(?P<key>{_CELL_REF})\s*,\s*"
     rf"(?:(?P<sheet>'(?:[^']|'')+'|[A-Z_][A-Z0-9_.]*)!)?"
     rf"(?P<start>{_CELL_REF}):(?P<end>{_CELL_REF})\s*,\s*"
-    r"(?P<index>[1-9][0-9]{0,4})\s*,\s*(?:FALSE|0)\s*\)", re.I | re.ASCII)
+    r"(?P<index>[1-9][0-9]{0,4})\s*,\s*(?:FALSE(?:\(\s*\))?|0)\s*\)", re.I | re.ASCII)
 
 
 # Excel CONVERT unit tokens are case-sensitive. Only multiplicative units with
@@ -330,12 +330,19 @@ _INDEX_MATCH = re.compile(
     r"\s*,\s*0\s*\)\s*\)", re.I | re.ASCII)
 
 
-def _verify_index_match(sheet, formula, cached, literals):
+def _selected_lookup(sheet, address, expected, cached):
+    result = {"source_sheet": sheet, "source_cell": address, "expected": expected, "cached": cached}
+    if cached is None:
+        result.update(status="unverified", reason="missing_numeric_cache")
+    else:
+        result["status"] = "matched" if cached == expected else "mismatch"
+    return result
+
+
+def _verify_index_match(sheet, formula, cached, literals, needle_value):
     match = _INDEX_MATCH.fullmatch(formula)
     if match is None:
         return {"status": "unverified", "reason": "requires_vertical_INDEX_and_exact_MATCH_0"}
-    if cached is None:
-        return {"status": "unverified", "reason": "missing_numeric_cache"}
     resolved = {}
     for field in ("needle", "keys", "values"):
         name = match[field + "_sheet"] or sheet
@@ -357,7 +364,7 @@ def _verify_index_match(sheet, formula, cached, literals):
     if (key_x != key_end_x or val_x != val_end_x or length != val_end_y - val_y + 1
             or not 1 <= length <= 2048):
         return {"status": "unverified", "reason": "requires_equal_bounded_vertical_vectors"}
-    needle = literals[resolved["needle"]].get(needle_cell)
+    needle = needle_value((resolved["needle"], needle_cell))
     if needle is None:
         return {"status": "unverified", "reason": "requires_literal_numeric_lookup_key"}
     for offset in range(length):
@@ -369,17 +376,15 @@ def _verify_index_match(sheet, formula, cached, literals):
             expected = literals[resolved["values"]].get(address)
             if expected is None:
                 return {"status": "unverified", "reason": "requires_literal_numeric_return_cell"}
-            return {"status": "matched" if cached == expected else "mismatch",
-                    "source_sheet": resolved["values"], "source_cell": address,
-                    "expected": expected, "cached": cached}
+            return _selected_lookup(resolved["values"], address, expected, cached)
     return {"status": "unverified", "reason": "no_exact_numeric_match"}
 
 
-def _verify_lookup(sheet, formula, cached, literals):
+def _verify_lookup(sheet, formula, cached, literals, needle_value):
     if formula.upper().startswith("INDEX("):
-        return _verify_index_match(sheet, formula, cached, literals)
+        return _verify_index_match(sheet, formula, cached, literals, needle_value)
     match = _EXACT_LOOKUP.fullmatch(formula)
-    if match is None or cached is None:
+    if match is None:
         return {"status": "unverified"}
     table = match["sheet"] or sheet
     if table.startswith("'"):
@@ -387,7 +392,7 @@ def _verify_lookup(sheet, formula, cached, literals):
     # Require the exact declared sheet name. No external, named, or implicit ranges.
     if table not in literals or sheet not in literals:
         return {"status": "unverified"}
-    needle = literals[sheet].get(match["key"].replace("$", "").upper())
+    needle = needle_value((sheet, match["key"].replace("$", "").upper()))
     try:
         _grid_position(match["key"])
         x1, y1 = _grid_position(match["start"])
@@ -410,12 +415,36 @@ def _verify_lookup(sheet, formula, cached, literals):
             address = _address(x+index-1, y) if vertical else _address(x, y+index-1)
             expected = cells.get(address)
             if expected is not None:
-                return {"status": "matched" if cached == expected else "mismatch",
-                        "source_sheet": table, "source_cell": address,
-                        "expected": expected, "cached": cached}
+                return _selected_lookup(table, address, expected, cached)
             break
     return {"status": "unverified"}
 
+
+
+def _resolve_lookups(lookups, literals, full_precision):
+    formulas = {(sheet, cell): (expr, cached) for sheet, cell, expr, cached in lookups}
+    results = {}
+    queue = deque(formulas)
+    waiting = defaultdict(list)
+
+    def needle_value(ref):
+        if full_precision and ref in formulas:
+            # Only a reconstructed selection may become the next lookup's key.
+            # A deliberately missing entry suspends the dependent until ready.
+            return results[ref].get("expected")
+        return literals[ref[0]].get(ref[1])
+
+    while queue:
+        key = queue.popleft()
+        expression, cached = formulas[key]
+        try:
+            results[key] = _verify_lookup(key[0], expression, cached, literals, needle_value)
+        except KeyError as exc:
+            waiting[exc.args[0]].append(key)
+        else:
+            queue.extend(waiting.pop(key, []))
+    return {key: results.get(key, {"status": "unverified", "reason": "cyclic_lookup_dependency"})
+            for key in formulas}
 
 
 _ARITHMETIC_TOKEN = re.compile(
@@ -622,7 +651,7 @@ def _parse_scalar_formula(key, expression, literals):
 
 
 
-def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
+def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False, lookup_sources=None):
     """Evaluate one dependency graph for ordinary arithmetic and CONVERT calls.
 
     Topological evaluation preserves the 256-cell conversion-chain contract
@@ -648,6 +677,10 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
             reverse.setdefault(dependency, []).append(key)
 
     def reference(ref):
+        # Numeric lookup results are proved against the literal table before
+        # graph evaluation. Read the selected source cell, never the saved cache.
+        if lookup_sources is not None:
+            ref = lookup_sources.get(ref, ref)
         if ref in values:
             result = values[ref]
             if isinstance(result, Exception):
@@ -806,7 +839,7 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
     if not legacy_lbm and any('"lbm"' in row[0] for row in producers.values()):
         # Reconstruct the whole graph under one alternate numeric convention;
         # never use a saved intermediate to explain a downstream result.
-        alternate = _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=True)
+        alternate = _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=True, lookup_sources=lookup_sources)
         for kind, records in reports.items():
             for record, other in zip(records, alternate[kind]):
                 if record["status"] == "mismatch" and other["status"] == "matched":
@@ -919,10 +952,10 @@ _ARITHMETIC_GRAPH_LIMIT = 256
 _ARITHMETIC_INDEX_LIMIT = 4096
 
 
-def _audit_scalar_components(arithmetic, conversions, literals):
+def _audit_scalar_components(arithmetic, conversions, literals, lookup_sources=None):
     """Evaluate independent producer graphs without treating cached formulas as literals."""
     if len(arithmetic) <= _ARITHMETIC_GRAPH_LIMIT:
-        return _scalar_formula_audit(arithmetic, conversions, literals)
+        return _scalar_formula_audit(arithmetic, conversions, literals, lookup_sources=lookup_sources)
 
     conversion_by_cell = {(row[0], row[1]): row for row in conversions}
     parents = {key: key for key in (*arithmetic, *conversion_by_cell)}
@@ -965,7 +998,8 @@ def _audit_scalar_components(arithmetic, conversions, literals):
                     "sheet": key[0], "cell": key[1], "cached": arithmetic[key][1],
                     "status": "unverified", "reason": "arithmetic_component_limit",
                 })
-        local = _scalar_formula_audit(local_arithmetic, local_conversions, literals)
+        local = _scalar_formula_audit(local_arithmetic, local_conversions, literals,
+                                      lookup_sources=lookup_sources)
         for kind in reports:
             reports[kind].extend(local[kind])
     return reports
@@ -1009,6 +1043,7 @@ def xlsx_audit(filename: str):
             cell_path = f"{ns}sheetData/{ns}row/{ns}c"
             unresolved_shared_followers = 0
             masters = _shared_lookup_masters(root.iterfind(cell_path), ns)
+            first_lookup = len(lookups)
             first_conversion = len(conversions)
             sheet_arithmetic = {}
             for cell in root.iterfind(cell_path):
@@ -1095,6 +1130,7 @@ def xlsx_audit(filename: str):
             # Rectangles never expand into coordinates, even for a whole worksheet.
             if derived_ranges is None:
                 sheet_values.clear()
+                del lookups[first_lookup:]
                 del conversions[first_conversion:]
                 sheet_arithmetic.clear()
             elif derived_ranges and complete_index:
@@ -1108,11 +1144,13 @@ def xlsx_audit(filename: str):
                             sheet_values[address] = None
                     sheet_arithmetic = {key: row for key, row in sheet_arithmetic.items()
                                         if not is_derived(key[1])}
+                    lookups[first_lookup:] = [row for row in lookups[first_lookup:] if not is_derived(row[1])]
                     conversions[first_conversion:] = [
                         row for row in conversions[first_conversion:] if not is_derived(row[1])
                     ]
                 except ValueError:
                     sheet_values.clear()
+                    del lookups[first_lookup:]
                     del conversions[first_conversion:]
                     sheet_arithmetic.clear()
             arithmetic.update(sheet_arithmetic)
@@ -1125,15 +1163,18 @@ def xlsx_audit(filename: str):
                                        "error_count": error_count})
     counts = {"matched": 0, "mismatch": 0, "unverified": lookup_total}
     examples = []
+    lookup_sources = {}
     if complete_index:
-        for name, address, expression, cached in lookups:
-            result = _verify_lookup(name, expression, cached, literals)
+        results = _resolve_lookups(lookups, literals, full_precision)
+        for (name, address), result in results.items():
             if result["status"] != "unverified":
                 counts["unverified"] -= 1
                 counts[result["status"]] += 1
+            if "source_cell" in result:
+                lookup_sources[(name, address)] = (result["source_sheet"], result["source_cell"])
             examples.append({"sheet": name, "cell": address, **result})
     manifest["lookup_audit"] = {"counts": counts, "examples": examples}
-    reconstructed = (_audit_scalar_components(arithmetic, conversions, literals)
+    reconstructed = (_audit_scalar_components(arithmetic, conversions, literals, lookup_sources=lookup_sources)
                      if complete_index and full_precision else {"conversion": [], "arithmetic": []})
     for kind, total in (("conversion", conversion_total), ("arithmetic", arithmetic_total)):
         counts = {"matched": 0, "mismatch": 0, "unverified": total}

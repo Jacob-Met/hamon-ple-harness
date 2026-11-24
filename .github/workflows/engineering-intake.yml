@@ -100,7 +100,9 @@ jobs:
           echo "Official kit commit: $(git -C "$RUNNER_TEMP/ple-upstream" rev-parse HEAD)"
           PYTHONPATH="$RUNNER_TEMP/ple-upstream" python -m kit validate .
       - name: Recover two controlled deliverables through the organizer capture and export code
-        run: python tests/replay_recovery_exports.py "$RUNNER_TEMP/ple-upstream"
+        run: |
+          python tests/replay_recovery_exports.py "$RUNNER_TEMP/ple-upstream"
+          python tests/replay_roster_exports.py "$RUNNER_TEMP/ple-upstream"
       - name: Independent outlined-font CAD sources (not scored PLE)
         run: |
           set -euo pipefail

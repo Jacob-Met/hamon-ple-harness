@@ -140,7 +140,7 @@ def sheet(rows, formulas):
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
-def write_workbook(path, rows):
+def write_workbook(path, rows, input_sheet=None):
     types = ('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
              '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
              '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
@@ -158,12 +158,64 @@ def write_workbook(path, rows):
         "_rels/.rels": f'<Relationships xmlns="{PKG}"><Relationship Id="rId1" Type="{REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>',
         "xl/workbook.xml": workbook,
         "xl/_rels/workbook.xml.rels": relationships,
-        "xl/worksheets/sheet1.xml": sheet([1.5,2.54,2,3], False),
+        "xl/worksheets/sheet1.xml": input_sheet if input_sheet is not None else sheet([1.5,2.54,2,3], False),
         "xl/worksheets/sheet2.xml": sheet([formula for formula,_ in rows], True),
     }
     with ZipFile(path, "w", compression=ZIP_DEFLATED) as book:
         for name, contents in parts.items():
             book.writestr(name, contents)
+
+
+def write_catalog_course(path):
+    # Place dependents before producers. Duplicate IDs deliberately return
+    # different areas, so the second matching row gives a different stress.
+    root = ET.Element("worksheet", xmlns=MAIN)
+    data = ET.SubElement(root, "sheetData")
+    for i, values in enumerate(((1,101,101,25),(1,102,101,30),(2,102,102,15)), 1):
+        row = ET.SubElement(data, "row", r=str(i))
+        for col, number in zip("ABCD", values):
+            ET.SubElement(ET.SubElement(row, "c", r=f"{col}{i}"), "v").text = str(number)
+    formulas = ['A5/A2', 'CONVERT(A3,"cm^2","m^2")',
+                'VLOOKUP(A4,Inputs!C1:D3,2,FALSE)',
+                'INDEX(Inputs!B1:B3,MATCH(Inputs!A1,Inputs!A1:A3,0))', 'CONVERT(6,"kN","N")']
+    write_workbook(path, [(formula,None) for formula in formulas], ET.tostring(root))
+
+
+def check_catalog_course(path, output):
+    fresh = xlsx_audit(path)
+    records = {r["cell"]: r for kind in ("lookup","conversion","arithmetic")
+               for r in fresh[kind+"_audit"]["examples"]}
+    assert len(records) == 5 and all(r["status"] == "matched" for r in records.values()), records
+    assert (records["A4"]["source_sheet"], records["A4"]["source_cell"]) == ("Inputs", "B1")
+    assert (records["A3"]["source_sheet"], records["A3"]["source_cell"]) == ("Inputs", "D1")
+    assert records["A2"]["expected"] == 0.0025 and records["A1"]["expected"] == 2400000
+    assert records["A5"]["expected"] == 6000
+    assert records["A2"]["si_dimension"] == [0, 2, 0, 0, 0]
+    assert records["A1"]["si_dimension"] == [1, -1, -2, 0, 0]
+    assert records["A1"]["unit_scale_si"] == "1"
+    assert audit_local_deliverable(path)["ok"]
+    # Keep the Calc file untouched. Remove both lookup caches, then plant
+    # mutually consistent incorrect caches in the dependent conversion and load.
+    sheet_part = next(s["part"] for s in fresh["sheets"] if s["name"] == "Checks")
+    with ZipFile(path) as source, ZipFile(output, "w", compression=ZIP_DEFLATED) as stale:
+        for member in source.namelist():
+            raw = source.read(member)
+            if member == sheet_part:
+                root = ET.fromstring(raw)
+                for c in root.iter(f"{{{MAIN}}}c"):
+                    val = c.find(f"{{{MAIN}}}v")
+                    if c.get("r") in ("A3","A4"):
+                        c.remove(val)
+                    elif c.get("r") in ("A1","A2"):
+                        val.text = "6000" if c.get("r") == "A1" else "1"
+                raw = ET.tostring(root)
+            stale.writestr(member, raw)
+    audit = xlsx_audit(output)
+    assert audit["lookup_audit"]["counts"]["unverified"] == 2
+    assert audit["conversion_audit"]["counts"]["mismatch"] == 1
+    assert audit["arithmetic_audit"]["counts"]["mismatch"] == 1
+    assert not audit_local_deliverable(output)["ok"]
+    return records
 
 
 def main():
@@ -197,10 +249,13 @@ def main():
         ('CONVERT(Inputs!A2^0,"Pa","kPa")', .001, "dimension_mismatch"),
     ]
     write_workbook(source_frames, [(formula, value) for formula, value, _ in controls])
+    catalog = args.out / "catalog-stress.xlsx"
+    write_catalog_course(catalog)
     command = [executable, f"-env:UserInstallation={(args.out/'calc-profile').resolve().as_uri()}",
-               "--headless", "--convert-to", "xlsx", "--outdir", str(output), str(source), str(source_frames)]
+               "--headless", "--convert-to", "xlsx", "--outdir", str(output), str(source), str(source_frames), str(catalog)]
     calc = subprocess.run(command, check=True, capture_output=True, text=True, timeout=90)
     (args.out/"calc.log").write_text(calc.stdout+calc.stderr)
+    catalog_records = check_catalog_course(output / catalog.name, args.out / "catalog-stress-stale.xlsx")
     frames_recalculated = output / source_frames.name
     frame_audit = xlsx_audit(frames_recalculated)
     frame_guard = audit_local_deliverable(frames_recalculated)
@@ -269,7 +324,7 @@ def main():
         "fresh_formulas_compared":len(rows), "fresh_formulas_matched":matched,
         "engine_specific_lbm_variants":engine_variants, "fresh_guard":guard["ok"],
         "stale_guard":stale_guard["ok"], "stale_mismatch_cells":mismatches,
-        "source_frame_controls":frames, "published_plate":published_plate,
+        "source_frame_controls":frames, "catalog_course":catalog_records, "published_plate":published_plate,
         "comparisons":comparisons,
     }
     (args.out/"report.json").write_text(json.dumps(result,indent=2)+"\n")
@@ -278,4 +333,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

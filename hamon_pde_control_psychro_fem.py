@@ -29,6 +29,7 @@ numerical cross-verification suite for Physical Engineering's Last Exam (PLE):
      - Adiabatic mixing accepts condensate_model="equilibrium_ice" to resolve ice down
        to -60 C and coexisting ice and liquid at 0 C. The default is liquid condensate.
   4. Structural FEM (`verify_fem_structure`):
+     - Isotropic CST plane-stress and plane-strain meshes with exact equilibrium and work checks.
      - Arbitrary 2D pin-jointed determinate & statically indeterminate truss direct-stiffness
        solver with thermal strain support, kinematic mechanism detection, nodal reaction
        equilibrium, and Clapeyron work-strain-energy theorem verification.
@@ -2664,8 +2665,259 @@ def _beam_response(spec):
         return {**identity, "passed": False, "reason": str(exc)}
 
 
+def _cst_number(value):
+    if type(value) not in (int, float) or not math.isfinite(value):
+        raise ValueError("expected a finite JSON number")
+    return Fraction(value)
+
+
+def _cst_index(value, count):
+    if type(value) is not int or not 0 <= value < count:
+        raise ValueError("mesh index outside supplied nodes")
+    return value
+
+
+def _cst_cross(a, b, p):
+    return (b[0]-a[0])*(p[1]-a[1]) - (b[1]-a[1])*(p[0]-a[0])
+
+
+def _cst_mesh(nodes, elements):
+    """Require a conforming mesh: interiors disjoint, shared boundaries match by node."""
+    if len(set(nodes)) != len(nodes):
+        raise ValueError("duplicate mesh coordinates")
+    triangles = []
+    for row in elements:
+        if not isinstance(row, (tuple, list)) or len(row) != 3:
+            raise ValueError("each element must have exactly three node indices")
+        a, b, c = (_cst_index(i, len(nodes)) for i in row)
+        det = _cst_cross(nodes[a], nodes[b], nodes[c])
+        if not det:
+            raise ValueError("degenerate triangle")
+        triangles.append((a, b, c) if det > 0 else (a, c, b))
+    if set(i for t in triangles for i in t) != set(range(len(nodes))):
+        raise ValueError("unreferenced mesh node")
+    for i, first in enumerate(triangles):
+        for second in triangles[:i]:
+            separated = False
+            for face, other in ((first, second), (second, first)):
+                for j in range(3):
+                    a, b = nodes[face[j]], nodes[face[(j+1) % 3]]
+                    sides = [_cst_cross(a, b, nodes[k]) for k in other]
+                    if max(sides) <= 0:
+                        separated = True
+                    for k, side in zip(other, sides):
+                        if k not in face and side == 0:
+                            x, y = nodes[k]
+                            if ((x-a[0])*(x-b[0]) + (y-a[1])*(y-b[1])) < 0:
+                                raise ValueError("nonconforming node on triangle edge")
+            if not separated:
+                raise ValueError("overlapping triangle interiors")
+    return triangles
+
+
+def _q4_mesh(nodes, elements):
+    quads = []
+    for row in elements:
+        if not isinstance(row, (list, tuple)) or len(row) != 4:
+            raise ValueError("each Q4 element must have four consecutive boundary nodes")
+        ids = tuple(_cst_index(i, len(nodes)) for i in row)
+        turns = [_cst_cross(nodes[ids[j-1]], nodes[ids[j]], nodes[ids[(j+1) % 4]])
+                 for j in range(4)]
+        if all(value < 0 for value in turns):
+            ids = (ids[0], ids[3], ids[2], ids[1])
+        elif not all(value > 0 for value in turns):
+            raise ValueError("folded or degenerate bilinear Q4 mapping")
+        quads.append(ids)
+    # Convex planar quads are exactly the union of two triangles. The
+    # triangulation is used only for overlap and hanging-node checks.
+    _cst_mesh(nodes, [tri for a,b,c,d in quads for tri in ((a,b,c), (a,c,d))])
+    return quads
+
+
+def _q4_gradient_numerators(points, xi, eta):
+    """Return det J and det J times each physical shape gradient, affine in xi,eta."""
+    signs = ((-1,-1), (1,-1), (1,1), (-1,1))
+    dxi = [Fraction(sx*(1 + sy*eta), 4) for sx,sy in signs]
+    deta = [Fraction(sy*(1 + sx*xi), 4) for sx,sy in signs]
+    x_xi, y_xi = (sum(p[k]*d for p,d in zip(points,dxi)) for k in (0,1))
+    x_eta, y_eta = (sum(p[k]*d for p,d in zip(points,deta)) for k in (0,1))
+    det = x_xi*y_eta - y_xi*x_eta
+    columns = []
+    for dx, de in zip(dxi, deta):
+        gx, gy = y_eta*dx - y_xi*de, x_xi*de - x_eta*dx
+        columns.extend(((gx, 0, gy), (0, gy, gx)))
+    return det, columns
+
+
+def _q4_pairs(nodes, quad, thickness):
+    """Pair opposite 2x2 Gauss points and sum their conjugates over the rationals."""
+    points = [nodes[i] for i in quad]
+    det, mids = _q4_gradient_numerators(points, 0, 0)
+    dofs = [j for i in quad for j in (2*i, 2*i+1)]
+    center = [(j, tuple(v/det for v in mid)) for j, mid in zip(dofs, mids)]
+    pairs = []
+    for sign in (-1, 1):
+        corner_det, corners = _q4_gradient_numerators(points, 1, sign)
+        slope_det = corner_det - det
+        # At (r,sign*r) and (-r,-sign*r), r^2=1/3. After dividing by
+        # det +/- slope_det*r, the three coefficients integrate 1,r,r^2.
+        denom = det*det - slope_det*slope_det/3
+        w0 = 2*thickness*det/denom
+        w1 = -2*thickness*slope_det/(3*denom)
+        cols = [(j, mid, tuple(x-y for x,y in zip(corner, mid)))
+                for j,mid,corner in zip(dofs,mids,corners)]
+        pairs.append(((w0, w1, w0/3), cols))
+    return center, pairs
+
+
+def _q4_pair_work(weights, a, slope_a, stress_b, slope_stress_b):
+    w0, w1, w2 = weights
+    return sum((w0*x+w1*y)*s + (w1*x+w2*y)*t
+               for x,y,s,t in zip(a,slope_a,stress_b,slope_stress_b))
+
+
+def _plane_mesh_response(spec):
+    """Small homogeneous, isotropic, small-strain meshes with nodal forces in SI."""
+    mode = spec["mode"].strip().lower()
+    identity = {"domain": "fem", "mode": mode}
+    try:
+        allowed = {"domain", "mode", "kinematics", "nodes", "elements", "loads", "supports",
+                   "E_Pa", "nu", "thickness_m", "claimed_field", "claimed_value", "rtol", "atol"}
+        if set(spec) - allowed:
+            raise ValueError("unsupported plane elasticity input: " + ", ".join(sorted(set(spec)-allowed)))
+        kin = spec["kinematics"]
+        e, nu, t = (_cst_number(spec[k]) for k in ("E_Pa", "nu", "thickness_m"))
+        if kin not in ("plane_stress", "plane_strain") or e <= 0 or not -1 < nu < Fraction(1, 2) or t <= 0:
+            raise ValueError("invalid isotropic material, thickness or plane assumption")
+        if not 3 <= len(spec["nodes"]) <= 64 or not 1 <= len(spec["elements"]) <= 128:
+            raise ValueError("requires 3 to 64 nodes and 1 to 128 elements")
+        nodes = []
+        for point in spec["nodes"]:
+            if len(point) != 2:
+                raise ValueError("each node requires exactly two coordinates in metres")
+            nodes.append(tuple(_cst_number(x) for x in point))
+        if mode == "q4_2d":
+            triangles, quads = [], _q4_mesh(nodes, spec["elements"])
+        else:
+            triangles, quads = _cst_mesh(nodes, spec["elements"]), []
+        loads = [Fraction(0)] * (2 * len(nodes))
+        prescribed = {}
+        for row in spec.get("loads", []):
+            if set(row) - {"node", "fx_N", "fy_N"} or not ({"fx_N", "fy_N"} & set(row)):
+                raise ValueError("nodal load requires fx_N or fy_N")
+            node = _cst_index(row["node"], len(nodes))
+            for j, field in enumerate(("fx_N", "fy_N")):
+                loads[2*node+j] += _cst_number(row.get(field, 0))
+        for row in spec.get("supports", []):
+            if set(row) - {"node", "ux_m", "uy_m"} or not ({"ux_m", "uy_m"} & set(row)):
+                raise ValueError("prescribe ux_m or uy_m; omit a free component")
+            node = _cst_index(row["node"], len(nodes))
+            for j, field in enumerate(("ux_m", "uy_m")):
+                if field in row:
+                    dof, value = 2*node+j, _cst_number(row[field])
+                    if dof in prescribed and prescribed[dof] != value:
+                        raise ValueError("conflicting prescribed displacement")
+                    prescribed[dof] = value
+    except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
+        return {**identity, "passed": False, "reason": str(exc)}
+
+    shear = e/(2*(1+nu))
+    coupling = e*nu/(1-nu*nu) if kin == "plane_stress" else e*nu/((1+nu)*(1-2*nu))
+    diagonal = 2*shear + coupling
+    def stress(strain):
+        ex, ey, gamma = strain
+        return (diagonal*ex + coupling*ey, coupling*ex + diagonal*ey, shear*gamma)
+
+    size = len(loads)
+    stiffness = [{} for _ in loads]
+    blocks = []
+    for tri in triangles:
+        p = [nodes[i] for i in tri]
+        det = _cst_cross(*p)
+        volume = t*det/2
+        columns = []
+        for j, i in enumerate(tri):
+            a, b = p[(j+1) % 3], p[(j+2) % 3]
+            dx, dy = (a[1]-b[1])/det, (b[0]-a[0])/det
+            columns.extend(((2*i, (dx, 0, dy)), (2*i+1, (0, dy, dx))))
+        for j, bj in columns:
+            db = stress(bj)
+            for i, bi in columns:
+                kij = volume * sum(x*y for x,y in zip(bi, db))
+                stiffness[i][j] = stiffness[i].get(j, 0) + kij
+        blocks.append((volume, columns))
+    quad_blocks = []
+    for quad in quads:
+        center, pairs = _q4_pairs(nodes, quad, t)
+        for weights, columns in pairs:
+            for j, mid_j, slope_j in columns:
+                d_mid, d_slope = stress(mid_j), stress(slope_j)
+                for i, mid_i, slope_i in columns:
+                    kij = _q4_pair_work(weights, mid_i, slope_i, d_mid, d_slope)
+                    stiffness[i][j] = stiffness[i].get(j, 0) + kij
+        quad_blocks.append((center, pairs))
+
+    equations = [({i: 1}, prescribed[i]) if i in prescribed else (stiffness[i], loads[i])
+                 for i in range(size)]
+    u = _beam_system(equations, size)
+    if u is None:
+        return {**identity, "passed": False, "reason": "singular constrained plane elasticity system"}
+
+    internal = [Fraction(0)] * size
+    strains, stresses, out_of_plane = [], [], []
+    energy = Fraction(0)
+    for volume, columns in blocks:
+        strain = [sum(u[j]*b[k] for j, b in columns) for k in range(3)]
+        sigma = stress(strain)
+        for j, b in columns:
+            internal[j] += volume * sum(x*y for x, y in zip(b, sigma))
+        energy += volume * sum(x*y for x, y in zip(strain, sigma))/2
+        strains.append(strain)
+        stresses.append(sigma)
+        out_of_plane.append(0 if kin == "plane_stress" else coupling*(strain[0]+strain[1]))
+    for center, pairs in quad_blocks:
+        center_strain = [sum(u[j]*b[k] for j,b in center) for k in range(3)]
+        strains.append(center_strain)
+        stresses.append(stress(center_strain))
+        out_of_plane.append(0 if kin == "plane_stress" else coupling*(center_strain[0]+center_strain[1]))
+        for weights, columns in pairs:
+            mid = [sum(u[j]*b[k] for j,b,_ in columns) for k in range(3)]
+            slope = [sum(u[j]*b[k] for j,_,b in columns) for k in range(3)]
+            d_mid, d_slope = stress(mid), stress(slope)
+            energy += _q4_pair_work(weights, mid, slope, d_mid, d_slope)/2
+            for j, b, db in columns:
+                internal[j] += _q4_pair_work(weights, b, db, d_mid, d_slope)
+
+    reactions = [f-p for f,p in zip(internal, loads)]
+    force_work = sum(f*d for f,d in zip(loads,u))/2
+    support_work = sum(reactions[i]*d for i,d in prescribed.items())/2
+    moment = sum(x*internal[2*i+1]-y*internal[2*i] for i,(x,y) in enumerate(nodes))
+    verified = (all(reactions[i] == 0 for i in range(size) if i not in prescribed)
+                and sum(internal[::2]) == sum(internal[1::2]) == moment == 0
+                and energy == force_work+support_work)
+    fields = {"displacements_xy_m": list(zip(u[::2], u[1::2])),
+              "reactions_xy_N": list(zip(reactions[::2], reactions[1::2])),
+              "element_strain_xx_yy_gamma_xy": strains, "element_stress_xx_yy_xy_Pa": stresses,
+              "element_sigma_zz_Pa": out_of_plane, "strain_energy_J": energy,
+              "nodal_load_work_J": force_work, "prescribed_support_work_J": support_work}
+    try:
+        rendered = {key: _truss_render(key, value) for key, value in fields.items()}
+    except _TrussOutputRangeError as exc:
+        field, index = exc.args
+        return {**identity, "passed": False, "reason": "response outside binary64 range",
+                "range_field": field, "range_index": index}
+    result = {**identity, "kinematics": kin, "passed": verified, **rendered}
+    if mode == "q4_2d":
+        result.update(integration="2x2_gauss", element_stress_strain_location="natural_center")
+    _check_claimed(result, spec, exact_booleans=True)
+    return result
+
+
 def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "truss_2d")).strip().lower()
+
+    if mode in ("cst_2d", "q4_2d"):
+        return _plane_mesh_response(spec)
 
     if mode == "truss_2d":
         return _truss_response(spec)
@@ -2702,7 +2954,7 @@ def verify_wave5_engineering(spec: Dict[str, Any]) -> Dict[str, Any]:
         return verify_control_system(spec)
     if mode in ("state", "adiabatic_mixing", "cooling_coil"):
         return verify_psychrometric_process(spec)
-    if mode in ("truss_2d", "euler_bernoulli_beam_1d", "continuous_beam_multispan"):
+    if mode in ("cst_2d", "q4_2d", "truss_2d", "euler_bernoulli_beam_1d", "continuous_beam_multispan"):
         return verify_fem_structure(spec)
     return {"passed": False, "reason": f"Unrecognized Wave-5 engineering domain/mode: domain={domain!r} mode={mode!r}"}
 

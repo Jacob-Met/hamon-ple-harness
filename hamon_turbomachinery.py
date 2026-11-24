@@ -156,9 +156,11 @@ def rotor(spec):
     wt1, wt2 = vt1 - u1, vt2 - u2
     meridional_term = (cm2 - cm1) * (cm2 + cm1)
     relative_term = (wt2 - wt1) * (wt2 + wt1)
-    static_change = float(((u2 - u1) * (u2 + u1) - relative_term - meridional_term) / 2)
-    kinetic_change = float((meridional_term + (vt2 - vt1) * (vt2 + vt1)) / 2)
-    energy_work = math.fsum((static_change, kinetic_change))
+    static_change_exact = ((u2 - u1) * (u2 + u1) - relative_term - meridional_term) / 2
+    kinetic_change_exact = (meridional_term + (vt2 - vt1) * (vt2 + vt1)) / 2
+    # The two changes can be large and opposite near an unloaded rotor.
+    static_change = float(static_change_exact)
+    energy_work = float(static_change_exact + kinetic_change_exact)
     residual = abs(work - energy_work)
     compatible = angular_momentum_change >= 0 if kind in ("pump", "compressor") else angular_momentum_change <= 0
     out = {
