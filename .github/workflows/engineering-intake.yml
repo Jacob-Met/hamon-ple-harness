@@ -42,7 +42,6 @@ jobs:
           python ship/verify_eagle_provisioned.py --repo . --stadium
       - name: Isolated filesystem for real Pi delivery recovery
         run: sudo install -d -m 755 -o "$(id -un)" /filesystem
-      - run: python -m unittest discover -s tests -v
       - name: Published Janbu slices through the real registered Pi tool (not scored)
         run: python ship/verify_janbu_registered.py
       - name: All public delivery schemas over real loopback Pi SSE (not scored)
@@ -134,3 +133,25 @@ jobs:
           if [[ "$rc" == 3 ]]; then
             echo "::warning::Artifact provenance differs from this checkout or dev set. A new score requires a genuine authorized run."
           fi
+
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Runtime + official static kit requirements (no model clients)
+        run: pip install --disable-pip-version-check -r requirements.txt "pytest>=8,<10" "python-dotenv>=1" "huggingface-hub>=1.31,<2"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install the actual registered tool runtime
+        run: npm ci --no-fund --no-audit
+      - name: System PDF vector tools for real two-sheet drawing contract
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends poppler-utils
+      - name: Isolated filesystem for real Pi delivery recovery
+        run: sudo install -d -m 755 -o "$(id -un)" /filesystem
+      - run: python -m unittest discover -s tests -v

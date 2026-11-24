@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import math
+from fractions import Fraction
 from pathlib import Path
 from unittest import TestCase, mock
 
@@ -31,6 +32,37 @@ class PassiveFinCertificateTests(TestCase):
             expected = independent_flux(spec)
             assert math.isclose(result["q_fin_w"], expected, rel_tol=1e-14)
             assert math.isclose(result["q_fvm_w"], expected, rel_tol=1e-3)
+
+    def test_verified_flux_uses_the_source_temperature_difference(self):
+        # k*A = h*P = 1e16, length=1, so for an insulated tip mL=1
+        # and q = 1e16 * (Tbase - Tambient) * tanh(1).
+        spec = dict(mode="convective_fin_1d", tip_bc="adiabatic", k_w_mk=1e16,
+                    h_w_m2k=1e16, perimeter_m=1, area_m2=1, length_m=1,
+                    t_base_c="BASE", t_inf_c="AMBIENT")
+        template = fence(spec)
+        for base, ambient, scale in (
+            ("20.0000000000000001", "20", 1),
+            ("20", "20.0000000000000001", -1),
+            ("1.0000000000000001", "1", 1),
+            ("0.0000000000000001", "0", 1),
+            ("20.000000000000004", "20", 40),
+            ("20", "20", 0),
+        ):
+            with self.subTest(base=base, ambient=ambient):
+                source = template.replace('"BASE"', base).replace('"AMBIENT"', ambient)
+                plan = route(source)
+                self.assertTrue(plan["presolve_verified"], plan)
+                result = json.loads(plan["presolve_result_json"])
+                expected = scale*math.tanh(1)
+                self.assertTrue(math.isclose(result["q_fin_w"], expected, rel_tol=2e-15))
+                self.assertTrue(math.isclose(result["q_fvm_w"], expected, rel_tol=1e-3))
+                exact_excess = Fraction(base) - Fraction(ambient)
+                tip = float(Fraction(ambient) + Fraction(float(exact_excess)/math.cosh(1)))
+                for field in ("t_eval_c", "t_tip_c"):
+                    self.assertTrue(math.isclose(result[field], tip, rel_tol=2e-15))
+                self.assertEqual(plan["presolve_source_sha256"], hashlib.sha256(source.encode()).hexdigest())
+        extreme = template.replace('"BASE"', '1e-999999999').replace('"AMBIENT"', '0')
+        self.assertFalse(route(extreme)["presolve_verified"])
 
     def test_convective_tip_and_source_spelling(self):
         spec = {**SPEC, "tip_bc": "convective", "h_tip_w_m2k": 22., "x_eval_m": .04}
