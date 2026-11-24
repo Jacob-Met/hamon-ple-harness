@@ -187,9 +187,12 @@ def first_instruction(stage, command):
     )
 
 
-async def _command_result(session, command):
+async def _command_result(session, command, *, deadline=None):
     try:
-        reply = await asyncio.wait_for(session.exec(command, timeout_sec=30), 33)
+        remaining = 33 if deadline is None else min(33, deadline - monotonic())
+        if remaining < 1:
+            return None
+        reply = await asyncio.wait_for(session.exec(command, timeout_sec=min(30, int(remaining))), remaining)
         if (reply.get("exit_code") == 0 and not reply.get("timed_out")
                 and not reply.get("truncated")):
             return reply
@@ -209,6 +212,23 @@ def recovery_command(command, target, before, after):
 
 async def run_command(session, command):
     return await _command_result(session, command) is not None
+
+
+async def publish_generated(session, command, paths, before, *, deadline):
+    """Publish only a complete set of freshly produced loose members."""
+    if not paths or not before:
+        return
+    prior = {}
+    for path in paths:
+        row = before.get(path) or {}
+        if row.get("state") in {"missing", "empty"}:
+            prior[Path(path).name] = None
+        elif row.get("state") == "ready" and row.get("fingerprint"):
+            prior[Path(path).name] = row["fingerprint"]
+        else:
+            return
+    await _command_result(session, command + " --from-generated-output " +
+                          shlex.quote(json.dumps(prior)), deadline=deadline)
 
 
 async def recover_after_refinement(session, command):

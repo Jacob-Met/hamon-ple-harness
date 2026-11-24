@@ -3105,6 +3105,10 @@ def solve_domain_problem(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
         from hamon_bearing_capacity import verify_bearing_capacity
         result = verify_bearing_capacity(spec, legacy_rectangle=("B_m" in spec or "L_m" in spec))
         return {**result, "kind": kind, "dual_verified": result["conservation_verified"]}
+    if kind == "bishop_slip_circle":
+        from hamon_bishop_circle import verify_bishop_circle
+        result = verify_bishop_circle(spec)
+        return {**result, "kind": kind, "dual_verified": result["conservation_verified"]}
     if kind == "layered_consolidation_transient":
         from hamon_transient_footing import verify_layered_transient
         result = verify_layered_transient(spec)
