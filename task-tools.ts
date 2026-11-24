@@ -32,6 +32,18 @@ import path from 'node:path';
 const RELAY = process.env.TASK_RELAY_URL ?? "";
 const WORKDIR = process.env.TASK_WORKDIR ?? "/";
 const MAX_EXEC_SEC = 600;
+
+function phaseDeadline(): number | null {
+	try {
+		const budget = JSON.parse(process.env.PLE_DELIVERY_BUDGET ?? "null");
+		return ["work", "delivery"].includes(budget?.phase) && Number.isFinite(budget.phase_deadline_ms)
+			? budget.phase_deadline_ms : null;
+	} catch {
+		return null;
+	}
+}
+const PHASE_DEADLINE = phaseDeadline();
+
 const IMAGES: Record<string, string> = {
 	".png": "image/png",
 	".jpg": "image/jpeg",
@@ -48,12 +60,17 @@ interface RelayResponse {
 	content_b64?: string;
 	output?: string;
 	timed_out?: boolean;
+	timeout_sec?: number;
 	exit_code: number;
 }
 
 function relay(route: string, body: object): Promise<RelayResponse> {
 	const url = new URL(`${RELAY}/${route}`);
-	const data = Buffer.from(JSON.stringify(body));
+	// Every task-side command shares this process phase, including export and
+	// preflight tools. The relay computes the effective timeout at dispatch.
+	const request = route === "exec" && PHASE_DEADLINE !== null
+		? { ...body, phase_deadline_ms: PHASE_DEADLINE } : body;
+	const data = Buffer.from(JSON.stringify(request));
 	return new Promise((resolve, reject) => {
 		const req = http.request(
 			{
@@ -184,7 +201,7 @@ function _origRegisterTaskTools_registerTaskTools(pi: ExtensionAPI) {
 					const r = await Promise.race([run, abort]);
 					const output = execOutput(r.output ?? "", Boolean(r.truncated));
 					if (output) onData(Buffer.from(output));
-					if (r.timed_out) throw new Error(`timeout:${limit}`);
+					if (r.timed_out) throw new Error(`timeout:${r.timeout_sec ?? limit}`);
 					return { exitCode: r.exit_code };
 				},
 			},
@@ -340,8 +357,10 @@ function _registerPleWave3DomainTools(pi: any) {
       return { content: [{ type: "text", text: JSON.stringify(details, null, 2) }], details };
     },
   };
+  engineeringSolver.description += " For a supplied slip-surface slice table use civil_geotech with calculation=janbu_slices (uncorrected simplified Janbu). Supply common c_prime_Pa and phi_deg or per-slice overrides, plus slices of {id,width_m,weight_N_m,base_angle_deg,pore_pressure_Pa}. Width is horizontal, weight is N per meter of out-of-plane thickness, stresses are Pa, and angle is signed positive downhill: retain negative resisting-slice angles. Pore pressure defaults to zero. Optional required_factor_of_safety checks a threshold; proposed_factor_of_safety checks a numerical answer. Inspect verified and base_contact_verified: tensile effective base contact is not certified. This checks vertical slice and overall horizontal force equilibrium only. No global moment equilibrium, geometry validation, thrust-line admissibility, critical surface search or Janbu correction factor is supplied.";
   engineeringSolver.description += " For a specified lower circular slip surface use civil_geotech with calculation=bishop_slip_circle, circle={center_x_m,center_y_m,radius_m}, slide_direction=right or left and contiguous left-to-right slices, each with left_x_m, right_x_m, weight_N_per_m, cohesion_Pa, friction_angle_deg and pore_pressure_Pa. Optional proposed_factor_of_safety checks a claimed value. Forces and moments are per metre out of plane. The result applies to the supplied circle and midpoint weights with gravity and basal water pressure.";
-  engineeringSolver.description += " For a beam on two to twelve unequal spans use structural with spec.calculation=continuous_beam_multispan, per-span arrays spans_m, udl_N_m (positive downward) and span_EI_Nm2. The optional station maps or ordered arrays support_conditions and support_settlements_m specify vertical seats and positive downward settlements. Up to eight seats can be compression_only. The result gives signed reactions, moments, gaps and contact states for every station.";
+  engineeringSolver.description += " For a beam on two to twelve unequal spans use structural with spec.calculation=continuous_beam_multispan, per-span arrays spans_m, udl_N_m (positive downward) and span_EI_Nm2. Optional point_loads [{x_m,downward_N}] place signed vertical forces anywhere along the beam, measured from its left end. The optional station maps or ordered arrays support_conditions and support_settlements_m specify vertical seats and positive downward settlements. Up to eight seats can be compression_only. The result gives signed reactions, moments, gaps and contact states for every station.";
+  engineeringSolver.description += " For a prescribed-time two-body transfer use lagrangian_orbital with spec.subkind=lambert_transfer, positive mu (m^3/s^2), r1_m and r2_m (three Cartesian metres in the same inertial frame), positive tof_s and transfer_path=short or long (default short). Only revolutions=0 is supported. Antipodal positions require a perpendicular plane_normal; short follows its direction, long the opposite. Returned v1_m_s and v2_m_s are independently propagated from their published values; inspect endpoint_verified and verified. Optional proposed_v1_m_s/proposed_v2_m_s check supplied velocities. This is a point-mass two-body calculation; conic_periapsis_m is not an arc collision-clearance certificate. The older orbital_transfer subkind remains circular Hohmann sizing and refuses these boundary-value inputs.";
   pi.registerTool({
     ...engineeringSolver,
     description: "Verify engineering calculations, CAD/STEP geometry and conservation residuals. Families and input selectors are listed in mode and spec. Call with only mode=reference for complete input conventions, examples, numerical limits and solver-specific options.",

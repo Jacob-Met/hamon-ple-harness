@@ -653,6 +653,11 @@ def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any
     if subkind == "isentropic":
         return _isentropic_nozzle(params, gamma, r_gas)
 
+    if subkind == "cd_nozzle_shock":
+        from hamon_cd_nozzle_shock import internal_shock
+        gas_gamma, _, _ = _ideal_gas_constants(params, gamma, r_gas, "CD nozzle")
+        return internal_shock(params, gas_gamma)
+
     if subkind == "normal_shock":
         from hamon_normal_shock import normal_shock_state
         out = {"domain": "compressible_acoustics", "subkind": "normal_shock", "verified": False}

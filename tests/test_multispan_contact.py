@@ -80,3 +80,49 @@ class MultiSpanContact(unittest.TestCase):
                            ("spans_m",[1,1,1]),("supports",["A","B","C"])):
             bad=route({"mode":"structural","spec":{"span_m":3,"E_Pa":1,"I_m4":1,"w_N_m":2,key:value}})
             self.assertFalse(bad["ok"])
+
+    def test_midspan_point_load_and_far_bearing_lift(self):
+        # Shi Lab CSA 03: equal spans, one central force. The independent
+        # force-method and OpenSees results are 13P/32, 22P/32, -3P/32.
+        # https://www.shitaoshi.web.illinois.edu/bootcamp/csa/03-indeterminate-beam.html
+        points = [{"x_m": 1, "downward_N": 32}]
+        fixed = course([0,0], spans_m=[2,2], support_conditions={}, point_loads=points)
+        self.assertTrue(fixed["conservation_verified"])
+        self.assertEqual(list(fixed["support_reactions_N"].values()), [13,22,-3])
+        self.assertEqual(fixed["support_moments_Nm"]["B"], -6)
+        self.assertEqual(fixed["M_max_sagging_Nm"], 13)
+        free = course([0,0], spans_m=[2,2], support_conditions={"C":"compression_only"},
+                      span_EI_Nm2=[16,16], point_loads=points)
+        self.assertEqual(list(free["support_reactions_N"].values()), [16,16,0])
+        # End slope of a simply supported central point load times the overhang.
+        self.assertEqual(free["support_gaps_m"]["C"], 1)
+        self.assertEqual(free["M_max_sagging_Nm"], 16)
+
+    def test_arbitrary_point_and_distributed_load_against_three_moment(self):
+        # For two bilateral spans with level seats, integrate each simple-span
+        # bending moment diagram against the linear unit-moment diagram.
+        from itertools import product
+        for a, p, b, q in product((Q(1,4), Q(5,4)), (-2,3), (Q(1,2), Q(5,2)), (-3,4)):
+            L, R = Q(2), Q(3)
+            E1, E2 = Q(7), Q(11)
+            wl, wr = Q(-1), Q(2)
+            loading = (wl*L**3/4 + p*a*(L**2-a**2)/L)/E1
+            loading += (wr*R**3/4 + q*(R-b)*(R**2-(R-b)**2)/R)/E2
+            mb = -loading/(2*(L/E1+R/E2))
+            ra = wl*L/2 + p*(L-a)/L + mb/L
+            rc = wr*R/2 + q*b/R + mb/R
+            rb = wl*L + wr*R + p + q - ra - rc
+            row = course([-1,2], spans_m=[2,3], span_EI_Nm2=[7,11], support_conditions={},
+                         point_loads=[{"x_m":str(a),"downward_N":p},{"x_m":str(L+b),"downward_N":q}])
+            self.assertEqual(row["support_moments_Nm"]["B"], float(mb))
+            self.assertEqual(list(row["support_reactions_N"].values()), list(map(float,(ra,rb,rc))))
+
+    def test_coincident_loads_and_invalid_coordinates(self):
+        loads = [{"x_m":1, "downward_N":7}, {"x_m":1, "downward_N":-2},
+                 {"x_m":0, "downward_N":3}, {"x_m":2, "downward_N":4}]
+        row = course([0,0], support_conditions={}, point_loads=loads)
+        self.assertEqual(list(row["support_reactions_N"].values()), [3,5,4])
+        self.assertEqual(row["M_max_Nm"], 0)
+        for invalid in (None, {}, [{"x_m":3,"downward_N":2}],
+                        [{"x_m":1,"upward_N":2}], [{"x_m":True,"downward_N":1}]):
+            self.assertFalse(course([0,0], point_loads=invalid)["ok"])
