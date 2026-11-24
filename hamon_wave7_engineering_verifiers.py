@@ -1677,13 +1677,14 @@ def _euler_rigid_body(params: Mapping[str, Any]) -> Dict[str, Any]:
 
 _CR3BP_LABELS = {"cr3bp", "cr3bp_transfer", "circular restricted three-body",
                  "circular restricted three body", "circular restricted three-body transfer"}
+_CR3BP_TERMS = ("cr3bp", "circular restricted three-body", "circular restricted three body")
 _CR3BP_KEYS = {"mass_ratio", "flight_time_tu", "target_lagrange", "jacobi",
                "initial_state", "target_state"}
 
 
 def _requests_cr3bp(spec):
     return bool(_CR3BP_KEYS.intersection(spec)) or any(
-        str(spec.get(key, "")).strip().lower() in _CR3BP_LABELS
+        any(term in str(spec.get(key, "")).lower() for term in _CR3BP_TERMS)
         for key in ("domain", "kind", "prompt", "subkind")
     )
 
@@ -2306,7 +2307,7 @@ def infer_wave7_domain(text_or_domain: str) -> Optional[str]:
         return "thermo_cycles"
     if any(k in s for k in ("epsilon-ntu", "ntu", "heat exchanger", "shell_tube", "radiosity", "view factor", "oppenheim", "gray enclosure", "radiation_network")):
         return "exchangers_radiation"
-    if any(k in s for k in ("euler_rigid_body", "rigid body", "principal inertia", "lagrangian", "eigenmode", "natural frequenc", "hohmann", "vis-viva", "orbital_transfer", "cr3bp", "circular restricted three-body", "circular restricted three body")):
+    if any(k in s for k in ("euler_rigid_body", "rigid body", "principal inertia", "lagrangian", "eigenmode", "natural frequenc", "hohmann", "vis-viva", "orbital_transfer", *_CR3BP_TERMS)):
         return "lagrangian_orbital"
     if any(k in s for k in ("nernst", "faraday", "overpotential", "electrochem", "mccabe-thiele", "mccabe", "fenske", "underwood", "distillation", "equilibrium_flash")):
         return "electrochem_separations"

@@ -92,3 +92,9 @@ class ThreeBodyTransfers(unittest.TestCase):
                   {"K":[[1]], "M":[[1]], "subkind":"lagrangian_modes"}):
             for extra in ({"jacobi":3}, {"mass_ratio":0.01, "target_lagrange":"L4"}):
                 self.assertFalse(dispatch_wave7_verifier("lagrangian_orbital", {**p, **extra})["verified"])
+
+    def test_free_text_three_body_request_cannot_certify_hohmann(self):
+        two_body = {"mu": 3.986004418e14, "r1": 6.678e6, "r2": 4.2164e7}
+        prompt = "verify a CR3BP transfer"
+        self.assertFalse(dispatch_wave7_verifier(prompt, two_body)["verified"])
+        self.assertFalse(dispatch_wave7_verifier({"prompt": prompt, "params": two_body})["verified"])
