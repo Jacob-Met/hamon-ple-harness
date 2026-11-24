@@ -1,0 +1,40 @@
+name: PLE acknowledged tool boundary
+on:
+  pull_request:
+    paths:
+      - harness.py
+      - taskbridge.py
+      - delivery-budget.ts
+      - tests/test_tool_batch_cutoff.py
+      - ship/verify_tool_batch_cutoff.py
+      - .github/workflows/delivery-tool-boundary.yml
+jobs:
+  paired-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: pip install --disable-pip-version-check -r requirements.txt
+      - run: npm ci --no-fund --no-audit
+      - name: Same registered read and process controls on reference and candidate
+        run: |
+          python ship/verify_tool_batch_cutoff.py \
+            --baseline 053dd5f0ff394063ffb5723b63962394150ad5f8 \
+            --out "$RUNNER_TEMP/delivery-tool-boundary"
+      - name: Preserve raw observations from both arms
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: delivery-tool-boundary
+          path: ${{ runner.temp }}/delivery-tool-boundary
+          if-no-files-found: error
