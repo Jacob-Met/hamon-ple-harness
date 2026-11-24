@@ -396,6 +396,23 @@ def _check_inline_deadline(session):
     raise taskbridge.Cancelled()
 
 
+async def _route_session_budget(session, inventory, delivery_targets, model):
+  """Keep the task reader responsive during either kind of physical presolve."""
+  await asyncio.sleep(0)
+  _check_inline_deadline(session)
+  plan = await asyncio.to_thread(
+      hamon_pareto.route_from_intake_prompt,
+      inventory,
+      instruction=session.instruction,
+      mcp_server_count=len(getattr(session, "mcp_servers", None) or []),
+      deliverable_count=len(delivery_targets),
+      model_api=model,
+  )
+  await asyncio.sleep(0)
+  _check_inline_deadline(session)
+  return plan
+
+
 async def _certified_inline_reply(session, inventory, delivery_targets):
   """Compile an explicitly requested JSON answer before any model setup.
 
@@ -405,18 +422,9 @@ async def _certified_inline_reply(session, inventory, delivery_targets):
   """
   if not hamon_pareto.explicit_json_result_request(session.instruction):
     return None, None
-  await asyncio.sleep(0)
-  _check_inline_deadline(session)
-  plan = await asyncio.to_thread(
-      hamon_pareto.route_from_intake_prompt,
-      inventory,
-      instruction=session.instruction,
-      mcp_server_count=len(getattr(session, "mcp_servers", None) or []),
-      deliverable_count=len(delivery_targets),
-      model_api=os.environ.get("MODEL_NAME", ""),
+  plan = await _route_session_budget(
+      session, inventory, delivery_targets, os.environ.get("MODEL_NAME", "")
   )
-  await asyncio.sleep(0)
-  _check_inline_deadline(session)
   return plan, hamon_pareto.certified_json_reply(session.instruction, plan)
 
 
@@ -529,12 +537,8 @@ async def solve(session: taskbridge.Session) -> str:
           configure, agent_dir, relay, session, env
       )
       if pareto_plan is None:
-        pareto_plan = hamon_pareto.route_from_intake_prompt(
-            engineering_inventory,
-            instruction=session.instruction,
-            mcp_server_count=len(getattr(session, "mcp_servers", None) or []),
-            deliverable_count=len(delivery_targets),
-            model_api=model,
+        pareto_plan = await _route_session_budget(
+            session, engineering_inventory, delivery_targets, model
         )
       if pareto_plan and "presolve_result_json" in pareto_plan:
         if "presolve_source_sha256" in pareto_plan:
