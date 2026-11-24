@@ -793,7 +793,7 @@ class Relay:
       # Giving an active Pi a normal tool error can start a provider turn
       # during the evaluator's summary grace. Its process watcher handles the
       # same cancel signal. Readers outside a managed process still get 503.
-      exits = tuple(self.session._agent_exits)
+      exits = tuple(getattr(self.session, "_agent_exits", ()))
       if exits:
         await asyncio.gather(*(event.wait() for event in exits))
       status, out_headers, payload = (
@@ -1507,7 +1507,10 @@ async def run_process(
     A `Finished` instance with the exit code, recent stderr lines, and whether
     the process was stopped by the time budget.
   """
-  if session.cancelled.is_set():
+  # Standalone callers may supply just time_left() and log().
+  cancel_event = getattr(session, "cancelled", None)
+  agent_exits = getattr(session, "_agent_exits", None)
+  if cancel_event is not None and cancel_event.is_set():
     raise Cancelled()
   pipe, devnull = asyncio.subprocess.PIPE, asyncio.subprocess.DEVNULL
   loop = asyncio.get_running_loop()
@@ -1561,14 +1564,17 @@ async def run_process(
       transport.close()
 
   stopped = False
-  session._agent_exits.add(streams.exited)
+  if agent_exits is not None:
+    agent_exits.add(streams.exited)
   exited = asyncio.create_task(streams.exited.wait())
-  cancelled = asyncio.create_task(session.cancelled.wait())
+  waiters = {exited}
+  if cancel_event is not None:
+    waiters.add(asyncio.create_task(cancel_event.wait()))
   try:
     ready, _ = await asyncio.wait(
-        {exited, cancelled}, timeout=run_for, return_when=asyncio.FIRST_COMPLETED
+        waiters, timeout=run_for, return_when=asyncio.FIRST_COMPLETED
     )
-    if session.cancelled.is_set():
+    if cancel_event is not None and cancel_event.is_set():
       # The outer session keeps a grace period for returning an existing
       # summary. Stop this subprocess before it can spend that period on a turn.
       raise Cancelled()
@@ -1579,12 +1585,13 @@ async def run_process(
           " limit"
       )
   finally:
-    exited.cancel()
-    cancelled.cancel()
+    for waiter in waiters:
+      waiter.cancel()
     try:
       await asyncio.shield(cleanup())
     finally:
-      session._agent_exits.discard(streams.exited)
+      if agent_exits is not None:
+        agent_exits.discard(streams.exited)
   code = proc.returncode if proc.returncode is not None and not stopped else -1
   return Finished(code, "\n".join(err), stopped)
 
