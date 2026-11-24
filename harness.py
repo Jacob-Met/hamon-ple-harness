@@ -421,7 +421,6 @@ async def solve(session: taskbridge.Session) -> str:
       # One read-only project inventory over the evaluator's task protocol.
       # This is ephemeral task data; never store or log its contents.
       engineering_inventory = await engineering_intake.intake_for_prompt(session)
-      engineering_cli_note = await engineering_intake.provision_engineering_cli(session)
       delivery_targets = delivery_guard.extract_targets(
           session.instruction, session.workdir
       )
@@ -430,6 +429,18 @@ async def solve(session: taskbridge.Session) -> str:
       if working_copy:
         delivery_targets = [{"path": working_copy, "kind": "file"}]
       session.fallback_summary = terminal.summary
+      # The same MODEL_NAME configures Pi below. Check first whether the whole
+      # instruction already has its explicitly requested, verified JSON answer.
+      pareto_plan = hamon_pareto.route_from_intake_prompt(
+          engineering_inventory,
+          instruction=session.instruction,
+          mcp_server_count=len(getattr(session, "mcp_servers", None) or []),
+          deliverable_count=len(delivery_targets),
+          model_api=os.environ.get("MODEL_NAME", ""),
+      )
+      if pareto_plan and pareto_plan.get("deliver_verified_json"):
+        return pareto_plan["presolve_result_json"]
+      engineering_cli_note = await engineering_intake.provision_engineering_cli(session)
       # Share one observation allowance before the participant starts. Later
       # delivery verification retains its own existing per-operation limits.
       observation_start = monotonic()
@@ -473,13 +484,6 @@ async def solve(session: taskbridge.Session) -> str:
         first_request += archive_contract.first_instruction(*archive_plan)
       name, model = await asyncio.to_thread(
           configure, agent_dir, relay, session, env
-      )
-      pareto_plan = hamon_pareto.route_from_intake_prompt(
-          engineering_inventory,
-          instruction=session.instruction,
-          mcp_server_count=len(getattr(session, "mcp_servers", None) or []),
-          deliverable_count=len(delivery_targets),
-          model_api=model,
       )
       if pareto_plan and "presolve_result_json" in pareto_plan:
         if "presolve_source_sha256" in pareto_plan:

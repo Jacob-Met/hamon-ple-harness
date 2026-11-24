@@ -280,12 +280,15 @@ def _wave8_request(instruction):
                          if isinstance(req, dict) and req.get("mode") == "electrochem_separations"
                          and isinstance(req.get("spec"), dict)
                          and req["spec"].get("subkind") == "electrochemistry"]
-    if activity_requests:
+    dimensional_jackets = [i for i, req in enumerate(requests)
+                           if isinstance(req, dict) and req.get("mode") == "reactor_kinetics"
+                           and isinstance(req.get("spec"), dict) and "heat_transfer" in req["spec"]]
+    if activity_requests or dimensional_jackets:
         # The text is the source of the certificate. Refuse a numeric lexeme
         # rounded to a different decimal value by the ordinary JSON decoder.
         literal = json.loads(text, parse_float=Decimal)
         literal_requests = literal if isinstance(literal, list) else [literal]
-        for i in activity_requests:
+        for i in activity_requests + dimensional_jackets:
             parsed = json.loads(json.dumps(requests[i], allow_nan=False), parse_float=Decimal)
             if parsed != literal_requests[i]:
                 return None
@@ -420,17 +423,44 @@ def _distillation_result(req):
     return result
 
 
+def _bounded_jacket_stability(row):
+    """Check the classification against the solver's outward-rounded sign bounds."""
+    intervals = []
+    for key in ("trace_bounds_s_inv", "determinant_bounds_s_inv2"):
+        bounds = row.get(key)
+        if (not isinstance(bounds, list) or len(bounds) != 2
+                or any(type(v) not in (int, float) or not math.isfinite(v) for v in bounds)
+                or bounds[0] > bounds[1]):
+            return False
+        intervals.append(bounds)
+    (trace_lo, trace_hi), (det_lo, det_hi) = intervals
+    return {
+        "unstable_saddle": det_hi < 0,
+        "unstable": trace_lo > 0,
+        "asymptotically_stable": det_lo > 0 and trace_hi < 0,
+    }.get(row.get("linear_stability"), False)
+
+
 def _jacketed_cstr_certificate(spec):
     """Admit a complete first-order liquid jacket model and check every reported balance."""
     required = {"reactor_type", "order", "C_A0", "v0", "T0", "delta_T_adiabatic",
-                "jacket_to_feed_heat_capacity_ratio", "coolant_T_K", "volume"}
+                "volume"}
+    dimensional = "heat_transfer" in spec
+    if dimensional:
+        heat = spec["heat_transfer"]
+        if (not isinstance(heat, dict) or set(heat) != {"UA_W_K", "rho_kg_m3", "Cp_J_kg_K", "coolant_T_K"}
+                or any(type(v) not in (int, float) or not math.isfinite(v) for v in heat.values())):
+            return None
+        required.add("heat_transfer")
+    else:
+        required.update(("jacket_to_feed_heat_capacity_ratio", "coolant_T_K"))
     optional = {"steady_state_branch", "gas_phase"}
     rate_laws = ({"k"}, {"k_ref", "T_ref", "E_a"}, {"A_preexp", "E_a"})
     if (not any(required | law == spec.keys() - optional for law in rate_laws)
             or spec["reactor_type"] != "cstr" or spec["order"] != 1
             or spec.get("gas_phase", False) is not False):
         return None
-    for key in spec.keys() - {"reactor_type", "gas_phase", "steady_state_branch"}:
+    for key in spec.keys() - {"reactor_type", "gas_phase", "steady_state_branch", "heat_transfer"}:
         if type(spec[key]) not in (int, float) or not math.isfinite(spec[key]):
             return None
     branch = spec.get("steady_state_branch")
@@ -443,10 +473,15 @@ def _jacketed_cstr_certificate(spec):
     if (result.get("verified") is not True or not isinstance(states, list)
             or not states or len(states) != result.get("steady_state_count")):
         return None
+    if dimensional and result.get("thermal_model") != "fixed_temperature_jacket":
+        return None
+    residual_keys = ("mass_residual", "energy_residual") if dimensional else ("mass_balance_residual", "energy_balance_residual")
     for row in states:
         if not isinstance(row, dict) or row.get("verified") is not True:
             return None
-        for key in ("mass_balance_residual", "energy_balance_residual"):
+        if dimensional and not _bounded_jacket_stability(row):
+            return None
+        for key in residual_keys:
             value = row.get(key)
             if type(value) not in (int, float) or not 0 <= value < 1e-9:
                 return None
@@ -692,6 +727,10 @@ def route_from_intake_prompt(
             if certificate is not None:
                 plan["presolve_result_json"] = certificate
                 plan["presolve_source_sha256"] = hashlib.sha256(instruction.encode()).hexdigest()
+                # The certified parser consumed the entire instruction, including
+                # the cover. A bare calculation still belongs to the participant.
+                if instruction.strip().splitlines()[0] in _WAVE8_COVERS:
+                    plan["deliver_verified_json"] = True
             elif fin_request:
                 plan["presolve_abstention"] = abstention
             return plan
