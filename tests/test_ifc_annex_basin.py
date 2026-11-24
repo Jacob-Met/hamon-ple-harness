@@ -6,6 +6,40 @@ import subprocess
 import sys
 import unittest
 
+import numpy as np
+from scipy.interpolate import BSpline
+from scipy.special import roots_legendre
+
+
+def integrated_side_volume(surface):
+    """Integrate horizontal section areas and dz directly on the tensor-product source."""
+    source = np.asarray([[point.Coordinates for point in row] for row in surface.ControlPointsList]) / 1000.
+    if not np.allclose(source[:, :, 2], source[:, :1, 2], atol=1.e-12, rtol=0):
+        raise ValueError("expected one horizontal control plane per U row")
+    def basis(knots, multiplicities, degree, count):
+        sequence = np.repeat(knots, multiplicities)
+        return BSpline(sequence, np.eye(count), degree)
+    ub = basis(surface.UKnots, surface.UMultiplicities, surface.UDegree, source.shape[0])
+    vb = basis(surface.VKnots, surface.VMultiplicities, surface.VDegree, source.shape[1])
+    def stations(spline):
+        low, high = spline.t[spline.k], spline.t[-spline.k-1]
+        knots = np.unique(spline.t[(low <= spline.t) & (spline.t <= high)])
+        nodes, weights = roots_legendre(8)
+        for left, right in zip(knots, knots[1:]):
+            for x, w in zip(nodes, weights):
+                yield .5*(left+right+x*(right-left)), .5*w*(right-left)
+    volume = 0.
+    for u, wu in stations(ub):
+        row = np.einsum("i,ijk->jk", ub(u), source)
+        dz = ub.derivative()(u) @ source[:, 0, 2]
+        twice_area = 0.
+        for v, wv in stations(vb):
+            x, y, _ = vb(v) @ row
+            dx, dy, _ = vb.derivative()(v) @ row
+            twice_area += wv * (x*dy - y*dx)
+        volume += wu * abs(dz * twice_area / 2)
+    return volume
+
 
 @unittest.skipUnless(os.environ.get("PLE_ANNEX_E_BASINS"), "original IFC files staged by CI")
 class AnnexEBasin(unittest.TestCase):
@@ -40,6 +74,25 @@ console.log(JSON.stringify(result.details));
                     element = ifcopenshell.geom.create_shape(settings, device)
                     native = element.geometry.item(0)
                     kernel = native.volume().to_double()
+                    if kind == "advanced-brep":
+                        from ifcopenshell.util.shape import get_volume
+                        side_volumes = sorted(integrated_side_volume(face.FaceSurface)
+                                              for face in model.by_type("IfcAdvancedFace")
+                                              if face.FaceSurface.is_a("IfcBSplineSurfaceWithKnots"))
+                        self.assertEqual(len(side_volumes), 2)
+                        integrated = side_volumes[1] - side_volumes[0]
+                        self.assertAlmostEqual(integrated, .002044986344568905, places=13)
+                        samples = []
+                        settings.set("iterator-output", wrapper.TRIANGULATED)
+                        for deflection in (.001, .00025, .00005, .00001):
+                            settings.set("mesher-linear-deflection", deflection)
+                            triangulated = ifcopenshell.geom.create_shape(settings, device)
+                            samples.append({"deflection_m": deflection,
+                                            "faces": len(triangulated.geometry.faces)//3,
+                                            "volume_m3": get_volume(triangulated.geometry)})
+                        print(json.dumps({"independent_spline_integral_m3": integrated,
+                                          "source_side_volumes_m3": side_volumes,
+                                          "kernel_volume_m3": kernel, "kernel_meshes": samples}))
                     out = subprocess.run(["node", "--experimental-strip-types", "--input-type=module",
                                           "-e", script, path.name], cwd=root, env=env, text=True,
                                          capture_output=True, timeout=150, check=True)
