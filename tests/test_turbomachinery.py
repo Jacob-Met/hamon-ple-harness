@@ -366,3 +366,32 @@ def test_one_pascal_deficit_with_adjacent_large_integer_pressures():
     result = verify_turbomachinery(spec)
     assert result["npsh_margin_m"] == float(-1 / (1000 * Fraction("9.80665")))
     assert not result["conservation_verified"]
+
+
+@pytest.mark.parametrize("kind,sign", [("pump", 1), ("turbine", -1)])
+def test_resolved_signed_work_survives_cancelling_static_and_kinetic_changes(kind, sign):
+    from hamon_conservation_cad_verifier import run_router_conservation_cad_verifier
+    from hamon_dual_verifier import run_dual_verify_spec
+
+    # At 60 rpm and unit radius and mass flow, torque equals the swirl change.
+    # The meridional acceleration contributes +15000 J/kg to kinetic energy
+    # and -15000 J/kg to static enthalpy. Neither rounded term resolves the work.
+    torque = sign * 2.0**-44
+    expected = math.tau * torque
+    case = {
+        "calculation": "euler_rotor", "machine_kind": kind, "rotation_rpm": 60,
+        "mass_flow_kg_s": 1, "measured_fluid_torque_N_m": torque,
+        "inlet": {"radius_m": 1, "meridional_velocity_m_s": 100,
+                  "absolute_tangential_velocity_m_s": 1},
+        "outlet": {"radius_m": 1, "meridional_velocity_m_s": 200,
+                   "absolute_tangential_velocity_m_s": 1 + torque},
+    }
+    result = verify_turbomachinery(case)
+    assert result["rothalpy_work_J_kg"] == result["fluid_specific_work_J_kg"] == expected
+    assert result["energy_residual_J_kg"] == 0
+    for claimed, passes in ((0.0, False), (expected, True)):
+        case["claimed"] = {"rothalpy_work_J_kg": claimed}
+        assert verify_turbomachinery(case)["conservation_verified"] is passes
+        assert run_router_conservation_cad_verifier({"spec": case})["conservation_verified"] is passes
+        dual = run_dual_verify_spec({"mode": "domain", "kind": "euler_rotor", "spec": case})
+        assert dual["dual_verified"] is passes
