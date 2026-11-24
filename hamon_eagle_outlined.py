@@ -66,8 +66,8 @@ _RGB = re.compile(r"rgb\(([\d.]+)%,\s*([\d.]+)%,\s*([\d.]+)%\)")
 
 
 def letter_strokes(paths, wire_ink, pitch):
-    """Use solid, visible neutral ink. Signal letters share the wire pen width."""
-    letters, signal = [], []
+    """Keep visible neutral lettering separated by its physical pen width."""
+    letters, signal = [], defaultdict(list)
     for ink, elements in paths.items():
         rgb = _RGB.fullmatch(ink)
         if ink == wire_ink or not rgb:
@@ -87,8 +87,8 @@ def letter_strokes(paths, wire_ink, pitch):
                 pen = float(element.get("stroke-width", "1")) * math.hypot(*matrix[:2])
             except ValueError:
                 continue
-            if .060 * pitch < pen < .073 * pitch:
-                signal.append(edge)
+            if math.isfinite(pen) and pen > 0:
+                signal[round(pen, 6)].append(edge)
     return LetterStrokes(letters), signal
 
 
@@ -159,7 +159,13 @@ def _decode_signal_grid(edges, left, baseline, step_x, step_y):
 
 
 def wire_words(wires, segments, pitch):
-    """Read a complete word only when its baseline and pen register to one wire."""
+    """Bind a complete style-consistent word by containment or a registered origin."""
+    if isinstance(segments, dict):
+        if len(segments) > 16:
+            return
+        for ink in segments.values():
+            yield from wire_words(wires, ink, pitch)
+        return
     for vertical in (False, True):
         def project(p):
             return (-p[1], p[0]) if vertical else p
@@ -216,7 +222,10 @@ def wire_words(wires, segments, pitch):
                             offsets.append((right-end)/pitch-.03)
                         # Label origins can occupy quarter-pitch drafting sites.
                         # Keep the same absolute coordinate residual at each site.
-                        registered = any(abs(4*v-round(4*v)) < .100 for v in offsets)
+                        # A whole word contained by one wire also has a direct
+                        # witness, including mirrored placements off that grid.
+                        registered = (any(abs(4*v-round(4*v)) < .100 for v in offsets)
+                                      or (start >= left and end <= right))
                         yield index, name, (vertical, occurrence), registered
 
 def _fit_voltage(nearby, center, direction, units, name):

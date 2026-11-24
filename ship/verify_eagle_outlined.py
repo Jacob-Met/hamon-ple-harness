@@ -59,22 +59,30 @@ def edited_pdf(source, destination, edit):
                 if edit == "erase_dots" or (i == 0 and dot_count == erase_index):
                     op = b"n"
                 dot_count += 1
-            if i == 0 and op == b"S" and len(operations) >= 2:
+            if op == b"S" and len(operations) >= 2:
                 (a, move), (b, line) = operations[-2:]
                 if move == b"m" and line == b"l":
                     pair = (tuple(a), tuple(b))
+                    targets = {
+                        "erase_mirrored_D": (0, ((3029, 2762), (3029, 2839))),
+                        "erase_quarter_J": (1, ((5073, 12064), (5086, 12077))),
+                        "erase_small_reset_M": (1, ((5342, 3605), (5342, 3679))),
+                    }
+                    if edit in targets and i == targets[edit][0] and set(pair) == set(targets[edit][1]):
+                        op = b"n"
+                        ground_edits += 1
                     deleted = {
                         "erase_voltage_stroke": ((16898, 2273), (16949, 2273)),
                         "erase_signal_underscore": ((1453, 11490), (1504, 11490)),
                     }
-                    if edit in deleted and set(pair) == set(deleted[edit]):
+                    if i == 0 and edit in deleted and set(pair) == set(deleted[edit]):
                         op = b"n"
                         ground_edits += 1
-                    if ((edit == "erase_ground_bar" and pair == ((16258, 7492), (16258, 7312))) or
+                    if i == 0 and ((edit == "erase_ground_bar" and pair == ((16258, 7492), (16258, 7312))) or
                             (edit == "break_ground_G" and pair == ((16311, 7467), (16298, 7480)))):
                         op = b"n"
                         ground_edits += 1
-                    if edit == "move_ground_word_toward_MOSI" and all(
+                    if i == 0 and edit == "move_ground_word_toward_MOSI" and all(
                             16298 <= x <= 16375 and 7312 <= y <= 7518 for x, y in pair):
                         # The adjacent MOSI wire lies one 120-unit grid step to the left.
                         for n, (x, y) in zip((-2, -1), pair):
@@ -85,6 +93,8 @@ def edited_pdf(source, destination, edit):
                                "erase_voltage_stroke", "erase_signal_underscore"):
             require(ground_edits == (18 if edit == "move_ground_word_toward_MOSI" else 1),
                     "Expected original painted ground strokes missing")
+        if (edit, i) in (("erase_mirrored_D",0),("erase_quarter_J",1),("erase_small_reset_M",1)):
+            require(ground_edits == 1, "Expected complete-word source stroke missing")
         if i < 2:
             require(dot_count == (94, 90)[i], "Physical source junction count changed")
         if i == 2 and edit == "appendix_stroke":
@@ -124,7 +134,8 @@ def main():
             "Complete voltage arrows no longer have the same physical endpoints")
     for page, tms, tck in ((page1, 230, 231), (page2, 178, 182)):
         anchors = page["printed_equivalence_anchors"]
-        require(anchors["JTAG_TMS"] == [tms] and anchors["JTAG_TCK"] == [tck]
+        require(anchors["JTAG_TMS"] == ([tms] if page is page1 else [tms, 179])
+                and anchors["JTAG_TCK"] == ([tck] if page is page1 else [tck, 183])
                 and "JTAG" not in anchors and page["wire_groups"][tms] != page["wire_groups"][tck],
                 "A printed underscore, following suffix, or distinct wire was lost")
     controls = {}
@@ -132,7 +143,8 @@ def main():
         with tempfile.TemporaryDirectory() as directory:
             for edit in ("recolor", "erase_one", "erase_terminal_mark", "erase_dots", "appendix_stroke",
                          "erase_ground_bar", "break_ground_G", "move_ground_word_toward_MOSI",
-                         "erase_voltage_stroke", "erase_signal_underscore"):
+                         "erase_voltage_stroke", "erase_signal_underscore", "erase_mirrored_D",
+                         "erase_quarter_J", "erase_small_reset_M"):
                 path = Path(directory, edit + ".pdf")
                 edited_pdf(args.pdf, path, edit)
                 controls[edit] = read_pdf(path)
@@ -176,6 +188,18 @@ def main():
                 expected[wire] = -1
             require(partition(sum(changed["document_wire_groups"], [])) == partition(expected),
                     f"{edit} changed an unrelated pair or retained the erased witness")
+        for edit, separated in (
+                ("erase_mirrored_D", list(range(224, 230))),
+                ("erase_quarter_J", [468 + i for i in range(179, 182)]),
+                ("erase_small_reset_M", [468 + i for i in range(348, 354)])):
+            changed = controls[edit]
+            require(all(a["wires"] == b["wires"] for a,b in zip(changed["pages"],baseline["pages"])),
+                    f"{edit} changed wire geometry")
+            expected = sum(baseline["document_wire_groups"], [])
+            for index in separated:
+                expected[index] = -1
+            require(partition(sum(changed["document_wire_groups"], [])) == partition(expected),
+                    f"{edit} retained an incomplete word or changed an unrelated connection")
     require(sha256(args.vendor_archive.read_bytes()).hexdigest() == ARCHIVE_SHA, "Unexpected CAD archive")
     with ZipFile(args.vendor_archive) as archive:
         cad = archive.read("A000056-cad-files/DUE_V02g.sch")
@@ -184,7 +208,7 @@ def main():
     require(len(truth) == 2, "Native sheet count differs")
     document = []
     other_islands = defaultdict(list)
-    for index, (sheet, expected) in enumerate(zip(truth, ((138, 131, 0, 258), (125, 120, 0, 22)))):
+    for index, (sheet, expected) in enumerate(zip(truth, ((138, 133, 0, 241), (125, 125, 0, 0)))):
         page = baseline["pages"][index]
         names = align(page["wires"], sheet)
         rows = list(zip(names, baseline["document_wire_groups"][index], strict=True))
@@ -197,10 +221,10 @@ def main():
         print(json.dumps({"page": index + 1, "wire_sections": len(names), **observed}))
     # Frozen after the PDF-only voltage and signal run, independent of numeric group IDs.
     other_roster = json.dumps(sorted(other_islands.values()), separators=(",", ":")).encode()
-    require(sha256(other_roster).hexdigest() == "a015c43619a1254f600306e50c54a02f26a82b81fbfed7a881e7e2c6b5b4e34a",
+    require(sha256(other_roster).hexdigest() == "966bc6ce0c6cfa1a81f5d69fe081f0e5f10a0f3c5e730cbb4d7177a9cf6ad86b",
             "The partition of the 640 non-ground wire sections changed")
     result = counts(document)
-    require(result == {"nets": 176, "exact": 161, "false_connected": 0, "false_separated": 768},
+    require(result == {"nets": 176, "exact": 170, "false_connected": 0, "false_separated": 648},
             f"Document metric changed: {result}")
     pairs = sum(n * (n - 1) // 2 for n in Counter(name for name, _ in document).values())
     print(json.dumps({"document": result, "correct_pairs": pairs - result["false_separated"],
@@ -209,3 +233,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
