@@ -570,11 +570,11 @@ def _passive_acoustic_interface(params: Mapping[str, Any]) -> Dict[str, Any]:
     oblique = "incidence_angle_deg" in params or "incidence_sine" in params
 
     def positive(value):
-        if oblique:
-            if type(value) is int and value > 0:
-                return Fraction(value)
-            if type(value) is not float:
-                raise ValueError("Oblique acoustic properties must be positive finite JSON numbers")
+        # JSON integers preserve impedance contrasts below one binary64 ulp.
+        if type(value) is int and value > 0:
+            return Fraction(value)
+        if oblique and type(value) is not float:
+            raise ValueError("Oblique acoustic properties must be positive finite JSON numbers")
         value = float(value)
         if not math.isfinite(value) or value <= 0:
             raise ValueError("Acoustic material and resonator parameters must be finite and positive")
@@ -616,7 +616,16 @@ def _passive_acoustic_interface(params: Mapping[str, Any]) -> Dict[str, Any]:
         # Near a match, 1 - R² can round to one although the loss is measurable
         # in the returned numeric type. At high contrast, never floor the power.
         if abs(r) <= Fraction(1, 2):
-            loss = -10.0 * math.log1p(-float(r * r)) / math.log(10.0)
+            reflected = r * r
+            if 0 < reflected < Fraction(1, 2**1022):
+                # Apply the dB scale before rounding subnormal reflected power.
+                # Higher log-series terms here are below binary64 range.
+                with localcontext() as context:
+                    context.prec = 80
+                    squared = Decimal(reflected.numerator) / Decimal(reflected.denominator)
+                    loss = float(10 * squared / Decimal(10).ln())
+            else:
+                loss = -10.0 * math.log1p(-float(reflected)) / math.log(10.0)
         else:
             with localcontext() as context:
                 context.prec = 60
