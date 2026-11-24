@@ -421,7 +421,7 @@ def _verify_lookup(sheet, formula, cached, literals):
 _ARITHMETIC_TOKEN = re.compile(
     rf"(?P<convert>CONVERT)(?=\s*\()|{_local_reference('ref')}|"
     r"(?P<number>(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:E[+-]?[0-9]+)?)"
-    r'|(?P<unit>"[A-Z]+(?:\^?2)?")|(?P<operator>[(),+*/-])|(?P<space>\s+)',
+    r'|(?P<unit>"[A-Z]+(?:\^?2)?")|(?P<operator>[(),+*/^-])|(?P<space>\s+)',
     re.I | re.ASCII)
 
 _COEFFICIENT = object()
@@ -460,6 +460,13 @@ class _FormulaConflict(ValueError):
         self.key, self.status, self.evidence = key, status, evidence
 
 
+def _bounded_frame(unit):
+    if (max(unit.scale.numerator.bit_length(), unit.scale.denominator.bit_length()) > 4096
+            or max(map(abs, unit.dimension)) > 1024):
+        raise ValueError("unsupported_unit_range")
+    return unit
+
+
 def _formula_unit(key, operation, left, right, *, conditional=False):
     if conditional and isinstance(operation, (ast.Add, ast.Sub)):
         # A valid sum must share the known operand's frame even when another
@@ -490,10 +497,72 @@ def _formula_unit(key, operation, left, right, *, conditional=False):
         unit = _FormulaUnit(left.scale*right.scale, scaled(left.dimension, right.dimension))
     else:
         unit = _FormulaUnit(left.scale/right.scale, reduced(left.dimension, right.dimension))
-    if (max(unit.scale.numerator.bit_length(), unit.scale.denominator.bit_length()) > 4096
-            or max(map(abs, unit.dimension)) > 1024):
-        raise ValueError("unsupported_unit_range")
-    return unit
+    return _bounded_frame(unit)
+
+
+def _excel_expression(tokens):
+    """Parse scalar spreadsheet operators with Excel's precedence and associativity."""
+    # Excel evaluates repeated powers left to right, and negation before power.
+    binary = {"+": (1, ast.Add), "-": (1, ast.Sub), "*": (2, ast.Mult),
+              "/": (2, ast.Div), "^": (3, ast.Pow)}
+    cursor = 0
+
+    def pop():
+        nonlocal cursor
+        if cursor == len(tokens):
+            raise ValueError("incomplete_scalar_formula")
+        cursor += 1
+        return tokens[cursor - 1]
+
+    def expect(token):
+        if pop() != token:
+            raise ValueError("invalid_scalar_formula")
+
+    def expression(minimum):
+        token = pop()
+        if token in ("+", "-"):
+            op = ast.UAdd() if token == "+" else ast.USub()
+            result = ast.UnaryOp(op=op, operand=expression(4))
+        elif token == "(":
+            result = expression(1)
+            expect(")")
+        elif token == "_convert":
+            expect("(")
+            args = [expression(1)]
+            for _ in range(2):
+                expect(",")
+                unit = pop()
+                if not unit.startswith('"'):
+                    raise ValueError("unsupported_conversion_units")
+                args.append(ast.Constant(value=unit[1:-1]))
+            expect(")")
+            result = ast.Call(func=ast.Name(id=token), args=args, keywords=[])
+        elif token.startswith("v"):
+            result = ast.Name(id=token)
+        else:
+            raise ValueError("invalid_scalar_formula")
+        while cursor < len(tokens) and tokens[cursor] in binary:
+            priority, operation = binary[tokens[cursor]]
+            if priority < minimum:
+                break
+            pop()
+            result = ast.BinOp(left=result, op=operation(), right=expression(priority + 1))
+        return result
+
+    result = expression(1)
+    if cursor != len(tokens):
+        raise ValueError("invalid_scalar_formula")
+    return result
+
+
+def _power_frame(frame, power):
+    if frame is None and power == 0:
+        # Every nonzero measured quantity loses its unit in the zeroth power.
+        return _FormulaUnit(Fraction(1), ZERO)
+    if not isinstance(frame, _FormulaUnit):
+        return frame
+    unit = _FormulaUnit(frame.scale ** power, tuple(e * power for e in frame.dimension))
+    return _bounded_frame(unit)
 
 
 def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
@@ -550,7 +619,7 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
                 # pass; numeric/reference availability is an evaluation error.
                 symbols[operand] = exc
             tokens.append(operand)
-        tree = ast.parse(" ".join(tokens), mode="eval").body
+        tree = _excel_expression(tokens)
         # An explicit dimensional contradiction does not depend on a cached
         # number, a present input, or successful evaluation of a dependency.
         for node in ast.walk(tree):
@@ -641,6 +710,22 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
                     raise ValueError("numeric_range")
                 return _FormulaNumber(expected, _FormulaUnit(Fraction(target.val), target.dim),
                                       actual.roots, actual.conversion_depth+1, actual.arithmetic_depth, evidence)
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
+                base, exponent = scalar(node.left), scalar(node.right)
+                if exponent.unit is not _COEFFICIENT or not exponent.value.is_integer() or abs(exponent.value) > 12:
+                    raise ValueError("power_requires_bounded_integer_coefficient")
+                power = int(exponent.value)
+                if base.value == 0 and power <= 0:
+                    raise ValueError("unsupported_zero_power")
+                number = base.value ** power
+                if (not math.isfinite(number) or (number == 0 and base.value != 0)
+                        or 0 < abs(number) < sys.float_info.min):
+                    raise ValueError("unsupported_result_range")
+                return _FormulaNumber(number, _power_frame(base.unit, power),
+                                      tuple(sorted(set(base.roots + exponent.roots))),
+                                      max(base.conversion_depth, exponent.conversion_depth),
+                                      max(base.arithmetic_depth, exponent.arithmetic_depth),
+                                      constraint=_power_frame(base.required_unit, power))
             if not isinstance(node, ast.BinOp) or type(node.op) not in operations:
                 raise ValueError("unsupported_arithmetic_operator")
             left, right = scalar(node.left), scalar(node.right)

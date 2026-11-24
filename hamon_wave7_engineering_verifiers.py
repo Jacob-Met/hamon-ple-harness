@@ -1679,7 +1679,27 @@ def _euler_rigid_body(params: Mapping[str, Any]) -> Dict[str, Any]:
             "residual": float(residual), "verified": bool(residual < 1e-8)}
 
 
+_CR3BP_LABELS = {"cr3bp", "cr3bp_transfer", "circular restricted three-body",
+                 "circular restricted three body", "circular restricted three-body transfer"}
+_CR3BP_TERMS = ("cr3bp", "circular restricted three-body", "circular restricted three body")
+_CR3BP_KEYS = {"mass_ratio", "flight_time_tu", "target_lagrange", "jacobi",
+               "initial_state", "target_state"}
+
+
+def _requests_cr3bp(spec):
+    return bool(_CR3BP_KEYS.intersection(spec)) or any(
+        any(term in str(spec.get(key, "")).lower() for term in _CR3BP_TERMS)
+        for key in ("domain", "kind", "prompt", "subkind")
+    )
+
+
 def solve_lagrangian_orbital(params: Mapping[str, Any]) -> Dict[str, Any]:
+    if _requests_cr3bp(params):
+        from hamon_cr3bp import verify_cr3bp_transfer
+        for key in ("domain", "kind", "prompt", "subkind"):
+            if key in params and str(params[key]).strip().lower() not in _CR3BP_LABELS | {"lagrangian_orbital"}:
+                return {"domain": "lagrangian_orbital", "verified": False, "error": "conflicting_orbital_models"}
+        return verify_cr3bp_transfer(params)
     subkind = str(
         params.get("subkind")
         or ("euler_rigid_body" if "I" in params else ("lagrangian_modes" if "K" in params else "orbital_transfer"))
@@ -1687,10 +1707,8 @@ def solve_lagrangian_orbital(params: Mapping[str, Any]) -> Dict[str, Any]:
 
     if subkind == "euler_rigid_body":
         return _euler_rigid_body(params)
-
     if subkind == "lagrangian_modes":
         return _lagrangian_modes(params)
-
     if subkind == "orbital_transfer":
         return _orbital_transfer(params)
 
@@ -2297,7 +2315,7 @@ def infer_wave7_domain(text_or_domain: str) -> Optional[str]:
         return "thermo_cycles"
     if any(k in s for k in ("epsilon-ntu", "ntu", "heat exchanger", "shell_tube", "radiosity", "view factor", "oppenheim", "gray enclosure", "radiation_network")):
         return "exchangers_radiation"
-    if any(k in s for k in ("euler_rigid_body", "rigid body", "principal inertia", "lagrangian", "eigenmode", "natural frequenc", "hohmann", "vis-viva", "orbital_transfer", "lambert")):
+    if any(k in s for k in ("euler_rigid_body", "rigid body", "principal inertia", "lagrangian", "eigenmode", "natural frequenc", "hohmann", "vis-viva", "orbital_transfer", "lambert", *_CR3BP_TERMS)):
         return "lagrangian_orbital"
     if any(k in s for k in ("nernst", "faraday", "overpotential", "electrochem", "mccabe-thiele", "mccabe", "fenske", "underwood", "distillation", "equilibrium_flash")):
         return "electrochem_separations"
@@ -2307,11 +2325,29 @@ def infer_wave7_domain(text_or_domain: str) -> Optional[str]:
 def dispatch_wave7_verifier(domain_or_spec: Any, params: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     if isinstance(domain_or_spec, Mapping):
         spec = domain_or_spec
-        domain = infer_wave7_domain(str(spec.get("domain") or spec.get("kind") or spec.get("prompt") or ""))
-        eff_params = dict(spec.get("params") or spec)
+        requested = str(spec.get("domain") or spec.get("kind") or spec.get("prompt") or "")
+        domain = infer_wave7_domain(requested)
+        nested = spec.get("params")
+        if _requests_cr3bp(spec) and "params" in spec and not isinstance(nested, Mapping):
+            return {"domain": "lagrangian_orbital", "verified": False, "error": "invalid_cr3bp_parameters"}
+        eff_params = dict(nested or spec)
     else:
-        domain = infer_wave7_domain(str(domain_or_spec))
+        requested = str(domain_or_spec)
+        domain = infer_wave7_domain(requested)
         eff_params = dict(params or {})
+
+    envelope = domain_or_spec if isinstance(domain_or_spec, Mapping) else {"domain": requested}
+    if _requests_cr3bp(envelope) or _requests_cr3bp(eff_params):
+        labels = ("domain", "kind", "prompt", "subkind")
+        if (isinstance(domain_or_spec, Mapping) and params is not None) or (
+            "params" in envelope and set(envelope) - {"params", *labels}
+        ) or any(
+            str(envelope[key]).strip().lower() not in _CR3BP_LABELS | {"lagrangian_orbital"}
+            for key in labels if key in envelope
+        ):
+            return {"domain": "lagrangian_orbital", "verified": False, "error": "conflicting_cr3bp_envelope"}
+        eff_params.setdefault("subkind", "cr3bp_transfer")
+        return solve_lagrangian_orbital(eff_params)
 
     if domain == "thermo_cycles":
         return solve_thermodynamic_cycle(eff_params)
