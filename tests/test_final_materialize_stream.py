@@ -57,6 +57,7 @@ class RepairStream:
         self.script = str(script)
         self.generator = GENERATOR
         self.command = command
+        self.early_command = None
         self.requests = 0
         self.tools = set()
 
@@ -74,9 +75,12 @@ class RepairStream:
             events = [('message_start', {'message': {'id': f'local-{self.requests}', 'type': 'message',
                 'role': 'assistant', 'model': request['model'], 'content': [],
                 'usage': {'input_tokens': 1, 'output_tokens': 0}}})]
-            if self.requests == (1 if self.command else 2):
-                tool = 'bash' if self.command else 'write'
-                args = {'command': self.command} if self.command else {'path': self.script, 'content': self.generator}
+            early = self.early_command if self.requests == 1 else None
+            write_turn = 3 if self.early_command else 2
+            if early or self.requests == (1 if self.command else write_turn):
+                command = early or self.command
+                tool = 'bash' if command else 'write'
+                args = {'command': command} if command else {'path': self.script, 'content': self.generator}
                 events += [
                     ('content_block_start', {'index': 0, 'content_block': {'type': 'tool_use',
                         'id': 'produce', 'name': tool, 'input': {}}}),
@@ -106,7 +110,7 @@ class RepairStream:
 @unittest.skipUnless(Path(harness.PI).is_file(), 'actual installed Pi CLI required')
 class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
     async def course(self, extension, *, cancel=False, loose=False, stream_factory=RepairStream,
-                     max_steps=None, expected_requests=3, late_loose=False):
+                     max_steps=None, expected_requests=3, late_loose=False, split=False, inherited=False):
         # CI provisions this empty task root, separate from the harness.
         with (tempfile.TemporaryDirectory(prefix='ple-recovery-', dir='/filesystem') as directory,
               tempfile.TemporaryDirectory(prefix='ple-home-') as home):
@@ -129,6 +133,19 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                       else stream_factory(script))
             if late_loose:
                 stream.generator = GENERATOR.replace('write_loose = False', 'write_loose = True')
+            if split:
+                self.assertTrue(late_loose)
+                # Only three members come from the final generator. The other
+                # three must come from the same task's earlier command.
+                stream.generator = stream.generator.replace(
+                    '(target.parent / name).write_bytes(data)',
+                    'if name in ("report.docx", "result.json", "checks.csv"): (target.parent / name).write_bytes(data)')
+                earlier = {'README.md': '# early calculation', 'notes.txt': 'early notes', 'audit.json': '{"early":1}'}
+                if inherited:
+                    (root / 'notes.txt').write_text(earlier.pop('notes.txt'))
+                (root / 'early.py').write_text('from pathlib import Path\n' + '\n'.join(
+                    f'Path({name!r}).write_text({body!r})' for name, body in earlier.items()))
+                stream.early_command = 'python3 early.py'
             use_publisher = loose or late_loose
             helpers = set()
             observed_recovery = []
@@ -205,7 +222,9 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                                             result['size'] = len(data)
                                         elif message['type'] == 'exec':
                                             args = shlex.split(message['command'])
-                                            if loose and message['command'].endswith('\n' + command):
+                                            if split and message['command'].endswith('\n' + stream.early_command):
+                                                args = shlex.split(stream.early_command)
+                                            elif loose and message['command'].endswith('\n' + command):
                                                 self.assertEqual(message['command'].splitlines()[-1], command)
                                                 args = shlex.split(command)
                                             elif use_publisher and len(args) >= 3 and Path(args[1]) in helpers:
@@ -267,11 +286,21 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(materializations), 1)
                 if late_loose:
                     self.assertTrue(any(args[:1] == ['--from-generated-output'] for args in observed_recovery))
+                if split:
+                    self.assertTrue(all((root / name).is_file() for name in MEMBERS))
+                if inherited:
+                    self.assertIn('Incomplete delivery', summary)
+                    self.assertFalse(output.exists(), summary)
+                    self.assertEqual((root / 'notes.txt').read_text(), 'early notes')
+                    return
                 self.assertNotIn('Incomplete', summary)
                 self.assertNotIn('could not be verified', summary)
                 with zipfile.ZipFile(output) as archive:
                     if extension == '.zip':
                         self.assertEqual(sorted(archive.namelist()), sorted(MEMBERS))
+                        if split:
+                            self.assertEqual(archive.read('notes.txt'), b'early notes')
+                            self.assertEqual(json.loads(archive.read('audit.json')), {'early': 1})
                         self.assertEqual(json.loads(archive.read('result.json')), {'total': 10})
                         with zipfile.ZipFile(io.BytesIO(archive.read('report.docx'))) as document:
                             self.assertIn(b'Computed total: 10', document.read('word/document.xml'))
@@ -289,6 +318,12 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
 
     async def test_six_loose_members_from_the_final_generator(self):
         await self.course('.zip', late_loose=True)
+
+    async def test_earlier_tool_and_final_generator_complete_one_archive(self):
+        await self.course('.zip', late_loose=True, split=True, expected_requests=4)
+
+    async def test_unchanged_inherited_member_cannot_complete_split_archive(self):
+        await self.course('.zip', late_loose=True, split=True, inherited=True, expected_requests=4)
 
     async def test_live_sse_cancel_reaps_pi_and_leaves_no_deliverable(self):
         await self.course('.docx', cancel=True)
