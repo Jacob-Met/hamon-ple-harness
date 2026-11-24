@@ -7,10 +7,13 @@ Nothing is written to task files or persisted in submission artifacts.
 from __future__ import annotations
 
 import ast
+import hashlib
 import asyncio
 from functools import lru_cache
 import json
 import shlex
+import secrets
+import zipfile
 import sys
 from pathlib import Path
 from time import monotonic
@@ -290,6 +293,67 @@ def _toolkit_sources(root: Path) -> tuple[tuple[str, bytes], ...]:
     return (*dependencies, ("hamon-engineering-toolkit.py", entry_bytes))
 
 
+# The submission install step creates this immutable archive once, before any
+# task is known. A source checkout still supports the individual-file upload.
+_BUILT_TOOLKIT = Path(__file__).with_name("engineering-toolkit.zip")
+
+
+def build_toolkit(output: Path) -> None:
+    sources = _toolkit_sources(Path(__file__).resolve().parent)
+    with zipfile.ZipFile(output, "w") as bundle:
+        for filename, data in sources:
+            # Fixed metadata keeps the compressed source reproducible.
+            bundle.writestr(zipfile.ZipInfo(filename), data, compress_type=zipfile.ZIP_DEFLATED)
+
+
+# This code runs under python -I in the task container. Verify the exact bytes
+# before parsing the archive; only the harness owns the advertised digest.
+_INSTALL_TOOLKIT = r'''
+import hashlib, io, os, pathlib, sys, tempfile, zipfile
+archive, expected = sys.argv[1:]
+path = pathlib.Path(archive)
+try:
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != expected:
+        raise ValueError("toolkit transfer mismatch")
+    with zipfile.ZipFile(io.BytesIO(data)) as bundle, tempfile.TemporaryDirectory(dir=path.parent) as staging:
+        names = bundle.namelist()
+        entry = "hamon-engineering-toolkit.py"
+        if not names or names[-1] != entry or len(set(names)) != len(names):
+            raise ValueError("invalid toolkit entry order")
+        for name in names:
+            if pathlib.PurePath(name).name != name or not name.endswith(".py"):
+                raise ValueError("invalid toolkit source name")
+            (pathlib.Path(staging) / name).write_bytes(bundle.read(name))
+        for name in names:
+            os.replace(pathlib.Path(staging) / name, path.parent / name)
+    print(expected)
+finally:
+    path.unlink(missing_ok=True)
+'''
+
+
+async def _install_built_toolkit(session: Any, deadline: float) -> bool:
+    data = await asyncio.to_thread(_BUILT_TOOLKIT.read_bytes)
+    digest = hashlib.sha256(data).hexdigest()
+    remote = "/tmp/ple-toolkit-" + secrets.token_hex(12) + ".zip"
+    limit = getattr(session, "limits", {}).get("max_write_bytes", len(data))
+    if type(limit) is not int or limit <= 0 or not data:
+        return False
+    for offset in range(0, len(data), limit):
+        chunk = data[offset:offset + limit]
+        size = await session.write_file(remote, chunk, append=offset > 0)
+        if size != offset + len(chunk):
+            return False
+    remaining = int(deadline - monotonic())
+    if remaining < 1:
+        return False
+    cmd = shlex.join(["python3", "-I", "-c", _INSTALL_TOOLKIT, remote, digest])
+    result = await session.exec(cmd, timeout_sec=remaining)
+    return (result.get("exit_code") == 0 and not result.get("timed_out")
+            and not result.get("truncated") and result.get("output", "").strip() == digest)
+
+
 # A deterministic CLI is copied into the task container (not artifacts), so
 # Pi can run it through its ordinary taskbridge-backed bash tool. This is code,
 # not a copy of any task data. A failed install never blocks the starter agent.
@@ -304,16 +368,21 @@ async def provision_engineering_cli(session: Any) -> str:
         deadline = monotonic() + budget
         # Keep the entry point last and advertise it only after every checked
         # write. One deadline covers the whole install, including local reads.
-        async with asyncio.timeout(budget):
-            sources = await asyncio.to_thread(_toolkit_sources, Path(__file__).resolve().parent)
-        for filename, module in sources:
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                return ""
-            target = "/tmp/" + filename
-            copied = await asyncio.wait_for(session.write_file(target, module), timeout=remaining)
-            if copied != len(module):
-                return ""
+        if _BUILT_TOOLKIT.is_file():
+            async with asyncio.timeout(budget):
+                if not await _install_built_toolkit(session, deadline):
+                    return ""
+        else:
+            async with asyncio.timeout(budget):
+                sources = await asyncio.to_thread(_toolkit_sources, Path(__file__).resolve().parent)
+            for filename, module in sources:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    return ""
+                target = "/tmp/" + filename
+                copied = await asyncio.wait_for(session.write_file(target, module), timeout=remaining)
+                if copied != len(module):
+                    return ""
     except (asyncio.TimeoutError, OSError, RuntimeError, SyntaxError, ValueError, KeyError, TaskError):
         return ""
     return (
@@ -426,3 +495,10 @@ async def provision_engineering_cli(session: Any) -> str:
         " are not physical mesh-intersection proofs; independently qualify"
         " every engineering calculation and deliverable."
     )
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Build the immutable task toolkit from this source checkout.")
+    parser.add_argument("--build-toolkit", required=True, type=Path)
+    build_toolkit(parser.parse_args().build_toolkit)
