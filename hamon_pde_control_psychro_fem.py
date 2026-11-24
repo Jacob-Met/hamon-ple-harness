@@ -29,6 +29,7 @@ numerical cross-verification suite for Physical Engineering's Last Exam (PLE):
      - Adiabatic mixing accepts condensate_model="equilibrium_ice" to resolve ice down
        to -60 C and coexisting ice and liquid at 0 C. The default is liquid condensate.
   4. Structural FEM (`verify_fem_structure`):
+     - Isotropic CST plane-stress and plane-strain meshes with exact equilibrium and work checks.
      - Arbitrary 2D pin-jointed determinate & statically indeterminate truss direct-stiffness
        solver with thermal strain support, kinematic mechanism detection, nodal reaction
        equilibrium, and Clapeyron work-strain-energy theorem verification.
@@ -2664,8 +2665,169 @@ def _beam_response(spec):
         return {**identity, "passed": False, "reason": str(exc)}
 
 
+def _cst_number(value):
+    if type(value) not in (int, float) or not math.isfinite(value):
+        raise ValueError("expected a finite JSON number")
+    return Fraction(value)
+
+
+def _cst_index(value, count):
+    if type(value) is not int or not 0 <= value < count:
+        raise ValueError("mesh index outside supplied nodes")
+    return value
+
+
+def _cst_cross(a, b, p):
+    return (b[0]-a[0])*(p[1]-a[1]) - (b[1]-a[1])*(p[0]-a[0])
+
+
+def _cst_mesh(nodes, elements):
+    """Require a conforming mesh: interiors disjoint, shared boundaries match by node."""
+    if len(set(nodes)) != len(nodes):
+        raise ValueError("duplicate mesh coordinates")
+    triangles = []
+    for row in elements:
+        if not isinstance(row, (tuple, list)) or len(row) != 3:
+            raise ValueError("each element must have exactly three node indices")
+        a, b, c = (_cst_index(i, len(nodes)) for i in row)
+        det = _cst_cross(nodes[a], nodes[b], nodes[c])
+        if not det:
+            raise ValueError("degenerate triangle")
+        triangles.append((a, b, c) if det > 0 else (a, c, b))
+    if set(i for t in triangles for i in t) != set(range(len(nodes))):
+        raise ValueError("unreferenced mesh node")
+    for i, first in enumerate(triangles):
+        for second in triangles[:i]:
+            separated = False
+            for face, other in ((first, second), (second, first)):
+                for j in range(3):
+                    a, b = nodes[face[j]], nodes[face[(j+1) % 3]]
+                    sides = [_cst_cross(a, b, nodes[k]) for k in other]
+                    if max(sides) <= 0:
+                        separated = True
+                    for k, side in zip(other, sides):
+                        if k not in face and side == 0:
+                            x, y = nodes[k]
+                            if ((x-a[0])*(x-b[0]) + (y-a[1])*(y-b[1])) < 0:
+                                raise ValueError("nonconforming node on triangle edge")
+            if not separated:
+                raise ValueError("overlapping triangle interiors")
+    return triangles
+
+
+def _cst_response(spec):
+    """Small homogeneous, isotropic, small-strain meshes with nodal forces in SI."""
+    mode = "cst_2d"
+    identity = {"domain": "fem", "mode": mode}
+    try:
+        allowed = {"domain", "mode", "kinematics", "nodes", "elements", "loads", "supports",
+                   "E_Pa", "nu", "thickness_m", "claimed_field", "claimed_value", "rtol", "atol"}
+        if set(spec) - allowed:
+            raise ValueError("unsupported CST input: " + ", ".join(sorted(set(spec)-allowed)))
+        kin = spec["kinematics"]
+        e, nu, t = (_cst_number(spec[k]) for k in ("E_Pa", "nu", "thickness_m"))
+        if kin not in ("plane_stress", "plane_strain") or e <= 0 or not -1 < nu < Fraction(1, 2) or t <= 0:
+            raise ValueError("invalid isotropic material, thickness or plane assumption")
+        if not 3 <= len(spec["nodes"]) <= 64 or not 1 <= len(spec["elements"]) <= 128:
+            raise ValueError("requires 3 to 64 nodes and 1 to 128 triangular elements")
+        nodes = []
+        for point in spec["nodes"]:
+            if len(point) != 2:
+                raise ValueError("each node requires exactly two coordinates in metres")
+            nodes.append(tuple(_cst_number(x) for x in point))
+        triangles = _cst_mesh(nodes, spec["elements"])
+        loads = [Fraction(0)] * (2 * len(nodes))
+        prescribed = {}
+        for row in spec.get("loads", []):
+            if set(row) - {"node", "fx_N", "fy_N"} or not ({"fx_N", "fy_N"} & set(row)):
+                raise ValueError("nodal load requires fx_N or fy_N")
+            node = _cst_index(row["node"], len(nodes))
+            for j, field in enumerate(("fx_N", "fy_N")):
+                loads[2*node+j] += _cst_number(row.get(field, 0))
+        for row in spec.get("supports", []):
+            if set(row) - {"node", "ux_m", "uy_m"} or not ({"ux_m", "uy_m"} & set(row)):
+                raise ValueError("prescribe ux_m or uy_m; omit a free component")
+            node = _cst_index(row["node"], len(nodes))
+            for j, field in enumerate(("ux_m", "uy_m")):
+                if field in row:
+                    dof, value = 2*node+j, _cst_number(row[field])
+                    if dof in prescribed and prescribed[dof] != value:
+                        raise ValueError("conflicting prescribed displacement")
+                    prescribed[dof] = value
+    except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
+        return {**identity, "passed": False, "reason": str(exc)}
+
+    shear = e/(2*(1+nu))
+    coupling = e*nu/(1-nu*nu) if kin == "plane_stress" else e*nu/((1+nu)*(1-2*nu))
+    diagonal = 2*shear + coupling
+    def stress(strain):
+        ex, ey, gamma = strain
+        return (diagonal*ex + coupling*ey, coupling*ex + diagonal*ey, shear*gamma)
+
+    size = len(loads)
+    stiffness = [{} for _ in loads]
+    blocks = []
+    for tri in triangles:
+        p = [nodes[i] for i in tri]
+        det = _cst_cross(*p)
+        volume = t*det/2
+        columns = []
+        for j, i in enumerate(tri):
+            a, b = p[(j+1) % 3], p[(j+2) % 3]
+            dx, dy = (a[1]-b[1])/det, (b[0]-a[0])/det
+            columns.extend(((2*i, (dx, 0, dy)), (2*i+1, (0, dy, dx))))
+        for j, bj in columns:
+            db = stress(bj)
+            for i, bi in columns:
+                kij = volume * sum(x*y for x,y in zip(bi, db))
+                stiffness[i][j] = stiffness[i].get(j, 0) + kij
+        blocks.append((volume, columns))
+    equations = [({i: 1}, prescribed[i]) if i in prescribed else (stiffness[i], loads[i])
+                 for i in range(size)]
+    u = _beam_system(equations, size)
+    if u is None:
+        return {**identity, "passed": False, "reason": "singular constrained CST system"}
+
+    internal = [Fraction(0)] * size
+    strains, stresses, out_of_plane = [], [], []
+    energy = Fraction(0)
+    for volume, columns in blocks:
+        strain = [sum(u[j]*b[k] for j, b in columns) for k in range(3)]
+        sigma = stress(strain)
+        for j, b in columns:
+            internal[j] += volume * sum(x*y for x, y in zip(b, sigma))
+        energy += volume * sum(x*y for x, y in zip(strain, sigma))/2
+        strains.append(strain)
+        stresses.append(sigma)
+        out_of_plane.append(0 if kin == "plane_stress" else coupling*(strain[0]+strain[1]))
+    reactions = [f-p for f,p in zip(internal, loads)]
+    force_work = sum(f*d for f,d in zip(loads,u))/2
+    support_work = sum(reactions[i]*d for i,d in prescribed.items())/2
+    moment = sum(x*internal[2*i+1]-y*internal[2*i] for i,(x,y) in enumerate(nodes))
+    verified = (all(reactions[i] == 0 for i in range(size) if i not in prescribed)
+                and sum(internal[::2]) == sum(internal[1::2]) == moment == 0
+                and energy == force_work+support_work)
+    fields = {"displacements_xy_m": list(zip(u[::2], u[1::2])),
+              "reactions_xy_N": list(zip(reactions[::2], reactions[1::2])),
+              "element_strain_xx_yy_gamma_xy": strains, "element_stress_xx_yy_xy_Pa": stresses,
+              "element_sigma_zz_Pa": out_of_plane, "strain_energy_J": energy,
+              "nodal_load_work_J": force_work, "prescribed_support_work_J": support_work}
+    try:
+        rendered = {key: _truss_render(key, value) for key, value in fields.items()}
+    except _TrussOutputRangeError as exc:
+        field, index = exc.args
+        return {**identity, "passed": False, "reason": "response outside binary64 range",
+                "range_field": field, "range_index": index}
+    result = {**identity, "kinematics": kin, "passed": verified, **rendered}
+    _check_claimed(result, spec, exact_booleans=True)
+    return result
+
+
 def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "truss_2d")).strip().lower()
+
+    if mode == "cst_2d":
+        return _cst_response(spec)
 
     if mode == "truss_2d":
         return _truss_response(spec)
@@ -2702,7 +2864,7 @@ def verify_wave5_engineering(spec: Dict[str, Any]) -> Dict[str, Any]:
         return verify_control_system(spec)
     if mode in ("state", "adiabatic_mixing", "cooling_coil"):
         return verify_psychrometric_process(spec)
-    if mode in ("truss_2d", "euler_bernoulli_beam_1d", "continuous_beam_multispan"):
+    if mode in ("cst_2d", "truss_2d", "euler_bernoulli_beam_1d", "continuous_beam_multispan"):
         return verify_fem_structure(spec)
     return {"passed": False, "reason": f"Unrecognized Wave-5 engineering domain/mode: domain={domain!r} mode={mode!r}"}
 
