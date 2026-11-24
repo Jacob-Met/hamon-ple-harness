@@ -9,7 +9,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 024b209c22694087e6bde37f2829139b5bd1ff45
+          ref: 04814d8e8e84981f840bb37423c66146ec372ed8
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -49,7 +49,10 @@ jobs:
               print('window',step,m.certified_union_volume_m3,m.material_face_counts,m.volume_m3(),flush=True)
               # Keep the authored window unchanged. Pair with a disjoint original
               # wall for a role counterfactual specific to boundary admission.
-              plain=meshes[60012 if step==74280 else 67828]
+              scene=Source()
+              scene.product('IFCWALL',[scene.box()])
+              plain,=scene.solids()
+              plain=replace(plain,vertices=plain.vertices+100.)
               for role in ('host','cutter'):
                   a,b=(m,plain) if role=='host' else (plain,m)
                   a=replace(a,metadata={'step_id':1},ifc_type='IFCWALL')
@@ -60,3 +63,6 @@ jobs:
                   except ValueError as exc:
                       print('role',step,role,type(exc).__name__,str(exc),flush=True)
           PY
+      - name: Run positive union and pre-subtraction role admission controls
+        if: always()
+        run: python -m unittest discover -s tests -p test_ifc_volume_only_opening_admission.py -v
