@@ -161,21 +161,50 @@ class FiniteTools:
                 await writer.wait_closed()
 
 
+class LockedDispatch(unittest.IsolatedAsyncioTestCase):
+    async def exercise(self, after_wait, expected, *, requested=90, deadline=20, cancel=False):
+        frames = []
+        session = taskbridge.Session(SimpleNamespace(), {"instruction":"test locked dispatch"})
+
+        async def send(frame):
+            message = json.loads(frame)
+            frames.append(message)
+            session._waiting[message["id"]].set_result({"type":"result","id":message["id"],"ok":True})
+
+        session.ws.send = send
+        clock = SimpleNamespace(monotonic=lambda: now)
+        now = 10
+        with mock.patch.object(taskbridge, "time", clock):
+            async with session._lock:
+                pending = asyncio.create_task(session.exec("one command", requested, deadline=deadline))
+                await asyncio.sleep(0)  # the request is now waiting for the writer
+                self.assertFalse(frames)
+                now = after_wait
+                if cancel:
+                    session.cancelled.set()
+            if expected is None:
+                with self.assertRaises(taskbridge.Cancelled if cancel else taskbridge.TaskError):
+                    await pending
+                self.assertEqual(frames, [])
+            else:
+                result = await pending
+                self.assertEqual(frames, [{"type":"exec", "id":"1", "command":"one command", "timeout_sec":expected}])
+                if deadline is not None:
+                    self.assertEqual(result["timeout_sec"], expected)
+            self.assertFalse(session._waiting)
+
+    async def test_elapsed_queue_time_reduces_the_dispatched_timeout(self):
+        await self.exercise(16.5, 1)
+        await self.exercise(13, 2, requested=2)
+        await self.exercise(19.9, 90, deadline=None)
+
+    async def test_expired_and_cancelled_queue_entries_are_never_sent(self):
+        await self.exercise(17.001, None)
+        await self.exercise(10, None, cancel=True)
+
+
 @unittest.skipUnless(Path(harness.PI).is_file(), "install the submitted Pi via npm ci")
 class CooperativePi(unittest.IsolatedAsyncioTestCase):
-    def test_evaluator_timeout_keeps_shorter_requests_and_whole_second_bounds(self):
-        script = """
-import {phaseExecLimit} from './task-tools.ts';
-import assert from 'node:assert/strict';
-assert.equal(phaseExecLimit(90, null, 10000), 90);
-assert.equal(phaseExecLimit(2, 20000, 10000), 2);
-assert.equal(phaseExecLimit(90, 20999, 10000), 8);
-assert.equal(phaseExecLimit(90, 13000, 10000), 1);
-assert.throws(() => phaseExecLimit(90, 12999, 10000), /not sent/);
-"""
-        subprocess.run(["node", "--experimental-strip-types", "--input-type=module", "-e", script],
-                       cwd=ROOT, check=True, capture_output=True, timeout=20)
-
     async def test_complete_batch_stops_and_resumes_without_an_extra_request(self):
         await self.exercise("valid")
 
