@@ -2581,6 +2581,12 @@ def run_router_ifc_clash(payload: dict) -> dict:
                 raise FileNotFoundError(f"IFC file not found: {payload.get('path')}")
             ifc_path = tmp_file
 
+        if type(payload.get("allow_partial", False)) is not bool:
+            raise ValueError("allow_partial must be Boolean")
+        if payload.get("allow_partial"):
+            from hamon_ifc_partial import partial_clash_report
+            return partial_clash_report(ifc_path.read_text(encoding="utf-8"), req_clear, cross_only)
+
         preferred = (
             "analyze_ifc_spatial_clash",
             "analyze_ifc_model",
