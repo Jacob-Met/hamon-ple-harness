@@ -113,30 +113,52 @@ class ProvenanceGateTests(unittest.TestCase):
             (root / "kit" / "__main__.py").touch()
             (root / "eval").mkdir()
             (root / "eval" / "dev_set.yaml").touch()
+            manifest_path = root / "artifacts" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["tasks"] = {"fixture": {"final_message": "1" * 40}}
+            manifest_path.write_text(json.dumps(manifest))
             provenance = {"manifest": "ok", "dev_set": "same", "harness": "same", "edited": []}
-            review = {"format": 1, "accepted": True, "unreadable": False,
-                      "provenance": provenance, "tasks": []}
-            def check(expected):
-                call = p.subprocess.CompletedProcess([], 0, json.dumps(review), "")
-                with patch.object(p.subprocess, "run", return_value=call):
-                    self.assertEqual(p.evaluate_official(root, root)["status"], expected)
-            check("fresh")
+            row = {"id": "fixture", "status": "ok", "warnings": [], "final_message": True}
+            review = {"format": 1, "accepted": True, "unreadable": False, "root": "artifacts",
+                      "provenance": provenance, "tasks": [row]}
+
+            def check():
+                calls = [
+                    p.subprocess.CompletedProcess([], 0, json.dumps(review), ""),
+                    p.subprocess.CompletedProcess([], 0, '["fixture"]', ""),
+                ]
+                with patch.object(p.subprocess, "run", side_effect=calls):
+                    return p.evaluate_official(root, root)
+
+            self.assertEqual(check()["status"], "fresh")
             provenance["harness"] = "docs-only"
-            check("fresh")
+            self.assertEqual(check()["status"], "fresh")
             provenance["dev_set"] = "other"
-            check("stale")
+            self.assertEqual(check()["status"], "stale")
             provenance["dev_set"] = "same"
             provenance["harness"] = "changed"
-            check("stale")
+            self.assertEqual(check()["status"], "stale")
             provenance["harness"] = "same"
             provenance["edited"] = ["fixture"]
-            check("stale")
+            self.assertEqual(check()["status"], "stale")
             provenance["edited"] = []
-            review["tasks"] = [{"id": "fixture", "status": "ok", "warnings": ["not in manifest.json"]}]
-            check("stale")
-            review["tasks"] = [{"id": "foundation-strategy", "status": "empty", "warnings": []}]
-            check("stale")
-
+            row["warnings"] = ["not in manifest.json"]
+            self.assertEqual(check()["status"], "stale")
+            row["warnings"] = []
+            row["status"] = "empty"
+            self.assertEqual(check()["status"], "stale")
+            row["status"] = "ok"
+            row["final_message"] = False
+            self.assertEqual(check()["final_message_mismatches"], ["fixture"])
+            self.assertEqual(check()["status"], "stale")
+            row["final_message"] = True
+            del manifest["tasks"]["fixture"]["final_message"]
+            manifest_path.write_text(json.dumps(manifest))
+            self.assertEqual(check()["status"], "stale")
+            for invalid in ([], [row, row], [dict(row, id="other")]):
+                review["tasks"] = invalid
+                with self.assertRaisesRegex(ValueError, "exact task roster"):
+                    check()
 
     def test_real_repository_requires_a_new_evaluation(self):
         root=Path(__file__).resolve().parents[1]

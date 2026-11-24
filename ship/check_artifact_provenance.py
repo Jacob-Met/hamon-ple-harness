@@ -145,10 +145,57 @@ def evaluate_official(root: Path, kit_root: Path) -> dict:
     tasks = report.get("tasks")
     if not isinstance(tasks, list):
         raise ValueError("organizer review lacks task results")
-    unrecorded = [
+    # Read the registered roster from the same kit and Python environment as
+    # the review. An accepted partial listing cannot certify the whole course.
+    roster_run = subprocess.run(
+        [_kit_python(kit_root), "-c",
+         "import json; from kit import artifacts; "
+         "print(json.dumps(list(artifacts.load_dev_set(artifacts.DEV_SET_FILE))))"],
+        cwd=kit_root, text=True, capture_output=True, check=False,
+    )
+    if roster_run.returncode:
+        raise ValueError("organizer kit could not read its registered task roster")
+    roster = json.loads(roster_run.stdout)
+    if (not isinstance(roster, list) or not roster
+            or any(not isinstance(task_id, str) or not task_id for task_id in roster)
+            or len(set(roster)) != len(roster)):
+        raise ValueError("organizer kit returned an invalid task roster")
+    if any(not isinstance(row, dict) or not isinstance(row.get("id"), str)
+           or row.get("status") not in ("ok", "empty", "missing", "refused")
+           or type(row.get("final_message")) is not bool for row in tasks):
+        raise ValueError("invalid task row in organizer artifact review")
+    reviewed_ids = [row["id"] for row in tasks]
+    if len(reviewed_ids) != len(roster) or set(reviewed_ids) != set(roster):
+        raise ValueError("organizer artifact review does not cover its exact task roster")
+
+    message_mismatches = []
+    missing_records = set()
+    if provenance.get("manifest") == "ok":
+        review_root = report.get("root")
+        if not isinstance(review_root, str) or not review_root:
+            raise ValueError("organizer did not identify the reviewed artifacts folder")
+        folder = (root / review_root).resolve()
+        if not folder.is_relative_to(root.resolve()):
+            raise ValueError("organizer artifacts folder is outside the entry")
+        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf8"))
+        recorded = manifest.get("tasks") if isinstance(manifest, dict) else None
+        if not isinstance(recorded, dict):
+            raise ValueError("reviewed manifest lacks its task records")
+        for row in tasks:
+            record = recorded.get(row["id"])
+            if not isinstance(record, dict):
+                if row["status"] == "ok":
+                    missing_records.add(row["id"])
+                continue
+            sha = record.get("final_message")
+            if (sha is not None and (not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha))
+                    or row["final_message"] != (sha is not None)):
+                message_mismatches.append(row["id"])
+
+    unrecorded = sorted(missing_records | {
         task["id"] for task in tasks
         if task.get("status") == "ok" and "not in manifest.json" in task.get("warnings", [])
-    ]
+    })
     empty_tasks = [task["id"] for task in tasks if task.get("status") == "empty"]
     missing_tasks = [task["id"] for task in tasks if task.get("status") in ("missing", "refused")]
     # The organizer explicitly accepts docs-only drift as the same runtime.
@@ -157,13 +204,14 @@ def evaluate_official(root: Path, kit_root: Path) -> dict:
              and provenance.get("dev_set") == "same"
              and provenance.get("harness") in ("same", "docs-only")
              and provenance.get("edited") == [] and not unrecorded
-             and not empty_tasks and not missing_tasks)
+             and not empty_tasks and not missing_tasks and not message_mismatches)
     return {
         "schema": "hamon.ple.official-provenance.v1",
         "status": "fresh" if fresh else "stale",
         "kit_exit": result.returncode,
         "unrecorded_usable_tasks": unrecorded,
         "empty_tasks": empty_tasks,
+        "final_message_mismatches": message_mismatches,
         "missing_tasks": missing_tasks,
         "kit_review": report,
     }
