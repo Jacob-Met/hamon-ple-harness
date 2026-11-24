@@ -1,7 +1,8 @@
 """Qualify the published multi-revolution Lambert tool against Gooding and Cartesian dynamics.
 
 The caller supplies a checkout of jorgepiloto/lamberthub at ORACLE_SHA. Its
-example table credits Der, The Superior Lambert Algorithm, example 1. Compare
+example table credits Der, The Superior Lambert Algorithm, example 1
+(https://amostech.com/TechnicalPapers/2011/Poster/DER.pdf). Compare
 the two returned velocity pairs without assuming Gooding's branch labels.
 """
 import argparse
@@ -201,7 +202,11 @@ def qualify(args):
             sense = "prograde" if prograde else "retrograde"
             table = [np.array(published[f"M1_{sense}_{suffix}"]) * 1000 for suffix in ("high", "low")]
             receipt["der_scaled_error"] = paired_error(replay_pairs, table, speed)
-            assert receipt["der_scaled_error"] < 5e-8, receipt
+            # The publication prints approximate vectors. Enforce the pinned upstream
+            # example's per-component tolerance on one bijection of complete pairs.
+            assert any(all(np.allclose(a, table[j], rtol=5e-6, atol=0)
+                           for a, j in zip(replay_pairs, order))
+                       for order in permutations(range(2))), receipt
         receipt["dop853"] = [propagate(spec, pair) for pair in replay_pairs]
         receipts.append(receipt)
     return dict(harness_sha=head(root), oracle_sha=ORACLE_SHA, stock=args.stock,
@@ -220,3 +225,10 @@ if __name__ == "__main__":
     options.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     print(f"{report['harness_sha']} stock={report['stock']} {report['registered_calls']} calls, "
           f"{sum(len(c['dop853']) for c in report['positive_cases'])} propagated solutions")
+    cases_reported = report["positive_cases"]
+    for key in ("der_scaled_error", "gooding_scaled_error"):
+        values = [c[key] for c in cases_reported if key in c]
+        if values:
+            print(f"Maximum {key} = {max(values):.12g}")
+    for key in ("sweep_error_rad", "position_relative", "velocity_scaled"):
+        print(f"Maximum DOP853 {key} = {max(row[key] for c in cases_reported for row in c['dop853']):.12g}")
