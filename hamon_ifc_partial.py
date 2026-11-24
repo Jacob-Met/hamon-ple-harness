@@ -393,3 +393,84 @@ def _inventory(text):
         except _GEOMETRY_ERRORS as exc:
             row["reason"] = str(exc)
     return rows, meshes, voids, fills
+
+
+def _known_pairs(meshes, clearance, cross_only):
+    """Preserve broadphase in the normal case and isolate exceptional numeric pairs."""
+    failed = []
+    try:
+        report = reader._clashes_for_solids(meshes, clearance, cross_only, include_quantity=False)
+        pairs = report["all_pairs"]
+    except _GEOMETRY_ERRORS:
+        pairs = []
+        for i, a in enumerate(meshes):
+            for b in meshes[i + 1:]:
+                if cross_only and a.discipline == b.discipline:
+                    continue
+                try:
+                    pairs.append(vars(reader.evaluate_pair_clash(a, b, clearance)))
+                except _GEOMETRY_ERRORS as exc:
+                    failed.append(dict(element_a=a.element_id, element_b=b.element_id, reason=str(exc)))
+    valid = []
+    for pair in pairs:
+        distance, bound = pair["min_distance_m"], pair.get("distance_lower_bound_m")
+        if not ((distance is not None and math.isfinite(distance) and distance >= 0)
+                or (distance is None and pair["status"] == "clear" and bound is not None
+                    and math.isfinite(bound) and bound > clearance)):
+            failed.append(dict(element_a=pair["element_a"], element_b=pair["element_b"],
+                               reason="Unresolved pair distance or clearance bound"))
+        else:
+            valid.append(pair)
+    return valid, failed
+
+
+def partial_clash_report(text, required_clearance_m, cross_discipline_only):
+    out = dict(tool="hamon_ifc_spatial_clash", ok=False, total_solid_volume_m3=None,
+               scope="physical IfcElement occurrences excluding virtual elements and feature elements",
+               hard_clash_count=None, clearance_violation_count=None, min_clearance_m=None)
+    try:
+        if not math.isfinite(required_clearance_m) or required_clearance_m < 0:
+            raise ValueError("Expected finite nonnegative clearance")
+        rows, meshes, voids, fills = _inventory(text)
+    except (ValueError, ArithmeticError, TypeError, IndexError, KeyError, ImportError, RuntimeError) as exc:
+        return {**out, "status": "unresolved_model", "reason": str(exc)}
+
+    physical = [r for r in rows.values() if r["role"] == "physical"]
+    quantities = [r for r in physical if r["volume_status"] == "known"]
+    missing = [r["step_id"] for r in physical if r["geometry_status"] == "unresolved"]
+    pairs, failed = _known_pairs(list(meshes.values()), required_clearance_m, cross_discipline_only)
+    missing_pairs = empty_pairs = 0
+    for i, a in enumerate(physical):
+        for b in physical[i + 1:]:
+            if cross_discipline_only and a["discipline"] == b["discipline"]:
+                continue
+            states = a["geometry_status"], b["geometry_status"]
+            if "empty" in states:
+                empty_pairs += 1
+            elif "unresolved" in states:
+                missing_pairs += 1
+    try:
+        volume = math.fsum(r["volume_m3"] for r in quantities)
+    except OverflowError:
+        volume = None
+    complete = len(quantities) == len(physical) and not failed and volume is not None
+    measured = [p["min_distance_m"] for p in pairs if p["min_distance_m"] is not None]
+    minimum = min(measured, default=None)
+    hard = [p for p in pairs if p["status"] == "hard_clash"]
+    violations = [p for p in pairs if p["status"] == "clearance_violation"]
+    return dict(out, ok=complete, status="complete" if complete else "partial",
+                cross_discipline_only=cross_discipline_only, products=list(rows.values()),
+                role_counts=dict(Counter(r["role"] for r in rows.values())),
+                void_relationships=voids, filling_relationships=fills,
+                physical_element_count=len(physical), known_mesh_count=len(meshes),
+                unresolved_geometry_step_ids=missing, known_volume_step_ids=[r["step_id"] for r in quantities],
+                known_occurrence_volume_sum_m3=volume, total_solid_volume_m3=volume if complete else None,
+                requested_pair_count=len(pairs) + len(failed) + empty_pairs + missing_pairs,
+                evaluated_pair_count=len(pairs), certified_empty_pair_count=empty_pairs,
+                missing_geometry_pair_count=missing_pairs, unresolved_pair_count=len(failed),
+                unresolved_pairs=failed, measured_pair_count=len(measured), bound_only_pair_count=len(pairs)-len(measured),
+                known_hard_clash_count=len(hard), known_clearance_violation_count=len(violations),
+                known_min_clearance_m=minimum, hard_clash_count=len(hard) if complete else None,
+                clearance_violation_count=len(violations) if complete else None,
+                min_clearance_m=minimum if minimum == 0 or (not failed and not missing_pairs) else None,
+                clashes=hard+violations, all_pairs=pairs)
