@@ -20,6 +20,13 @@ jobs:
           cache: npm
       - name: Install the actual registered tool runtime
         run: npm ci --no-fund --no-audit
+      - name: buildingSMART Annex E curved BRep with independently integrated volume
+        run: |
+          curl --fail --silent --show-error --location --retry 2 --max-time 30 \
+            https://raw.githubusercontent.com/buildingSMART/IFC4.x-specification-models/ef22440ec501551ccc9689309560bbc7e26aa9d7/models/advanced-geometric-shape/cube-advanced-brep/cube-advanced-brep.ifc \
+            --output "$RUNNER_TEMP/annex-e-twisted-cube.ifc"
+          test "$(git hash-object "$RUNNER_TEMP/annex-e-twisted-cube.ifc")" = 1f0e5b59bc1890d081350bc5d8fe692985f424b9
+          PLE_ANNEX_E_TWISTED_CUBE="$RUNNER_TEMP/annex-e-twisted-cube.ifc" python -m unittest discover -s tests -p test_ifc_advanced_brep.py -v
       - name: System PDF vector tools for real two-sheet drawing contract
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends poppler-utils
       - name: Independent stadium copper and task provisioning controls
@@ -74,7 +81,7 @@ jobs:
       - name: Registered pipe networks and isolated participant CLI
         run: make verify-pipe-meshes
       - name: Registered TypeScript/Python tools and physics regression gates
-        run: python -m pytest -q tests/test_ac_power_flow.py tests/test_registered_engineering_verifiers.py tests/test_wired_router_e2e.py tests/test_wave6_physics_verifiers.py tests/test_jacketed_cstr.py tests/test_wave7_engineering_verifiers.py tests/test_turbomachinery.py tests/test_wave8_certified_budget.py tests/test_step_translated_properties.py
+        run: python -m pytest -q tests/test_ac_power_flow.py tests/test_symmetrical_components.py tests/test_registered_engineering_verifiers.py tests/test_wired_router_e2e.py tests/test_wave6_physics_verifiers.py tests/test_jacketed_cstr.py tests/test_wave7_engineering_verifiers.py tests/test_turbomachinery.py tests/test_wave8_certified_budget.py tests/test_step_translated_properties.py
       - run: python -m compileall -q engineering_intake.py engineering_toolkit.py hamon_drawing.py hamon_preflight.py hamon_dxf.py hamon_scale.py hamon_affine_metric.py hamon_callout.py hamon_dual_verifier.py hamon_cad_takeoff.py hamon_pareto.py harness.py taskbridge.py delivery_guard.py delivery_materialize.py archive_checkpoint.py archive_contract.py ship/check_artifact_provenance.py ship/audit_ple_delivery.py
       - name: Historical public PLE output contract replay (not scored)
         run: python ship/audit_ple_delivery.py
@@ -118,4 +125,3 @@ jobs:
           if [[ "$rc" == 3 ]]; then
             echo "::warning::Artifact provenance differs from this checkout or dev set. A new score requires a genuine authorized run."
           fi
-

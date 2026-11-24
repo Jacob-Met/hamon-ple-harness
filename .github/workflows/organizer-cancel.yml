@@ -3,6 +3,7 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - "harness.py"
       - "tests/mock_sse_proxy.py"
       - "tests/organizer_cancel/Makefile"
       - ".github/workflows/organizer-cancel.yml"

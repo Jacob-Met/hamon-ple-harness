@@ -144,14 +144,23 @@ def _shell(points, faces, inward, budget):
                   for triangle in triangles for a, b, c in [triangle.points])
     if not volume6 or (volume6 < 0) != inward:
         raise ValueError("shell lacks the required outward or inward winding")
-    for i, a in enumerate(triangles):
-        for b in triangles[:i]:
+    # Sweep on the longest axis. Two disjoint projections cannot intersect.
+    # The budget limits all overlapping intervals, including later AABB rejects.
+    axis = max(range(3), key=lambda k: max(t.high[k] for t in triangles) -
+                                       min(t.low[k] for t in triangles))
+    active = []
+    for a in sorted(triangles, key=lambda t: t.low[axis]):
+        active = [b for b in active if b.high[axis] >= a.low[axis]]
+        for b in active:
             budget.spend()
+            if any(x < y or u < v for x, y, u, v in zip(a.high, b.low, b.high, a.low)):
+                continue
             common = tuple(set(a.points).intersection(b.points))
             if len(common) == 2 and any(_cross(a.normal, b.normal)):
-                continue  # Their planes meet only along the shared edge.
-            if any(not _on_common_simplex(point, common) for point in _intersection_points(a, b)):
+                continue
+            if any(not _on_common_simplex(p, common) for p in _intersection_points(a, b)):
                 raise ValueError("shell has intersecting or overlapping faces")
+        active.append(a)
     return triangles, volume6
 
 
@@ -260,3 +269,16 @@ def certify_void_shells(shells, *, max_checks=2_000_000):
         certified.append((triangles, volume6))
     if sum(volume for _, volume in certified) <= 0:
         raise ValueError("shells do not enclose positive material")
+
+
+def certify_exterior_shell(vertices, faces, *, max_checks=2_000_000):
+    """Require an embedded, closed, outward-wound connected triangle boundary."""
+    if not len(faces) or len(faces) > 32768:
+        raise ValueError("advanced BRep exceeds bounded embedded-shell qualification")
+    coordinates = [tuple(map(float, row)) for row in vertices]
+    scale = max(value.as_integer_ratio()[1] for row in coordinates for value in row)
+    def integer(value):
+        numerator, denominator = value.as_integer_ratio()
+        return numerator * (scale // denominator)
+    points = [tuple(integer(value) for value in row) for row in coordinates]
+    _shell(points, faces, False, _Budget(max_checks))

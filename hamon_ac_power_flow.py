@@ -3,8 +3,10 @@
 import math
 
 import numpy as np
+from scipy import sparse
 from scipy.optimize import least_squares, root
 from scipy.special import expit
+from hamon_ac_sparse import linear_step, rectangular_current_solve
 
 
 def number(value):
@@ -81,7 +83,19 @@ def network(spec):
             number(b.get("shunt_g_pu", 0)), number(b.get("shunt_b_pu", 0))
         )
     reference = math.radians(number(buses[slack].get("va_deg", 0)))
-    ybus = np.diag(shunt)
+    # Keep small-system arithmetic stable; large sparse networks must never
+    # allocate an n-by-n dense admittance or finite-difference Jacobian.
+    # Reactive-limit switching retains its established dense solver. The sparse
+    # qualification covers fixed PV magnitudes and fixed PQ injections.
+    use_sparse = nb >= 128 and not limits
+    ybus = sparse.diags(shunt, format="lil") if use_sparse else np.diag(shunt)
+
+    def diagonal(values):
+        return sparse.diags(values, format="csr") if use_sparse else np.diag(values)
+
+    def blocks(rows):
+        return sparse.bmat(rows, format="csc") if use_sparse else np.block(rows)
+
     a = []
     b = []
     admittance = []
@@ -130,6 +144,8 @@ def network(spec):
     if len(seen) != nb:
         raise ValueError("Every bus must be connected to the slack bus")
     f, t, y, tap, yc = map(np.asarray, (a, b, admittance, ratio, charging))
+    if use_sparse:
+        ybus = ybus.tocsr()
 
     def branch_currents(voltage):
         tapped = voltage[f] / tap
@@ -176,12 +192,12 @@ def network(spec):
             tolerances = np.r_[power_tolerances(voltage, p, nonslack), q_tolerance]
             if norm < 1e-11 and np.all(np.abs(res) <= tolerances):
                 return voltage
-            vd = np.diag(voltage)
-            iv = np.diag(current)
+            vd = diagonal(voltage)
+            iv = diagonal(current)
             da = 1j * vd @ np.conj(iv - ybus @ vd)
-            unit = np.diag(voltage / np.abs(voltage))
+            unit = diagonal(voltage / np.abs(voltage))
             dm = vd @ np.conj(ybus @ unit) + np.conj(iv) @ unit
-            jac = np.block(
+            jac = blocks(
                 [
                     [
                         da.real[np.ix_(nonslack, nonslack)],
@@ -190,7 +206,7 @@ def network(spec):
                     [da.imag[np.ix_(pq, nonslack)], dm.imag[np.ix_(pq, pq)]],
                 ]
             )
-            correction = np.linalg.solve(jac, res)
+            correction = linear_step(jac, res)
             for step in range(20):
                 angles = np.angle(voltage)
                 magnitudes = np.abs(voltage)
@@ -433,9 +449,15 @@ def network(spec):
         return np.r_[pq_res.real, pq_res.imag, pv_p, np.abs(v[pv]) ** 2 - vset[pv] ** 2]
 
     z0 = np.r_[initial[nonslack].real, initial[nonslack].imag]
-    independent = root(balance, z0, tol=1e-11)
-    other = unpack(independent.x)
-    independent_res = float(np.linalg.norm(balance(independent.x), np.inf))
+    if use_sparse:
+        independent_x = rectangular_current_solve(
+            z0, unpack, balance, branch_currents, nonslack, pq, pv,
+            p, q, shunt, f, t, y, tap, yc,
+        )
+    else:
+        independent_x = root(balance, z0, tol=1e-11).x
+    other = unpack(independent_x)
+    independent_res = float(np.linalg.norm(balance(independent_x), np.inf))
     current, send, receive = branch_currents(voltage)
     sf = voltage[f] * np.conj(send)
     st = voltage[t] * np.conj(receive)
@@ -623,6 +645,11 @@ def phasor(data):
 
 
 def symmetrical_fault(spec):
+    """Solve terminal faults from independent zero/positive/negative Thévenin EMFs.
+
+    The positive phasor is required. Omitted zero and negative sequence
+    voltages are zero, preserving the balanced-source convention.
+    """
     fault = spec["fault_type"]
     if fault not in ("3PH", "SLG", "LL", "DLG"):
         raise ValueError("Use 3PH, SLG, LL or DLG")
@@ -653,13 +680,16 @@ def symmetrical_fault(spec):
         phasor(sequence_impedances[k]) for k in ("zero", "positive", "negative")
     )
     zf = phasor(spec.get("fault_impedance_pu", {"real": 0, "imag": 0}))
-    emf = phasor(spec["prefault_positive_voltage_pu"])
-    if min(z.real for z in (z0, z1, z2, zf)) < 0 or emf == 0:
-        raise ValueError(
-            "Require nonnegative resistances and nonzero prefault positive-sequence voltage"
-        )
-    # Preserve the ABC positive sequence when rotating the fault to canonical
-    # A (SLG) or BC (LL/DLG) positions.
+    source_names = {f"prefault_{mode}_voltage_pu" for mode in ("zero", "positive", "negative")}
+    if any(isinstance(key, str) and key.startswith("prefault_") and key not in source_names for key in spec):
+        raise ValueError("Unsupported prefault voltage declaration")
+    e1 = phasor(spec["prefault_positive_voltage_pu"])
+    zero = {"real": 0, "imag": 0}
+    e0 = phasor(spec.get("prefault_zero_voltage_pu", zero))
+    e2 = phasor(spec.get("prefault_negative_voltage_pu", zero))
+    if min(z.real for z in (z0, z1, z2, zf)) < 0 or not any((e0, e1, e2)):
+        raise ValueError("Require nonnegative resistances and a nonzero prefault excitation")
+    # Canonical phase ordering is A (SLG) or BC (LL/DLG).
     offset = (
         0
         if fault == "3PH"
@@ -677,13 +707,14 @@ def symmetrical_fault(spec):
     ctx = mp.clone()
     exponents = [0] + [
         math.frexp(abs(x))[1]
-        for z in (z0, z1, z2, zf, emf) for x in (z.real, z.imag) if x
+        for z in (z0, z1, z2, zf, e0, e1, e2) for x in (z.real, z.imag) if x
     ]
     ctx.prec = 112 + 2 * (max(exponents) - min(exponents))
-    z0, z1, z2, zf, emf = map(ctx.mpc, (z0, z1, z2, zf, emf))
+    z0, z1, z2, zf, e0, e1, e2 = map(ctx.mpc, (z0, z1, z2, zf, e0, e1, e2))
     order = [(offset + n) % 3 for n in range(3)]
     alpha = ctx.mpc(-1, ctx.sqrt(3)) / 2
-    rotation = emf * alpha ** (-offset)
+    # Positive and negative sequences rotate in opposite directions.
+    positive, negative = e1 * alpha ** (-offset), e2 * alpha**offset
     transform = ctx.matrix([[1, 1, 1], [1, alpha.conjugate(), alpha],
                             [1, alpha, alpha.conjugate()]])
     if fault == "3PH":
@@ -691,12 +722,12 @@ def symmetrical_fault(spec):
         # the terminal constraints admit arbitrary current in that mode.
         if any(impedance + zf == 0 for impedance in (z0, z1, z2)):
             raise ValueError("Three-phase terminal currents are not uniquely determined")
-        seq = (0, rotation / (z1 + zf), 0)
+        seq = (e0 / (z0 + zf), positive / (z1 + zf), negative / (z2 + zf))
     elif fault == "SLG":
-        i = rotation / (z0 + z1 + z2 + 3 * zf)
+        i = (e0 + positive + negative) / (z0 + z1 + z2 + 3 * zf)
         seq = (i, i, i)
     elif fault == "LL":
-        i = rotation / (z1 + z2 + zf)
+        i = (positive - negative) / (z1 + z2 + zf)
         seq = (0, i, -i)
     else:
         # BC meet at a common point connected to ground by zf. The parallel
@@ -704,23 +735,23 @@ def symmetrical_fault(spec):
         zg = z0 + 3 * zf
         determinant = z1 * (zg + z2) + zg * z2
         seq = (
-            -rotation * z2 / determinant,
-            rotation * (zg + z2) / determinant,
-            -rotation * zg / determinant,
+            (z1 * (e0 - negative) + z2 * (e0 - positive)) / determinant,
+            (zg * (positive - negative) + z2 * (positive - e0)) / determinant,
+            (zg * (negative - positive) + z1 * (negative - e0)) / determinant,
         )
     # Restore the fixed ABC coordinates of the positive and negative
     # sequences. Keep I0 directly: summing the published phase currents
     # can lose a genuine small ground return through cancellation.
     seq_current = ctx.matrix([seq[0], seq[1] * alpha**offset,
                               seq[2] * alpha**(-offset)])
-    seq_voltage = ctx.matrix([-z0 * seq_current[0], emf - z1 * seq_current[1],
-                              -z2 * seq_current[2]])
+    seq_voltage = ctx.matrix([e0 - z0 * seq_current[0], e1 - z1 * seq_current[1],
+                              e2 - z2 * seq_current[2]])
     iabc = transform * seq_current
     voltage = transform * seq_voltage
 
     # Independent phase-domain system with three terminal boundary conditions.
     zabc = transform * ctx.diag([z0, z1, z2]) * transform.H / 3
-    source = emf * transform[:, 1]
+    source = transform * ctx.matrix([e0, e1, e2])
     zero_v, zero_i = ctx.zeros(3), ctx.zeros(3)
     a, b, c = order
     if fault == "3PH":

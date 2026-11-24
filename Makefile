@@ -8,6 +8,10 @@ verify-cd-nozzle-shock:
 verify-multispan-contact:
 	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m unittest discover -s tests -p 'test_multispan_contact.py' -v
 
+.PHONY: verify-advanced-ifc
+verify-advanced-ifc:
+	$(PYTHON) ship/verify_advanced_ifc.py
+
 .PHONY: verify-provider-wire
 verify-provider-wire:
 	$(PYTHON) ship/replay_engineering_provider_wire.py --reference
@@ -43,3 +47,7 @@ verify-workbook-units:
 verify-xlsx-unit-graph:
 	@set -eu; output=$$(mktemp -d); trap 'rm -rf -- "$$output"' EXIT; \
 	$(PYTHON) ship/verify_xlsx_unit_graph.py --out "$$output" --min-memory-gib 4
+
+.PHONY: verify-sequence-faults
+verify-sequence-faults:
+	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m pytest -q tests/test_symmetrical_components.py

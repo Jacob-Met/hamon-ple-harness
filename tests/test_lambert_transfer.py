@@ -4,6 +4,8 @@ import math
 import random
 import unittest
 
+from test_certified_inline_reply import certificate, instruction
+
 import numpy as np
 from mpmath import mp
 from scipy.integrate import solve_ivp
@@ -111,8 +113,11 @@ class LambertTransferTests(unittest.TestCase):
             angle = rng.uniform(.5,2.6)
             dt = rng.uniform(1.8,8.)
             target = np.array([radius*math.cos(angle),radius*math.sin(angle),0])
-            result = self.qualified(self.solve(r2_m=target.tolist(), tof_s=dt,
-                transfer_path='short' if i%2 else 'long'))
+            spec = dict(subkind="lambert_transfer", mu=1, r1_m=[1, 0, 0],
+                        r2_m=target.tolist(), tof_s=dt, transfer_path="short" if i % 2 else "long")
+            plan = certificate(instruction({"mode": "lagrangian_orbital", "spec": spec}))
+            self.assertEqual(plan["thinking_tier"], "low")
+            result = self.qualified(json.loads(plan["presolve_result_json"]))
             start = [1.,0,0,*result['v1_m_s']]
             def derivative(_t,y):
                 return np.r_[y[3:],-y[:3]/np.linalg.norm(y[:3])**3]

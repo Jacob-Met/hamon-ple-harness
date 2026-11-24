@@ -2673,6 +2673,15 @@ def verify_fem_structure(spec: Dict[str, Any]) -> Dict[str, Any]:
     if mode == "euler_bernoulli_beam_1d":
         return _beam_response(spec)
 
+    if mode == "continuous_beam_multispan":
+        from hamon_multispan_beam import solve_multispan
+
+        try:
+            result = solve_multispan({key: value for key, value in spec.items() if key != "domain"})
+        except (KeyError, IndexError, TypeError, ValueError, ArithmeticError) as exc:
+            return {"passed": False, "domain": "fem", "mode": mode, "reason": str(exc)}
+        return {"passed": result["dual_verified"], "domain": "fem", "mode": mode, **result}
+
     return {"passed": False, "domain": "fem", "mode": mode, "reason": f"Unknown FEM mode: {mode}"}
 
 
@@ -2693,7 +2702,7 @@ def verify_wave5_engineering(spec: Dict[str, Any]) -> Dict[str, Any]:
         return verify_control_system(spec)
     if mode in ("state", "adiabatic_mixing", "cooling_coil"):
         return verify_psychrometric_process(spec)
-    if mode in ("truss_2d", "euler_bernoulli_beam_1d"):
+    if mode in ("truss_2d", "euler_bernoulli_beam_1d", "continuous_beam_multispan"):
         return verify_fem_structure(spec)
     return {"passed": False, "reason": f"Unrecognized Wave-5 engineering domain/mode: domain={domain!r} mode={mode!r}"}
 

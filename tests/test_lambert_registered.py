@@ -8,6 +8,9 @@ import sys
 import tempfile
 import unittest
 
+from test_certified_inline_reply import certificate, instruction
+from test_cr3bp_transfer import EARTH_MOON, SATURN_TITAN, orbit
+
 ROOT = Path(__file__).resolve().parents[1]
 
 class RegisteredLambertTests(unittest.TestCase):
@@ -21,6 +24,8 @@ class RegisteredLambertTests(unittest.TestCase):
             {'mode':'lagrangian_orbital','spec':{**positive,'revolutions':1}},
             {'mode':'reference'},
         ]
+        for row in (EARTH_MOON, SATURN_TITAN):
+            calls.append({"mode": "lagrangian_orbital", "spec": dict(subkind="cr3bp_transfer", **orbit(row))})
         source = r"""
 import registerTaskTools from './task-tools.ts';
 const registered = new Map();
@@ -46,6 +51,10 @@ console.log(JSON.stringify(results));
         self.assertAlmostEqual(results[1]['details']['v1_m_s'][1],-1.)
         self.assertIn('lambert_transfer',results[5]['content'][0]['text'])
         self.assertIn('endpoint_verified',results[5]['content'][0]['text'])
+        for index in (0, 1, 6, 7):
+            plan = certificate(instruction(calls[index]))
+            self.assertEqual(json.loads(plan['presolve_result_json']), results[index]['details'])
+
 
 if __name__ == '__main__':
     unittest.main()

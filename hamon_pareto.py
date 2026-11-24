@@ -288,12 +288,15 @@ def _wave8_request(instruction):
     nozzle_requests = [i for i, req in enumerate(requests)
                        if isinstance(req, dict) and req.get("mode") == "compressible_acoustics"
                        and isinstance(req.get("spec"), dict) and req["spec"].get("subkind") == "cd_nozzle_shock"]
-    if activity_requests or dimensional_jackets or control_requests or nozzle_requests:
+    orbit_requests = [i for i, req in enumerate(requests)
+                      if isinstance(req, dict) and req.get("mode") == "lagrangian_orbital"]
+    literal_checks = activity_requests + dimensional_jackets + control_requests + nozzle_requests + orbit_requests
+    if literal_checks:
         # The text is the source of the certificate. Refuse a numeric lexeme
         # rounded to a different decimal value by the ordinary JSON decoder.
         literal = json.loads(text, parse_float=Decimal)
         literal_requests = literal if isinstance(literal, list) else [literal]
-        for i in activity_requests + dimensional_jackets + control_requests + nozzle_requests:
+        for i in literal_checks:
             parsed = json.loads(json.dumps(requests[i], allow_nan=False), parse_float=Decimal)
             if parsed != literal_requests[i]:
                 return None
@@ -537,6 +540,51 @@ def _coil_product_certificate(req):
     return result
 
 
+def _orbital_result(req):
+    """Reuse the registered endpoint verifier only for explicit, finite orbital inputs."""
+    spec = req["spec"]
+    kind = spec.get("subkind")
+    if kind == "lambert_transfer":
+        scalars = {"mu", "tof_s", "revolutions"}
+        vectors = {"r1_m", "r2_m", "plane_normal", "proposed_v1_m_s", "proposed_v2_m_s"}
+        label, options, width = "transfer_path", ("short", "long"), 3
+        limit = 1e-10
+    elif kind == "cr3bp_transfer":
+        scalars = {"mass_ratio", "flight_time_tu", "jacobi"}
+        vectors = {"initial_state", "target_state"}
+        label, options, width = "target_lagrange", ("L1", "L2", "L3", "L4", "L5"), 6
+        limit = 1e-8
+    else:
+        return None
+    if not spec.keys() <= scalars | vectors | {"domain", "subkind", label}:
+        return None
+    if spec.get("domain", req["mode"]) != req["mode"] or (label in spec and spec[label] not in options):
+        return None
+
+    def number(value):
+        return type(value) in (int, float) and math.isfinite(value) and float(value) == value
+
+    if any(not number(spec[key]) for key in scalars & spec.keys()):
+        return None
+    for key in vectors & spec.keys():
+        values = spec[key]
+        if not isinstance(values, list) or len(values) != width or not all(map(number, values)):
+            return None
+    # Admit at most one revolution of the primary pair in normalized time.
+    # Longer integrations remain available through the registered task tool.
+    if kind == "cr3bp_transfer" and not 0 < spec.get("flight_time_tu", 0) <= math.tau:
+        return None
+    result = dispatch_ple_tool("hamon_conservation_cad_verifier", req)
+    residual = result.get("residual")
+    if (result.get("verified") is not True or result.get("subkind") != kind
+            or result.get("domain") != req["mode"] or not number(residual)
+            or not 0 <= residual <= limit):
+        return None
+    if kind == "lambert_transfer" and result.get("endpoint_verified") is not True:
+        return None
+    return result
+
+
 def _small_discrete_stable(a):
     """Independent strict Jury inequalities for one or two real states."""
     if len(a) == 1:
@@ -673,6 +721,8 @@ def _wave8_result(req):
     ):
         return None
     spec = req["spec"]
+    if req["mode"] == "lagrangian_orbital":
+        return _orbital_result(req)
     if req["mode"] == "control":
         return _discrete_control_certificate(req)
     if req["mode"] == "compressible_acoustics":
