@@ -1,0 +1,38 @@
+name: Registered tool delivery deadline
+on:
+  pull_request:
+    paths:
+      - task-tools.ts
+      - taskbridge.py
+      - delivery-budget.ts
+      - tests/test_remote_tool_phase_deadlines.py
+      - tests/test_cooperative_delivery_budget.py
+      - .github/workflows/registered-tool-deadline.yml
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install pinned participant runtime
+        run: |
+          pip install --disable-pip-version-check -r requirements.txt
+          npm ci --no-fund --no-audit
+      - name: Real registered tools and delayed task interpreter
+        env:
+          PYTHONPATH: .:tests
+        run: |
+          set -o pipefail
+          python -m unittest -v test_remote_tool_phase_deadlines test_cooperative_delivery_budget.CooperativePi.test_slow_registered_preflight_preserves_the_acknowledged_session 2>&1 | tee registered-tool-deadline.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: registered-tool-deadline
+          path: registered-tool-deadline.log
