@@ -785,3 +785,4 @@ async def solve(session: taskbridge.Session) -> str:
 def resolve_wired_domain_tools(prompt: str = "", file_paths=()) -> list[str]:
     from hamon_pareto import select_domain_tools
     return list(select_domain_tools(prompt=prompt, file_paths=file_paths))
+
