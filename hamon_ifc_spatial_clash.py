@@ -1746,6 +1746,23 @@ def _require_single_swept_body(entities, step, *, mass_takeoff=False):
     raise UnresolvedOpening("unsupported swept opening or host profile")
 
 
+def _require_prism_or_clipped_prism(entities, item):
+    visited = set()
+    while isinstance(item, tuple) and item[0] == "ref" and item[1] not in visited and len(visited) < 128:
+        visited.add(item[1])
+        kind, fields = entities.get(item[1], (None, []))
+        if kind == "IFCEXTRUDEDAREASOLID":
+            return
+        if kind != "IFCBOOLEANCLIPPINGRESULT" or len(fields) != 3 or fields[0] != "DIFFERENCE":
+            break
+        second = fields[2]
+        if not isinstance(second, tuple) or second[0] != "ref" or entities.get(second[1], ("",))[0] not in (
+                "IFCHALFSPACESOLID", "IFCPOLYGONALBOUNDEDHALFSPACE"):
+            break
+        item = fields[1]
+    raise UnresolvedOpening("Expected a polygonal prism or a complete planar clipping chain")
+
+
 def _opening_relationships(entities):
     related = {}
     for kind,args in entities.values():
@@ -1775,7 +1792,8 @@ def _physical_occurrences(solids, entities, unit_scale, related, empty=None):
             continue
         if any("mass_issue" in s.metadata for s in [material, *openings]):
             raise UnresolvedOpening("Unqualified compound host or opening material")
-        frame = _resolve_local_placement(entities, entities[host][1][5], unit_scale)
+        placement = entities[host][1][5]
+        frame = np.eye(4) if placement is None else _placed_product_frame(entities, placement, unit_scale)
         try:
             for component in [material, *openings]:
                 local = (component.vertices - frame[:3, 3]) @ frame[:3, :3]
@@ -1820,11 +1838,7 @@ def _gross_ifc_solids(entities, unit_scale, participants, products, advanced_mes
             items = _opening_body_items(entities, eid, mass_takeoff=strict_geometry)
             if eid in participants:
                 for item in items:
-                    kind = entities.get(item[1], ("",))[0] if isinstance(item, tuple) and item[0] == "ref" else ""
-                    if kind == "IFCEXTRUDEDAREASOLID":
-                        continue
-                    if etype.startswith("IFCOPENING") or kind != "IFCBOOLEANCLIPPINGRESULT":
-                        raise UnresolvedOpening("Expected a straight polygonal prism opening or a clipped prism host")
+                    _require_prism_or_clipped_prism(entities, item)
         global_id = str(args[0] or f"#{eid}")
         name = str(args[2] or f"{etype}_{eid}")
         if strict_geometry or (eid in participants and args[5] is not None):
