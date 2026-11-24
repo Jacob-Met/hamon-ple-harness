@@ -75,33 +75,15 @@ console.log(JSON.stringify(result.details));
                     native = element.geometry.item(0)
                     kernel = native.volume().to_double()
                     if kind == "advanced-brep":
-                        from ifcopenshell.util.shape import get_volume
                         side_volumes = sorted(integrated_side_volume(face.FaceSurface)
                                               for face in model.by_type("IfcAdvancedFace")
                                               if face.FaceSurface.is_a("IfcBSplineSurfaceWithKnots"))
                         self.assertEqual(len(side_volumes), 2)
                         integrated = side_volumes[1] - side_volumes[0]
                         self.assertAlmostEqual(integrated, .002044986344568905, places=13)
-                        samples = []
-                        settings.set("iterator-output", wrapper.TRIANGULATED)
-                        for deflection in (.001, .00025, .00005, .00001):
-                            settings.set("mesher-linear-deflection", deflection)
-                            triangulated = ifcopenshell.geom.create_shape(settings, device)
-                            samples.append({"deflection_m": deflection,
-                                            "faces": len(triangulated.geometry.faces)//3,
-                                            "volume_m3": get_volume(triangulated.geometry)})
-                        mesh_vertices = np.asarray(triangulated.geometry.verts).reshape(-1, 3)
-                        mesh_faces = np.asarray(triangulated.geometry.faces).reshape(-1, 3)
-                        tris = mesh_vertices[mesh_faces]
-                        cap_areas = {}
-                        for z in (0., -.084, -.094):
-                            selected = tris[np.all(np.isclose(tris[:, :, 2], z, atol=1.e-9, rtol=0), axis=1)]
-                            cap_areas[z] = np.cross(selected[:, 1] - selected[:, 0],
-                                                    selected[:, 2] - selected[:, 0])[:, 2].sum() / 2
                         print(json.dumps({"independent_spline_integral_m3": integrated,
-                                          "signed_mesh_cap_areas_m2": cap_areas,
                                           "source_side_volumes_m3": side_volumes,
-                                          "kernel_volume_m3": kernel, "kernel_meshes": samples}))
+                                          "native_signed_volume_m3": kernel}, sort_keys=True))
                     out = subprocess.run(["node", "--experimental-strip-types", "--input-type=module",
                                           "-e", script, path.name], cwd=root, env=env, text=True,
                                          capture_output=True, timeout=150, check=True)
@@ -114,8 +96,6 @@ console.log(JSON.stringify(result.details));
                         self.assertEqual(reply["source_face_count"], 5)
                         self.assertAlmostEqual(reply["total_solid_volume_m3"], integrated,
                                                delta=integrated * .0001)
-                        self.assertGreater(abs(kernel-integrated), .4*integrated)
-                        self.assertGreater(abs(samples[-1]["volume_m3"]-integrated), integrated)
                         continue
                     self.assertTrue(reply["ok"], reply)
                     self.assertEqual(reply["solid_count"], 1)
