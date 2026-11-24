@@ -12,7 +12,7 @@ import tempfile
 import zipfile
 from xml.etree.ElementTree import ParseError
 
-from office_package import check_office_package
+from office_package import check_office_package, verify_table_contract
 
 
 def verify_typed_members(z, names, max_unpacked_bytes=None):
@@ -34,6 +34,18 @@ def verify_typed_members(z, names, max_unpacked_bytes=None):
                         return False
                 try:
                     check_office_package(doc, suffix)
+                    contract = names.get(name) if isinstance(names, dict) else None
+                    if contract and contract.get("unavailable"):
+                        if max_unpacked_bytes is not None:
+                            return False
+                        raise ValueError(f"template contract unavailable for {name}")
+                    if contract:
+                        try:
+                            verify_table_contract(doc, contract)
+                        except OverflowError as exc:
+                            if max_unpacked_bytes is not None:
+                                return False
+                            raise ValueError(f"template inspection budget for {name}") from exc
                 except (ParseError, LookupError) as exc:
                     raise ValueError(f"invalid Office XML in {name}") from exc
                 if doc.testzip():

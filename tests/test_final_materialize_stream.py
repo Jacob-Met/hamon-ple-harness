@@ -110,7 +110,7 @@ class RepairStream:
 @unittest.skipUnless(Path(harness.PI).is_file(), 'actual installed Pi CLI required')
 class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
     async def course(self, extension, *, cancel=False, loose=False, stream_factory=RepairStream,
-                     max_steps=None, expected_requests=3, late_loose=False, split=False, inherited=False):
+                     max_steps=None, expected_requests=3, late_loose=False, split=False, inherited=False, template_case=None):
         # CI provisions this empty task root, separate from the harness.
         with (tempfile.TemporaryDirectory(prefix='ple-recovery-', dir='/filesystem') as directory,
               tempfile.TemporaryDirectory(prefix='ple-home-') as home):
@@ -122,6 +122,16 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                 prompt += '\nWrite a first complete version, then improve it. Produce exactly these six files at the archive root:\n' + '\n'.join(
                     f'{i}. `{name}`' for i, name in enumerate(MEMBERS, 1))
                 self.assertEqual(sorted(archive_contract.member_names(prompt)), sorted(MEMBERS))
+            members = MEMBERS
+            if template_case:
+                from test_template_workbooks import authored_bytes, install_templates
+                templates = install_templates(root)
+                members = [*templates, *MEMBERS[2:]]
+                prompt = prompt.replace("report.docx`", "foundation_schedule.xlsx` on the owner's template, one row per foundation for all thirty-six, with the columns the template defines.")
+                prompt = prompt.replace("result.json`", "constraint_register.xlsx` on the owner's template, with the columns the template defines.")
+                for name, template in templates.items():
+                    (root / (name + ".fixture")).write_bytes(authored_bytes(template, 36 if name == members[0] else 1))
+                self.assertEqual(archive_contract.table_roles(prompt, members), dict(zip(members, (36, 1))))
             command = None
             if loose:
                 command = 'python3 write_members.py'
@@ -133,6 +143,12 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                       else stream_factory(script))
             if late_loose:
                 stream.generator = GENERATOR.replace('write_loose = False', 'write_loose = True')
+            if template_case:
+                first = members[1] if template_case == "swapped" else members[0]
+                stream.generator = stream.generator.replace(
+                    "'report.docx': document.getvalue(), 'result.json': json.dumps({'total': value}).encode()",
+                    f"{members[0]!r}: Path({first + '.fixture'!r}).read_bytes(), "
+                    f"{members[1]!r}: Path({members[1] + '.fixture'!r}).read_bytes()")
             if split:
                 self.assertTrue(late_loose)
                 # Only three members come from the final generator. The other
@@ -228,9 +244,9 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                                                 self.assertEqual(message['command'].splitlines()[-1], command)
                                                 args = shlex.split(command)
                                             elif use_publisher and len(args) >= 3 and Path(args[1]) in helpers:
-                                                stage, dest, members = json.loads(args[2])
+                                                stage, dest, member_spec = json.loads(args[2])
                                                 self.assertEqual(dest, str(output))
-                                                self.assertEqual(members, MEMBERS)
+                                                self.assertEqual(list(member_spec), members)
                                                 self.assertRegex(stage, r'^/tmp/ple-members-[0-9a-f]{16}$')
                                                 self.addCleanup(shutil.rmtree, stage, ignore_errors=True)
                                                 self.addCleanup(Path(stage + '.checkpoint.zip').unlink, missing_ok=True)
@@ -288,6 +304,19 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(any(args[:1] == ['--from-generated-output'] for args in observed_recovery))
                 if split:
                     self.assertTrue(all((root / name).is_file() for name in MEMBERS))
+                if template_case:
+                    self.assertTrue(any(args[:1] == ['--from-generated-output'] for args in observed_recovery))
+                    if template_case == "swapped":
+                        self.assertIn("Incomplete delivery", summary)
+                        self.assertFalse(output.exists())
+                    else:
+                        self.assertNotIn("Incomplete", summary)
+                        self.assertNotIn("could not be verified", summary)
+                        with zipfile.ZipFile(output) as archive:
+                            self.assertEqual(sorted(archive.namelist()), sorted(members))
+                            for name in members[:2]:
+                                self.assertEqual(archive.read(name), (root / (name + ".fixture")).read_bytes())
+                    return
                 if inherited:
                     self.assertIn('Incomplete delivery', summary)
                     self.assertFalse(output.exists(), summary)
@@ -306,6 +335,11 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                             self.assertIn(b'Computed total: 10', document.read('word/document.xml'))
                     else:
                         self.assertIn(b'Computed total: 10', archive.read('word/document.xml'))
+
+    async def test_actual_pi_template_role_pair(self):
+        for case in ("completed", "swapped"):
+            with self.subTest(case=case):
+                await self.course(".zip", late_loose=True, template_case=case)
 
     async def test_docx_from_generator_written_in_final_repair(self):
         await self.course('.docx')

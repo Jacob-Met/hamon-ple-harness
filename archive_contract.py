@@ -149,6 +149,45 @@ def declared_members(instruction, targets):
     return member_names(instruction)
 
 
+def table_roles(instruction, members):
+    """Bind only expressly requested tables on templates in the enumerated contract."""
+    units = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen".split()
+    tens = "twenty thirty forty fifty sixty seventy eighty ninety".split()
+    matches = list(NUMBERED_ITEM_RE.finditer(instruction))
+    roles = {}
+    for index, item in enumerate(matches):
+        name = item[2]
+        if name not in members or not name.lower().endswith((".xlsx", ".xlsm")):
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(instruction)
+        paragraph = " ".join(instruction[item.end():end].split("\n\n", 1)[0].lower().split())
+        if not (re.search(r"\bon (?:the |an? )?(?:[\w’'-]+ )?template\b", paragraph)
+                and "columns" in paragraph):
+            continue
+        minimum = 1
+        count = re.search(r"\bone row per [\w -]+? for all (\d+|[a-z]+(?:-[a-z]+)?)\b", paragraph)
+        if count:
+            word = count[1]
+            lead, _, tail = word.partition("-")
+            if word.isdecimal():
+                minimum = int(word)
+            elif lead in tens and (not tail or tail in units[1:10]):
+                minimum = 10 * (2 + tens.index(lead)) + (units.index(tail) if tail else 0)
+            elif word in units:
+                minimum = units.index(word)
+        roles[name] = minimum
+    return roles
+
+
+def member_spec(session, names):
+    """The ordinary archive list gains a per-member contract only when the prompt asks."""
+    roles = table_roles(getattr(session, "instruction", ""), names)
+    if not roles:
+        return names
+    frozen = getattr(session, "_delivery_tables", {})
+    return {name: frozen.get(name, {"unavailable": True}) if name in roles else None for name in names}
+
+
 async def provision(session, targets, *, deadline: float | None = None):
     names = declared_members(getattr(session, "instruction", ""), targets)
     if not names:
@@ -173,7 +212,7 @@ async def provision(session, targets, *, deadline: float | None = None):
     except Exception:
         return None
     target = targets[0]["path"]
-    command = "python3 " + shlex.quote(helper) + " " + shlex.quote(json.dumps([stage, target, names]))
+    command = "python3 " + shlex.quote(helper) + " " + shlex.quote(json.dumps([stage, target, member_spec(session, names)]))
     return stage, command
 
 

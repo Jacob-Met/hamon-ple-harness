@@ -27,9 +27,11 @@ def public_instruction(name):
 
 
 class TerminalReceipt(unittest.IsolatedAsyncioTestCase):
-    async def course(self, prompt, populate=None, *, unavailable=False, workdir="/filesystem/work", inspect=None):
+    async def course(self, prompt, populate=None, *, unavailable=False, workdir="/filesystem/work", inspect=None, prepare=None):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            if prepare:
+                prepare(root / workdir.lstrip("/"))
             probes = []
             session = SimpleNamespace(instruction=prompt, workdir=workdir,
                 mcp_servers=[], final_message="", usage=mock.AsyncMock(), log=mock.AsyncMock(),
@@ -91,7 +93,7 @@ class TerminalReceipt(unittest.IsolatedAsyncioTestCase):
         self.assertIn("zip_root_members_mismatch", answer)
         self.assertNotIn(CLAIM, answer)
 
-    async def test_structurally_complete_six_member_archive_preserves_report(self):
+    async def test_format_only_six_member_archive_refuses_wrong_workbooks(self):
         prompt = public_instruction("foundation-strategy")
         taskroot = "/filesystem/dc_structural__foundation_strategy__blind"
         book = ROOT / "artifacts/fill-compaction-acceptance/files/filesystem/Fill_Placement_Records_BlockA_SlabOnGrade.xlsx"
@@ -103,8 +105,10 @@ class TerminalReceipt(unittest.IsolatedAsyncioTestCase):
                     payload = book.read_bytes() if member.endswith(".xlsx") else (
                         b'{"result":"format-only control"}' if member.endswith(".json") else b"# format-only control")
                     archive.writestr(member, payload)
-        answer, _ = await self.course(prompt, complete, workdir=taskroot)
-        self.assertEqual(answer, CLAIM)
+        from test_template_workbooks import install_templates
+        answer, _ = await self.course(prompt, complete, workdir=taskroot, prepare=install_templates)
+        self.assertIn("zip_invalid_member_format", answer)
+        self.assertNotIn(CLAIM, answer)
 
     async def test_solar_document_store_is_never_treated_as_a_local_file(self):
         answer, paths = await self.course(public_instruction("solar-witness-test-package"))
