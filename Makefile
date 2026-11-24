@@ -34,3 +34,7 @@ verify-drainage-front:
 .PHONY: verify-workbook-units
 verify-workbook-units:
 	$(PYTHON) -m unittest discover -s tests -p 'test_xlsx*.py' -v
+
+.PHONY: verify-advanced-ifc
+verify-advanced-ifc:
+	$(PYTHON) ship/verify_advanced_ifc.py
