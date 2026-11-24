@@ -1336,7 +1336,7 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
                 "error": message, "conservation_verified": False}
 
     calculation = spec.get("calculation")
-    multispan_fields = {"spans_m", "udl_N_m", "span_EI_Nm2"}
+    multispan_fields = {"spans_m", "udl_N_m", "span_EI_Nm2", "point_loads"}
     if calculation != "continuous_beam_multispan" and multispan_fields.intersection(spec):
         return unsupported("per-span arrays require calculation=continuous_beam_multispan")
     if "supports" in spec and calculation == "continuous_beam_2span":
