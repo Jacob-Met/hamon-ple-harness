@@ -64,6 +64,8 @@ def edited_pdf(source, destination, edit):
                 if move == b"m" and line == b"l":
                     pair = (tuple(a), tuple(b))
                     targets = {
+                        "break_xref_pointer": (1, ((6539, 4282), (6467, 4354))),
+                        "erase_xref_border_A": (0, ((818, 2237), (894, 2237))),
                         "erase_mirrored_D": (0, ((3029, 2762), (3029, 2839))),
                         "erase_quarter_J": (1, ((5073, 12064), (5086, 12077))),
                         "erase_packed_plus": (0, ((11715, 8402), (11766, 8402))),
@@ -83,6 +85,20 @@ def edited_pdf(source, destination, edit):
                         operations.extend([([], b"S"),
                                            ([NumberObject(11725), NumberObject(8406)], b"m"),
                                            ([NumberObject(11752), NumberObject(8420)], b"l")])
+                        ground_edits += 1
+                    if (i == 0 and edit == "xref_wrong_zone" and
+                            all(2794 <= x <= 2845 and 1484 <= y <= 1561 for x,y in pair)):
+                        # Physically replace the last B in XUSB/2.3B by a complete
+                        # C in the same pen and lattice. Both captions still decode.
+                        if ground_edits == 0:
+                            operations.append(([], b"n"))
+                            letter = [(4,1),(3,0),(1,0),(0,1),(0,5),(1,6),(3,6),(4,5)]
+                            def to_pdf(point):
+                                x,y = point
+                                return [NumberObject(round(2794+51*x/4)), NumberObject(round(1561-77*y/6))]
+                            for first,last in zip(letter,letter[1:]):
+                                operations.extend([(to_pdf(first), b"m"), (to_pdf(last), b"l"), ([], b"S")])
+                        op = b"n"
                         ground_edits += 1
                     deleted = {
                         "erase_voltage_stroke": ((16898, 2273), (16949, 2273)),
@@ -109,8 +125,11 @@ def edited_pdf(source, destination, edit):
         if (edit, i) in (("erase_mirrored_D",0),("erase_quarter_J",1),("erase_small_reset_M",1),
                          ("erase_wire_voltage_plus",0), ("erase_corroborating_voltage_plus",0),
                          ("erase_vin_I_stem",0), ("erase_packed_plus",0), ("erase_packed_V",0),
-                         ("add_packed_foreign_stroke",0)):
+                         ("add_packed_foreign_stroke",0), ("break_xref_pointer",1),
+                         ("erase_xref_border_A",0)):
             require(ground_edits == 1, "Expected complete-word source stroke missing")
+        if i == 0 and edit == "xref_wrong_zone":
+            require(ground_edits == 10, "Expected all ten B strokes in the outlined target-zone caption")
         if i < 2:
             require(dot_count == (94, 90)[i], "Physical source junction count changed")
         if i == 2 and edit == "appendix_stroke":
@@ -155,6 +174,12 @@ def main():
                 and anchors["JTAG_TCK"] == ([tck] if page is page1 else [tck, 183])
                 and "JTAG" not in anchors and page["wire_groups"][tms] != page["wire_groups"][tck],
                 "A printed underscore, following suffix, or distinct wire was lost")
+    def reference_rows(page):
+        return [(r["name"], r["wire_index"], r["zone"], r["target_page"], r["target_zone"])
+                for r in page.get("outlined_cross_references", [])]
+    require(reference_rows(page1) == [("XUSB",264,"1A",2,"3B")]
+            and reference_rows(page2) == [("XUSB",234,"3B",1,"1A")],
+            "Printed source and destination frame evidence changed")
     controls = {}
     if args.controls:
         with tempfile.TemporaryDirectory() as directory:
@@ -163,7 +188,8 @@ def main():
                          "erase_voltage_stroke", "erase_signal_underscore", "erase_mirrored_D",
                          "erase_quarter_J", "erase_small_reset_M", "erase_wire_voltage_plus",
                          "erase_corroborating_voltage_plus", "erase_vin_I_stem",
-                         "erase_packed_plus", "erase_packed_V", "add_packed_foreign_stroke"):
+                         "erase_packed_plus", "erase_packed_V", "add_packed_foreign_stroke",
+                         "break_xref_pointer", "erase_xref_border_A", "xref_wrong_zone"):
                 path = Path(directory, edit + ".pdf")
                 edited_pdf(args.pdf, path, edit)
                 controls[edit] = read_pdf(path)
@@ -219,6 +245,16 @@ def main():
             require(all(a["wires"] == b["wires"] for a, b in zip(changed["pages"], baseline["pages"])) and
                     partition(sum(changed["document_wire_groups"], [])) == partition(expected),
                     f"{edit} admitted unexplained ink or changed an unrelated physical connection")
+        for edit in ("break_xref_pointer", "erase_xref_border_A", "xref_wrong_zone"):
+            changed = controls[edit]
+            expected = sum(baseline["document_wire_groups"], [])
+            expected[468+234] = -1
+            require(all(a["wires"] == b["wires"] for a,b in zip(changed["pages"], baseline["pages"]))
+                    and partition(sum(changed["document_wire_groups"], [])) == partition(expected),
+                    f"{edit} retained an uncorroborated XUSB join or changed an unrelated wire")
+        require(reference_rows(controls["xref_wrong_zone"]["pages"][0]) == [("XUSB",264,"1A",2,"3C")]
+                and reference_rows(controls["xref_wrong_zone"]["pages"][1]) == reference_rows(page2),
+                "Wrong-zone control must preserve two legible captions with incompatible destinations")
         for edit, separated in (
                 ("erase_wire_voltage_plus", [194]),
                 ("erase_corroborating_voltage_plus", [194]),
@@ -255,10 +291,10 @@ def main():
         print(json.dumps({"page": index + 1, "wire_sections": len(names), **observed}))
     # Frozen after the PDF-only voltage and signal run, independent of numeric group IDs.
     other_roster = json.dumps(sorted(other_islands.values()), separators=(",", ":")).encode()
-    require(sha256(other_roster).hexdigest() == "6e8be15f943486533875cdedb7c6f2f9290612b11ab2389181a68d8e742d22d6",
+    require(sha256(other_roster).hexdigest() == "794cc14d871e996b4ca9c59e43826e234a5751d383fd5d11b643371c600c275c",
             "The partition of the 640 non-ground wire sections changed")
     result = counts(document)
-    require(result == {"nets": 176, "exact": 173, "false_connected": 0, "false_separated": 17},
+    require(result == {"nets": 176, "exact": 174, "false_connected": 0, "false_separated": 9},
             f"Document metric changed: {result}")
     pairs = sum(n * (n - 1) // 2 for n in Counter(name for name, _ in document).values())
     print(json.dumps({"document": result, "correct_pairs": pairs - result["false_separated"],
