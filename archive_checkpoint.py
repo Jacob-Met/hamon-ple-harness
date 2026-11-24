@@ -150,12 +150,14 @@ def recover(stage: Path, target: Path, names: list[str]) -> str:
     return "published"
 
 
-def publish(stage: Path, target: Path, names: list[str], *, after_empty=False) -> None:
+def publish(stage: Path, target: Path, names: list[str], *, after_empty=False, prior_members=None) -> None:
     if not names or len(names) != len(set(names)) or any(
         not n or n in {".", ".."} or "/" in n or "\\" in n for n in names
     ):
         raise ValueError("expected distinct root filenames")
-    if not after_empty and not target.exists():
+    if prior_members is not None and set(prior_members) != set(names):
+        raise ValueError("incomplete prior observation of generated members")
+    if prior_members is None and not after_empty and not target.exists():
         _hydrate_stage_from_output_dir(stage, target.parent, names)
     sources = [stage / n for n in names]
     if any(not _valid_regular_file(p) for p in sources):
@@ -174,7 +176,20 @@ def publish(stage: Path, target: Path, names: list[str], *, after_empty=False) -
         verify(candidate, names)
         if initial != [stamp(p) for p in sources]:
             raise ValueError("staged members changed during publication")
-        if after_empty:
+        if prior_members is not None:
+            # Compare the verified, immutable candidate bytes with what was on
+            # disk before the generator, including same-size replacements.
+            with zipfile.ZipFile(candidate) as archive:
+                for name, previous in prior_members.items():
+                    if previous is None:
+                        continue
+                    digest = hashlib.sha256(str(archive.getinfo(name).file_size).encode())
+                    with archive.open(name) as member:
+                        while block := member.read(1_048_576):
+                            digest.update(block)
+                    if digest.hexdigest() == previous:
+                        raise ValueError(f"unchanged generator output: {name}")
+        if after_empty or prior_members is not None:
             _install_over_empty(candidate, target, names)
         else:
             _replace_synced(candidate, target)
@@ -251,7 +266,12 @@ def publish_after_empty(stage: Path, target: Path, names: list[str]) -> None:
 if __name__ == "__main__":
     import sys
     stage, target, members = json.loads(sys.argv[1])
-    if sys.argv[2:] == ["--verify"]:
+    if len(sys.argv) == 4 and sys.argv[2] == "--from-generated-output":
+        target = Path(target)
+        if target.parent.is_symlink():
+            raise ValueError("refusing linked output directory")
+        publish(target.parent, target, members, prior_members=json.loads(sys.argv[3]))
+    elif sys.argv[2:] == ["--verify"]:
         verify_checkpoint(Path(stage), Path(target), members)
     elif sys.argv[2:] == ["--checkpoint"]:
         checkpoint(Path(stage), Path(target), members)
