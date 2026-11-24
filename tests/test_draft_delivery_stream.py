@@ -96,8 +96,9 @@ class AuthoredDraftStream(unittest.IsolatedAsyncioTestCase):
                                         else:
                                             self.assertEqual(path, draft)
                                             self.assertEqual(raw.decode(), author)
-                                        path.write_bytes(raw)
-                                        reply["size"] = len(raw)
+                                        with path.open("ab" if m.get("append") else "wb") as handle:
+                                            handle.write(raw)
+                                        reply["size"] = path.stat().st_size
                                     elif m["type"] == "exec":
                                         args = shlex.split(m["command"])
                                         if args[:3] == ["cd", str(root), "&&"]:

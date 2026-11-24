@@ -93,6 +93,18 @@ class DraftPublication(unittest.TestCase):
             self.publish(output, list(members), {"members": members})
         self.assertFalse(output.exists())
 
+    def test_owner_formulas_are_preserved_and_their_old_values_are_recalculated(self):
+        xml = b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>2</v></c><c r="B1"><f>A1*2</f><v>4</v></c></row></sheetData></worksheet>'
+        changed = draft.patch_sheet(xml, {"A1": 5})
+        refreshed, formulas = draft.invalidate_formula_cache(changed)
+        self.assertTrue(formulas)
+        root = ET.fromstring(refreshed)
+        cell = next(n for n in root.iter() if n.get("r") == "B1")
+        self.assertEqual([n.tag.rsplit("}", 1)[-1] for n in cell], ["f"])
+        self.assertEqual(cell[0].text, "A1*2")
+        with self.assertRaises(ValueError):
+            draft.patch_sheet(xml, {"B1": 10})
+
     def test_draft_needs_a_qualified_task_and_fresh_observation(self):
         dest = "/filesystem/project/output/return.zip"
         targets = [{"path": dest, "kind": "file"}]
