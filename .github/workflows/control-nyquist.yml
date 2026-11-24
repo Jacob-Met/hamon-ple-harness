@@ -1,0 +1,38 @@
+name: Continuous control Nyquist verification
+on:
+  pull_request:
+    paths:
+      - hamon_pde_control_psychro_fem.py
+      - hamon_conservation_cad_verifier.py
+      - task-tools.ts
+      - tests/test_nyquist_winding.py
+      - .github/workflows/control-nyquist.yml
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install the participant runtime and independent frequency-response oracle
+        run: |
+          python -m pip install -r requirements.txt control==0.10.2
+          npm ci --no-audit --no-fund
+      - name: Exercise exact pole counts, frequency crossings and the registered tool
+        env:
+          PYTHONPATH: .:tests
+          OPENBLAS_NUM_THREADS: "1"
+          MPLBACKEND: Agg
+        run: |
+          python -c 'import control; print(control.__version__)'
+          python -m unittest -v test_nyquist_winding test_exact_transfer_hurwitz test_bode_crossovers test_bode_frequency_range test_discrete_control_registration
