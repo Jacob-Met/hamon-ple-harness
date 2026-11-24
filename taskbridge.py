@@ -111,6 +111,7 @@ class Session:
     self.final_message = ""
     self.fallback_summary = lambda text: text
     self.cancelled = asyncio.Event()
+    self._agent_exits: set[asyncio.Event] = set()
     self._ids = itertools.count(1)
     self._waiting: dict[str, asyncio.Future[dict[str, Any]]] = {}
     self._lock = asyncio.Lock()
@@ -769,6 +770,12 @@ class Relay:
       status, out_headers = 400, {"Content-Type": "application/json"}
       payload = b'{"error": "the request ended before its body did"}'
     except Cancelled:
+      # Giving an active Pi a normal tool error can start a provider turn
+      # during the evaluator's summary grace. Its process watcher handles the
+      # same cancel signal. Readers outside a managed process still get 503.
+      exits = tuple(self.session._agent_exits)
+      if exits:
+        await asyncio.gather(*(event.wait() for event in exits))
       status, out_headers, payload = (
           503,
           {"Content-Type": "application/json"},
@@ -1474,6 +1481,8 @@ async def run_process(
     A `Finished` instance with the exit code, recent stderr lines, and whether
     the process was stopped by the time budget.
   """
+  if session.cancelled.is_set():
+    raise Cancelled()
   pipe, devnull = asyncio.subprocess.PIPE, asyncio.subprocess.DEVNULL
   loop = asyncio.get_running_loop()
   transport, streams = await loop.subprocess_exec(
@@ -1526,16 +1535,30 @@ async def run_process(
       transport.close()
 
   stopped = False
+  session._agent_exits.add(streams.exited)
+  exited = asyncio.create_task(streams.exited.wait())
+  cancelled = asyncio.create_task(session.cancelled.wait())
   try:
-    await asyncio.wait_for(streams.exited.wait(), run_for)
-  except asyncio.TimeoutError:
-    stopped = True
-    await session.log(
-        f"{log_prefix}stopped {max(left, 0) - run_for:.0f} s before the time"
-        " limit"
+    ready, _ = await asyncio.wait(
+        {exited, cancelled}, timeout=run_for, return_when=asyncio.FIRST_COMPLETED
     )
+    if session.cancelled.is_set():
+      # The outer session keeps a grace period for returning an existing
+      # summary. Stop this subprocess before it can spend that period on a turn.
+      raise Cancelled()
+    if not ready:
+      stopped = True
+      await session.log(
+          f"{log_prefix}stopped {max(left, 0) - run_for:.0f} s before the time"
+          " limit"
+      )
   finally:
-    await asyncio.shield(cleanup())
+    exited.cancel()
+    cancelled.cancel()
+    try:
+      await asyncio.shield(cleanup())
+    finally:
+      session._agent_exits.discard(streams.exited)
   code = proc.returncode if proc.returncode is not None and not stopped else -1
   return Finished(code, "\n".join(err), stopped)
 

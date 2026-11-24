@@ -32,6 +32,30 @@ import path from 'node:path';
 const RELAY = process.env.TASK_RELAY_URL ?? "";
 const WORKDIR = process.env.TASK_WORKDIR ?? "/";
 const MAX_EXEC_SEC = 600;
+
+// The evaluator has integer-second command timeouts and no per-request cancel.
+// Leave Pi time to receive and persist the actual result before its hard stop.
+const EXEC_RECEIPT_MS = 2000;
+function phaseDeadline(): number | null {
+	try {
+		const budget = JSON.parse(process.env.PLE_DELIVERY_BUDGET ?? "null");
+		return ["work", "delivery"].includes(budget?.phase) && Number.isFinite(budget.phase_deadline_ms)
+			? budget.phase_deadline_ms : null;
+	} catch {
+		return null;
+	}
+}
+const PHASE_DEADLINE = phaseDeadline();
+
+export function phaseExecLimit(requested: number, deadline: number | null, now: number): number {
+	if (deadline === null) return requested;
+	const remaining = Math.floor((deadline - now - EXEC_RECEIPT_MS) / 1000);
+	if (remaining < 1) {
+		throw new Error("The phase has no time for another task command and its result. The command was not sent.");
+	}
+	return Math.min(requested, remaining);
+}
+
 const IMAGES: Record<string, string> = {
 	".png": "image/png",
 	".jpg": "image/jpeg",
@@ -175,7 +199,7 @@ function _origRegisterTaskTools_registerTaskTools(pi: ExtensionAPI) {
 			operations: {
 				exec: async (command, cwd, { onData, signal, timeout }) => {
 					if (signal?.aborted) throw new Error("aborted");
-					const limit = execLimit(timeout, MAX_EXEC_SEC);
+					const limit = phaseExecLimit(execLimit(timeout, MAX_EXEC_SEC), PHASE_DEADLINE, performance.timeOrigin + performance.now());
 					const run = relay("exec", { command: `cd ${quote(cwd)} || exit 1\n${command}`, timeout_sec: limit });
 					// The relay cannot cancel an exec: an abort stops the wait, and the command runs on to its time limit.
 					const abort = new Promise<never>((_, reject) =>
