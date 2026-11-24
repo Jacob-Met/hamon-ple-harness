@@ -1,5 +1,9 @@
 PYTHON ?= python3
 
+.PHONY: verify-ifc-indexed-arcs
+verify-ifc-indexed-arcs:
+	OPENBLAS_NUM_THREADS=1 uv run --no-project --with-requirements requirements.txt python -m unittest discover -s tests -p 'test_ifc_indexed_arcs.py' -v
+
 .PHONY: verify-multispan-contact
 verify-multispan-contact:
 	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m unittest discover -s tests -p 'test_multispan_contact.py' -v
@@ -21,12 +25,12 @@ verify-witness-equipment:
 
 .PHONY: verify-pipe-meshes
 verify-pipe-meshes:
-	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m pytest -q tests/test_pipe_network.py tests/test_pipe_sparse_loops.py
+	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m pytest -q tests/test_pipe_network.py tests/test_pipe_sparse_loops.py tests/test_pipe_sparse_reservoirs.py tests/test_fixed_head_exchange.py tests/test_pipe_minor_exchange.py
 
 .PHONY: verify-drainage-front
 verify-drainage-front:
 	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m pytest -q tests/test_consolidation_front.py tests/test_layered_consolidation_transient.py
 
-.PHONY: verify-ifc-indexed-arcs
-verify-ifc-indexed-arcs:
-	OPENBLAS_NUM_THREADS=1 uv run --no-project --with-requirements requirements.txt python -m unittest discover -s tests -p 'test_ifc_indexed_arcs.py' -v
+.PHONY: verify-workbook-units
+verify-workbook-units:
+	$(PYTHON) -m unittest discover -s tests -p 'test_xlsx*.py' -v

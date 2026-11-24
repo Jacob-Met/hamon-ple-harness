@@ -38,17 +38,20 @@ export class DeliveryBudget {
       : this.delivery ? this.maxSteps : Math.max(1, this.maxSteps - 4);
     if (limit !== null && this.steps >= limit) {
       this.reason = this.delivery ? "step limit" : "delivery step reserve";
-    } else if (this.phaseDeadline !== null) {
-      const now = this.clock();
-      const nextTurn = Math.max(0, now - this.lastBoundary, ...this.durations);
-      const cutoff = !this.delivery && this.taskDeadline !== null
-        ? Math.min(this.phaseDeadline, this.taskDeadline - 4 * nextTurn)
-        : this.phaseDeadline;
-      if (now + nextTurn >= cutoff) {
-        this.reason = this.delivery ? "final time reserve" : "delivery time reserve";
-      }
+    } else {
+      this.reason = this.timeReason(this.clock());
     }
     return this.reason;
+  }
+
+  timeReason(now) {
+    if (this.phaseDeadline === null) return null;
+    const nextTurn = Math.max(0, now - this.lastBoundary, ...this.durations);
+    const cutoff = !this.delivery && this.taskDeadline !== null
+      ? Math.min(this.phaseDeadline, this.taskDeadline - 4 * nextTurn)
+      : this.phaseDeadline;
+    return now + nextTurn >= cutoff
+      ? (this.delivery ? "final time reserve" : "delivery time reserve") : null;
   }
 
   finish(event) {
@@ -59,6 +62,9 @@ export class DeliveryBudget {
         ![...this.expected].every(id => observed.has(id))) return false;
     if (!this.decided) this.beforeTool(this.expected.values().next().value);
     const now = this.clock(), elapsed = now - this.lastBoundary;
+    // A first slow tool can exceed every earlier observation. Once all
+    // siblings have genuine results, hand off before requesting another turn.
+    this.reason ??= this.timeReason(now);
     this.lastBoundary = now;
     if (elapsed > 0 && Number.isFinite(elapsed)) {
       this.durations.push(elapsed);

@@ -87,6 +87,10 @@ console.log('budget policy controls passed');
         self.assertFalse(harness.delivery_budget_exhausted(session, 8))
 
 
+# The evaluator must stop this one-shot command before its second mutation.
+SLOW_COMMAND = "printf 'started\\n' >> executions; sleep 16; touch late-write"
+
+
 class FiniteTools:
     def __init__(self, mode="valid"):
         self.mode = mode
@@ -95,6 +99,8 @@ class FiniteTools:
         self.tools = set()
 
     def plan(self, request, index):
+        if self.mode in ("inflight", "cancel_inflight") and index == 1:
+            return False, [("bash", {"command": SLOW_COMMAND, "timeout": 90})], ""
         delivery = "DELIVERY_PHASE" in json.dumps(request["messages"])
         already = any("delivery.json" in json.dumps(row) for row in request["messages"]
                       if row.get("role") == "assistant")
@@ -155,6 +161,48 @@ class FiniteTools:
                 await writer.wait_closed()
 
 
+class LockedDispatch(unittest.IsolatedAsyncioTestCase):
+    async def exercise(self, after_wait, expected, *, requested=90, deadline=20, cancel=False):
+        frames = []
+        session = taskbridge.Session(SimpleNamespace(), {"instruction":"test locked dispatch"})
+
+        async def send(frame):
+            message = json.loads(frame)
+            frames.append(message)
+            session._waiting[message["id"]].set_result({"type":"result","id":message["id"],"ok":True})
+
+        session.ws.send = send
+        clock = SimpleNamespace(monotonic=lambda: now)
+        now = 10
+        with mock.patch.object(taskbridge, "time", clock):
+            async with session._lock:
+                pending = asyncio.create_task(session.exec("one command", requested, deadline=deadline))
+                await asyncio.sleep(0)  # the request is now waiting for the writer
+                self.assertFalse(frames)
+                now = after_wait
+                if cancel:
+                    session.cancelled.set()
+            if expected is None:
+                with self.assertRaises(taskbridge.Cancelled if cancel else taskbridge.TaskError):
+                    await pending
+                self.assertEqual(frames, [])
+            else:
+                result = await pending
+                self.assertEqual(frames, [{"type":"exec", "id":"1", "command":"one command", "timeout_sec":expected}])
+                if deadline is not None:
+                    self.assertEqual(result["timeout_sec"], expected)
+            self.assertFalse(session._waiting)
+
+    async def test_elapsed_queue_time_reduces_the_dispatched_timeout(self):
+        await self.exercise(16.5, 1)
+        await self.exercise(13, 2, requested=2)
+        await self.exercise(19.9, 90, deadline=None)
+
+    async def test_expired_and_cancelled_queue_entries_are_never_sent(self):
+        await self.exercise(17.001, None)
+        await self.exercise(10, None, cancel=True)
+
+
 @unittest.skipUnless(Path(harness.PI).is_file(), "install the submitted Pi via npm ci")
 class CooperativePi(unittest.IsolatedAsyncioTestCase):
     async def test_complete_batch_stops_and_resumes_without_an_extra_request(self):
@@ -165,6 +213,12 @@ class CooperativePi(unittest.IsolatedAsyncioTestCase):
 
     async def test_all_invalid_batch_still_reaches_delivery(self):
         await self.exercise("invalid")
+
+    async def test_slow_inflight_bash_preserves_the_acknowledged_session(self):
+        await self.exercise("inflight")
+
+    async def test_cancel_during_admitted_bash_never_restarts_delivery(self):
+        await self.exercise("cancel_inflight")
 
     async def exercise(self, mode):
         from websockets.asyncio.client import connect
@@ -177,56 +231,50 @@ class CooperativePi(unittest.IsolatedAsyncioTestCase):
             for directory in (task_dir, agent_dir, session_dir, work):
                 directory.mkdir()
             observed = {}
-            async def run_handler(socket):
-                session = taskbridge.Session(socket, {
-                    "instruction":"Calculate first, then write a delivery file.",
-                    "workdir":str(task_dir), "limits":{"max_steps":7,"agent_timeout_sec":1200}})
-                receiver = asyncio.create_task(session._read())
-                try:
-                    async with taskbridge.Relay(session) as relay:
-                        env = relay.env()
-                        env.update(PI_CODING_AGENT_DIR=str(agent_dir),PI_OFFLINE="1",
-                                   PI_SKIP_VERSION_CHECK="1",PI_TELEMETRY="0",
-                                   NODE_NO_WARNINGS="1",TASK_WORKDIR=str(task_dir))
-                        name, model = await asyncio.to_thread(harness.configure, agent_dir, relay, session, env)
-                        argv = [harness.PI,"--print","--mode","json","--session-dir",str(session_dir),
-                                "-nc","-ns","-np","-na","-e",str(ROOT/"task-tools.ts"),
-                                "-e",str(ROOT/"delivery-budget.ts"),"--provider",name,
-                                "--model",model,"--thinking","off"]
-                        run = harness.Run(session,model,budgeted=True)
-                        first = await taskbridge.run_process(argv,session,
-                            env=harness.delivery_process_env(env,session,run.budget_steps,300,budget_id=run.budget_id),
-                            cwd=str(work),stdin=b"Perform the next preparation step.",
-                            on_line=run.on_line,stop_before_sec=300)
-                        observed["requests_before_resume"] = len(stream.requests)
-                        observed["first_status"] = first.code
-                        observed["first_replies"] = run.replies
-                        observed["budget_steps"] = run.budget_steps
-                        matched = harness.acknowledged_tool_session(
-                            session_dir,run.tool_turn,run.observed_results,run.expected_calls,run.history,budget_id=run.budget_id)
-                        observed["matched"] = matched is not None
-                        if mode != "valid":
-                            observed["missing_marker_id_refused"] = harness.acknowledged_tool_session(
-                                session_dir,run.tool_turn,run.observed_results,run.expected_calls,run.history) is None
-                            observed["wrong_marker_id_refused"] = harness.acknowledged_tool_session(
-                                session_dir,run.tool_turn,run.observed_results,run.expected_calls,run.history,
-                                budget_id="not-this-run") is None
-                        if matched is None:
-                            observed["tail_roles"] = [[(r.get("message",{}).get("role"),r.get("message",{}).get("stopReason")) for r in list(map(json.loads,p.read_text().splitlines()))[-6:]] for p in session_dir.glob("*.jsonl")]
-                        else:
-                            await taskbridge.run_process([*argv,"--session",str(matched)],session,
-                                env=harness.delivery_process_env(env,session,run.budget_steps,90,delivery=True,budget_id=run.budget_id),
-                                cwd=str(work),stdin=b"DELIVERY_PHASE: write the calculated result now.",
-                                on_line=run.on_line,stop_before_sec=90)
-                        observed["last"] = session.final_message
-                finally:
-                    receiver.cancel()
-                    await asyncio.gather(receiver,return_exceptions=True)
+            slow = mode in ("inflight", "cancel_inflight")
+
+            async def run_handler(session):
+                async with taskbridge.Relay(session) as relay:
+                    env = relay.env()
+                    env.update(PI_CODING_AGENT_DIR=str(agent_dir),PI_OFFLINE="1",
+                               PI_SKIP_VERSION_CHECK="1",PI_TELEMETRY="0",
+                               NODE_NO_WARNINGS="1",TASK_WORKDIR=str(task_dir))
+                    name, model = await asyncio.to_thread(harness.configure, agent_dir, relay, session, env)
+                    argv = [harness.PI,"--print","--mode","json","--session-dir",str(session_dir),
+                            "-nc","-ns","-np","-na","-e",str(ROOT/"task-tools.ts"),
+                            "-e",str(ROOT/"delivery-budget.ts"),"--provider",name,
+                            "--model",model,"--thinking","off"]
+                    run = harness.Run(session,model,budgeted=True)
+                    first = await taskbridge.run_process(argv,session,
+                        env=harness.delivery_process_env(env,session,run.budget_steps,300,budget_id=run.budget_id),
+                        cwd=str(work),stdin=b"Perform the next preparation step.",
+                        on_line=run.on_line,stop_before_sec=300)
+                    observed["requests_before_resume"] = len(stream.requests)
+                    observed["first_status"] = first.code
+                    observed["first_replies"] = run.replies
+                    observed["budget_steps"] = run.budget_steps
+                    matched = harness.acknowledged_tool_session(
+                        session_dir,run.tool_turn,run.observed_results,run.expected_calls,run.history,budget_id=run.budget_id)
+                    observed["matched"] = matched is not None
+                    if mode in ("mixed", "invalid"):
+                        observed["missing_marker_id_refused"] = harness.acknowledged_tool_session(
+                            session_dir,run.tool_turn,run.observed_results,run.expected_calls,run.history) is None
+                        observed["wrong_marker_id_refused"] = harness.acknowledged_tool_session(
+                            session_dir,run.tool_turn,run.observed_results,run.expected_calls,run.history,
+                            budget_id="not-this-run") is None
+                    if matched is None:
+                        observed["tail_roles"] = [[(r.get("message",{}).get("role"),r.get("message",{}).get("stopReason")) for r in list(map(json.loads,p.read_text().splitlines()))[-6:]] for p in session_dir.glob("*.jsonl")]
+                    else:
+                        await taskbridge.run_process([*argv,"--session",str(matched)],session,
+                            env=harness.delivery_process_env(env,session,run.budget_steps,90,delivery=True,budget_id=run.budget_id),
+                            cwd=str(work),stdin=b"DELIVERY_PHASE: write the calculated result now.",
+                            on_line=run.on_line,stop_before_sec=90)
+                    observed["last"] = session.final_message
 
             async def handler(socket):
                 try:
                     async with asyncio.timeout(25):
-                        await run_handler(socket)
+                        await taskbridge._session(socket, run_handler)
                 except Exception as exc:
                     observed["handler_error"] = repr(exc)
 
@@ -240,10 +288,28 @@ class CooperativePi(unittest.IsolatedAsyncioTestCase):
                     async with serve(handler,"127.0.0.1",0) as evaluator:
                         port = evaluator.sockets[0].getsockname()[1]
                         async with connect(f"ws://127.0.0.1:{port}") as socket:
+                            await socket.send(json.dumps({
+                                "type":"task", "instruction":"Calculate first, then write a delivery file.",
+                                "workdir":str(task_dir),
+                                "limits":{"max_steps":7, "agent_timeout_sec":20 if slow else 1200}}))
                             async with asyncio.timeout(40):
                                 async for frame in socket:
                                     msg = json.loads(frame)
-                                    if msg.get("type") == "write_file":
+                                    if msg.get("type") == "exec" and slow:
+                                        self.assertEqual(msg["command"].splitlines()[-1], SLOW_COMMAND)
+                                        self.assertNotIn("exec_timeout", observed)
+                                        limit = observed["exec_timeout"] = msg["timeout_sec"]
+                                        child = await asyncio.create_subprocess_exec(
+                                            "timeout", str(limit), "bash", "-c", msg["command"])
+                                        if mode == "cancel_inflight":
+                                            await socket.send(json.dumps({"type":"cancel"}))
+                                        status = await child.wait()
+                                        observed["exec_status"] = status
+                                        if mode != "cancel_inflight":
+                                            await socket.send(json.dumps({"type":"result","id":msg["id"],
+                                                "ok":True,"exit_code":status,"output":"",
+                                                "truncated":False,"timed_out":status == 124}))
+                                    elif msg.get("type") == "write_file":
                                         path = Path(msg["path"])
                                         self.assertTrue(path.is_relative_to(task_dir))
                                         data = base64.b64decode(msg["content_b64"])
@@ -251,15 +317,37 @@ class CooperativePi(unittest.IsolatedAsyncioTestCase):
                                         path.write_bytes(data)
                                         await socket.send(json.dumps({"type":"result","id":msg["id"],
                                                                       "ok":True,"size":len(data)}))
+                                    elif msg.get("type") == "done":
+                                        observed["done"] = msg["final_message"]
                                     elif "id" in msg:
                                         await socket.send(json.dumps({"type":"result","id":msg["id"],
                                                                       "ok":False,"error":"unsupported fixture action"}))
             self.assertEqual(stream.errors,[])
             self.assertNotIn("handler_error", observed, (observed,stream.errors,len(stream.requests)))
+            if slow:
+                self.assertEqual((task_dir/"executions").read_text(), "started\n")
+                self.assertFalse((task_dir/"late-write").exists(), observed)
+                self.assertGreaterEqual(observed["exec_timeout"], 1)
+                self.assertLess(observed["exec_timeout"], 15)
+                self.assertEqual(observed["exec_status"], 124)
+                if mode == "cancel_inflight":
+                    self.assertEqual(len(stream.requests), 1)
+                    self.assertNotIn("requests_before_resume", observed)
+                    self.assertFalse((task_dir/"delivery.json").exists())
+                    self.assertIn("stopped", observed["done"])
+                    return
+                self.assertTrue(observed["matched"], observed)
+                self.assertEqual(observed["requests_before_resume"], 1)
+                self.assertEqual(len(stream.requests), 3)
+                delivered_context = json.dumps(stream.requests[1]["messages"])
+                self.assertIn(f'Command timed out after {observed["exec_timeout"]} seconds', delivered_context)
+                self.assertEqual(json.loads((task_dir/"delivery.json").read_text()), {"completed":2})
+                self.assertEqual(observed["last"], "Delivered.")
+                return
             self.assertEqual(observed["requests_before_resume"],3,observed)
             self.assertEqual(observed["first_replies"],3 if mode == "valid" else 4,observed)
             self.assertEqual(observed["budget_steps"],3,observed)
-            if mode != "valid":
+            if mode in ("mixed", "invalid"):
                 self.assertTrue(observed["missing_marker_id_refused"])
                 self.assertTrue(observed["wrong_marker_id_refused"])
             self.assertTrue(observed["matched"],observed)

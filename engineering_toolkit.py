@@ -27,7 +27,7 @@ import zipfile
 from typing import Any
 
 from office_package import (
-    _DOCUMENT_RELS, _SPREADSHEET_NS, _xlsx_relationships, _xlsx_target, _xlsx_xml,
+    _DOCUMENT_RELS, _SPREADSHEET_NS, _xlsx_relationships, _xlsx_target, _xlsx_xml, workbook_parts as _xlsx_parts,
     check_office_package,
 )
 
@@ -195,50 +195,6 @@ def equal_dimensions(lhs: str, rhs: str, rtol: str):
             "dimensions":list(a.dim)}
 
 
-def _xlsx_parts(archive):
-    names = archive.namelist()
-    if len(names) != len(set(names)):
-        raise ValueError("Duplicate OOXML package member")
-    if "_rels/.rels" not in names and "xl/workbook.xml" not in names:
-        # Earlier callers also audit standalone worksheet fragments.
-        parts = sorted(n for n in names if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n))
-        if not parts:
-            raise ValueError("No workbook or standalone worksheet parts")
-        return None, [{"part": n, "kind": "worksheet", "name": None} for n in parts]
-    if "_rels/.rels" not in names:
-        workbook = "xl/workbook.xml"
-    else:
-        office = [r for r in _xlsx_relationships(archive, "_rels/.rels").values()
-                  if r.get("Type") in {base + "/officeDocument" for base in _DOCUMENT_RELS}]
-        if len(office) != 1 or office[0].get("TargetMode", "Internal") != "Internal":
-            raise ValueError("Expected exactly one internal workbook relationship")
-        workbook = _xlsx_target("", office[0].get("Target", ""))
-    root = _xlsx_xml(archive, workbook, 2_000_000)
-    ns = root.tag.removesuffix("workbook")
-    if ns not in {"{" + v + "}" for v in _SPREADSHEET_NS}:
-        raise ValueError(f"Invalid spreadsheet workbook: {workbook}")
-    sheets = root.find(ns + "sheets")
-    if sheets is None:
-        raise ValueError("Workbook is missing its sheets collection")
-    source = pathlib.PurePosixPath(workbook)
-    rels = _xlsx_relationships(archive, str(source.parent / "_rels" / (source.name + ".rels")))
-    result = []
-    for sheet in sheets.findall(ns + "sheet"):
-        ids = [sheet.get("{" + prefix + "}id") for prefix in _DOCUMENT_RELS]
-        ids = [rid for rid in ids if rid is not None]
-        if len(ids) != 1 or ids[0] not in rels:
-            raise ValueError(f"Unresolved relationship for sheet {sheet.get('name')!r}")
-        rel = rels[ids[0]]
-        if rel.get("TargetMode", "Internal") != "Internal":
-            raise ValueError(f"Workbook sheet {sheet.get('name')!r} has an external target")
-        base, _, kind = rel.get("Type", "").rpartition("/")
-        if base not in _DOCUMENT_RELS:
-            kind = rel.get("Type", "unknown")
-        result.append({"name": sheet.get("name"), "sheet_id": sheet.get("sheetId"),
-                       "state": sheet.get("state", "visible"), "kind": kind,
-                       "part": _xlsx_target(workbook, rel.get("Target", ""))})
-    return workbook, result
-
 
 _CELL_REF = r"\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}"
 _EXACT_LOOKUP = re.compile(
@@ -254,8 +210,17 @@ _CONVERT_UNITS = {
     key: UNITS[name] for key, name in {
         "m": "m", "mm": "mm", "cm": "cm", "km": "km", "in": "inch", "ft": "ft",
         "yd": "yd", "g": "g", "kg": "kg", "lbm": "lbm", "sec": "s", "hr": "hr",
+        "N": "N", "kN": "kN", "MN": "MN",
+        "Pa": "Pa", "kPa": "kPa", "MPa": "MPa", "GPa": "GPa",
     }.items()
 }
+# Excel permits both m2 and m^2. Prefixes apply to the length before squaring.
+for _length_token in ("m", "mm", "cm", "km", "in", "ft", "yd"):
+    _length_unit = _CONVERT_UNITS[_length_token]
+    for _suffix in ("2", "^2"):
+        _CONVERT_UNITS[_length_token + _suffix] = _length_unit * _length_unit
+
+
 def _grid_position(address):
     match = re.fullmatch(r"([A-Z]{1,3})([1-9][0-9]{0,6})", address.replace("$", "").upper())
     if match is None:
@@ -456,7 +421,7 @@ def _verify_lookup(sheet, formula, cached, literals):
 _ARITHMETIC_TOKEN = re.compile(
     rf"(?P<convert>CONVERT)(?=\s*\()|{_local_reference('ref')}|"
     r"(?P<number>(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:E[+-]?[0-9]+)?)"
-    r'|(?P<unit>"[A-Z]+")|(?P<operator>[(),+*/-])|(?P<space>\s+)',
+    r'|(?P<unit>"[A-Z]+(?:\^?2)?")|(?P<operator>[(),+*/-])|(?P<space>\s+)',
     re.I | re.ASCII)
 
 _COEFFICIENT = object()
@@ -1344,6 +1309,9 @@ def run(argv=None):
     wp.add_argument("file", nargs="?")
     wp.add_argument("--example", action="store_true", help="print a constructed input template")
     wp.add_argument("--output", help="new DOCX path, written only on an exact schedule match")
+    draft=sub.add_parser("materialize-draft",help="Export a fresh participant-authored Word or archive draft")
+    for name in ("source", "target", "fingerprint", "members"):
+        draft.add_argument(name)
     q=sub.add_parser("quantity",help="Convert a dimension-safe arithmetic expression")
     q.add_argument("expression");q.add_argument("--to",required=True)
     e=sub.add_parser("check",help="Assert two physical quantities match under relative tolerance")
@@ -1420,6 +1388,9 @@ def run(argv=None):
     try:
         if args.cmd=="witness-equipment":
             out=witness_equipment(args.pdf,args.catalog,args.edition,args.sheet,args.title_sheet,args.equipment_type)
+        elif args.cmd=="materialize-draft":
+            from hamon_delivery_draft import render
+            out=render(args.source,args.target,json.loads(args.members),args.fingerprint)
         elif args.cmd=="witness-package":
             import hamon_witness_package
             if args.example and args.file is None and args.output is None:
