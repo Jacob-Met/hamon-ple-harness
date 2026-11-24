@@ -311,9 +311,9 @@ def test_signed_gauge_reference_preserves_positive_and_negative_thresholds():
                    vapor_pressure_Pa=2300, suction_velocity_m_s=2, required_npsh_m=9.146854430412017)
     result = verify_turbomachinery(spec)
     g = Fraction("9.80665")
-    expected = (90000 - 2300 + 1000 * 2**2 / 2) / (1000 * float(g))
+    expected = Fraction(89700, 1000) / g
     assert result["available_npsh_m"] == pytest.approx(expected)
-    assert result["npsh_margin_m"] < 0
+    assert result["npsh_margin_m"] == float(expected - Fraction("9.146854430412017")) < 0
     assert not result["conservation_verified"]
     suction["required_npsh_m"] = math.nextafter(suction["required_npsh_m"], 0)
     assert verify_turbomachinery(spec)["conservation_verified"]
@@ -345,3 +345,24 @@ def test_registered_gauge_pressure_drives_both_verification_routes():
         assert run_dual_verify_spec({"mode":"domain", "kind":"euler_rotor", "spec":case})["dual_verified"] is passes
     data["suction_gauge_pressure_Pa"] = -100000
     assert not verify_turbomachinery(case)["ok"]
+
+
+@pytest.mark.parametrize("fields", [
+    dict(suction_absolute_pressure_Pa=12106.65, vapor_pressure_Pa=2300, required_npsh_m=1),
+    dict(suction_absolute_pressure_Pa=2300, vapor_pressure_Pa=2300, gauge_elevation_above_npsh_datum_m=.3,
+         loss_to_npsh_datum_m=.2, required_npsh_m=.1),
+])
+def test_decimal_head_balance_meets_exact_threshold(fields):
+    spec = radial_case()
+    spec["suction_flange"].update(fields, suction_velocity_m_s=0)
+    result = verify_turbomachinery(spec)
+    assert result["npsh_margin_m"] == 0 and result["conservation_verified"]
+
+
+def test_one_pascal_deficit_with_adjacent_large_integer_pressures():
+    spec = radial_case()
+    spec["suction_flange"].update(suction_absolute_pressure_Pa=2**53, vapor_pressure_Pa=2**53+1,
+                                 suction_velocity_m_s=0, required_npsh_m=0)
+    result = verify_turbomachinery(spec)
+    assert result["npsh_margin_m"] == float(-1 / (1000 * Fraction("9.80665")))
+    assert not result["conservation_verified"]

@@ -92,37 +92,46 @@ def station(data, omega):
 
 
 def npsh_at_suction_flange(data):
-    density = positive(data, "density_kg_m3")
+    def quantity(field, default=None):
+        value = data[field] if default is None else data.get(field, default)
+        finite(value, field)
+        # Integer tokens retain their full value. For a parsed float, use its
+        # shortest round-trippable decimal spelling, as displayed to the caller.
+        return Fraction(str(value))
+
+    density = quantity("density_kg_m3")
+    if density <= 0:
+        raise ValueError("density_kg_m3 must be positive")
     gauge = "suction_gauge_pressure_Pa" in data
     atmospheric = "local_atmospheric_pressure_Pa" in data
     if gauge or atmospheric:
         if not gauge or not atmospheric or "suction_absolute_pressure_Pa" in data:
             raise ValueError("Supply absolute suction pressure or a gauge reading paired with local atmospheric pressure")
-        finite(data["suction_gauge_pressure_Pa"], "suction_gauge_pressure_Pa")
-        positive(data, "local_atmospheric_pressure_Pa")
-        pressure = Fraction(data["suction_gauge_pressure_Pa"]) + Fraction(data["local_atmospheric_pressure_Pa"])
-        if pressure <= 0:
-            raise ValueError("Reconstructed absolute suction pressure must be positive")
+        atmosphere = quantity("local_atmospheric_pressure_Pa")
+        if atmosphere <= 0:
+            raise ValueError("local_atmospheric_pressure_Pa must be positive")
+        pressure = quantity("suction_gauge_pressure_Pa") + atmosphere
     else:
-        positive(data, "suction_absolute_pressure_Pa")
-        pressure = Fraction(data["suction_absolute_pressure_Pa"])
-    vapor = finite(data["vapor_pressure_Pa"], "vapor_pressure_Pa")
-    velocity = finite(data["suction_velocity_m_s"], "suction_velocity_m_s")
-    required = finite(data["required_npsh_m"], "required_npsh_m")
+        pressure = quantity("suction_absolute_pressure_Pa")
+    if pressure <= 0:
+        raise ValueError("Absolute suction pressure must be positive")
+    vapor = quantity("vapor_pressure_Pa")
+    velocity = quantity("suction_velocity_m_s")
+    required = quantity("required_npsh_m")
     if vapor < 0 or velocity < 0 or required < 0:
         raise ValueError(
             "Vapor pressure, suction speed and required NPSH must be nonnegative"
         )
-    elevation = finite(data.get("gauge_elevation_above_npsh_datum_m", 0), "gauge_elevation_above_npsh_datum_m")
-    loss = finite(data.get("loss_to_npsh_datum_m", 0), "loss_to_npsh_datum_m")
+    elevation = quantity("gauge_elevation_above_npsh_datum_m", 0)
+    loss = quantity("loss_to_npsh_datum_m", 0)
     if loss < 0:
         raise ValueError("Loss between the measurement point and NPSH datum must be nonnegative")
     # Compare the signed total-head margin before rounding the displayed head.
     # The suction flange and an elevated gauge use the same comparison datum.
     g = Fraction(980665, 100000)
-    head = ((Fraction(pressure) - Fraction(vapor)) / (Fraction(density) * g)
-            + Fraction(velocity) ** 2 / (2 * g) + Fraction(elevation) - Fraction(loss))
-    margin = head - Fraction(required)
+    head = ((pressure - vapor) / (density * g)
+            + velocity ** 2 / (2 * g) + elevation - loss)
+    margin = head - required
     return {"available_npsh_m": float(head), "npsh_margin_m": float(margin),
             "meets_required_npsh": margin >= 0}
 
