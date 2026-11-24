@@ -1,8 +1,8 @@
-"""Zero-revolution two-body Lambert transfers with independent endpoint replay.
+"""Two-body Lambert transfers with independent endpoint and revolution replay.
 
 The time equation and radial/transverse reconstruction follow Izzo (2015),
 https://arxiv.org/abs/1403.2705, equation 18 and Algorithm 1.
-A bracket, rather than an unconstrained Newton step, stays on the M=0 branch.
+A bracket, rather than an unconstrained Newton step, stays on each time branch.
 The returned binary64 velocities are separately propagated with universal
 Kepler variables. Conservation alone cannot establish a specified arrival.
 """
@@ -100,9 +100,9 @@ def _propagate(ctx, r0, v0, dt):
     return r, v, abs(elapsed(chi)-dt)/dt
 
 
-def _time_of_flight(ctx, x, lam):
+def _time_of_flight(ctx, x, lam, revolutions=0):
     if x == 1:
-        return ctx.mpf(2)/3*(1-lam**3)
+        return ctx.inf if revolutions else ctx.mpf(2)/3*(1-lam**3)
     delta = (1-x)*(1+x)
     y = ctx.sqrt(1-lam*lam*delta)
     if x < 1:
@@ -110,7 +110,33 @@ def _time_of_flight(ctx, x, lam):
         psi = ctx.atan2((y-lam*x)*ctx.sqrt(delta), x*y+lam*delta)
     else:
         psi = ctx.asinh((y-lam*x)*ctx.sqrt(-delta))
-    return (psi/ctx.sqrt(abs(delta))-x+lam*y)/delta
+    return ((psi+revolutions*ctx.pi)/ctx.sqrt(abs(delta))-x+lam*y)/delta
+
+
+def _minimum_time(ctx, lam, revolutions):
+    """Bracket the unique elliptic minimum using Izzo equation 22."""
+    lo, hi = ctx.zero, ctx.one/2
+    def derivative(x):
+        delta = (1-x)*(1+x)
+        y = ctx.sqrt(1-lam*lam*delta)
+        time = _time_of_flight(ctx, x, lam, revolutions)
+        return (3*time*x-2+2*lam**3*x/y)/delta
+    for _ in range(240):
+        if derivative(hi) > 0:
+            break
+        hi = (hi+1)/2
+    else:
+        raise ArithmeticError("multirevolution_minimum_bracket_budget")
+    for iteration in range(320):
+        middle = (lo+hi)/2
+        if derivative(middle) < 0:
+            lo = middle
+        else:
+            hi = middle
+        if hi-lo < ctx.mpf("1e-55"):
+            x = (lo+hi)/2
+            return x, _time_of_flight(ctx, x, lam, revolutions), iteration+1
+    raise ArithmeticError("multirevolution_minimum_iteration_budget")
 
 
 def _solve_x(ctx, lam, target):
