@@ -14,19 +14,19 @@ def triangle(scene, points, bottom=0., depth=2.):
 
 
 def contact_items(scene):
-    # The two outer prisms touch along the vertical through (1,1), in the
-    # middle of the first prism's diagonal edge. Its source ring does not
-    # have a vertex there. The union kernel splits that edge at the contact.
+    # The two outer prisms touch along the vertical through (2,0). Their
+    # individually indexed boundaries are valid, but welding the Boolean
+    # output by position would give four incident faces at this edge.
     # The third prism is entirely inside the first and adds no material.
     return [triangle(scene, [(0., 0.), (2., 0.), (0., 2.)]),
-            triangle(scene, [(1., 1.), (2., 1.), (1., 2.)]),
+            triangle(scene, [(2., 0.), (3., 0.), (3., -1.)]),
             triangle(scene, [(.25, .25), (.75, .25), (.25, .75)], .5, 1.)]
 
 
 def scene_with_opening(compound_role):
     scene = Source()
     compound = contact_items(scene)
-    distant = [triangle(scene, [(3., 0.), (4., 0.), (3., 1.)])]
+    distant = [triangle(scene, [(8., 0.), (9., 0.), (8., 1.)])]
     wall = scene.product("IFCWALL", compound if compound_role == "host" else distant)
     cutter = scene.product("IFCOPENINGELEMENT", compound if compound_role == "cutter" else distant)
     scene.void(wall, cutter)
