@@ -289,6 +289,7 @@ function _registerPleWave3DomainTools(pi: any) {
         path: { type: "string", description: "Workspace-relative path to .ifc model" },
         required_clearance_m: { type: "number", description: "Minimum required clearance in meters (default 0.05)" },
         cross_discipline_only: { type: "boolean", description: "Filter to cross-discipline clashes only (default true)" },
+        allow_partial: { type: "boolean", description: "Report physical-element quantities and pair coverage when part of a model is unresolved (default false)" },
       },
       required: ["path"],
     },
@@ -299,6 +300,7 @@ function _registerPleWave3DomainTools(pi: any) {
         ifc_b64: raw.toString("base64"),
         required_clearance_m: params.required_clearance_m ?? 0.05,
         cross_discipline_only: params.cross_discipline_only ?? true,
+        ...(params.allow_partial !== undefined ? { allow_partial: params.allow_partial } : {}),
       });
       return {
         content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
