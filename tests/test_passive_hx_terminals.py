@@ -18,6 +18,46 @@ def rating(ua, arrangement="counterflow", **changes):
 
 
 class PassiveHXTests(unittest.TestCase):
+    def test_fouling_adds_resistance_on_each_physical_area(self):
+        streams = dict(BASE, cp_hot_J_kgK=1024, cp_cold_J_kgK=1024, Th_in_K=400, Tc_in_K=300)
+        # Independent complete-device resistances in K/W; the areas are 4.5 and 9 m².
+        ua = 1 / (1 / (256 * 9) + (1 / 512) / 4.5 + (1 / 1024) / 9)
+        self.assertEqual(ua, 1024)
+        for basis, clean, area in (("outside", 256, 9), ("inside", 512, 4.5)):
+            with self.subTest(basis=basis):
+                model = dict(area_basis=basis, U_clean_W_m2K=clean, outside_to_inside_area_ratio=2,
+                             R_inside_m2K_W=1/512, R_outside_m2K_W=1/1024)
+                rated = solve_domain_problem("heat_exchanger_ntu", dict(streams, fouling=model, area_m2=area))
+                self.assertTrue(rated["dual_verified"], rated)
+                self.assertEqual(rated["UA_W_K"], ua)
+                self.assertEqual(rated["U_effective_W_m2K"], ua / area)
+                self.assertEqual(rated["NTU"], 1)
+                self.assertEqual((rated["Q_duty_W"], rated["Th_out_K"], rated["Tc_out_K"]),
+                                 (51200, 350, 350))
+                sized = solve_domain_problem("heat_exchanger_lmtd", dict(streams, fouling=model, Th_out_K=350))
+                self.assertTrue(sized["dual_verified"], sized)
+                self.assertEqual((sized["UA_W_K"], sized["LMTD_K"], sized["area_m2"]), (ua, 50, area))
+                self.assertEqual(sized["area_basis"], basis)
+
+    def test_fouling_clean_limit_and_ambiguous_or_invalid_inputs(self):
+        model = dict(area_basis="outside", U_clean_W_m2K=128, outside_to_inside_area_ratio=1.5,
+                     R_inside_m2K_W=0, R_outside_m2K_W=0)
+        spec = dict(BASE, fouling=model, area_m2=2)
+        rated = solve_domain_problem("heat_exchanger_ntu", spec)
+        self.assertTrue(rated["dual_verified"], rated)
+        self.assertEqual(rated["Q_duty_W"], rating(256)["Q_duty_W"])
+        for kind, bad in (
+            ("heat_exchanger_ntu", dict(spec, UA_W_K=256)),
+            ("heat_exchanger_lmtd", dict(spec, Th_out_K=335, U_W_m2K=128)),
+            ("heat_exchanger_ntu", dict(BASE, fouling=model)),
+            ("heat_exchanger_ntu", dict(spec, area_m2=-1)),
+            ("heat_exchanger_ntu", dict(spec, fouling=dict(model, area_basis="unspecified"))),
+            ("heat_exchanger_ntu", dict(spec, fouling=dict(model, outside_to_inside_area_ratio=0))),
+            ("heat_exchanger_lmtd", dict(BASE, Th_out_K=335, fouling=dict(model, R_inside_m2K_W=-1))),
+        ):
+            with self.subTest(kind=kind, inputs=bad):
+                self.assertFalse(solve_domain_problem(kind, bad)["dual_verified"])
+
     def test_global_energy_closure_does_not_qualify_a_negative_area(self):
         r = sizing(270.)
         self.assertFalse(r["dual_verified"])
