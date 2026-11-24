@@ -369,7 +369,7 @@ function _registerPleWave3DomainTools(pi: any) {
         if (Object.keys(params).some((key) => key !== "mode")) {
           throw new Error("Request the engineering reference with mode alone.");
         }
-        return { content: [{ type: "text", text: engineeringSolver.description + " The FEM family also accepts spec.mode=continuous_beam_multispan with the same signed loads, seats and settlements." }], details: { mode: "reference" } };
+        return { content: [{ type: "text", text: engineeringSolver.description + " The FEM family also accepts spec.mode=continuous_beam_multispan with the same signed loads, seats and settlements. For an unchoked isentropic CD nozzle use compressible_acoustics, spec.subkind=cd_nozzle_subsonic, exit_to_throat_area, back_to_total_pressure and optional station_areas_over_throat. The result reports the subsonic Mach and static-to-total pressure and temperature at the throat, exit and requested areas." }], details: { mode: "reference" } };
       }
       return engineeringSolver.execute(id, params);
     },
