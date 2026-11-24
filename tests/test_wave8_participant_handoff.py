@@ -44,7 +44,7 @@ def test_solver_receipt_reaches_low_effort_participant_with_original_request(tmp
         (single, "low", 1),
         (json.dumps({"mode": "civil_geotech", "spec": {**spec, "applied_gross_pressure_Pa": 1e12}}),
          "medium", 0),
-        ("Run the calculations below and return their JSON results in the same order.\n" + fence,
+        (fence,
          "low", 2),
         (fence + "\nCompare against the project specification.", "medium", 0),
         (staged, "low", 1),

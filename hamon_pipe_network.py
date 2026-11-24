@@ -759,8 +759,8 @@ def verify_pipe_network(spec):
         )
 
 
-def equipped_branch_head(branch, flow_per_pump):
-    """Common stage head at total flow plus one parallel path's hose and strainer."""
+def _equipped_branch_terms(branch, flow_per_pump):
+    """Keep the branch head components separate until the pump-curve comparison."""
     fields = {"common_head_m", "hose_length_m", "hose_diameter_m", "hose_roughness_m",
               "kinematic_viscosity_m2_s", "strainer_reference_flow_m3_s",
               "strainer_reference_head_m"}
@@ -778,13 +778,22 @@ def equipped_branch_head(branch, flow_per_pump):
         raise ValueError("Hose dimensions, viscosity, gravity and reference flow must be positive")
     if not 0 <= roughness < diameter or min(common, reference_head) < 0:
         raise ValueError("Require nonnegative head and roughness less than the hose diameter")
+    flow = Fraction(flow_per_pump)
     with np.errstate(over="raise", invalid="raise", divide="raise"):
         law, _, _ = pipe_law(length, diameter, roughness, 0, viscosity, gravity)
-        hose = float(law(flow_per_pump)[0])
-        strainer = reference_head * (flow_per_pump / reference_flow) ** 2
-        required = number(common + hose + strainer)
-    return {"common_head_m": common, "hose_head_loss_m": hose,
+        hose = Fraction(number(float(law(float(flow))[0])))
+    if flow > 0 and hose <= 0:
+        raise ValueError("Positive hose loss is unresolved at the design flow")
+    strainer = Fraction(reference_head) * (flow / Fraction(reference_flow))**2
+    required = Fraction(common) + hose + strainer
+    return {"common_head_m": Fraction(common), "hose_head_loss_m": hose,
             "strainer_head_loss_m": strainer, "required_head_m": required}
+
+
+def equipped_branch_head(branch, flow_per_pump):
+    """Return the conventional binary64 display of one equipped path's head budget."""
+    return {name: number(float(value))
+            for name, value in _equipped_branch_terms(branch, flow_per_pump).items()}
 
 
 def pump_curve(curve):
@@ -866,10 +875,10 @@ def verify_pump_duty(spec):
         if gravity <= 0 or ("gravity_m_s2" in branch and number(branch["gravity_m_s2"]) != gravity):
             raise ValueError("Use one positive site gravity for head losses and power")
         if "equipped_branch" in spec:
-            result.update(
-                equipped_branch_head({**branch, "gravity_m_s2": gravity}, float(per_pump))
-            )
-            required = Fraction(result["required_head_m"])
+            terms = _equipped_branch_terms({**branch, "gravity_m_s2": gravity}, per_pump)
+            required = terms["required_head_m"]
+            for name, value in terms.items():
+                _duty_quantity(result, name, value)
         else:
             required = Fraction(number(spec["required_head_m"]))
             if required < 0:

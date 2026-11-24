@@ -36,13 +36,18 @@ target = Path(sys.argv[1])
 if target.suffix == '.docx':
     target.write_bytes(document.getvalue())
 else:
-    with zipfile.ZipFile(target, 'w') as z:
-        z.writestr('report.docx', document.getvalue())
-        z.writestr('result.json', json.dumps({'total': value}))
-        z.writestr('checks.csv', 'quantity,value\\ntotal,%s\\n' % value)
-        z.writestr('README.md', '# Calculation fixture\\nSum of supplied values.\\n')
-        z.writestr('notes.txt', 'Synthetic runtime control.\\n')
-        z.writestr('audit.json', json.dumps({'inputs': 3}))
+    members = {'report.docx': document.getvalue(), 'result.json': json.dumps({'total': value}).encode(),
+               'checks.csv': ('quantity,value\\ntotal,%s\\n' % value).encode(),
+               'README.md': b'# Calculation fixture\\nSum of supplied values.\\n',
+               'notes.txt': b'Synthetic runtime control.\\n', 'audit.json': b'{"inputs":3}'}
+    write_loose = False
+    if write_loose:
+        for name, data in members.items():
+            (target.parent / name).write_bytes(data)
+    else:
+        with zipfile.ZipFile(target, 'w') as z:
+            for name, data in members.items():
+                z.writestr(name, data)
 '''
 MEMBERS = ['report.docx', 'result.json', 'checks.csv', 'README.md', 'notes.txt', 'audit.json']
 
@@ -50,6 +55,7 @@ class RepairStream:
     """The second model turn writes a generator through Pi's actual write tool."""
     def __init__(self, script, *, command=None):
         self.script = str(script)
+        self.generator = GENERATOR
         self.command = command
         self.requests = 0
         self.tools = set()
@@ -70,7 +76,7 @@ class RepairStream:
                 'usage': {'input_tokens': 1, 'output_tokens': 0}}})]
             if self.requests == (1 if self.command else 2):
                 tool = 'bash' if self.command else 'write'
-                args = {'command': self.command} if self.command else {'path': self.script, 'content': GENERATOR}
+                args = {'command': self.command} if self.command else {'path': self.script, 'content': self.generator}
                 events += [
                     ('content_block_start', {'index': 0, 'content_block': {'type': 'tool_use',
                         'id': 'produce', 'name': tool, 'input': {}}}),
@@ -100,7 +106,7 @@ class RepairStream:
 @unittest.skipUnless(Path(harness.PI).is_file(), 'actual installed Pi CLI required')
 class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
     async def course(self, extension, *, cancel=False, loose=False, stream_factory=RepairStream,
-                     max_steps=None, expected_requests=3):
+                     max_steps=None, expected_requests=3, late_loose=False):
         # CI provisions this empty task root, separate from the harness.
         with (tempfile.TemporaryDirectory(prefix='ple-recovery-', dir='/filesystem') as directory,
               tempfile.TemporaryDirectory(prefix='ple-home-') as home):
@@ -121,6 +127,9 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                     + "target.unlink()\nPath('report.zip').touch()\n")
             stream = (MockStream() if cancel else RepairStream(script, command=command) if loose
                       else stream_factory(script))
+            if late_loose:
+                stream.generator = GENERATOR.replace('write_loose = False', 'write_loose = True')
+            use_publisher = loose or late_loose
             helpers = set()
             observed_recovery = []
             writes, materializations, children = [], [], []
@@ -149,7 +158,7 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                       mock.patch.object(loop, 'subprocess_exec', side_effect=record_spawn),
                       mock.patch.object(harness.engineering_intake, 'intake_for_prompt', mock.AsyncMock(return_value='')),
                       mock.patch.object(harness.engineering_intake, 'provision_engineering_cli', mock.AsyncMock(return_value='')),
-                      (contextlib.nullcontext() if loose else
+                      (contextlib.nullcontext() if use_publisher else
                        mock.patch.object(harness.archive_contract, 'provision', mock.AsyncMock(return_value=None)))):
                     async with serve(entry, '127.0.0.1', 0) as server:
                         port = server.sockets[0].getsockname()[1]
@@ -176,7 +185,7 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                                             data = (root / 'input.json').read_bytes()
                                             result.update(content_b64=base64.b64encode(data).decode(), size=len(data), truncated=False)
                                         elif message['type'] == 'write_file':
-                                            if loose:
+                                            if use_publisher and message['path'] != str(script):
                                                 helper = Path(message['path'])
                                                 self.assertEqual(helper.parent, Path('/tmp'))
                                                 self.assertRegex(helper.name, r'^ple-archive-[0-9a-f]{16}\.pyz$')
@@ -190,7 +199,7 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                                             self.assertEqual(message['path'], str(script))
                                             self.assertFalse(message.get('append'))
                                             data = base64.b64decode(message['content_b64'])
-                                            self.assertEqual(data.decode(), GENERATOR)
+                                            self.assertEqual(data.decode(), stream.generator if late_loose else GENERATOR)
                                             script.write_bytes(data)
                                             writes.append(str(script))
                                             result['size'] = len(data)
@@ -199,7 +208,7 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                                             if loose and message['command'].endswith('\n' + command):
                                                 self.assertEqual(message['command'].splitlines()[-1], command)
                                                 args = shlex.split(command)
-                                            elif loose and len(args) >= 3 and Path(args[1]) in helpers:
+                                            elif use_publisher and len(args) >= 3 and Path(args[1]) in helpers:
                                                 stage, dest, members = json.loads(args[2])
                                                 self.assertEqual(dest, str(output))
                                                 self.assertEqual(members, MEMBERS)
@@ -221,7 +230,7 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                                             process = await spawn(*args, cwd=root, stdout=asyncio.subprocess.PIPE,
                                                                   stderr=asyncio.subprocess.PIPE)
                                             stdout, stderr = await asyncio.wait_for(process.communicate(), message['timeout_sec'] + 2)
-                                            if not loose or args[1:2] == ['-c']:
+                                            if not use_publisher or args[1:2] == ['-c']:
                                                 self.assertEqual(process.returncode, 0, stderr.decode())
                                             result.update(exit_code=process.returncode, output=stdout.decode(), timed_out=False, truncated=False)
                                         else:
@@ -256,6 +265,8 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(stream.requests) if isinstance(stream.requests, list) else stream.requests, expected_requests)
                 self.assertEqual(writes, [str(script)])
                 self.assertEqual(len(materializations), 1)
+                if late_loose:
+                    self.assertTrue(any(args[:1] == ['--from-generated-output'] for args in observed_recovery))
                 self.assertNotIn('Incomplete', summary)
                 self.assertNotIn('could not be verified', summary)
                 with zipfile.ZipFile(output) as archive:
@@ -275,6 +286,9 @@ class FinalMaterializationStream(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_output_from_registered_bash_republishes_complete_loose_members(self):
         await self.course('.zip', loose=True)
+
+    async def test_six_loose_members_from_the_final_generator(self):
+        await self.course('.zip', late_loose=True)
 
     async def test_live_sse_cancel_reaps_pi_and_leaves_no_deliverable(self):
         await self.course('.docx', cancel=True)

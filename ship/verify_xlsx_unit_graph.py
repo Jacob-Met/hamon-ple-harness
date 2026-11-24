@@ -145,10 +145,29 @@ def main():
     write_workbook(source, rows)
     before = xlsx_audit(source)
     assert sum(s["formulas_without_cached_values"] for s in before["sheets"]) == len(rows)
+    # Calc evaluates the spreadsheet numbers even when the stated input unit
+    # contradicts a preceding conversion. Keep this control separate from the 76.
+    source_frames = args.out / "conversion-source-frames.xlsx"
+    converted_cm = 'CONVERT(Inputs!A3,"m","cm")*2'
+    controls = [
+        (f'CONVERT({converted_cm},"m","mm")', 400000, "unit_scale_mismatch"),
+        (f'CONVERT({converted_cm},"kg","g")', 400000, "dimension_mismatch"),
+        (f'CONVERT({converted_cm},"cm","mm")', 4000, "matched"),
+    ]
+    write_workbook(source_frames, [(formula, value) for formula, value, _ in controls])
     command = [executable, f"-env:UserInstallation={(args.out/'calc-profile').resolve().as_uri()}",
-               "--headless", "--convert-to", "xlsx", "--outdir", str(output), str(source)]
+               "--headless", "--convert-to", "xlsx", "--outdir", str(output), str(source), str(source_frames)]
     calc = subprocess.run(command, check=True, capture_output=True, text=True, timeout=90)
     (args.out/"calc.log").write_text(calc.stdout+calc.stderr)
+    frames_recalculated = output / source_frames.name
+    frame_audit = xlsx_audit(frames_recalculated)
+    frame_guard = audit_local_deliverable(frames_recalculated)
+    assert not frame_guard["ok"], frame_guard
+    frames = {r["cell"]: r for r in frame_audit["conversion_audit"]["examples"] if r["sheet"] == "Checks"}
+    assert set(frames) == {"A1", "A2", "A3"}
+    for index, (_, expected_value, expected_status) in enumerate(controls, 1):
+        observed = frames[f"A{index}"]
+        assert observed["cached"] == expected_value and observed["status"] == expected_status, observed
     recalculated = output/source.name
     audit = xlsx_audit(recalculated)
     guard = audit_local_deliverable(recalculated)
@@ -200,6 +219,7 @@ def main():
         "fresh_formulas_compared":len(rows), "fresh_formulas_matched":matched,
         "engine_specific_lbm_variants":engine_variants, "fresh_guard":guard["ok"],
         "stale_guard":stale_guard["ok"], "stale_mismatch_cells":mismatches,
+        "source_frame_controls":frames,
         "comparisons":comparisons,
     }
     (args.out/"report.json").write_text(json.dumps(result,indent=2)+"\n")

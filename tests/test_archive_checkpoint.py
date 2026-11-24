@@ -40,6 +40,26 @@ class ArchiveInterruption(unittest.TestCase):
             self.assertFalse(archive_checkpoint.verify_typed_members(archive, ["memo.docx"], needed - 1))
             self.assertTrue(archive_checkpoint.verify_typed_members(archive, ["memo.docx"], needed))
 
+    def test_late_members_preserve_concurrent_archive_and_reject_invalid_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "submission.zip"
+            names = ["result.json"]
+            (root / names[0]).write_text("{invalid")
+            with self.assertRaises(ValueError):
+                archive_checkpoint.publish(root, target, names, prior_members={"result.json": None})
+            self.assertFalse(target.exists())
+            (root / names[0]).write_text('{"answer": 10}')
+            original_link = os.link
+            def competing_writer(candidate, destination, **kwargs):
+                with zipfile.ZipFile(destination, "w") as direct:
+                    direct.writestr("result.json", '{"answer": 42}')
+                return original_link(candidate, destination, **kwargs)
+            with mock.patch.object(os, "link", side_effect=competing_writer):
+                archive_checkpoint.publish(root, target, names, prior_members={"result.json": None})
+            with zipfile.ZipFile(target) as direct:
+                self.assertEqual(json.loads(direct.read("result.json")), {"answer": 42})
+
     def test_raw_foundation_contract_and_ambiguity(self):
         text = public_task("foundation-strategy")
         names = archive_contract.member_names(text)

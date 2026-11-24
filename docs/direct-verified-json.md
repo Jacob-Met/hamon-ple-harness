@@ -1,10 +1,11 @@
 # Direct replies for complete, verified JSON calculations
 
-The presolve router already computes and verifies a bounded inline physical
-calculation, then includes its JSON in a model request. When the instruction
-asks for exactly that JSON, this final generation step is redundant. The new
-path returns the complete result through the ordinary evaluator response before
-model configuration, Pi startup or task CLI copying.
+Trunk already returns a complete verified inline JSON calculation before model
+configuration, Pi startup or task CLI copying. This change keeps that path
+within its intended observed-context and task-lifetime boundaries. It makes
+incomplete inventory visible, allows cancellation to be processed during
+calculation, and binds the exported completion flag and actual reply to one
+validated result contract.
 
 ## Admission
 
@@ -55,9 +56,10 @@ solver CPU still cost resources; this change does not infer a dollar saving.
 `tests/test_certified_inline_reply.py` runs actual evaluator WebSockets and the
 installed Pi runtime against loopback Anthropic SSE. Paired courses cover a pipe
 network, electrochemical cell, multi-branch jacketed CSTR and ordered batch. The
-baseline disables only the new completion hook, retaining normal presolve and
-model execution. Each candidate must remove the baseline's one provider request
-and return equal physical JSON. The fixture's synthetic token counters are not
+ordinary arm disables direct completion, retaining normal presolve and model
+execution. The qualified direct arm must preserve the existing zero-request
+behavior and return equal physical JSON. This is a retained capability, not a
+new gain over current trunk. The fixture's synthetic token counters are not
 a price or engineering-accuracy oracle. Requests and input bytes are measured.
 
 Separate protocol controls complete all four cases with no model credentials,

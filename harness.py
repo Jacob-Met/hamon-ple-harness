@@ -491,7 +491,14 @@ async def solve(session: taskbridge.Session) -> str:
       session_args = ["--session-dir", str(session_dir)]
       # A generator written during this task can deterministically finish an
       # exact requested artifact; inherited unchanged scripts are never run.
-      materialize_candidates = delivery_materialize.candidates(delivery_targets)
+      materialize_candidates = delivery_materialize.candidates(
+          delivery_targets,
+          archive_members=archive_contract.declared_members(session.instruction, delivery_targets)
+              if engineering_cli_note else (),
+          witness=bool(engineering_cli_note and working_copy and terminal.filing
+                       and "witness" in session.instruction.lower()
+                       and "commissioning" in session.instruction.lower()),
+      )
       before_generators = await delivery_guard.snapshot(
           session, delivery_materialize.snapshot_targets(materialize_candidates),
           deadline=observation_deadline,
@@ -506,6 +513,7 @@ async def solve(session: taskbridge.Session) -> str:
       )
       if working_copy:
         delivery_note = terminal.copy_instruction(working_copy)
+      delivery_note += delivery_materialize.draft_note(materialize_candidates)
       first_request = session.instruction
       if archive_plan:
         first_request += archive_contract.first_instruction(*archive_plan)
@@ -738,9 +746,13 @@ async def solve(session: taskbridge.Session) -> str:
                 session, delivery_targets, deadline=final_deadline - 10))
           final_issues = delivery_guard.compare(before_delivery, terminal.after)
           if final_issues:
+            generator_probes = delivery_materialize.snapshot_targets(materialize_candidates)
+            member_paths = sorted(first_publication.required_outputs) if archive_plan else []
+            if len(generator_probes) + len(member_paths) > delivery_guard.MAX_TARGETS:
+                member_paths = []
+            loose_probes = [{"path": path, "kind": "file"} for path in member_paths]
             after_generators = await delivery_guard.snapshot(
-                session, delivery_materialize.snapshot_targets(materialize_candidates),
-                deadline=final_deadline - 10,
+                session, generator_probes + loose_probes, deadline=final_deadline - 10,
             )
             selected = delivery_materialize.plan(
                 materialize_candidates, final_issues, before_generators, after_generators,
@@ -751,6 +763,10 @@ async def solve(session: taskbridge.Session) -> str:
               observed = await delivery_materialize.materialize(
                   session, selected, reserve_sec=10, deadline=final_deadline,
               )
+              if member_paths and any(row["state"] == "executed" for row in observed):
+                await archive_contract.publish_generated(
+                    session, archive_plan[1], member_paths, after_generators, deadline=final_deadline - 10,
+                )
               terminal.observe(await delivery_guard.snapshot(
                   session, delivery_targets, deadline=final_deadline,
               ))
