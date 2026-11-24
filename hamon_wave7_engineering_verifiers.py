@@ -743,8 +743,16 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
                 return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False,
                         "error": "second_law_crossover_or_unreachable_effectiveness",
                         "invalid_observation": key}
-        if "UA" in observed:
-            ua = observed["UA"]
+        tube = None
+        if "tube_resistance" in params:
+            from hamon_passive_heat_exchanger import tubular_resistance, tube_extent
+            try:
+                tube = tubular_resistance(params["tube_resistance"])
+            except (ArithmeticError, TypeError, ValueError) as exc:
+                return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": str(exc)}
+        geometry_ua = tube.get("rated_UA_W_K") if tube is not None else None
+        if geometry_ua is not None or "UA" in observed:
+            ua = geometry_ua if geometry_ua is not None else observed["UA"]
             if ua < 0.0:
                 return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": "negative_UA"}
             ntu = ua / c_min
@@ -900,7 +908,13 @@ def solve_exchanger_or_radiation(params: Mapping[str, Any]) -> Dict[str, Any]:
             difference = max(0.0, abs(value - measured) - roundoff)
             observation_residuals[key] = difference / scale if scale else 0.0
         residual = float(max(eb_h, eb_c, lmtd_res, *observation_residuals.values()))
+        if tube is not None:
+            try:
+                tube.update(tube_extent(tube, ua))
+            except (ArithmeticError, TypeError, ValueError) as exc:
+                return {"domain": "exchangers_radiation", "subkind": subkind, "verified": False, "error": str(exc)}
         return {
+            **({"tube_resistance": tube} if tube is not None else {}),
             "domain": "exchangers_radiation",
             "subkind": subkind,
             "flow_arrangement": arr,
