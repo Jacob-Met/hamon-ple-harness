@@ -300,3 +300,48 @@ def test_measurements_at_two_stations_recover_same_datum_head():
     inlet.update(gauge_elevation_above_npsh_datum_m=2, loss_to_npsh_datum_m=0.5)
     upstream = verify_turbomachinery(spec)
     assert upstream["available_npsh_m"] == pytest.approx(reference["available_npsh_m"], abs=1e-12)
+
+
+
+def test_signed_gauge_reference_preserves_positive_and_negative_thresholds():
+    spec = radial_case()
+    suction = spec["suction_flange"]
+    del suction["suction_absolute_pressure_Pa"]
+    suction.update(suction_gauge_pressure_Pa=-11325, local_atmospheric_pressure_Pa=101325,
+                   vapor_pressure_Pa=2300, suction_velocity_m_s=2, required_npsh_m=9.146854430412017)
+    result = verify_turbomachinery(spec)
+    g = Fraction("9.80665")
+    expected = (90000 - 2300 + 1000 * 2**2 / 2) / (1000 * float(g))
+    assert result["available_npsh_m"] == pytest.approx(expected)
+    assert result["npsh_margin_m"] < 0
+    assert not result["conservation_verified"]
+    suction["required_npsh_m"] = math.nextafter(suction["required_npsh_m"], 0)
+    assert verify_turbomachinery(spec)["conservation_verified"]
+
+
+@pytest.mark.parametrize("extra", [
+    {"suction_gauge_pressure_Pa": -11325},
+    {"local_atmospheric_pressure_Pa": 101325},
+    {"suction_gauge_pressure_Pa": -11325, "local_atmospheric_pressure_Pa": 101325},
+])
+def test_mixed_or_partial_suction_pressure_reference_abstains(extra):
+    spec = radial_case()
+    spec["suction_flange"].update(extra)
+    assert not verify_turbomachinery(spec)["ok"]
+
+
+def test_registered_gauge_pressure_drives_both_verification_routes():
+    from hamon_conservation_cad_verifier import run_router_conservation_cad_verifier
+    from hamon_dual_verifier import run_dual_verify_spec
+
+    case = radial_case()
+    case["calculation"] = "euler_rotor"
+    data = case["suction_flange"]
+    del data["suction_absolute_pressure_Pa"]
+    data.update(suction_gauge_pressure_Pa=-70000, local_atmospheric_pressure_Pa=100000)
+    for required, passes in ((2, True), (4, False)):
+        data["required_npsh_m"] = required
+        assert run_router_conservation_cad_verifier({"spec":case})["conservation_verified"] is passes
+        assert run_dual_verify_spec({"mode":"domain", "kind":"euler_rotor", "spec":case})["dual_verified"] is passes
+    data["suction_gauge_pressure_Pa"] = -100000
+    assert not verify_turbomachinery(case)["ok"]

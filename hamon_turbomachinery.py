@@ -93,7 +93,19 @@ def station(data, omega):
 
 def npsh_at_suction_flange(data):
     density = positive(data, "density_kg_m3")
-    pressure = positive(data, "suction_absolute_pressure_Pa")
+    gauge = "suction_gauge_pressure_Pa" in data
+    atmospheric = "local_atmospheric_pressure_Pa" in data
+    if gauge or atmospheric:
+        if not gauge or not atmospheric or "suction_absolute_pressure_Pa" in data:
+            raise ValueError("Supply absolute suction pressure or a gauge reading paired with local atmospheric pressure")
+        finite(data["suction_gauge_pressure_Pa"], "suction_gauge_pressure_Pa")
+        positive(data, "local_atmospheric_pressure_Pa")
+        pressure = Fraction(data["suction_gauge_pressure_Pa"]) + Fraction(data["local_atmospheric_pressure_Pa"])
+        if pressure <= 0:
+            raise ValueError("Reconstructed absolute suction pressure must be positive")
+    else:
+        positive(data, "suction_absolute_pressure_Pa")
+        pressure = Fraction(data["suction_absolute_pressure_Pa"])
     vapor = finite(data["vapor_pressure_Pa"], "vapor_pressure_Pa")
     velocity = finite(data["suction_velocity_m_s"], "suction_velocity_m_s")
     required = finite(data["required_npsh_m"], "required_npsh_m")
@@ -105,21 +117,14 @@ def npsh_at_suction_flange(data):
     loss = finite(data.get("loss_to_npsh_datum_m", 0), "loss_to_npsh_datum_m")
     if loss < 0:
         raise ValueError("Loss between the measurement point and NPSH datum must be nonnegative")
-    if elevation or loss:
-        # Refer the measured absolute total head to the manufacturer's comparison
-        # plane. Only subtract a loss between those points, once.
-        g = Fraction(980665, 100000)
-        head = ((Fraction(pressure) - Fraction(vapor)) / (Fraction(density) * g)
-                + Fraction(velocity) ** 2 / (2 * g) + Fraction(elevation) - Fraction(loss))
-        margin = head - Fraction(required)
-        return {"available_npsh_m": float(head), "npsh_margin_m": float(margin),
-                "meets_required_npsh": margin >= 0}
-    available = (pressure - vapor) / (density * 9.80665) + velocity**2 / (2 * 9.80665)
-    return {
-        "available_npsh_m": available,
-        "npsh_margin_m": available - required,
-        "meets_required_npsh": available >= required,
-    }
+    # Compare the signed total-head margin before rounding the displayed head.
+    # The suction flange and an elevated gauge use the same comparison datum.
+    g = Fraction(980665, 100000)
+    head = ((Fraction(pressure) - Fraction(vapor)) / (Fraction(density) * g)
+            + Fraction(velocity) ** 2 / (2 * g) + Fraction(elevation) - Fraction(loss))
+    margin = head - Fraction(required)
+    return {"available_npsh_m": float(head), "npsh_margin_m": float(margin),
+            "meets_required_npsh": margin >= 0}
 
 
 def rotor(spec):
@@ -244,3 +249,4 @@ def verify_turbomachinery(spec):
             "calculation": "euler_rotor",
             "reason": str(exc),
         }
+
