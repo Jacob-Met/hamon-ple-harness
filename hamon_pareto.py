@@ -727,6 +727,10 @@ def route_from_intake_prompt(
             if certificate is not None:
                 plan["presolve_result_json"] = certificate
                 plan["presolve_source_sha256"] = hashlib.sha256(instruction.encode()).hexdigest()
+                # The certified parser consumed the entire instruction, including
+                # the cover. A bare calculation still belongs to the participant.
+                if instruction.strip().splitlines()[0] in _WAVE8_COVERS:
+                    plan["deliver_verified_json"] = True
             elif fin_request:
                 plan["presolve_abstention"] = abstention
             return plan
