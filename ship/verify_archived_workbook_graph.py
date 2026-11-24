@@ -87,12 +87,23 @@ def main():
         assert failures.keys() == expected.keys()
         for address, row in failures.items():
             assert math.isclose(row["expected"], expected[address], rel_tol=1e-12), row
+        cost_roots = ({("Alternatives", f"{column}35") for column in "GHIJ"}
+                      | {("Markups", f"B{i}") for i in range(2, 9)})
+        expected_roots = {
+            ("Alternatives", "T35"): cost_roots,
+            ("Alternatives", "U35"): cost_roots | {("Alternatives", "E35")},
+            ("LaborRates", "G10"): {("LaborRates", f"{column}10") for column in "DEF"},
+        }
+        for key, roots in expected_roots.items():
+            assert {tuple(ref) for ref in failures[key]["root_cells"]} == roots
+            assert failures[key]["root_cell_count"] == len(roots)
         report = {
             "archive": str(archive.relative_to(ROOT)), "workbook": original.name,
             "source_sha256": original_hash, "recalculated_sha256": hashlib.sha256(clean.read_bytes()).hexdigest(),
             "libreoffice": subprocess.check_output(["soffice","--version"], text=True).strip(),
             "reference": baseline, "candidate": counts, "corrupted": stale["counts"],
-            "rejected_cells": [f"{sheet}!{cell}" for sheet, cell in sorted(failures)],
+            "rejected_cells": {f"{sheet}!{cell}": failures[(sheet, cell)]["root_cells"]
+                               for sheet, cell in sorted(failures)},
             "reference_accepted_corruption": True, "candidate_accepted_corruption": False,
         }
     args.report.parent.mkdir(parents=True, exist_ok=True)

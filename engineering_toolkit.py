@@ -799,6 +799,9 @@ def _scalar_formula_audit(arithmetic, conversions, literals, legacy_lbm=False):
                 record["reason"] = "missing_numeric_cache"
             else:
                 record["status"] = "matched" if math.isclose(cached,result.value,rel_tol=1e-12) else "mismatch"
+            if kind == "arithmetic" and record["status"] == "mismatch" and result.roots:
+                record["root_cells"] = [list(ref) for ref in result.roots[:32]]
+                record["root_cell_count"] = len(result.roots)
         reports[kind].append(record)
     if not legacy_lbm and any('"lbm"' in row[0] for row in producers.values()):
         # Reconstruct the whole graph under one alternate numeric convention;
