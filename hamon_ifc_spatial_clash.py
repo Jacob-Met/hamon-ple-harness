@@ -1337,6 +1337,11 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
         operand_ref = args[2]
         operand_kind = entities.get(operand_ref[1], ("",))[0] if isinstance(operand_ref, tuple) and operand_ref[0] == "ref" else ""
         plane_clip = operator == "DIFFERENCE" and operand_kind in ("IFCHALFSPACESOLID", "IFCPOLYGONALBOUNDEDHALFSPACE")
+        if plane_clip:
+            try:
+                _require_prism_or_clipped_prism(entities, args[1])
+            except UnresolvedOpening as exc:
+                raise UnresolvedSolidGeometry("Half-space clipping requires a qualified finite prism host") from exc
         for reference in args[1:]:
             if operands and operator == "DIFFERENCE" and isinstance(reference, tuple) and reference[0] == "ref":
                 second_kind, fields = entities.get(reference[1], (None, []))
@@ -1635,6 +1640,13 @@ def _qualified_polygon_sweep(entities, item_ref, unit_scale):
     vertices = _apply_transform(vertices, solid_frame @ profile_frame)
     if not np.isfinite(vertices).all():
         raise UnresolvedSolidGeometry("Nonfinite transformed sweep")
+    source_volume = abs(_signed_area_2d(ring - ring[0]) * sweep[2])
+    origin = vertices[faces[0, 0]]
+    a, b, c = (vertices[faces[:, k]] - origin for k in range(3))
+    mesh_volume = abs(float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum())) / 6.
+    if not (math.isfinite(source_volume) and source_volume > 0 and mesh_volume > 0
+            and math.isclose(source_volume, mesh_volume, rel_tol=1e-8, abs_tol=0.)):
+        raise UnresolvedSolidGeometry("Transformed mesh does not preserve the finite authored prism volume")
     return vertices, faces
 
 
