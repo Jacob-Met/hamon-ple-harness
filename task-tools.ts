@@ -32,6 +32,18 @@ import path from 'node:path';
 const RELAY = process.env.TASK_RELAY_URL ?? "";
 const WORKDIR = process.env.TASK_WORKDIR ?? "/";
 const MAX_EXEC_SEC = 600;
+
+function phaseDeadline(): number | null {
+	try {
+		const budget = JSON.parse(process.env.PLE_DELIVERY_BUDGET ?? "null");
+		return ["work", "delivery"].includes(budget?.phase) && Number.isFinite(budget.phase_deadline_ms)
+			? budget.phase_deadline_ms : null;
+	} catch {
+		return null;
+	}
+}
+const PHASE_DEADLINE = phaseDeadline();
+
 const IMAGES: Record<string, string> = {
 	".png": "image/png",
 	".jpg": "image/jpeg",
@@ -48,6 +60,7 @@ interface RelayResponse {
 	content_b64?: string;
 	output?: string;
 	timed_out?: boolean;
+	timeout_sec?: number;
 	exit_code: number;
 }
 
@@ -176,7 +189,7 @@ function _origRegisterTaskTools_registerTaskTools(pi: ExtensionAPI) {
 				exec: async (command, cwd, { onData, signal, timeout }) => {
 					if (signal?.aborted) throw new Error("aborted");
 					const limit = execLimit(timeout, MAX_EXEC_SEC);
-					const run = relay("exec", { command: `cd ${quote(cwd)} || exit 1\n${command}`, timeout_sec: limit });
+					const run = relay("exec", { command: `cd ${quote(cwd)} || exit 1\n${command}`, timeout_sec: limit, phase_deadline_ms: PHASE_DEADLINE });
 					// The relay cannot cancel an exec: an abort stops the wait, and the command runs on to its time limit.
 					const abort = new Promise<never>((_, reject) =>
 						signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }),
@@ -184,7 +197,7 @@ function _origRegisterTaskTools_registerTaskTools(pi: ExtensionAPI) {
 					const r = await Promise.race([run, abort]);
 					const output = execOutput(r.output ?? "", Boolean(r.truncated));
 					if (output) onData(Buffer.from(output));
-					if (r.timed_out) throw new Error(`timeout:${limit}`);
+					if (r.timed_out) throw new Error(`timeout:${r.timeout_sec ?? limit}`);
 					return { exitCode: r.exit_code };
 				},
 			},
@@ -341,7 +354,7 @@ function _registerPleWave3DomainTools(pi: any) {
     },
   };
   engineeringSolver.description += " For a specified lower circular slip surface use civil_geotech with calculation=bishop_slip_circle, circle={center_x_m,center_y_m,radius_m}, slide_direction=right or left and contiguous left-to-right slices, each with left_x_m, right_x_m, weight_N_per_m, cohesion_Pa, friction_angle_deg and pore_pressure_Pa. Optional proposed_factor_of_safety checks a claimed value. Forces and moments are per metre out of plane. The result applies to the supplied circle and midpoint weights with gravity and basal water pressure.";
-  engineeringSolver.description += " For a beam on two to twelve unequal spans use fem with spec.mode=continuous_beam_multispan or structural with spec.calculation=continuous_beam_multispan. Supply per-span arrays spans_m, udl_N_m (positive downward) and span_EI_Nm2. The optional station maps or ordered arrays support_conditions and support_settlements_m specify vertical seats and positive downward settlements. Up to eight seats can be compression_only. The result gives signed reactions, moments, gaps and contact states for every station.";
+  engineeringSolver.description += " For a beam on two to twelve unequal spans use fem with spec.mode=continuous_beam_multispan or structural with spec.calculation=continuous_beam_multispan. Supply per-span arrays spans_m, udl_N_m (positive downward) and span_EI_Nm2. Optional point_loads [{x_m,downward_N}] place signed vertical forces anywhere along the beam, measured from its left end. The optional station maps or ordered arrays support_conditions and support_settlements_m specify vertical seats and positive downward settlements. Up to eight seats can be compression_only. The result gives signed reactions, moments, gaps and contact states for every station.";
   pi.registerTool({
     ...engineeringSolver,
     description: "Verify engineering calculations, CAD/STEP geometry and conservation residuals. Families and input selectors are listed in mode and spec. Call with only mode=reference for complete input conventions, examples, numerical limits and solver-specific options.",

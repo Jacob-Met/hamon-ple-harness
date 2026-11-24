@@ -48,6 +48,20 @@ assert.equal(unrestrained.passed, false);
 assert.match(unrestrained.reason, /no restrained equilibrium/);
 assert.equal((await runFem('fem-conflict', {calculation: 'continuous_beam_2span'})).passed, false);
 assert.equal((await runFem('fem-unsupported', {point_load_N: 10})).passed, false);
+// Shi Lab CSA 03 gives the signed reactions (13, 22, -3) P/32 and support moment -3PL/32.
+const point = {spans_m:[2,2], udl_N_m:[0,0], span_EI_Nm2:[16,16],
+               point_loads:[{x_m:1, downward_N:32}], support_conditions:{}};
+for (const family of ['structural', 'fem']) {
+  const selector = family === 'fem' ? {mode: calculation} : {calculation};
+  const fixed = (await beam.execute('point-' + family, {mode:family, spec:{...point, ...selector}})).details;
+  assert.deepEqual(fixed.support_reactions_N, {A:13, B:22, C:-3});
+  assert.equal(fixed.support_moments_Nm.B, -6);
+  assert.equal(fixed.dual_verified, true);
+  const free = (await beam.execute('free-' + family, {mode:family,
+    spec:{...point, ...selector, support_conditions:{C:'compression_only'}}})).details;
+  assert.deepEqual(free.support_reactions_N, {A:16, B:16, C:0});
+  assert.equal(free.support_gaps_m.C, 1);
+}
 const bad=(await beam.execute('invalid', { mode:'structural',
     spec:{ ...spec, span_m:3,E_Pa:1,I_m4:1,w_N_m:2 } })).details;
 assert.equal(bad.ok,false);

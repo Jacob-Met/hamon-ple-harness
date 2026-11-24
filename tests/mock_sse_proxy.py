@@ -2,22 +2,27 @@
 
 Run with the organizer Python environment:
     python tests/mock_sse_proxy.py /path/to/organizer/kit-checkout
-The Docker host gateway must be able to reach host loopback.
+The host probe uses loopback. On Linux the organizer's isolated container
+reaches the same fixture through Docker's local bridge gateway.
 """
 import argparse
 import asyncio
 import contextlib
 import json
+import ipaddress
 import os
+import secrets
 from pathlib import Path
 import sys
+import subprocess
 
 
 class MockStream:
     """Return a real partial Anthropic event stream, then wait for client close."""
 
-    def __init__(self, reply_text=None):
+    def __init__(self, reply_text=None, *, auth_token=None):
         self.reply_text = reply_text
+        self.auth_token = auth_token
         self.requests = 0
         self.probed = asyncio.Event()
         self.started = asyncio.Event()
@@ -26,7 +31,14 @@ class MockStream:
     async def respond(self, reader, writer):
         try:
             headers = (await reader.readuntil(b"\r\n\r\n")).decode("ascii").split("\r\n")
-            fields = dict(line.lower().split(": ", 1) for line in headers[1:] if ": " in line)
+            fields = {name.lower(): value.strip() for name, value in
+                      (line.split(":", 1) for line in headers[1:] if ":" in line)}
+            if self.auth_token and fields.get("x-api-key") != self.auth_token and (
+                fields.get("authorization") != "Bearer " + self.auth_token
+            ):
+                writer.write(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
+                await writer.drain()
+                return
             request = json.loads(await reader.readexactly(int(fields["content-length"])))
             method, target, _ = headers[0].split()
             route = (method, target.split("?", 1)[0])
@@ -73,12 +85,43 @@ class MockStream:
                 await writer.wait_closed()
 
 
+def docker_bridge_gateway():
+    """Find the local address the organizer maps to host.docker.internal."""
+    if sys.platform != "linux":
+        return None
+    raw = subprocess.run(
+        ["docker", "network", "inspect", "bridge"], check=True,
+        capture_output=True, text=True, timeout=15,
+    ).stdout
+    for config in json.loads(raw)[0]["IPAM"]["Config"]:
+        value = config.get("Gateway")
+        if value:
+            gateway = ipaddress.ip_address(value)
+            if gateway.version == 4 and not gateway.is_unspecified:
+                return str(gateway)
+    raise RuntimeError("Docker's local bridge has no IPv4 gateway")
+
+
+@contextlib.asynccontextmanager
+async def serve_kit_stream(stream, gateway):
+    async with contextlib.AsyncExitStack() as stack:
+        host = await stack.enter_async_context(
+            await asyncio.start_server(stream.respond, "127.0.0.1", 0)
+        )
+        port = host.sockets[0].getsockname()[1]
+        if gateway and gateway != "127.0.0.1":
+            await stack.enter_async_context(
+                await asyncio.start_server(stream.respond, gateway, port)
+            )
+        yield port
+
+
 async def run_kit(kit_root):
-    stream = MockStream()
-    async with await asyncio.start_server(stream.respond, "127.0.0.1", 0) as server:
-        port = server.sockets[0].getsockname()[1]
+    token = secrets.token_hex(24)
+    stream = MockStream(auth_token=token)
+    async with serve_kit_stream(stream, docker_bridge_gateway()) as port:
         env = {**os.environ, "MODEL_PROXY_URL": f"http://127.0.0.1:{port}",
-               "MODEL_PROXY_KEY": "local-fixture"}
+               "MODEL_PROXY_KEY": token}
         check = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "kit", "check", str(Path(__file__).resolve().parents[1]),
             "--cancel-test", "--no-smoke", cwd=kit_root, env=env)
