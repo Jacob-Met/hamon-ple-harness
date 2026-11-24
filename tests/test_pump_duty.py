@@ -101,6 +101,41 @@ class EquippedBranchTests(unittest.TestCase):
         self.assertTrue(single["checks"]["panel_adequate"])
         self.assertFalse(self.run_spec(available_panel_W=99)["checks"]["panel_adequate"])
 
+    def test_positive_branch_losses_survive_rounding_at_the_curve_head(self):
+        # A positive laminar loss is a strict physical shortfall even when both
+        # reported heads round to the same binary64 value.
+        branch = {**self.branch, "common_head_m": 16, "hose_length_m": 1,
+                  "hose_diameter_m": 1, "kinematic_viscosity_m2_s": 1e-6,
+                  "strainer_reference_flow_m3_s": 1e-4, "strainer_reference_head_m": 1e-6}
+        def solve(flow, head):
+            curve = [{"flow_m3_s": q, "head_m": head} for q in (0, 1)]
+            return self.run_spec(total_flow_m3_s=flow, identical_pumps=1,
+                                 curve=curve, equipped_branch=branch)
+        q = 1e-10
+        loss = 128 * 1e-6 * q / (math.pi * 9.80665) + 1e-6 * (q / 1e-4)**2
+        self.assertTrue(0 < loss < math.ulp(16) / 2)
+        result = solve(q, 16)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["required_head_m"], result["available_head_m"])
+        self.assertFalse(result["checks"]["head_adequate"])
+        self.assertFalse(result["duty_verified"])
+        self.assertTrue(math.isclose(result["head_margin_m"], -loss, rel_tol=1e-12))
+        self.assertTrue(solve(0, 16)["duty_verified"])
+        self.assertTrue(solve(q, math.nextafter(16, math.inf))["duty_verified"])
+
+    def test_strainer_ratio_square_can_exceed_float_range_with_finite_head(self):
+        # 2^-1000 * (1 / 2^-600)^2 = 2^200 metres.
+        branch = {**self.branch, "common_head_m": 0, "hose_length_m": 1,
+                  "hose_diameter_m": 1, "kinematic_viscosity_m2_s": 1,
+                  "strainer_reference_flow_m3_s": 2.0**-600, "strainer_reference_head_m": 2.0**-1000}
+        curve = [{"flow_m3_s": q, "head_m": 2.0**200} for q in (0, 1)]
+        result = self.run_spec(total_flow_m3_s=1, identical_pumps=1, curve=curve,
+                               equipped_branch=branch)
+        self.assertTrue(result["ok"], result.get("reason"))
+        self.assertEqual(result["strainer_head_loss_m"], 2.0**200)
+        self.assertFalse(result["duty_verified"])
+        self.assertLess(result["head_margin_m"], -4)
+
     def test_invalid_mixed_or_missing_branch_inputs_and_curve_limit(self):
         self.assertFalse(self.run_spec(required_head_m=0)["ok"])
         for name, value in [("hose_diameter_m", 0), ("hose_roughness_m", .1),
