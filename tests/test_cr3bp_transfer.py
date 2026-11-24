@@ -81,3 +81,14 @@ class ThreeBodyTransfers(unittest.TestCase):
                 result = dispatch_wave7_verifier("CR3BP", {**p, key: value})
                 self.assertFalse(result["verified"])
                 self.assertIn("error", result)
+
+    def test_three_body_obligations_cannot_disappear_during_dispatch(self):
+        p = orbit(EARTH_MOON)
+        for extra in ({"burn_m_s": 3}, {"jacobi": 4}, {"target_state": [0]*6},
+                      {"kind": "orbital_transfer"}, {"subkind":"euler_rigid_body"}):
+            envelope = {"domain":"lagrangian_orbital", "params":p, **extra}
+            self.assertFalse(dispatch_wave7_verifier(envelope)["verified"], extra)
+        for p in ({"I":[2,3,5], "omega0":[1,0,0], "subkind":"euler_rigid_body"},
+                  {"K":[[1]], "M":[[1]], "subkind":"lagrangian_modes"}):
+            for extra in ({"jacobi":3}, {"mass_ratio":0.01, "target_lagrange":"L4"}):
+                self.assertFalse(dispatch_wave7_verifier("lagrangian_orbital", {**p, **extra})["verified"])

@@ -1675,7 +1675,26 @@ def _euler_rigid_body(params: Mapping[str, Any]) -> Dict[str, Any]:
             "residual": float(residual), "verified": bool(residual < 1e-8)}
 
 
+_CR3BP_LABELS = {"cr3bp", "cr3bp_transfer", "circular restricted three-body",
+                 "circular restricted three body", "circular restricted three-body transfer"}
+_CR3BP_KEYS = {"mass_ratio", "flight_time_tu", "target_lagrange", "jacobi",
+               "initial_state", "target_state"}
+
+
+def _requests_cr3bp(spec):
+    return bool(_CR3BP_KEYS.intersection(spec)) or any(
+        str(spec.get(key, "")).strip().lower() in _CR3BP_LABELS
+        for key in ("domain", "kind", "prompt", "subkind")
+    )
+
+
 def solve_lagrangian_orbital(params: Mapping[str, Any]) -> Dict[str, Any]:
+    if _requests_cr3bp(params):
+        from hamon_cr3bp import verify_cr3bp_transfer
+        for key in ("domain", "kind", "prompt", "subkind"):
+            if key in params and str(params[key]).strip().lower() not in _CR3BP_LABELS | {"lagrangian_orbital"}:
+                return {"domain": "lagrangian_orbital", "verified": False, "error": "conflicting_orbital_models"}
+        return verify_cr3bp_transfer(params)
     subkind = str(
         params.get("subkind")
         or ("euler_rigid_body" if "I" in params else ("lagrangian_modes" if "K" in params else "orbital_transfer"))
@@ -1683,18 +1702,8 @@ def solve_lagrangian_orbital(params: Mapping[str, Any]) -> Dict[str, Any]:
 
     if subkind == "euler_rigid_body":
         return _euler_rigid_body(params)
-
     if subkind == "lagrangian_modes":
         return _lagrangian_modes(params)
-
-    cr3bp_fields = {"mass_ratio", "flight_time_tu", "initial_state", "target_state", "target_lagrange"}
-    if subkind == "cr3bp_transfer" or cr3bp_fields.intersection(params):
-        from hamon_cr3bp import verify_cr3bp_transfer
-        if "subkind" in params and subkind != "cr3bp_transfer":
-            return {"domain": "lagrangian_orbital", "subkind": subkind, "verified": False,
-                    "error": "conflicting_orbital_models"}
-        return verify_cr3bp_transfer(params)
-
     if subkind == "orbital_transfer":
         return _orbital_transfer(params)
 
@@ -2309,21 +2318,33 @@ def dispatch_wave7_verifier(domain_or_spec: Any, params: Optional[Mapping[str, A
         spec = domain_or_spec
         requested = str(spec.get("domain") or spec.get("kind") or spec.get("prompt") or "")
         domain = infer_wave7_domain(requested)
-        eff_params = dict(spec.get("params") or spec)
+        nested = spec.get("params")
+        if _requests_cr3bp(spec) and "params" in spec and not isinstance(nested, Mapping):
+            return {"domain": "lagrangian_orbital", "verified": False, "error": "invalid_cr3bp_parameters"}
+        eff_params = dict(nested or spec)
     else:
         requested = str(domain_or_spec)
         domain = infer_wave7_domain(requested)
         eff_params = dict(params or {})
+
+    envelope = domain_or_spec if isinstance(domain_or_spec, Mapping) else {"domain": requested}
+    if _requests_cr3bp(envelope) or _requests_cr3bp(eff_params):
+        labels = ("domain", "kind", "prompt", "subkind")
+        if (isinstance(domain_or_spec, Mapping) and params is not None) or (
+            "params" in envelope and set(envelope) - {"params", *labels}
+        ) or any(
+            str(envelope[key]).strip().lower() not in _CR3BP_LABELS | {"lagrangian_orbital"}
+            for key in labels if key in envelope
+        ):
+            return {"domain": "lagrangian_orbital", "verified": False, "error": "conflicting_cr3bp_envelope"}
+        eff_params.setdefault("subkind", "cr3bp_transfer")
+        return solve_lagrangian_orbital(eff_params)
 
     if domain == "thermo_cycles":
         return solve_thermodynamic_cycle(eff_params)
     if domain == "exchangers_radiation":
         return solve_exchanger_or_radiation(eff_params)
     if domain == "lagrangian_orbital":
-        if any(term in requested.lower() for term in ("cr3bp", "circular restricted three-body", "circular restricted three body")):
-            if str(eff_params.get("subkind", "cr3bp_transfer")).lower() != "cr3bp_transfer":
-                return {"domain": domain, "verified": False, "error": "conflicting_orbital_models"}
-            eff_params.setdefault("subkind", "cr3bp_transfer")
         return solve_lagrangian_orbital(eff_params)
     if domain == "electrochem_separations":
         return solve_electrochem_or_separation(eff_params)

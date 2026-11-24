@@ -2377,6 +2377,10 @@ def run_router_conservation_cad_verifier(payload: Dict[str, Any]) -> Dict[str, A
         if not isinstance(raw_spec, dict) or not raw_spec:
             raise ValueError(f"{family} requires a non-empty spec object")
         spec = dict(raw_spec)
+        if family == "lagrangian_orbital" and set(payload) - {"mode", "spec"}:
+            from hamon_wave7_engineering_verifiers import _requests_cr3bp
+            if _requests_cr3bp(spec) or _requests_cr3bp(payload):
+                raise ValueError("CR3BP obligations belong inside the registered spec")
         declared_domain = str(spec.get("domain") or "").strip().lower()
         if declared_domain and declared_domain != family:
             raise ValueError(f"spec.domain {declared_domain!r} conflicts with mode {family!r}")
