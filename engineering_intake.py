@@ -142,12 +142,31 @@ def probe_dxf(path):
 
 def main():
     entries, counts, warnings = [], Counter(), []
+    def incomplete(_error=None):
+        if "directory_scan_incomplete" not in warnings:
+            warnings.append("directory_scan_incomplete")
+    def omitted_directory_has_entries(path):
+        try:
+            if path.is_symlink():
+                return True
+            with os.scandir(path) as children:
+                return next(children, None) is not None
+        except OSError:
+            return True
     visited = 0
     total = 0
-    for dirname, dirs, files in os.walk(".", followlinks=False):
+    for dirname, dirs, files in os.walk(".", followlinks=False, onerror=incomplete):
         depth = len(pathlib.PurePath(dirname).parts)
-        dirs[:] = sorted(d for d in dirs if d not in EXCLUDE and
-                         not d.startswith(".") and depth < MAX_DEPTH)
+        retained = []
+        for directory in sorted(dirs):
+            path = pathlib.Path(dirname) / directory
+            if (directory in EXCLUDE or directory.startswith(".") or depth >= MAX_DEPTH
+                    or path.is_symlink()):
+                if omitted_directory_has_entries(path):
+                    incomplete()
+            else:
+                retained.append(directory)
+        dirs[:] = retained
         if depth > MAX_DEPTH:
             dirs[:] = []
             continue

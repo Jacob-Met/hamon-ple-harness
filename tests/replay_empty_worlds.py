@@ -47,7 +47,8 @@ async def run_case(port, folder):
                     summary = msg.get("final_message", "")
                     assert CLAIM not in summary and all(p in summary for p in terminal.paths), (folder.name, summary)
                     assert set(terminal.paths) <= probed, (folder.name, probed)
-                    return {"task": folder.name, "guarded_paths": len(terminal.paths), "done": True}
+                    return {"task": folder.name, "guarded_paths": len(terminal.paths),
+                            "done": True, "summary": summary}
                 if msg["type"] == "error":
                     raise RuntimeError((folder.name, msg))
                 if "id" not in msg:
@@ -66,8 +67,9 @@ async def run_case(port, folder):
     raise RuntimeError(f"{folder.name}: no terminal message")
 
 
-async def main(folders):
+async def replay(folders):
     stream = MockStream(reply_text=CLAIM)
+    observations = {}
     async def entry(socket):
         await harness.taskbridge._session(socket, harness.solve)
     with tempfile.TemporaryDirectory() as home:
@@ -83,9 +85,36 @@ async def main(folders):
                     for i in range(0, len(folders), 2):
                         results = await asyncio.gather(*(run_case(port, f) for f in folders[i:i + 2]))
                         for row in results:
-                            print(json.dumps(row), flush=True)
+                            observations[row["task"]] = row
+                            print(json.dumps({k:v for k,v in row.items() if k != "summary"}), flush=True)
     assert stream.requests >= len(folders)
-    print(json.dumps({"prompts": len(folders), "sse_requests": stream.requests}))
+    return {"prompts": len(folders), "sse_requests": stream.requests, "observations": observations}
+
+
+async def main(folders):
+    # Compare the ordinary model path and the direct-answer candidate through
+    # the same real Pi/SSE/evaluator protocol. These public prompts have other
+    # work and delivery obligations; none is a closed inline calculation.
+    with mock.patch.object(harness, "_certified_inline_reply", return_value=(None, None)):
+        baseline = await replay(folders)
+    direct_admissions = 0
+    original = harness._certified_inline_reply
+    async def observe(*args, **kwargs):
+        nonlocal direct_admissions
+        result = await original(*args, **kwargs)
+        if result[1] is not None:
+            direct_admissions += 1
+        return result
+    with mock.patch.object(harness, "_certified_inline_reply", side_effect=observe):
+        candidate = await replay(folders)
+    assert baseline["observations"] == candidate["observations"]
+    assert baseline["sse_requests"] == candidate["sse_requests"]
+    assert direct_admissions == 0
+    print(json.dumps({"public_prompts": len(folders),
+                      "baseline_sse_requests": baseline["sse_requests"],
+                      "candidate_sse_requests": candidate["sse_requests"],
+                      "terminal_summaries_equal": True,
+                      "direct_admissions": direct_admissions}), flush=True)
 
 
 if __name__ == "__main__":
