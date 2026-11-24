@@ -252,3 +252,144 @@ def _validate_body(entities, step, project_contexts, visited, active):
         _validate_body(entities, dependency, project_contexts, visited, active)
     active.remove(step)
     visited.add(step)
+
+
+def _products(entities, roles, defined):
+    rows = {}
+    for step, (kind, attrs) in sorted(entities.items()):
+        if kind not in defined:
+            raise ValueError(f"Unrecognized IFC entity {kind} on #{step}")
+        if kind not in roles:
+            continue
+        shape = entities.get(_ref(attrs[6]) if len(attrs) > 6 else None)
+        reps = shape[1][2] if shape and len(shape[1]) > 2 and isinstance(shape[1][2], list) else []
+        labels = []
+        for ref in reps:
+            fields = entities.get(_ref(ref), ("", []))[1]
+            labels.append(fields[1] if len(fields) > 1 and isinstance(fields[1], str) else None)
+        name = attrs[2] if len(attrs) > 2 and isinstance(attrs[2], str) else ""
+        rows[step] = dict(step_id=step, guid=attrs[0] if attrs and isinstance(attrs[0], str) else None,
+                          ifc_type=kind, role=roles[kind], representation_roles=labels,
+                          discipline=reader._infer_discipline(kind, name), void_relation_ids=[])
+    return rows
+
+
+def _dependencies(entities, rows):
+    voids, fills = [], []
+    cutters, issues = defaultdict(list), {}
+    for step, (kind, attrs) in sorted(entities.items()):
+        if kind not in ("IFCRELVOIDSELEMENT", "IFCRELFILLSELEMENT", "IFCRELAGGREGATES",
+                        "IFCRELNESTS", "IFCRELPROJECTSELEMENT"):
+            continue
+        parent = _ref(attrs[4]) if len(attrs) > 4 else None
+        end = _ref(attrs[5]) if len(attrs) > 5 else None
+        if kind == "IFCRELVOIDSELEMENT":
+            if parent not in rows or rows[parent]["role"] != "physical":
+                raise ValueError(f"Unassignable physical host on void relation #{step}")
+            voids.append(dict(step_id=step, host_step_id=parent, cutter_step_id=end))
+            rows[parent]["void_relation_ids"].append(step)
+            cutters[parent].append(end)
+            if len(attrs) != 6 or end not in rows or rows[end]["role"] != "opening":
+                issues[parent] = f"Unresolved cutter #{end} on void relation #{step}"
+        elif kind == "IFCRELFILLSELEMENT":
+            if (len(attrs) != 6 or parent not in rows or end not in rows
+                    or rows[parent]["role"] != "opening" or rows[end]["role"] != "physical"):
+                raise ValueError(f"Unassignable filling relation #{step}")
+            fills.append(dict(step_id=step, opening_step_id=parent, filling_step_id=end))
+        elif kind == "IFCRELPROJECTSELEMENT":
+            if parent not in rows:
+                raise ValueError(f"Unassignable projected element on #{step}")
+            issues[parent] = f"Unqualified projected feature relation #{step}"
+        elif parent in rows and rows[parent]["role"] == "physical":
+            issues[parent] = f"Unqualified physical assembly relation #{step}"
+    owners = Counter(c for children in cutters.values() for c in children)
+    for host, children in cutters.items():
+        if any(owners[c] > 1 for c in children):
+            issues[host] = "Opening belongs to multiple void relationships"
+    return voids, fills, cutters, issues
+
+
+_GEOMETRY_ERRORS = (ValueError, ArithmeticError, TypeError, IndexError, KeyError, RecursionError)
+
+
+def _valid_mesh(mesh):
+    v, f = mesh.vertices, mesh.faces
+    if (v.ndim != 2 or v.shape[1] != 3 or not np.isfinite(v).all() or f.ndim != 2
+            or f.shape[1] != 3 or not len(f) or f.min() < 0 or f.max() >= len(v)):
+        raise ValueError("Invalid source mesh")
+    triangles = v[f]
+    normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    if not np.isfinite(normals).all() or np.any(np.all(normals == 0, axis=1)):
+        raise ValueError("Unrepresentable or degenerate world-space triangle")
+
+
+def _inventory(text):
+    schema, data = _source_sections(text)
+    roles, defined = _schema_roles(schema)
+    entities = _entities(data)
+    scale, contexts = _model_context(entities)
+    rows = _products(entities, roles, defined)
+    voids, fills, cutters, issues = _dependencies(entities, rows)
+    participants = set(cutters).union(*(set(children) for children in cutters.values()))
+    gross, empty, visited = {}, set(), set()
+    for step, row in rows.items():
+        if row["role"] not in ("physical", "opening"):
+            continue
+        row.update(geometry_status="unresolved", volume_status="unresolved", volume_m3=None)
+        kind, attrs = entities[step]
+        try:
+            if len(attrs) < 7:
+                raise ValueError("Incomplete product attributes")
+            shape = reader._required_ifc_entity(entities, attrs[6], "IFCPRODUCTDEFINITIONSHAPE")
+            if len(shape) != 3 or not isinstance(shape[2], list):
+                raise ValueError("Incomplete product definition shape")
+            items = reader._opening_body_items(entities, step, mass_takeoff=True)
+            row["body_item_ids"] = [_ref(ref) for ref in items]
+            for ref in shape[2]:
+                fields = entities[_ref(ref)][1]
+                if str(fields[1]).upper() == "BODY":
+                    _validate_body(entities, _ref(ref), contexts, visited, set())
+            bodies, empties = reader._gross_ifc_solids(
+                entities, scale, participants, [(step, kind, attrs, shape)], strict_geometry=True)
+            if step in empties:
+                empty.add(step)
+                if row["role"] == "opening":
+                    row.update(geometry_status="empty", volume_status="excluded")
+                continue
+            body, = bodies
+            _valid_mesh(body)
+            gross[step] = body
+            if row["role"] == "opening":
+                row.update(geometry_status="known", volume_status="excluded")
+        except _GEOMETRY_ERRORS as exc:
+            row["reason"] = str(exc)
+
+    meshes = {}
+    for step, row in rows.items():
+        if row["role"] != "physical" or (step not in gross and step not in empty):
+            continue
+        try:
+            if step in issues:
+                raise ValueError(issues[step])
+            bodies = [gross[step]] if step in gross else []
+            if step in cutters:
+                missing = [c for c in cutters[step] if c not in gross and c not in empty]
+                if missing:
+                    raise ValueError(f"Unresolved required cutters {missing}")
+                bodies = reader._physical_occurrences(
+                    [*bodies, *(gross[c] for c in cutters[step] if c in gross)],
+                    entities, scale, {step: set(cutters[step])}, empty)
+            if not bodies:
+                row.update(geometry_status="empty", volume_status="known", volume_m3=0.)
+                continue
+            body, = bodies
+            _valid_mesh(body)
+            meshes[step] = replace(body, element_id=f"#{step}")
+            row["geometry_status"] = "known"
+            volume = body.volume_m3()
+            if not math.isfinite(volume) or volume <= 0:
+                raise ValueError("Unrepresentable material quantity")
+            row.update(volume_status="known", volume_m3=volume)
+        except _GEOMETRY_ERRORS as exc:
+            row["reason"] = str(exc)
+    return rows, meshes, voids, fills
