@@ -65,6 +65,8 @@ MAX_HTTP_BYTES = 10_000_000  # an http request's body
 MAX_WRITE_BYTES = 10_000_000  # one write_file's data
 # limits.exec_timeout_sec: a longer exec or http timeout is cut to this
 MAX_TIMEOUT_SEC = 600
+# Let the registered bash tool receive and persist its genuine evaluator reply.
+EXEC_RECEIPT_SEC = 2
 HTTP_METHODS = ("GET", "POST", "DELETE", "PUT", "PATCH", "HEAD", "OPTIONS")
 
 # This file's own limits.
@@ -111,6 +113,7 @@ class Session:
     self.final_message = ""
     self.fallback_summary = lambda text: text
     self.cancelled = asyncio.Event()
+    self._agent_exits: set[asyncio.Event] = set()
     self._ids = itertools.count(1)
     self._waiting: dict[str, asyncio.Future[dict[str, Any]]] = {}
     self._lock = asyncio.Lock()
@@ -185,13 +188,17 @@ class Session:
           future.set_exception(Cancelled())
       self._waiting.clear()
 
-  async def request(self, kind: str, **fields: Any) -> dict[str, Any]:
+  async def request(
+      self, kind: str, *, exec_deadline: float | None = None, **fields: Any
+  ) -> dict[str, Any]:
     """Sends one protocol request and awaits its matching result frame.
 
     Omits fields whose value is `None`.
 
     Args:
       kind: Request `type` (e.g., `exec`, `read_file`, `write_file`, `http`).
+      exec_deadline: Optional local monotonic deadline for a bounded exec reply.
+          The evaluator receives only an integer timeout, computed at dispatch.
       **fields: Additional request fields to include when not `None`.
 
     Returns:
@@ -209,29 +216,42 @@ class Session:
         "id": rid,
         **{k: v for k, v in fields.items() if v is not None},
     }
-    frame = _frame(message)  # a message over MAX_FRAME raises here
     future = asyncio.get_running_loop().create_future()
-    self._waiting[rid] = future
     try:
-      try:
-        await self._send(frame)
-      except ConnectionClosed:
-        self.cancelled.set()
-        if future.done() and not future.cancelled():
-          # the reader may have failed it already: read its exception, or
-          # asyncio logs it as never retrieved
-          future.exception()
-        raise Cancelled() from None
-      return await future
+      async with self._lock:
+        if self.cancelled.is_set():
+          raise Cancelled()
+        if exec_deadline is not None:
+          remaining = math.floor(exec_deadline - time.monotonic() - EXEC_RECEIPT_SEC)
+          if remaining < 1:
+            raise TaskError("The phase has no time for another command and its result. The command was not sent.")
+          message["timeout_sec"] = min(message["timeout_sec"], remaining)
+        frame = _frame(message)
+        self._waiting[rid] = future
+        try:
+          await self.ws.send(frame)
+        except ConnectionClosed:
+          self.cancelled.set()
+          if future.done() and not future.cancelled():
+            # The reader may already have failed this request.
+            future.exception()
+          raise Cancelled() from None
+      result = await future
+      if exec_deadline is not None:
+        return {**result, "timeout_sec": message["timeout_sec"]}
+      return result
     finally:
       self._waiting.pop(rid, None)
 
-  async def exec(self, command: str, timeout_sec: int = 120) -> dict[str, Any]:
+  async def exec(
+      self, command: str, timeout_sec: int = 120, *, deadline: float | None = None
+  ) -> dict[str, Any]:
     """Runs `bash -c command` inside the task container in `workdir`.
 
     Args:
       command: Shell command string to execute.
       timeout_sec: Timeout in seconds (clamped to `1..MAX_TIMEOUT_SEC`).
+      deadline: Optional monotonic phase end, including time to record the reply.
 
     Returns:
       Result dictionary with `exit_code`, `output`, `truncated`, and
@@ -243,6 +263,7 @@ class Session:
     """
     result = await self.request(
         "exec",
+        exec_deadline=deadline,
         command=_text("exec: the command", command),
         timeout_sec=_seconds(timeout_sec),
     )
@@ -769,6 +790,12 @@ class Relay:
       status, out_headers = 400, {"Content-Type": "application/json"}
       payload = b'{"error": "the request ended before its body did"}'
     except Cancelled:
+      # Giving an active Pi a normal tool error can start a provider turn
+      # during the evaluator's summary grace. Its process watcher handles the
+      # same cancel signal. Readers outside a managed process still get 503.
+      exits = tuple(getattr(self.session, "_agent_exits", ()))
+      if exits:
+        await asyncio.gather(*(event.wait() for event in exits))
       status, out_headers, payload = (
           503,
           {"Content-Type": "application/json"},
@@ -833,8 +860,14 @@ class Relay:
     # evaluator as a malformed frame.
     try:
       if route == "exec":
+        deadline = fields.get("phase_deadline_ms")
+        options = {}
+        if deadline is not None:
+          if type(deadline) not in (int, float) or not (0 < deadline <= 2**53 - 1):
+            raise TaskError("phase_deadline_ms must be a finite Unix timestamp in milliseconds")
+          options["deadline"] = time.monotonic() + (deadline / 1000 - time.time())
         result = await self.session.exec(
-            fields.get("command"), fields.get("timeout_sec", 120)
+            fields.get("command"), fields.get("timeout_sec", 120), **options
         )
       elif route == "read_file":
         result = await self.session.read_result(fields.get("path"))
@@ -1474,6 +1507,11 @@ async def run_process(
     A `Finished` instance with the exit code, recent stderr lines, and whether
     the process was stopped by the time budget.
   """
+  # Standalone callers may supply just time_left() and log().
+  cancel_event = getattr(session, "cancelled", None)
+  agent_exits = getattr(session, "_agent_exits", None)
+  if cancel_event is not None and cancel_event.is_set():
+    raise Cancelled()
   pipe, devnull = asyncio.subprocess.PIPE, asyncio.subprocess.DEVNULL
   loop = asyncio.get_running_loop()
   transport, streams = await loop.subprocess_exec(
@@ -1526,16 +1564,34 @@ async def run_process(
       transport.close()
 
   stopped = False
+  if agent_exits is not None:
+    agent_exits.add(streams.exited)
+  exited = asyncio.create_task(streams.exited.wait())
+  waiters = {exited}
+  if cancel_event is not None:
+    waiters.add(asyncio.create_task(cancel_event.wait()))
   try:
-    await asyncio.wait_for(streams.exited.wait(), run_for)
-  except asyncio.TimeoutError:
-    stopped = True
-    await session.log(
-        f"{log_prefix}stopped {max(left, 0) - run_for:.0f} s before the time"
-        " limit"
+    ready, _ = await asyncio.wait(
+        waiters, timeout=run_for, return_when=asyncio.FIRST_COMPLETED
     )
+    if cancel_event is not None and cancel_event.is_set():
+      # The outer session keeps a grace period for returning an existing
+      # summary. Stop this subprocess before it can spend that period on a turn.
+      raise Cancelled()
+    if not ready:
+      stopped = True
+      await session.log(
+          f"{log_prefix}stopped {max(left, 0) - run_for:.0f} s before the time"
+          " limit"
+      )
   finally:
-    await asyncio.shield(cleanup())
+    for waiter in waiters:
+      waiter.cancel()
+    try:
+      await asyncio.shield(cleanup())
+    finally:
+      if agent_exits is not None:
+        agent_exits.discard(streams.exited)
   code = proc.returncode if proc.returncode is not None and not stopped else -1
   return Finished(code, "\n".join(err), stopped)
 
