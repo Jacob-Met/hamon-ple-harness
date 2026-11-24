@@ -75,8 +75,8 @@ def passive_exchanger(spec, *, sizing):
     if arr not in ({"parallel", "counterflow"} if sizing else {"parallel", "counterflow", "shell_and_tube_1_2"}):
         return {"dual_verified": False, "reason": "unsupported_flow_arrangement"}
 
-    def read(key):
-        raw = spec[key]
+    def read(key, source=spec):
+        raw = source[key]
         v = float(raw)
         if isinstance(raw, bool) or not math.isfinite(v):
             raise ValueError(f"{key} must be finite")
@@ -112,6 +112,29 @@ def passive_exchanger(spec, *, sizing):
         span = real(delta)
         inlet_h, inlet_c = real(hi), real(ci)
         result = {"arrangement": arr}
+        effective_u = None
+        if "fouling" in spec:
+            if "tube_resistance" in spec:
+                raise ValueError("Choose one resistance model: fouling or tube_resistance")
+            model = spec["fouling"]
+            if not isinstance(model, dict):
+                raise ValueError("fouling must specify the clean coefficient and the two surface resistances")
+            if "UA_W_K" in spec or "U_W_m2K" in spec:
+                raise ValueError("Specify effective conductance or the fouling model, not both")
+            basis = model["area_basis"]
+            if basis not in ("inside", "outside"):
+                raise ValueError("area_basis must be inside or outside")
+            clean = read("U_clean_W_m2K", model)
+            ratio = read("outside_to_inside_area_ratio", model)
+            inside = read("R_inside_m2K_W", model)
+            outside = read("R_outside_m2K_W", model)
+            if min(clean, ratio) <= 0 or min(inside, outside) < 0:
+                raise ValueError("Clean U and area ratio must be positive; fouling resistances must be nonnegative")
+            # R_total [K/W] = 1/(U_clean*A_ref) + R_inside/A_inside + R_outside/A_outside.
+            added = inside*ratio + outside if basis == "outside" else inside + outside/ratio
+            effective_u = 1/(1/clean + added)
+            result.update(area_basis=basis, U_effective_W_m2K=wire(effective_u),
+                          fouling_on_basis_m2K_W=wire(added))
         tube = tubular_resistance(spec["tube_resistance"]) if "tube_resistance" in spec else None
         if tube is not None:
             result["tube_resistance"] = tube
@@ -120,7 +143,12 @@ def passive_exchanger(spec, *, sizing):
                 raise ValueError("Supplied U disagrees with the service U on the outer area")
         if sizing:
             ho = read("Th_out_K")
-            u = Fraction(tube["service_U_outer_W_m2K"]) if tube is not None else read("U_W_m2K")
+            if tube is not None:
+                u = Fraction(tube["service_U_outer_W_m2K"])
+            elif effective_u is not None:
+                u = effective_u
+            else:
+                u = read("U_W_m2K")
             if min(ho, u) <= 0:
                 raise ValueError("Outlet absolute temperature and sizing U must be positive")
             q = ch*(hi-ho)
@@ -147,7 +175,9 @@ def passive_exchanger(spec, *, sizing):
             area = ua/real(u)
             result.update(LMTD_K=wire(mean), area_m2=wire(area), area_identifiable=True)
         else:
-            if tube is None:
+            if effective_u is not None:
+                stated_ua = effective_u * read("area_m2")
+            elif tube is None:
                 stated_ua = read("UA_W_K")
             else:
                 if "rated_UA_W_K" not in tube:
@@ -197,6 +227,8 @@ def passive_exchanger(spec, *, sizing):
                 out_c = out_h-gap2 if arr == "parallel" else inlet_h-gap1
             result.update(effectiveness=wire(eps), NTU=wire(ntu), Th_out_K=wire(out_h))
 
+        if effective_u is not None:
+            result["UA_W_K"] = wire(ua)
         if tube is not None:
             if "UA_W_K" in spec and not math.isclose(read("UA_W_K"), wire(ua), rel_tol=1e-9, abs_tol=0):
                 raise ValueError("Supplied UA disagrees with the service duty or tube rating")
