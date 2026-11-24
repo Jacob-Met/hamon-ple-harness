@@ -147,7 +147,7 @@ def _boundary(occupied, coordinates):
     return np.asarray(vertices, dtype=np.float64), np.asarray(faces, dtype=np.int32)
 
 
-def rectilinear_boolean(meshes, operator):
+def rectilinear_boolean(meshes, operator, *, allow_empty=False):
     """Return an exact-cell mesh, or None when a source face is not axis aligned.
 
     The caller qualifies finite coordinates, indices and closed topology. An
@@ -177,6 +177,8 @@ def rectilinear_boolean(meshes, operator):
             material &= ~cells
         else:
             raise ValueError("invalid rectilinear Boolean operation")
+    if material is not None and not material.any() and allow_empty:
+        return np.empty((0, 3), dtype=float), np.empty((0, 3), dtype=np.int32)
     if material is None or not material.any():
         raise ValueError("Boolean produced no qualified bounded solid")
     return _boundary(material, coordinates)
