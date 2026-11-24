@@ -1,0 +1,52 @@
+name: Public jacket balance and provider request comparison
+on:
+  pull_request:
+    paths:
+      - "ship/measure_jacket_provider_requests.py"
+      - ".github/workflows/jacket-provider-requests.yml"
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Match the actual PR base and locked Pi runtime
+        env:
+          FEATURE: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^2)" = "$FEATURE"
+          git worktree add --detach "$RUNNER_TEMP/jacket-a" HEAD^1
+          git worktree add --detach "$RUNNER_TEMP/jacket-b" HEAD
+          cmp "$RUNNER_TEMP/jacket-a/package.json" "$RUNNER_TEMP/jacket-b/package.json"
+          cmp "$RUNNER_TEMP/jacket-a/package-lock.json" "$RUNNER_TEMP/jacket-b/package-lock.json"
+          npm ci --no-fund --no-audit
+          ln -s "$GITHUB_WORKSPACE/node_modules" "$RUNNER_TEMP/jacket-a/node_modules"
+          ln -s "$GITHUB_WORKSPACE/node_modules" "$RUNNER_TEMP/jacket-b/node_modules"
+          python -m pip install -r requirements.txt
+          mkdir wire-results
+          git -C "$RUNNER_TEMP/jacket-b" rev-parse HEAD > wire-results/candidate.commit
+          git -C "$RUNNER_TEMP/jacket-a" rev-parse HEAD > wire-results/stock.commit
+      - name: Compare both ordinary provider paths with a loopback SSE response
+        run: |
+          set -euo pipefail
+          python ship/measure_jacket_provider_requests.py --root "$RUNNER_TEMP/jacket-a" > wire-results/stock.jsonl
+          python ship/measure_jacket_provider_requests.py --root "$RUNNER_TEMP/jacket-b" > wire-results/candidate.jsonl
+          python ship/measure_jacket_provider_requests.py --compare wire-results/{stock,candidate}.jsonl | tee wire-results/comparison.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: public-jacket-provider-requests
+          path: wire-results
+          if-no-files-found: warn

@@ -226,3 +226,100 @@ def test_pump_datum_correction_controls_certified_budget():
     assert json.loads(qualified["presolve_result_json"])["meets_required_npsh"]
     gauge["loss_to_npsh_datum_m"] = 4
     assert not route(pump)["presolve_verified"]
+
+
+
+def _notre_dame_jacket(coolant):
+    # NDCBE controls, Exothermic-CSTR.ipynb, Git blob 36251f18f6214fa5f39ecbb732b9658d5c0feaa6.
+    # Convert the published litre/minute model to SI and retain its Ea/R ratio.
+    return {"reactor_type": "cstr", "order": 1, "C_A0": 1000, "v0": 0.1 / 60,
+            "volume": 0.1, "T0": 350, "A_preexp": 7.2e10 / 60,
+            "E_a": 72750 * (8.31446261815324 / 8.314),
+            "delta_T_adiabatic": 50000 / 239, "steady_state_branch": "all",
+            "heat_transfer": {"UA_W_K": 50000 / 60, "rho_kg_m3": 1000,
+                              "Cp_J_kg_K": 239, "coolant_T_K": coolant}}
+
+
+def _dimensional_route(spec):
+    return router.route_from_intake_prompt(json.dumps(EMPTY), instruction=json.dumps(
+        {"mode": "reactor_kinetics", "spec": spec}))
+
+
+@pytest.mark.parametrize("coolant,expected_branches", [(295, 1), (300, 3), (305, 1)])
+def test_dimensional_jacket_uses_both_original_dynamic_balances(coolant, expected_branches):
+    import numpy as np
+    from scipy.integrate import solve_ivp
+    from scipy.optimize import brentq
+
+    # Independently evaluate the published two-state differential equations
+    # in minutes and mol/L. Never substitute the steady heat manifold into the ODE.
+    def k(temp):
+        return 7.2e10 * np.exp(-72750 / (8.314 * temp))
+
+    def ode(time, state):
+        concentration, temp = state
+        reacted = k(temp) * concentration
+        return np.array([1 - concentration - reacted,
+                         350 - temp + 50000/239 * reacted + 50000/23900 * (coolant - temp)])
+
+    def energy(temp):
+        return ode(0, (1/(1+k(temp)), temp))[1]
+
+    grid = np.linspace(280, 440, 641)
+    roots = [brentq(energy, a, b) for a, b in zip(grid, grid[1:]) if energy(a)*energy(b) < 0]
+    plan = _dimensional_route(_notre_dame_jacket(coolant))
+    assert plan["presolve_verified"] and plan["thinking_tier"] == "low"
+    states = json.loads(plan["presolve_result_json"])["steady_states"]
+    assert len(states) == len(roots) == expected_branches
+    for row, temp in zip(states, roots):
+        state = np.array([1/(1+k(temp)), temp])
+        assert row["exit_T_K"] == pytest.approx(temp, abs=1e-7)
+        assert row["C_A_mol_m3"] == pytest.approx(1000*state[0], abs=1e-6)
+        steps = np.diag([1e-5, 1e-4])
+        def derivative(function):
+            return np.column_stack([(function(state+step) - function(state-step))/(2*step[i])
+                                    for i, step in enumerate(steps)])
+        jac = derivative(lambda x: ode(0, x))
+        trace, det = np.trace(jac), np.linalg.det(jac)
+        expected = "unstable_saddle" if det < 0 else ("unstable" if trace > 0 else "asymptotically_stable")
+        assert row["linear_stability"] == expected
+        assert row["trace_s_inv"] == pytest.approx(trace/60, rel=1e-6)
+        assert row["determinant_s_inv2"] == pytest.approx(det/3600, rel=1e-6)
+        # Check finite-time response to small physical perturbations in both directions.
+        def propagate(x):
+            result = solve_ivp(ode, (0, .1), x, method="DOP853", rtol=1e-11, atol=1e-12)
+            assert result.success
+            return result.y[:, -1]
+        radius = max(abs(np.linalg.eigvals(derivative(propagate))))
+        assert bool(radius < 1) is (expected == "asymptotically_stable")
+
+
+def test_dimensional_jacket_rejects_extra_inputs_and_marginal_classification():
+    spec = _notre_dame_jacket(300)
+    assert not _dimensional_route(dict(spec, coolant_volume_m3=4))["presolve_verified"]
+    assert not _dimensional_route(dict(spec, gas_phase=True))["presolve_verified"]
+    assert not _dimensional_route(dict(spec, steady_state_branch=None))["presolve_verified"]
+    assert not _dimensional_route(dict(spec, heat_transfer=dict(spec["heat_transfer"], UA_W_K=True)))["presolve_verified"]
+    # The certificate must carry a strictly decisive interval even when the
+    # root solver finds a balanced equilibrium.
+    row = {"linear_stability": "asymptotically_stable",
+           "trace_bounds_s_inv": [-1.1, -.9], "determinant_bounds_s_inv2": [-.1, .1]}
+    assert not router._bounded_jacket_stability(row)
+    row.update(linear_stability="nonhyperbolic", determinant_bounds_s_inv2=[0, 0])
+    assert not router._bounded_jacket_stability(row)
+
+
+def test_notre_dame_printed_equilibrium_and_jacobian():
+    import numpy as np
+    middle = json.loads(_dimensional_route(_notre_dame_jacket(300))["presolve_result_json"])["steady_states"][1]
+    # Public notebook cell 30 rounds its middle branch to two decimal places.
+    assert middle["C_A_mol_m3"] / 1000 == pytest.approx(.50, abs=.005)
+    assert middle["exit_T_K"] == pytest.approx(350.08, abs=.005)
+    low = json.loads(_dimensional_route(_notre_dame_jacket(290))["presolve_result_json"])["steady_states"][0]
+    # Cell 36 prints the forward-difference A matrix at the first 290 K coolant.
+    # Convert the SI Jacobian back to the notebook's mol/L, K and minutes.
+    a = np.asarray(low["jacobian"]) * 60
+    a[0, 1] /= 1000
+    a[1, 0] *= 1000
+    np.testing.assert_allclose(a, [[-1.05041791, -.00429658087], [10.5476802, -2.19318466]],
+                               rtol=3e-6, atol=1e-8)
