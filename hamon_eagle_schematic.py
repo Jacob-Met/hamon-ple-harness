@@ -834,11 +834,39 @@ def _outlined_supplies(paths, wire_ink, pitch, wires, membership):
                     "tip": glyph["tip"], "label_source": "outlined_supply_strokes"}
             evidence.append((index, name, occurrence, mark))
 
+    rail_words = defaultdict(list)
+    rail_roots = defaultdict(set)
+    arrow_roots = defaultdict(set)
+    for index, name, _, _ in evidence:
+        arrow_roots[name].add(membership[index])
+    arrow_tips = [g["tip"] for g in candidates if g["shape"] == "supply_arrow"]
     for index, name, occurrence, registered in outlined.wire_words(wires, signal_strokes, pitch):
+        if registered and _POWER_NAME.fullmatch(name):
+            vertical, ink = occurrence
+            points = [point for line in ink for point in line]
+            xmid, ymid = ((min(axis) + max(axis)) / 2 for axis in zip(*points))
+            axis = [-point[1] if vertical else point[0] for point in wires[index]]
+            center = (ymid, -xmid) if vertical else (xmid, ymid)
+            # A wire label centers on its supporting wire. A symbol caption can
+            # coincide with a different wire. Keep the entire arrow caption zone
+            # (forward/lateral bounds in anchored_voltage) out of this channel.
+            if min(axis) < xmid < max(axis) and all(math.dist(center, tip) > 2.25*pitch for tip in arrow_tips):
+                rail_words[name].append((index, name, occurrence, None))
+                rail_roots[occurrence].add(membership[index])
+
         if (registered and (name == "GND" or not _GROUND_NAME.fullmatch(name))
                 and not _POWER_NAME.fullmatch(name)
                 and not re.fullmatch(r"(?:R|C|L|Q|U|J)[0-9]+", name)):
             evidence.append((index, name, occurrence, None))
+
+    for name, records in rail_words.items():
+        records = [r for r in records if len(rail_roots[r[2]]) == 1]
+        roots = {membership[r[0]] for r in records}
+        # A signed voltage needs both a printed wire label on its own arrow's
+        # island and an independently placed copy. Named rails such as VIN use
+        # repeated whole wire labels even on drawings without a supply symbol.
+        if len(roots) > 1 and (name[0] not in "+-" or roots & arrow_roots[name]):
+            evidence.extend(records)
 
     occurrence_roots, names = defaultdict(set), defaultdict(set)
     for index in grounded:
