@@ -70,8 +70,8 @@ console.log(JSON.stringify(result.details));
                     f"#900=IFCCARTESIANPOINT(({x},0.,{z-.001}));\n"
                     "#901=IFCAXIS2PLACEMENT3D(#900,$,$);\n"
                     "#902=IFCLOCALPLACEMENT(#73,#901);\n"
-                    "#903=IFCRECTANGLEPROFILEDEF(.AREA.,'probe',$,.002,.002);\n"
-                    "#904=IFCEXTRUDEDAREASOLID(#903,$,#10,.002);\n"
+                    "#903=IFCRECTANGLEPROFILEDEF(.AREA.,'probe',$,0.002,0.002);\n"
+                    "#904=IFCEXTRUDEDAREASOLID(#903,$,#10,0.002);\n"
                     "#905=IFCSHAPEREPRESENTATION(#18,'Body','SweptSolid',(#904));\n"
                     "#906=IFCPRODUCTDEFINITIONSHAPE($,$,(#905));\n"
                     "#907=IFCDUCTSEGMENT('0AzR0sseD4bBOcPJ50wSE9',$,'probe',$,$,#902,#906,$,$);\n"
@@ -81,6 +81,7 @@ console.log(JSON.stringify(result.details));
                 result = run_router_ifc_clash({"ifc_text": source, "required_clearance_m": .05})
                 self.assertTrue(result["ok"], result)
                 self.assertEqual(result["pair_count"], 1, result)
+                print("revolved beam probe", touches, result["hard_clash_count"], result["min_clearance_m"])
                 self.assertEqual(result["hard_clash_count"], int(touches), result)
                 if not touches:
                     self.assertGreater(result["min_clearance_m"], 7.)
