@@ -39,7 +39,7 @@ console.log(JSON.stringify(results));
             results = json.loads(proc.stdout.strip().splitlines()[-1])
             self.assertEqual(list(Path(taskdir).iterdir()),[])
         self.assertEqual([r['details']['verified'] for r in results[:6]],
-                         [True,False,False,False,True,False])
+                         [True,False,False,False,True,False],results)
         self.assertAlmostEqual(results[0]['details']['M2'],.6069166972327382,places=12)
         self.assertTrue(results[1]['details']['choked'])
         self.assertNotIn('M2',results[1]['details'])

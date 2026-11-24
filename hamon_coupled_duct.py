@@ -30,11 +30,13 @@ def coupled_duct(params, constants):
 
 
 def _solve(params, constants, result):
-    allowed = {"subkind", "M1", "T01", "P1", "L", "D_h", "f", "q_J_kg",
+    allowed = {"domain", "subkind", "M1", "T01", "P1", "L", "D_h", "f", "q_J_kg",
                "gamma", "R", "cp", "friction_factor_convention", "branch"}
     extra = sorted(set(params) - allowed)
     if extra:
         raise ValueError("Unsupported coupled-duct parameters: " + ", ".join(extra))
+    if params.get("domain", "compressible_acoustics") != "compressible_acoustics":
+        raise ValueError("Coupled duct belongs to compressible_acoustics")
     ctx = mp.clone()
     ctx.dps = 100
 
