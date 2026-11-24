@@ -130,3 +130,76 @@ class LookupTests(unittest.TestCase):
                         z.writestr(name, content)
                 examples = xlsx_audit(str(path))['lookup_audit']['examples']
                 self.assertEqual(next(x for x in examples if x['cell'] == address)['status'], expected)
+
+
+class LookupConsumerTests(unittest.TestCase):
+    def audit(self, rows, catalog=None):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lookup.xlsx"
+            package(path)
+            with ZipFile(path) as source:
+                members = {name: source.read(name) for name in source.namelist()}
+            members["xl/worksheets/1.xml"] = worksheet(rows)
+            if catalog is not None:
+                members["xl/worksheets/2.xml"] = worksheet(catalog)
+            with ZipFile(path, "w") as out:
+                for name, data in members.items():
+                    out.writestr(name, data)
+            return xlsx_audit(str(path))
+
+    def test_missing_and_stale_key_caches_never_change_first_selected_area(self):
+        table = "'Ratings 2026'!A1:B3"
+        catalog = [[("A",None,1),("B",None,2)], [("A",None,1),("B",None,3)],
+                   [("A",None,2),("B",None,25)]]
+        for cache in (None, 3):
+            data = self.audit([
+                [("A","6000/B1",6000),("B",'CONVERT(C1,"cm^2","m^2")',1),
+                 ("C",f"VLOOKUP(D1,{table},2,FALSE)",None),
+                 ("D",f"VLOOKUP(E1,{table},2,FALSE)",cache),("E",None,1)]], catalog)
+            lookups = {r["cell"]:r for r in data["lookup_audit"]["examples"]}
+            self.assertEqual((lookups["D1"]["source_cell"], lookups["C1"]["source_cell"]), ("B1","B3"))
+            self.assertEqual(lookups["C1"]["status"], "unverified")
+            self.assertEqual(lookups["D1"]["status"], "unverified" if cache is None else "mismatch")
+            result = data["conversion_audit"]["examples"][0]
+            self.assertEqual((result["status"],result["expected"],result["si_dimension"]),
+                             ("mismatch",.0025,[0,2,0,0,0]))
+            self.assertEqual(data["arithmetic_audit"]["examples"][0]["expected"], 2400000)
+
+    def test_saved_calc_exact_mode_and_approximate_controls(self):
+        table = "'Ratings 2026'!A1:B2"
+        catalog = [[("A", None, 1), ("B", None, 25)],
+                   [("A", None, 1), ("B", None, 30)]]
+        for mode in ("FALSE()", "TRUE()", "FALSE(1)", "1"):
+            with self.subTest(mode=mode):
+                audit = self.audit([[("A", None, 1), ("B", f"VLOOKUP(A1,{table},2,{mode})", 25),
+                                     ("C", "2*B1", 50)]], catalog)
+                lookup = audit["lookup_audit"]["examples"][0]
+                status = "matched" if mode == "FALSE()" else "unverified"
+                self.assertEqual(lookup["status"], status)
+                self.assertEqual(audit["arithmetic_audit"]["examples"][0]["status"], status)
+                if mode == "FALSE()":
+                    self.assertEqual(lookup["source_cell"], "B1")
+
+    def test_cyclic_and_unresolved_preceding_key_leave_consumers_unverified(self):
+        table = "'Ratings 2026'!A1:B3"
+        for key_formula in (f"VLOOKUP(B1,{table},2,FALSE)", None):
+            data = self.audit([[("A",key_formula,2),("B",f"VLOOKUP(A1,{table},2,FALSE)",25),
+                                ("C","B1*2",50)]],
+                              [[("A","1+0",1),("B",None,10)],
+                               [("A",None,2),("B",None,25)]])
+            self.assertEqual(data["arithmetic_audit"]["counts"]["unverified"], 1)
+            self.assertTrue(all(r["status"]=="unverified" for r in data["lookup_audit"]["examples"]))
+
+    def test_disconnected_components_trace_the_selected_literal_beyond_prefix(self):
+        table = "'Ratings 2026'!A1:B2"
+        catalog = [[("A", None, 1), ("B", None, 25)],
+                   [("A", None, 1), ("B", None, 30)]]
+        rows = [[("A", None, 1), ("B", f"VLOOKUP(A1,{table},2,FALSE)", None)]]
+        rows.extend([[("C", "2*$B$1", 50)] for _ in range(256)])
+        rows.append([("C", "2*$B$1", 60)])
+        report = self.audit(rows, catalog)
+        arithmetic = report["arithmetic_audit"]
+        self.assertEqual(arithmetic["counts"], {"matched": 256, "mismatch": 1, "unverified": 0})
+        stale = next(row for row in arithmetic["examples"] if row["cell"] == "C258")
+        self.assertEqual(stale["expected"], 50)
+        self.assertEqual(stale["root_cells"], [["Ratings 2026", "B1"]])
