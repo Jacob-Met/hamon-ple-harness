@@ -44,7 +44,7 @@ jobs:
       - name: Install the submitted Pi and evaluator transport
         run: |
           npm ci --no-fund --no-audit
-          python -m pip install 'websockets==15.0.1'
+          python -m pip install --disable-pip-version-check -r requirements.txt
           sudo mkdir -p /filesystem
           sudo chown "$(id -u):$(id -g)" /filesystem
       - name: Verify authored exports, cancellation and all public empty worlds
