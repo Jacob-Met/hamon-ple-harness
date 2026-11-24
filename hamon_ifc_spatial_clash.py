@@ -1475,6 +1475,80 @@ def _required_ifc_entity(entities, ref, kind):
     raise ValueError(f"Expected a resolved {kind} reference")
 
 
+def _ifc_number(value):
+    if type(value) not in (int, float):
+        raise UnresolvedSolidGeometry("Expected a numeric IFC measure")
+    number = float(value)
+    if not math.isfinite(number):
+        raise UnresolvedSolidGeometry("Nonfinite IFC measure")
+    return number
+
+
+def _ifc_vector(entities, ref, kind, dimension):
+    attrs = _required_ifc_entity(entities, ref, kind)
+    if len(attrs) != 1 or not isinstance(attrs[0], list) or len(attrs[0]) != dimension:
+        raise UnresolvedSolidGeometry(f"Expected {dimension} numeric coordinates on {kind}")
+    return np.array([_ifc_number(v) for v in attrs[0]])
+
+
+def _closed_polyline(entities, ref, unit_scale):
+    """Admit the authored simple, explicitly closed straight-line boundary."""
+    attrs = _required_ifc_entity(entities, ref, "IFCPOLYLINE")
+    if len(attrs) != 1 or not isinstance(attrs[0], list) or not 4 <= len(attrs[0]) <= 2049:
+        raise UnresolvedSolidGeometry("Expected a bounded closed polygon with 3 to 2048 corners")
+    points = np.array([_ifc_vector(entities, p, "IFCCARTESIANPOINT", 2) for p in attrs[0]]) * unit_scale
+    if not np.isfinite(points).all() or not np.array_equal(points[0], points[-1]):
+        raise UnresolvedSolidGeometry("IFC polygon lacks a finite, explicit closing edge")
+    points = points[:-1]
+    if len(np.unique(points, axis=0)) != len(points):
+        raise UnresolvedSolidGeometry("Repeated IFC boundary corner")
+    from shapely.geometry import Polygon
+    polygon = Polygon(points)
+    if not polygon.is_valid or not 0 < polygon.area < math.inf:
+        raise UnresolvedSolidGeometry("Invalid IFC polygon boundary")
+    return points
+
+
+def _qualified_polygon_sweep(entities, item_ref, unit_scale):
+    """Construct a finite extrusion from a fully resolved, straight IFC profile."""
+    args = _required_ifc_entity(entities, item_ref, "IFCEXTRUDEDAREASOLID")
+    if len(args) != 4 or not isinstance(args[0], tuple) or args[0][0] != "ref":
+        raise UnresolvedSolidGeometry("Invalid IFC extrusion")
+    profile, fields = entities.get(args[0][1], (None, []))
+    if not fields or fields[0] != "AREA":
+        raise UnresolvedSolidGeometry("Expected an IFC AREA profile")
+    profile_frame = np.eye(4)
+    if profile == "IFCARBITRARYCLOSEDPROFILEDEF" and len(fields) == 3:
+        ring = _closed_polyline(entities, fields[2], unit_scale)
+    elif profile == "IFCRECTANGLEPROFILEDEF" and len(fields) == 5:
+        x, y = [_ifc_number(v) * unit_scale * .5 for v in fields[3:]]
+        if not (0 < x < math.inf and 0 < y < math.inf):
+            raise UnresolvedSolidGeometry("Invalid IFC rectangle dimensions")
+        ring = np.array([(-x, -y), (x, -y), (x, y), (-x, y)])
+        if fields[2] is not None:
+            p, axis = _required_ifc_entity(entities, fields[2], "IFCAXIS2PLACEMENT2D")
+            profile_frame[:2, 3] = _ifc_vector(entities, p, "IFCCARTESIANPOINT", 2) * unit_scale
+            if axis is not None:
+                direction = _ifc_vector(entities, axis, "IFCDIRECTION", 2)
+                if not np.any(direction):
+                    raise UnresolvedSolidGeometry("Invalid rectangle reference direction")
+                d = _unit_ratios(direction)
+                profile_frame[:2, :2] = ((d[0], -d[1]), (d[1], d[0]))
+    else:
+        raise UnresolvedSolidGeometry("Only closed straight polylines and rectangles are qualified for this extrusion")
+    solid_frame = np.eye(4) if args[1] is None else _rigid_ifc_frame(entities, args[1], unit_scale)
+    direction = _ifc_vector(entities, args[2], "IFCDIRECTION", 3)
+    depth = _ifc_number(args[3]) * unit_scale
+    if not 0 < depth < math.inf or direction[2] == 0:
+        raise UnresolvedSolidGeometry("Invalid sweep depth or direction parallel to the profile")
+    sweep = profile_frame[:3, :3].T @ _unit_ratios(direction) * depth
+    vertices, faces = _extrude_polygon_2d(ring, sweep)
+    vertices = _apply_transform(vertices, solid_frame @ profile_frame)
+    if not np.isfinite(vertices).all():
+        raise UnresolvedSolidGeometry("Nonfinite transformed sweep")
+    return vertices, faces
+
+
 def _rigid_ifc_frame(entities, ref, unit_scale):
     """Resolve a qualified rigid 3D placement for mass properties."""
     args = _required_ifc_entity(entities, ref, "IFCAXIS2PLACEMENT3D")
@@ -1485,7 +1559,7 @@ def _rigid_ifc_frame(entities, ref, unit_scale):
         attrs = _required_ifc_entity(entities, ref, kind)
         if len(attrs) != 1 or not isinstance(attrs[0], list) or len(attrs[0]) != 3:
             raise ValueError(f"Expected three coordinates for {kind}")
-        v = np.asarray(attrs[0], dtype=float)
+        v = np.array([_ifc_number(value) for value in attrs[0]])
         if not np.isfinite(v).all():
             raise ValueError(f"Nonfinite {kind}")
         if kind == "IFCDIRECTION":
