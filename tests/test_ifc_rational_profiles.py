@@ -90,6 +90,18 @@ class RationalProfile(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertIsNone(result["total_solid_volume_m3"])
 
+    def test_nested_far_origin_keeps_a_small_authored_gap(self):
+        f = model(.5, (0., .225))
+        make = f.create_entity
+        parent = make("IfcLocalPlacement", None, make("IfcAxis2Placement3D",
+                      make("IfcCartesianPoint", (1e17, -1e17, 1e17))))
+        for slab in f.by_type("IfcSlab"):
+            slab.ObjectPlacement.PlacementRelTo = parent
+        result = public(f)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["all_pairs"][0]["status"], "clearance_violation")
+        self.assertAlmostEqual(result["min_clearance_m"], .025, places=12)
+
     def test_gap_contact_and_overlap(self):
         for gap, status in ((.025, "clearance_violation"), (.3, "clear"),
                             (0., "hard_clash"), (-.05, "hard_clash")):

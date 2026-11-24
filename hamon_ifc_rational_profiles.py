@@ -135,6 +135,13 @@ def _planar_bounds(inner_a, outer_a, inner_b, outer_b):
     from shapely.geometry import Polygon
     from shapely.ops import nearest_points
 
+    # A distant project origin must not erase the local material geometry in
+    # the floating-point witness search. All certificates use rational points.
+    ox,oy = inner_a[0]
+    def relative(points):
+        return [(x-ox,y-oy) for x,y in points]
+    inner_a,outer_a,inner_b,outer_b = map(relative,(inner_a,outer_a,inner_b,outer_b))
+
     def polygon(points):
         return Polygon([(float(x),float(y)) for x,y in points])
 
@@ -192,8 +199,56 @@ def _distance(left, right, clearance):
     raise ValueError("Rational clearance threshold or distance remains unresolved")
 
 
-def rational_scene(model, bodies, scale, required_clearance, cross_only, discipline):
-    from ifcopenshell.util.placement import get_axis2placement, get_local_placement
+
+def _cardinal(direction, default):
+    if direction is None:
+        return default
+    ratios = tuple(_number(v) for v in direction.DirectionRatios)
+    if len(ratios)!=len(default) or sum(v!=0 for v in ratios)!=1:
+        raise ValueError("Rational prism requires a cardinal source direction")
+    return tuple((v>0)-(v<0) for v in ratios)
+
+
+def _world_frame(product, item, profile):
+    placements = []
+    local = product.ObjectPlacement
+    seen = set()
+    while local is not None:
+        if not local.is_a("IfcLocalPlacement") or local.id() in seen or len(seen)>=128:
+            raise ValueError("Rational products require bounded acyclic local placements")
+        seen.add(local.id())
+        placements.append(local.RelativePlacement)
+        local = local.PlacementRelTo
+    placements.reverse()
+    if item.Position is not None:
+        placements.append(item.Position)
+    if profile.is_a()=="IfcRectangleProfileDef" and profile.Position is not None:
+        placements.append(profile.Position)
+    linear = ((1,0,0),(0,1,0),(0,0,1))
+    offset = (Fraction(0),)*3
+    for placement in placements:
+        pos = tuple(_number(v) for v in placement.Location.Coordinates)
+        if placement.is_a()=="IfcAxis2Placement2D" and len(pos)==2:
+            ux,uy = _cardinal(placement.RefDirection,(1,0))
+            axes = ((ux,uy,0),(-uy,ux,0),(0,0,1))
+            pos += (Fraction(0),)
+        elif placement.is_a()=="IfcAxis2Placement3D" and len(pos)==3:
+            x = _cardinal(placement.RefDirection,(1,0,0))
+            z = _cardinal(placement.Axis,(0,0,1))
+            if sum(a*b for a,b in zip(x,z))!=0:
+                raise ValueError("Rational prism requires orthogonal source directions")
+            y = tuple(z[(i+1)%3]*x[(i+2)%3]-z[(i+2)%3]*x[(i+1)%3] for i in range(3))
+            axes = (x,y,z)
+        else:
+            raise ValueError("Unsupported rational prism placement")
+        # Resolve source-frame translations before any binary64 conversion.
+        offset = tuple(offset[i]+sum(a*b for a,b in zip(row,pos)) for i,row in enumerate(linear))
+        linear = tuple(tuple(sum(a*b for a,b in zip(row,axis)) for axis in axes) for row in linear)
+    if abs(linear[2][2])!=1:
+        raise ValueError("Rational prisms require a vertical world extrusion")
+    return linear,offset
+
+def rational_scene(bodies, scale, required_clearance, cross_only, discipline):
     length = Fraction(str(scale))
     if not 0 < length or len(bodies)>32 or not math.isfinite(required_clearance) or required_clearance < 0:
         raise ValueError("Outside bounded rational scene or units")
@@ -207,16 +262,7 @@ def rational_scene(model, bodies, scale, required_clearance, cross_only, discipl
         profile = item.SweptArea
         if profile.ProfileType != "AREA":
             raise ValueError("Expected a material AREA profile")
-        placement = product.ObjectPlacement
-        seen = set()
-        while placement is not None:
-            if not placement.is_a("IfcLocalPlacement") or placement.id() in seen:
-                raise ValueError("Rational products require acyclic local placements")
-            seen.add(placement.id())
-            placement = placement.PlacementRelTo
-        matrix = get_local_placement(product.ObjectPlacement)
-        if item.Position is not None:
-            matrix = matrix @ get_axis2placement(item.Position)
+        linear,offset = _world_frame(product,item,profile)
         if (ring is not None and ring.is_a()=="IfcRationalBSplineCurveWithKnots"
                 and profile.is_a()=="IfcArbitraryClosedProfileDef"):
             area = rational_profile_area(ring)
@@ -226,30 +272,20 @@ def rational_scene(model, bodies, scale, required_clearance, cross_only, discipl
             dx,dy = _number(profile.XDim)/2,_number(profile.YDim)/2
             if dx<=0 or dy<=0:
                 raise ValueError("Invalid rectangular peer")
-            if profile.Position is not None:
-                matrix = matrix @ get_axis2placement(profile.Position)
             area = float(4*dx*dy)
             coords = [(-dx,-dy),(dx,-dy),(dx,dy),(-dx,dy)]
             weights = []
         else:
             raise ValueError("Rational scene contains an unsupported peer profile")
-        # Only signed cardinal world frames and a right vertical extrusion are
-        # qualified. This makes every transformed hull coordinate rational.
-        linear = matrix[:3,:3]
-        if (any(v not in (-1.,0.,1.) for v in linear.flat)
-                or any(sum(abs(v) for v in linear[i,:])!=1 for i in range(3))
-                or any(sum(abs(v) for v in linear[:,i])!=1 for i in range(3))
-                or abs(linear[2,2])!=1):
-            raise ValueError("Rational prisms require a cardinal planar world frame")
         direction = item.ExtrudedDirection.DirectionRatios
         if (len(direction)!=3 or direction[0]!=0 or direction[1]!=0 or not _number(direction[2])
                 or _number(item.Depth)<=0):
             raise ValueError("Rational prisms require a positive right extrusion")
-        xy = [(length*(Fraction(float(matrix[0,3]))+int(linear[0,0])*Fraction(x)+int(linear[0,1])*Fraction(y)),
-               length*(Fraction(float(matrix[1,3]))+int(linear[1,0])*Fraction(x)+int(linear[1,1])*Fraction(y))) for x,y in coords]
-        z0 = length*Fraction(float(matrix[2,3]))
+        xy = [(length*(offset[0]+linear[0][0]*Fraction(x)+linear[0][1]*Fraction(y)),
+               length*(offset[1]+linear[1][0]*Fraction(x)+linear[1][1]*Fraction(y))) for x,y in coords]
+        z0 = length*offset[2]
         depth = length*_number(item.Depth)
-        z1 = z0+int(linear[2,2])*(1 if direction[2]>0 else -1)*depth
+        z1 = z0+linear[2][2]*(1 if direction[2]>0 else -1)*depth
         h = [(x*w,y*w,w) for (x,y),w in zip(xy,weights)]
         spans = [tuple(h[i:i+3]) for i in range(0,len(h)-1,2)]
         volume = area*float(length**2)*float(depth)

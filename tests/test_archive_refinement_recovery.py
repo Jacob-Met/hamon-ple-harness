@@ -44,8 +44,9 @@ class ArchiveRefinementRecovery(unittest.IsolatedAsyncioTestCase):
                         archive_checkpoint.checkpoint(stage, target, members)
                         remaining = after_checkpoint
                         action = None
-                    elif command.endswith(" --recover"):
-                        action = archive_checkpoint.recover(stage, target, members)
+                    elif command.endswith((" --recover", " --recover-first-only")):
+                        action = archive_checkpoint.recover(stage, target, members,
+                            first_only=command.endswith(" --recover-first-only"))
                     else:
                         archive_checkpoint.publish(stage, target, members)
                         action = None
@@ -121,7 +122,9 @@ class ArchiveRefinementRecovery(unittest.IsolatedAsyncioTestCase):
                 reply = await harness.solve(session)
             final = target.read_bytes() if target.exists() else None
             state = (await snapshot(session, targets))[str(target)]["state"]
-            return dict(calls=calls, commands=commands, first=first, final=final, state=state, reply=reply)
+            checkpoint = stage.with_name(stage.name + ".checkpoint.zip")
+            return dict(calls=calls, commands=commands, first=first, final=final, state=state, reply=reply,
+                        checkpoint=checkpoint.read_bytes() if checkpoint.exists() else None)
 
     async def test_failed_refinement_recovers_the_complete_archive(self):
         for change in ("corrupt", "missing", "both_invalid"):
@@ -140,12 +143,16 @@ class ArchiveRefinementRecovery(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["state"], "ready")
                 self.assertEqual(result["final"] == result["first"], change != "improved")
 
-    async def test_unacknowledged_refinement_tail_can_recover_without_model_replay(self):
+    async def test_unacknowledged_refinement_preserves_the_occupied_name_and_checkpoint(self):
         result = await self.exercise("both_invalid", tool_tail=True)
-        self.assertEqual(result["state"], "ready")
-        self.assertEqual(result["final"], result["first"])
+        self.assertEqual(result["state"], "invalid")
+        self.assertEqual(result["final"], b"PK\x03\x04interrupted replacement")
+        self.assertEqual(result["checkpoint"], result["first"])
         self.assertEqual(len(result["calls"]), 2)
         self.assertIn("before giving a final answer", result["reply"])
+        absent = await self.exercise("missing", tool_tail=True)
+        self.assertEqual(absent["state"], "ready")
+        self.assertEqual(absent["final"], absent["first"])
 
     async def test_failed_checkpoint_preserves_the_first_pass(self):
         result = await self.exercise("both_invalid", checkpoint_ok=False)

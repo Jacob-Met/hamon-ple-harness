@@ -157,7 +157,7 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
     scale = calculate_unit_scale(model)
     if "rational" in curved_types:
         from hamon_ifc_rational_profiles import rational_scene
-        return rational_scene(model, bodies, scale, required_clearance, cross_only, discipline)
+        return rational_scene(bodies, scale, required_clearance, cross_only, discipline)
     settings = geom.settings()
     settings.set("iterator-output", wrapper.NATIVE)
     settings.set("use-world-coords", True)

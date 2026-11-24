@@ -1347,9 +1347,6 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
         return unsupported("this calculation cannot apply these support specifications")
     if calculation in ("diaphragm_membrane", "continuous_beam_2span", "continuous_beam_multispan"):
         if calculation == "continuous_beam_multispan":
-            allowed = multispan_fields | {"mode", "calculation", "support_conditions", "support_settlements_m"}
-            if spec.keys() - allowed:
-                return unsupported("unexpected multi-span fields: " + ", ".join(sorted(spec.keys() - allowed)))
             from hamon_multispan_beam import solve_multispan as solve
         elif calculation == "diaphragm_membrane":
             from hamon_diaphragm import solve_diaphragm as solve
@@ -1996,6 +1993,9 @@ def verify_civil_geotech_balance(spec: Dict[str, Any]) -> Dict[str, Any]:
     if spec.get("calculation") == "janbu_slices":
         from hamon_janbu_slices import verify_janbu_slices
         return verify_janbu_slices(spec)
+    if spec.get("calculation") == "level_pool_routing":
+        from hamon_reservoir_routing import verify_reservoir_routing
+        return verify_reservoir_routing(spec)
     if spec.get("calculation") == "channel_specific_energy":
         from hamon_channel_specific_energy import specific_energy
         return specific_energy(spec)
@@ -2383,6 +2383,10 @@ def run_router_conservation_cad_verifier(payload: Dict[str, Any]) -> Dict[str, A
         if not isinstance(raw_spec, dict) or not raw_spec:
             raise ValueError(f"{family} requires a non-empty spec object")
         spec = dict(raw_spec)
+        if family == "lagrangian_orbital" and set(payload) - {"mode", "spec"}:
+            from hamon_wave7_engineering_verifiers import _requests_cr3bp
+            if _requests_cr3bp(spec) or _requests_cr3bp(payload):
+                raise ValueError("CR3BP obligations belong inside the registered spec")
         declared_domain = str(spec.get("domain") or "").strip().lower()
         if declared_domain and declared_domain != family:
             raise ValueError(f"spec.domain {declared_domain!r} conflicts with mode {family!r}")
@@ -2443,7 +2447,7 @@ def run_router_conservation_cad_verifier(payload: Dict[str, Any]) -> Dict[str, A
         elif spec.get("netlist") or spec.get("branches") or fname.endswith((".cir", ".sp", ".spice", ".net")): mode = "circuit"
         elif "lhs" in spec and "rhs" in spec: mode = "dimensional"
         elif spec.get("calculation") in ("diaphragm_membrane", "continuous_beam_2span", "continuous_beam_multispan") or ("span_m" in spec and "E_Pa" in spec): mode = "structural"
-        elif spec.get("calculation") in ("janbu_slices", "bishop_slip_circle", "channel_specific_energy", "layered_footing_settlement", "layered_consolidation_transient", "layered_consolidation_1d", "consolidation_1d", "consolidation_history_1d", "rankine_layers", "at_rest_plane_stress", "bearing_capacity", "rigid_strip_contact", "rigid_rectangle_contact", "rigid_triangle_contact", "rigid_polygon_contact", "rigid_zoned_contact", "compaction_acceptance") or any(k in spec for k in ("cut_bank_m3", "footing_B_m", "channel_B_m", "settlement_layers")): mode = "civil_geotech"
+        elif spec.get("calculation") in ("janbu_slices", "bishop_slip_circle", "channel_specific_energy", "level_pool_routing", "layered_footing_settlement", "layered_consolidation_transient", "layered_consolidation_1d", "consolidation_1d", "consolidation_history_1d", "rankine_layers", "at_rest_plane_stress", "bearing_capacity", "rigid_strip_contact", "rigid_rectangle_contact", "rigid_triangle_contact", "rigid_polygon_contact", "rigid_zoned_contact", "compaction_acceptance") or any(k in spec for k in ("cut_bank_m3", "footing_B_m", "channel_B_m", "settlement_layers")): mode = "civil_geotech"
         elif any(k in spec for k in ("inlets", "outlets", "pipe_D_m", *_HX_INPUTS, "UA_W_K")): mode = "thermal_fluid"
         elif spec.get("file_b64"):
             mode = "step_cad" if "ISO-10303-21" in base64.b64decode(spec["file_b64"])[:512].decode("utf-8", errors="replace") else "circuit"

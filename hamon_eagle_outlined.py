@@ -155,7 +155,7 @@ def _decode_signal_grid(edges, left, baseline, step_x, step_y):
             return None
         word.append(letter)
     name = "".join(word)
-    return name if re.fullmatch(r"[A-Z0-9][A-Z0-9_+/().-]{1,23}", name) and re.search("[A-Z]", name) else None
+    return name if re.fullmatch(r"[+A-Z0-9][A-Z0-9_+/().-]{1,23}", name) and re.search("[A-Z]", name) else None
 
 
 def wire_words(wires, segments, pitch):
@@ -237,7 +237,7 @@ def _fit_voltage(nearby, center, direction, units, name):
         tuple((6*i+x, y) for x, y in edge)
         for i, letter in enumerate(name) for edge in _edges(_GLYPHS[letter])
     }
-    physical, actual = [], []
+    physical, actual, adjacent = [], [], []
     for a, b in nearby:
         edge = []
         for point in (a, b):
@@ -245,15 +245,18 @@ def _fit_voltage(nearby, center, direction, units, name):
             edge.append((2+(dx*x+dy*y)/sx, 3+(dy*x-dx*y)/sy))
         if not any(-2.4 < x < extent+2.4 and -.32 < y < 6.32 for x, y in edge):
             continue
-        if any(abs(v-round(v)) > .32 for p in edge for v in p):
-            return None
-        actual.append(tuple(sorted((round(x), round(y)) for x, y in edge)))
-        physical.append(tuple(sorted((a, b))))
+        quantized = tuple(sorted((round(x), round(y)) for x, y in edge))
+        stroke = tuple(sorted((a, b)))
+        if quantized in expected and all(abs(v-round(v)) <= .32 for p in edge for v in p):
+            actual.append(quantized)
+            physical.append(stroke)
+        else:
+            adjacent.append(stroke)
     if len(actual) == len(expected) and set(actual) == expected:
-        return tuple(sorted(physical))
+        return tuple(sorted(physical)), frozenset(adjacent)
 
 
-def anchored_voltage(mark, lettering):
+def _voltage_candidates(mark, lettering):
     """Two perpendicular strokes of a printed plus fix the font origin and scale."""
     foot, tip = mark["foot"], mark["tip"]
     stem = math.dist(foot, tip)
@@ -288,6 +291,44 @@ def anchored_voltage(mark, lettering):
                     if placed:
                         occurrence = _fit_voltage(nearby, center, (dx, dy), (sx, sy), name)
                         if occurrence:
-                            matches.add((name, occurrence))
-    return matches.pop() if len(matches) == 1 else None
+                            matches.add((name, *occurrence))
+    return matches
 
+
+
+def paired_voltages(marks, lettering, components):
+    """Keep isolated words and recover two crowded arrow legends with mutually explained ink."""
+    candidates = [_voltage_candidates(mark, lettering) for mark in marks]
+    readings = [{(name, ink) for name, ink, extra in choices if not extra} for choices in candidates]
+    # The isolated-word pass above remains independent. A new crowded reading
+    # has a stricter ownership requirement: no alternative candidate may claim
+    # the same strokes for another word or electrical component.
+    owners = defaultdict(set)
+    for choices, component in zip(candidates, components, strict=True):
+        for name, ink, _ in choices:
+            for stroke in ink:
+                owners[stroke].add((name, ink, component))
+    crowded = []
+    for index, choices in enumerate(candidates):
+        if len(choices) == 1:
+            name, ink, extra = next(iter(choices))
+            if extra and all(len(owners[stroke]) == 1 for stroke in ink):
+                crowded.append((index, name, ink, extra))
+    partners = defaultdict(list)
+    for pos, (i, name, ink, extra) in enumerate(crowded):
+        for j, other_name, other_ink, other_extra in crowded[:pos]:
+            if (components[i] != components[j] and extra.issubset(other_ink)
+                    and other_extra.issubset(ink) and set(ink).isdisjoint(other_ink)):
+                partners[i].append((j, name, ink))
+                partners[j].append((i, other_name, other_ink))
+    for i, matches in partners.items():
+        if len(matches) == 1:
+            j, name, ink = matches[0]
+            if len(partners[j]) == 1:
+                readings[i].add((name, ink))
+    return [next(iter(options)) if len(options) == 1 else None for options in readings]
+
+
+def anchored_voltage(mark, lettering):
+    """Read a single arrow only when its complete caption has no unexplained ink."""
+    return paired_voltages([mark], lettering, [0])[0]
