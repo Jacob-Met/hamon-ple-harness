@@ -14,6 +14,10 @@ rational values of the binary64 output coordinates. Their enclosed volumes
 must agree exactly. The output must agree with the kernel volume and survive
 reconstruction in world coordinates within the stated numerical tolerance.
 
+Volumes that cannot retain a normal positive binary64 value are withheld rather
+than accepted through a subnormal absolute-error allowance. A volume-only
+compound is refused as either host or cutter in opening subtraction.
+
 This does not relax input-geometry admission. It is never accepted as an
 opening cutter or a replacement clipping surface. Original component geometry
 is retained for geometric queries. A dedicated field supplies only the checked

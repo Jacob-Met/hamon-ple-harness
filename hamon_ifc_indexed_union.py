@@ -8,6 +8,7 @@ This module certifies no replacement surface, area, centroid or clearance.
 from collections import defaultdict
 from fractions import Fraction
 import math
+import sys
 import numpy as np
 
 def _closed_indexed_boundary(points, faces):
@@ -64,7 +65,13 @@ def _exact_axis_volumes(points, faces):
     values = [value / 6 for value in totals]
     if values[0] <= 0 or values[0] != values[1] or values[0] != values[2]:
         raise ValueError("Cartesian enclosed-volume integrals disagree")
-    return float(values[0])
+    try:
+        result = float(values[0])
+    except OverflowError as exc:
+        raise ValueError("Indexed volume is not representable") from exc
+    if not math.isfinite(result) or result < sys.float_info.min:
+        raise ValueError("No representable normal positive indexed volume")
+    return result
 
 def certified_indexed_union_volume(vertices, faces, *, kernel_volume,
                                    operand_volumes, world_vertices, scale):
@@ -87,8 +94,12 @@ def certified_indexed_union_volume(vertices, faces, *, kernel_volume,
     if not maximum - margin <= local <= total + margin:
         raise ValueError("Material union violates operand volume bounds")
     reconstructed = _exact_axis_volumes(world_vertices, faces)
-    expected = local * scale**3
-    if (not math.isfinite(expected) or expected <= 0 or not math.isfinite(reconstructed)
+    try:
+        expected = local * scale**3
+    except OverflowError as exc:
+        raise ValueError("World volume overflow") from exc
+    if (not math.isfinite(expected) or expected < sys.float_info.min
+            or not math.isfinite(reconstructed) or reconstructed < sys.float_info.min
             or not math.isclose(reconstructed, expected, rel_tol=2e-9,
                                 abs_tol=128*math.ulp(expected))):
         raise ValueError("World reconstruction changes the certified volume")

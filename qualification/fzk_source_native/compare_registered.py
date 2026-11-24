@@ -83,6 +83,9 @@ console.log(JSON.stringify(result.details));
         # Surface touching is not a positive material-intersection volume.
         assert pair["min_distance_m"] == 0 and pair["material_interference"] == "unverified"
         reference = native["openings"][str(host)]
+        native_distances = [part["net"]["distance_m"] for part in reference["window_parts"]]
+        assert math.isclose(pair["min_distance_m"], min(native_distances), rel_tol=0, abs_tol=1e-9)
+        assert sum(distance <= 1e-9 for distance in native_distances) == 2
         assert math.isclose(rows[window]["volume_m3"], reference["window_union_m3"],
                             rel_tol=0, abs_tol=1e-11)
         assert math.isclose(rows[host]["volume_m3"] + rows[window]["volume_m3"],

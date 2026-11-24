@@ -1824,7 +1824,8 @@ def _physical_occurrences(solids, entities, unit_scale, related, empty=None):
         openings = [by_step[i] for i in sorted(opening_steps) if i not in empty]
         if not openings:
             continue
-        if any("mass_issue" in s.metadata for s in [material, *openings]):
+        if any("mass_issue" in s.metadata or s.certified_union_volume_m3 is not None
+               for s in [material, *openings]):
             raise UnresolvedOpening("Unqualified compound host or opening material")
         placement = entities[host][1][5]
         frame = np.eye(4) if placement is None else _placed_product_frame(entities, placement, unit_scale)

@@ -183,6 +183,14 @@ def _context(entities, ref, projects):
         raise ValueError("Unsupported nonidentity project coordinate system")
 
 
+def _single_boundary(points, faces, step):
+    seeds, closed, coherent = reader._closed_surface_components(points, faces)
+    if len(closed) != len(faces) or not coherent:
+        raise ValueError(f"Open or inconsistently oriented source boundary on #{step}")
+    if len(seeds) != 1:
+        raise ValueError(f"Multiple boundary components in a single source shell on #{step}")
+
+
 def _checked_triangulation(entities, step, attrs):
     if len(attrs) != 5 or attrs[4] is not None or (attrs[2] is not None and attrs[2] is not True):
         raise ValueError(f"Unqualified closure or triangulation indexing on #{step}")
@@ -197,9 +205,7 @@ def _checked_triangulation(entities, step, attrs):
         if not isinstance(tri, list) or len(tri) != 3 or any(type(v) is not int or not 1 <= v <= len(points) for v in tri):
             raise ValueError(f"Invalid triangulation indices on #{step}")
     faces = np.asarray(attrs[3], dtype=np.int64) - 1
-    _, closed, coherent = reader._closed_surface_components(np.asarray(points), faces)
-    if len(closed) != len(faces) or not coherent:
-        raise ValueError(f"Open or inconsistently oriented triangulation on #{step}")
+    _single_boundary(np.asarray(points), faces, step)
 
 
 def _validate_body(entities, step, project_contexts, visited, active):
@@ -247,6 +253,11 @@ def _validate_body(entities, step, project_contexts, visited, active):
     elif kind == "IFCPOLYGONALFACESET":
         if len(attrs) != 4 or (attrs[1] is not None and attrs[1] is not True):
             raise ValueError(f"Unqualified polygonal face-set closure on #{step}")
+        (points, faces), = reader._polygonal_solid_mesh(entities, attrs, 1.)
+        _single_boundary(points, faces, step)
+    elif kind == "IFCFACETEDBREP":
+        (points, faces), = reader._faceted_solid_mesh(entities, attrs, 1.)
+        _single_boundary(points, faces, step)
     elif kind == "IFCTRIANGULATEDFACESET":
         _checked_triangulation(entities, step, attrs)
     elif kind in ("IFCCARTESIANPOINT", "IFCDIRECTION"):

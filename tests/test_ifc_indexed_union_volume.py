@@ -51,3 +51,8 @@ def test_nonfinite_or_nonintegral_indices_refuse():
     damaged[0,0] = np.nan
     with pytest.raises(ValueError):
         certify(damaged,F,1.,[1.,1.])
+
+@pytest.mark.parametrize("world_scale", [1e-108, 1e-103])
+def test_subnormal_world_measure_is_withheld(world_scale):
+    with pytest.raises(ValueError, match="representable"):
+        certify(V,F,1.,[1.,1.],world=V*world_scale,scale=2*world_scale)
