@@ -277,6 +277,10 @@ if __name__ == "__main__":
         checkpoint(Path(stage), Path(target), members)
     elif sys.argv[2:] == ["--recover"]:
         print(json.dumps({"action": recover(Path(stage), Path(target), members)}))
+    elif sys.argv[2:] == ["--first-only"]:
+        # An earlier publisher may still finish after an interrupted request.
+        publish(Path(stage), Path(target), members, after_empty=True)
+        print("PLE_ARCHIVE_PUBLISHED", end="")
     elif sys.argv[2:] == ["--after-empty"]:
         publish_after_empty(Path(stage), Path(target), members)
     elif sys.argv[2:] == ["--from-output"]:

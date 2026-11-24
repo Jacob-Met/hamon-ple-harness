@@ -645,20 +645,43 @@ async def solve(session: taskbridge.Session) -> str:
               issues = delivery_guard.compare(before_delivery, after_delivery)
               await session.log("delivery_gate: post_materialize=" + str(len(issues)))
           delivery_time = taskbridge.time_share(session.time_left(), STOP_BEFORE_SEC)
-          if (issues or (working_copy and terminal.filing)) and can_continue and not delivery_budget_exhausted(session, run.budget_steps) and (delivery_time is None or delivery_time >= MIN_DELIVERY_RUN_SEC):
+          # An interrupted tool request cannot be resumed. A new participant
+          # session can still inspect the task files and author a missing local
+          # archive. Never carry a pending command or its presumed result across.
+          fresh_archive = bool(
+              archive_plan and not session.mcp_servers and not run.invalid_tail
+              and run.expected_calls.difference(run.observed_results)
+              and before_delivery.get(delivery_targets[0]["path"], {}).get("state") == "missing"
+              and (after_delivery or {}).get(delivery_targets[0]["path"], {}).get("state") == "missing"
+          )
+          if ((issues or (working_copy and terminal.filing)) and (can_continue or fresh_archive)
+              and not delivery_budget_exhausted(session, run.budget_steps)
+              and (delivery_time is None or delivery_time >= MIN_DELIVERY_RUN_SEC)):
             # Each task has its own temporary session directory. Continue the
             # actual calculation history if Pi persisted it before the cutoff.
-            resume = any(session_dir.glob("*.jsonl"))
+            resume = not fresh_archive and any(session_dir.glob("*.jsonl"))
             terminal.invalidate()
             instruction = delivery_guard.repair_instruction(issues) if issues else "\n\nThe working copy was recovered locally."
             if working_copy:
               instruction += terminal.copy_instruction(working_copy)
             if archive_plan:
-              instruction += archive_contract.first_instruction(*archive_plan)
+              stage, publisher = archive_plan
+              if fresh_archive:
+                publisher += " --first-only"
+              instruction += archive_contract.first_instruction(stage, publisher)
+            if fresh_archive:
+              instruction += (
+                  "\nAn earlier tool request has no confirmed outcome. Start from the files "
+                  "currently on disk. Inspect the destination, staging directory and project "
+                  "work before writing. Preserve a complete archive if one has appeared. "
+                  "Use the existing engineering results to complete missing members. "
+                  "Do not repeat the interrupted operation or assume that it succeeded.")
             if not resume:
               instruction = session.instruction + instruction
             participant_followup = True
-            run.archive_watch = first_publication
+            # A new session cannot acknowledge a call from the previous one.
+            run.archive_watch = (archive_contract.FirstPublication((stage, publisher))
+                                 if fresh_archive else first_publication)
             await taskbridge.run_process(
                 [*argv, "--continue"] if resume else argv,
                 session,
@@ -676,7 +699,7 @@ async def solve(session: taskbridge.Session) -> str:
             if still_missing and archive_plan:
               # The final repair can finish the staged members just before its cutoff.
               # The participant's last turn is not responsible for committing them.
-              recovery = archive_contract.recovery_command(
+              recovery = publisher if fresh_archive else archive_contract.recovery_command(
                   archive_plan[1], delivery_targets[0]["path"], before_delivery, after_repair)
               if await archive_contract.run_command(session, recovery):
                 after_repair = await delivery_guard.snapshot(session, delivery_targets)
