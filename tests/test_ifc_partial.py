@@ -194,6 +194,47 @@ class PartialIfcTests(unittest.TestCase):
                     self.assertEqual(report["all_pairs"], [])
                     self.assertIsNone(report["total_solid_volume_m3"])
 
+    def test_overlapping_cube_shells_require_explicit_material_items(self):
+        # The overlap is 0.8 * 0.7 * 0.6, so adding two closed shells would overcount.
+        triangles = [(1,3,2),(1,4,3),(5,6,7),(5,7,8),(1,2,6),(1,6,5),
+                     (2,3,7),(2,7,6),(3,4,8),(3,8,7),(4,1,5),(4,5,8)]
+        for kind in ("triangulated", "polygonal", "faceted"):
+            with self.subTest(kind=kind):
+                s = PartialScene()
+                points = [(x+ox, y+oy, z+oz) for ox,oy,oz in [(0,0,0),(.2,.3,.4)]
+                          for z in (0,1) for x,y in ((0,0),(1,0),(1,1),(0,1))]
+                faces = [tuple(i+offset for i in t) for offset in (0,8) for t in triangles]
+                if kind == "faceted":
+                    point_ids = [s.add(f"IFCCARTESIANPOINT({pt})") for pt in points]
+                    ff = []
+                    for t in faces:
+                        refs = ",".join(f"#{point_ids[i-1]}" for i in t)
+                        loop = s.add(f"IFCPOLYLOOP(({refs}))")
+                        outer = s.add(f"IFCFACEOUTERBOUND(#{loop},.T.)")
+                        ff.append(s.add(f"IFCFACE((#{outer}))"))
+                    refs = ",".join(f"#{f}" for f in ff)
+                    shell = s.add(f"IFCCLOSEDSHELL(({refs}))")
+                    item = s.add(f"IFCFACETEDBREP(#{shell})")
+                else:
+                    coordinates = ",".join(map(str,points))
+                    pts = s.add(f"IFCCARTESIANPOINTLIST3D(({coordinates}))")
+                    if kind == "triangulated":
+                        face_list = ",".join(map(str,faces))
+                        item = s.add(f"IFCTRIANGULATEDFACESET(#{pts},$,.T.,({face_list}),$)")
+                    else:
+                        ff = [s.add(f"IFCINDEXEDPOLYGONALFACE({t})") for t in faces]
+                        refs = ",".join(f"#{f}" for f in ff)
+                        item = s.add(f"IFCPOLYGONALFACESET(#{pts},.T.,({refs}),$)")
+                invalid = s.product("IFCWALL", "single source", [item])
+                valid = s.product("IFCBEAM", "separate Body items", [s.box(1,.5,z=0,y=.5),
+                                                                    s.box(1,.7,z=.4,y=.8)])
+                report = s.partial()
+                self.assertEqual(report["unresolved_geometry_step_ids"], [invalid])
+                self.assertIn("Multiple boundary components", rows(report)[invalid]["reason"])
+                self.assertAlmostEqual(rows(report)[valid]["volume_m3"], 1.664, places=10)
+                self.assertIsNone(report["total_solid_volume_m3"])
+                self.assertEqual((report["missing_geometry_pair_count"], report["all_pairs"]), (1,[]))
+
     def test_project_conversion_dimensions(self):
         for dims in ("1,0,0,0,0,0,0","0,0,1,0,0,0,0",None):
             with self.subTest(dims=dims):
