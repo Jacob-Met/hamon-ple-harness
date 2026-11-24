@@ -1315,6 +1315,10 @@ def _lagrangian_modes(params):
 
 def _orbital_transfer(params: Mapping[str, Any]) -> Dict[str, Any]:
     """Two circular orbits joined by a Hohmann ellipse, with tilt at the higher apsis."""
+    if set(params) & {"r1_m", "r2_m", "tof_s", "transfer_path", "plane_normal", "revolutions",
+                      "proposed_v1_m_s", "proposed_v2_m_s"}:
+        return {"domain": "lagrangian_orbital", "subkind": "orbital_transfer", "verified": False,
+                "error": "lambert_inputs_require_lambert_transfer"}
     from mpmath import mp
 
     result = {"domain": "lagrangian_orbital", "subkind": "orbital_transfer", "verified": False}
@@ -1689,6 +1693,10 @@ def solve_lagrangian_orbital(params: Mapping[str, Any]) -> Dict[str, Any]:
 
     if subkind == "orbital_transfer":
         return _orbital_transfer(params)
+
+    if subkind == "lambert_transfer":
+        from hamon_lambert import solve_lambert_transfer
+        return solve_lambert_transfer(params)
 
     return {"domain": "lagrangian_orbital", "subkind": subkind, "verified": False, "error": f"unsupported_lagrangian_orbital:{subkind}"}
 
@@ -2289,7 +2297,7 @@ def infer_wave7_domain(text_or_domain: str) -> Optional[str]:
         return "thermo_cycles"
     if any(k in s for k in ("epsilon-ntu", "ntu", "heat exchanger", "shell_tube", "radiosity", "view factor", "oppenheim", "gray enclosure", "radiation_network")):
         return "exchangers_radiation"
-    if any(k in s for k in ("euler_rigid_body", "rigid body", "principal inertia", "lagrangian", "eigenmode", "natural frequenc", "hohmann", "vis-viva", "orbital_transfer")):
+    if any(k in s for k in ("euler_rigid_body", "rigid body", "principal inertia", "lagrangian", "eigenmode", "natural frequenc", "hohmann", "vis-viva", "orbital_transfer", "lambert")):
         return "lagrangian_orbital"
     if any(k in s for k in ("nernst", "faraday", "overpotential", "electrochem", "mccabe-thiele", "mccabe", "fenske", "underwood", "distillation", "equilibrium_flash")):
         return "electrochem_separations"
