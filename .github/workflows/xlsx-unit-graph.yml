@@ -8,6 +8,7 @@ on:
       - "taskbridge.py"
       - "tests/test_xlsx*.py"
       - "ship/verify_xlsx_unit_graph.py"
+      - "ship/verify_archived_workbook_graph.py"
       - ".github/workflows/xlsx-unit-graph.yml"
   workflow_dispatch:
 jobs:
@@ -45,6 +46,19 @@ jobs:
           pip install --disable-pip-version-check --timeout 30 --retries 1 sympy==1.14.0
       - name: Recalculate saved workbook and compare exact unit scales
         run: python ship/verify_xlsx_unit_graph.py --out "$RUNNER_TEMP/xlsx-unit-graph" --min-memory-gib 4
+      - name: Check out the prior prefix-limited verifier for paired comparison
+        uses: actions/checkout@v4
+        with:
+          ref: 6bd906f83c07b803f21e613ff74659f6a2e71d33
+          path: .xlsx-graph-reference
+          sparse-checkout: |
+            engineering_toolkit.py
+            office_package.py
+          sparse-checkout-cone-mode: false
+      - name: Replay the unmodified archived conveyance workbook and corrupted controls
+        run: |
+          python ship/verify_archived_workbook_graph.py --reference .xlsx-graph-reference \
+            --report "$RUNNER_TEMP/xlsx-unit-graph/archived-workbook.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
