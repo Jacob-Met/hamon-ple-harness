@@ -81,6 +81,14 @@ class NyquistWindingTests(unittest.TestCase):
         self.assertFalse(verify([-2], [1, 1], claimed_field="nyquist_clockwise_encirclements",
                                 claimed_value=-1)["passed"])
 
+    def test_integer_claims_have_no_numeric_tolerance(self):
+        for field in ["nyquist_clockwise_encirclements", "nyquist_closed_loop_rhp_poles"]:
+            for value in [1.99, "2.00000000000000000001", True, 0]:
+                result = verify([12], [1, 3, 3, 1], claimed_field=field, claimed_value=value, atol=100)
+                self.assertFalse(result["passed"], result)
+                self.assertEqual(result["claim_check"]["comparison"], "exact_integer")
+            self.assertTrue(verify([12], [1, 3, 3, 1], claimed_field=field, claimed_value="2.0")["passed"])
+
     @unittest.skipUnless(importlib.util.find_spec("control"), "external python-control oracle")
     def test_external_control_library(self):
         import control

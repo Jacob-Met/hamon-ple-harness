@@ -1707,6 +1707,19 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         elif "claimed_value" in spec and isinstance(field, str) and field in res and res[field] is None:
             res["passed"] = False
             res["reason"] = f"Cannot verify claimed {field}: the result is undefined or unavailable"
+        elif "claimed_value" in spec and field in ("nyquist_clockwise_encirclements", "nyquist_closed_loop_rhp_poles"):
+            # A winding or pole count is integral. Relative tolerances and a
+            # float conversion could otherwise accept an adjacent/fractional claim.
+            value = spec["claimed_value"]
+            try:
+                count = Decimal(str(value)) if type(value) in (str, int, float) else None
+                matches = count is not None and count.is_finite() and count == res[field]
+            except (ArithmeticError, ValueError):
+                matches = False
+            res["claim_check"] = {"field": field, "actual": res[field],
+                                  "comparison": "exact_integer", "within_tolerance": matches}
+            if not matches:
+                res.update(passed=False, reason=f"Claimed {field} must equal the exact integer count")
         else:
             _check_claimed(res, spec)
         return res
