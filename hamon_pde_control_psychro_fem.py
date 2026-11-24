@@ -13,7 +13,8 @@ numerical cross-verification suite for Physical Engineering's Last Exam (PLE):
      - Continuous-time LTI transfer-function half-plane pole counts from exact shifted
        Hurwitz minors, separate numerical pole approximations,
        exact Bode gain/phase crossover frequencies, Gain Margin (dB), Phase Margin (deg),
-       unity-feedback closed-loop stability, and static DC gain.
+       exact Nyquist winding for regular strictly proper loops, unity-feedback closed-loop
+       stability, and static DC gain.
      - State-space exact Faddeev-LeVerrier characteristic polynomial, Cayley-Hamilton
        residual, numerical pole diagnostics and algebraic controllability/observability ranks of the supplied
        finite binary64 coefficients. Continuous Lyapunov or discrete Stein equations
@@ -1543,6 +1544,62 @@ def _transfer_pole_diagnostics(monic):
     return poles, status
 
 
+def _nyquist_winding(num, den, closed):
+    """Count clockwise encirclements of -1 for a regular strictly proper loop.
+
+    Traverse s=jw from -infinity to +infinity and close through the right
+    half-plane. The large arc maps to 1 for F=1+N/D. Crossings of the negative
+    real ray by F thus give the complete winding without a frequency grid.
+    """
+    def unavailable(reason):
+        return {"status": "unavailable", "reason": reason,
+                "clockwise_encirclements": None, "negative_ray_events": None}
+
+    if len(_trim_poly(list(reversed(num)))) >= len(den):
+        return unavailable("requires_strictly_proper_loop")
+
+    cr, ci = _jw_parts(closed)
+    dr, di = _jw_parts(den)
+    # Work with the supplied realization. Common imaginary-axis factors are
+    # not silently cancelled, and an indented contour is outside this count.
+    if not den[-1] or _regular_roots(_poly_gcd(dr, di)):
+        return unavailable("open_loop_pole_on_contour")
+    if not closed[-1] or _regular_roots(_poly_gcd(cr, ci)):
+        return unavailable("nyquist_locus_hits_minus_one")
+
+    # Numerators of Re(F) and Im(F)/w in x=w². Their common denominator
+    # |D(jw)|² is strictly positive by the contour check above.
+    real = _poly_sum(_poly_product(cr, dr), [0] + _poly_product(ci, di))
+    imag = _poly_sum(_poly_product(ci, dr), _poly_product(cr, di), -1)
+    events = []
+    if imag:
+        # Im(F) is odd. When its linear term vanishes, its first nonzero
+        # coefficient still determines the two sides of the origin.
+        if real[0] < 0:
+            right = next(c for c in imag if c)
+            events.append({"omega_squared_interval": ["0", "0"],
+                           "clockwise_contribution": 1 if right > 0 else -1})
+
+        roots = _regular_roots(imag, nonzero_witnesses=(real,))
+        for i, (lo, hi) in enumerate(roots):
+            if _poly_value(real, (lo + hi) / 2) > 0:
+                continue
+            # Signs in the adjacent root-free gaps also classify tangencies.
+            # Conjugation reverses the frequency AND the imaginary sign, so
+            # crossings at +w and -w make the same signed contribution.
+            previous = roots[i - 1][1] if i else Fraction(0)
+            following = roots[i + 1][0] if i + 1 < len(roots) else hi + 2
+            left = _poly_value(imag, (previous + lo) / 2)
+            right = _poly_value(imag, (hi + following) / 2)
+            contribution = 2 * (int(right > 0) - int(left > 0))
+            events.append({"omega_squared_interval": [_fraction_text(lo), _fraction_text(hi)],
+                           "clockwise_contribution": contribution})
+
+    return {"status": "certified", "clockwise_encirclements": sum(
+                event["clockwise_contribution"] for event in events),
+            "negative_ray_events": events}
+
+
 def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(spec.get("mode", "transfer_function" if "den" in spec else "state_space")).strip().lower()
     timebase = spec.get("timebase", "continuous")
@@ -1593,6 +1650,9 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         poles, pole_status = _transfer_pole_diagnostics(open_monic)
         cl_poles, cl_pole_status = _transfer_pole_diagnostics(closed_monic)
 
+        nyquist = _nyquist_winding(num_exact, den_exact, closed)
+        winding = nyquist["clockwise_encirclements"]
+        nyquist_closed_rhp = open_certificate["rhp_poles"] + winding if winding is not None else None
         margins = _bode_margins(spec.get("num", [1.0]), spec["den"])
         # Take the origin limit in the same exact binary64 coefficient units
         # as the transfer certificates, before rounding the scalar for display.
@@ -1616,6 +1676,9 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             "passed": bool(closed_monic),
             "domain": "control",
             "mode": mode,
+            "nyquist_certificate": nyquist,
+            "nyquist_clockwise_encirclements": winding,
+            "nyquist_closed_loop_rhp_poles": nyquist_closed_rhp,
             "open_loop_root_certificate": open_certificate,
             "closed_loop_root_certificate": closed_certificate,
             "hurwitz_stable": open_certificate["hurwitz_stable"],
@@ -1633,6 +1696,8 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
             "closed_loop_poles_status": cl_pole_status,
             **margins,
         }
+        if nyquist_closed_rhp is not None and nyquist_closed_rhp != closed_certificate["rhp_poles"]:
+            res.update(passed=False, reason="Nyquist winding and characteristic pole counts disagree")
         if not closed_monic:
             res["reason"] = closed_certificate["reason"]
         field = spec.get("claimed_field")
@@ -1642,6 +1707,19 @@ def verify_control_system(spec: Dict[str, Any]) -> Dict[str, Any]:
         elif "claimed_value" in spec and isinstance(field, str) and field in res and res[field] is None:
             res["passed"] = False
             res["reason"] = f"Cannot verify claimed {field}: the result is undefined or unavailable"
+        elif "claimed_value" in spec and field in ("nyquist_clockwise_encirclements", "nyquist_closed_loop_rhp_poles"):
+            # A winding or pole count is integral. Relative tolerances and a
+            # float conversion could otherwise accept an adjacent/fractional claim.
+            value = spec["claimed_value"]
+            try:
+                count = Decimal(str(value)) if type(value) in (str, int, float) else None
+                matches = count is not None and count.is_finite() and count == res[field]
+            except (ArithmeticError, ValueError):
+                matches = False
+            res["claim_check"] = {"field": field, "actual": res[field],
+                                  "comparison": "exact_integer", "within_tolerance": matches}
+            if not matches:
+                res.update(passed=False, reason=f"Claimed {field} must equal the exact integer count")
         else:
             _check_claimed(res, spec)
         return res
