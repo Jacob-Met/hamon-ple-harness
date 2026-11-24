@@ -5,6 +5,7 @@ This adversarial false-completion control never executes participant commands or
 writes task artifacts. It measures the terminal contract, not engineering scores.
 """
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -21,21 +22,47 @@ sys.path.insert(0, str(ROOT))
 import delivery_guard
 import harness
 from mock_sse_proxy import MockStream
-from ship.audit_ple_delivery import task_workdir
 
 
 CLAIM = "I delivered every file."
 
 
-async def run_case(port, folder):
-    instruction = json.loads((folder / "trajectory.json").read_bytes())["steps"][0]["message"]
-    exports = ["/" + str(p.relative_to(folder / "files")) for p in (folder / "files").rglob("*") if p.is_file()]
-    cwd = task_workdir(instruction, exports)
+PROMPT_COURSE = json.loads((Path(__file__).with_name("archived_prompt_course.json")).read_bytes())
+
+
+def load_cases(artifacts, requested=()):
+    """Resolve the complete archived course or an exact, explicitly requested subset."""
+    roster = PROMPT_COURSE["prompts"]
+    available = {path.parent.name: path for path in artifacts.glob("*/trajectory.json")}
+    if len(set(requested)) != len(requested):
+        raise ValueError("duplicate requested task ID")
+    selected = set(requested) if requested else set(roster)
+    unknown = selected - roster.keys() if requested else available.keys() - roster.keys()
+    missing = selected - available.keys()
+    if unknown or missing:
+        raise ValueError(f"archived prompt roster mismatch: unknown={sorted(unknown)}, missing={sorted(missing)}")
+    cases = []
+    for task in sorted(selected):
+        trace = json.loads(available[task].read_bytes())
+        steps = trace.get("steps") if isinstance(trace, dict) else None
+        first = steps[0] if isinstance(steps, list) and steps else None
+        if (not isinstance(first, dict) or first.get("source") != "user"
+                or type(first.get("step_id")) is not int or first["step_id"] != 1
+                or not isinstance(first.get("message"), str)):
+            raise ValueError(f"{task}: first trajectory step is not the archived user prompt")
+        message = first["message"]
+        if hashlib.sha256(message.encode("utf-8")).hexdigest() != roster[task]["sha256"]:
+            raise ValueError(f"{task}: first user prompt digest differs from the archive")
+        cases.append((task, message, roster[task]["workdir"]))
+    return cases
+
+
+async def run_case(port, task, instruction, cwd):
     targets = delivery_guard.extract_targets(instruction, cwd)
     terminal = delivery_guard.TerminalDelivery(instruction, targets)
     terminal.add_working_copy(cwd)
     if not terminal.paths:
-        raise ValueError(f"{folder.name}: public deliverable contract was not recognized")
+        raise ValueError(f"{task}: public deliverable contract was not recognized")
     probed = set()
     async with connect(f"ws://127.0.0.1:{port}") as socket:
         await socket.send(json.dumps({"type": "task", "instruction": instruction, "workdir": cwd,
@@ -45,12 +72,12 @@ async def run_case(port, folder):
                 msg = json.loads(frame)
                 if msg["type"] == "done":
                     summary = msg.get("final_message", "")
-                    assert CLAIM not in summary and all(p in summary for p in terminal.paths), (folder.name, summary)
-                    assert set(terminal.paths) <= probed, (folder.name, probed)
-                    return {"task": folder.name, "guarded_paths": len(terminal.paths),
+                    assert CLAIM not in summary and all(p in summary for p in terminal.paths), (task, summary)
+                    assert set(terminal.paths) <= probed, (task, probed)
+                    return {"task": task, "guarded_paths": len(terminal.paths),
                             "done": True, "summary": summary}
                 if msg["type"] == "error":
-                    raise RuntimeError((folder.name, msg))
+                    raise RuntimeError((task, msg))
                 if "id" not in msg:
                     continue
                 # A missing file fact is supplied only for the registered read-only
@@ -64,10 +91,10 @@ async def run_case(port, folder):
                         reply = {"type": "result", "id": msg["id"], "ok": True, "exit_code": 0,
                                  "output": json.dumps({p: {"state": "missing"} for p in paths})}
                 await socket.send(json.dumps(reply))
-    raise RuntimeError(f"{folder.name}: no terminal message")
+    raise RuntimeError(f"{task}: no terminal message")
 
 
-async def replay(folders):
+async def replay(cases):
     stream = MockStream(reply_text=CLAIM)
     observations = {}
     async def entry(socket):
@@ -82,21 +109,21 @@ async def replay(folders):
             with mock.patch.dict(os.environ, env, clear=True):
                 async with serve(entry, "127.0.0.1", 0) as server:
                     port = server.sockets[0].getsockname()[1]
-                    for i in range(0, len(folders), 2):
-                        results = await asyncio.gather(*(run_case(port, f) for f in folders[i:i + 2]))
+                    for i in range(0, len(cases), 2):
+                        results = await asyncio.gather(*(run_case(port, *case) for case in cases[i:i + 2]))
                         for row in results:
                             observations[row["task"]] = row
                             print(json.dumps({k:v for k,v in row.items() if k != "summary"}), flush=True)
-    assert stream.requests >= len(folders)
-    return {"prompts": len(folders), "sse_requests": stream.requests, "observations": observations}
+    assert stream.requests >= len(cases)
+    return {"prompts": len(cases), "sse_requests": stream.requests, "observations": observations}
 
 
-async def main(folders):
+async def main(cases):
     # Compare the ordinary model path and the direct-answer candidate through
     # the same real Pi/SSE/evaluator protocol. These public prompts have other
     # work and delivery obligations; none is a closed inline calculation.
     with mock.patch.object(harness, "_certified_inline_reply", return_value=(None, None)):
-        baseline = await replay(folders)
+        baseline = await replay(cases)
     direct_admissions = 0
     original = harness._certified_inline_reply
     async def observe(*args, **kwargs):
@@ -106,11 +133,14 @@ async def main(folders):
             direct_admissions += 1
         return result
     with mock.patch.object(harness, "_certified_inline_reply", side_effect=observe):
-        candidate = await replay(folders)
+        candidate = await replay(cases)
     assert baseline["observations"] == candidate["observations"]
     assert baseline["sse_requests"] == candidate["sse_requests"]
     assert direct_admissions == 0
-    print(json.dumps({"public_prompts": len(folders),
+    print(json.dumps({"public_prompts": len(cases),
+                      "archive_commit": PROMPT_COURSE["archive_commit"],
+                      "full_course": len(cases) == len(PROMPT_COURSE["prompts"]),
+                      "task_ids": [task for task, _, _ in cases],
                       "baseline_sse_requests": baseline["sse_requests"],
                       "candidate_sse_requests": candidate["sse_requests"],
                       "terminal_summaries_equal": True,
@@ -118,10 +148,8 @@ async def main(folders):
 
 
 if __name__ == "__main__":
-    cases = sorted(p.parent for p in (ROOT / "artifacts").glob("*/trajectory.json"))
-    if sys.argv[1:]:
-        cases = [p for p in cases if p.name in sys.argv[1:]]
-    if not cases:
-        raise SystemExit("No matching public prompts.")
+    try:
+        cases = load_cases(ROOT / "artifacts", sys.argv[1:])
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     asyncio.run(main(cases))
-

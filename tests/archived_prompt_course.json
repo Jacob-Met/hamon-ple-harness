@@ -1,0 +1,121 @@
+{
+  "archive_commit": "7cc4b8d336d6ec28f4c8af966461fa8aa2737675",
+  "prompts": {
+    "backfeed-energization-reply": {
+      "sha256": "d7cfad460f79e18f40a5e68e28ee0c10506558804aa64cb7a382d5ef76632c78",
+      "workdir": "/app"
+    },
+    "cooling-water-flush-plan": {
+      "sha256": "0d7d54adbcf78d3972b17e572af3f3822d195d144c3cead2656ecc212fb5fdc2",
+      "workdir": "/filesystem/final_batch4__mechanical_task5_pcw_flush_mop__blind"
+    },
+    "data-center-site-model": {
+      "sha256": "68c267e758b825331f8ffe6d6d7a5c1b24f4535d091df33ed6ebddafecfac3fc",
+      "workdir": "/app/files/frontier__DCBim__p6_002"
+    },
+    "data-hall-device-takeoff": {
+      "sha256": "1e846e9ed9682ed4ec7d96166b3d679186a858dd9c82b66ce8bf69b5f7bfdaba",
+      "workdir": "/filesystem/final_batch4__electrical_task17_ec_0205_d100__blind"
+    },
+    "data-hall-mep-routing": {
+      "sha256": "e18cad7b690a5d6c1776db04536fefaddaf2b6c56fa1a8bbfc52951bc7730b6c",
+      "workdir": "/app/files/dc_model__hall_seed000_d000__mep_routing"
+    },
+    "data-hall-mep-routing-offset": {
+      "sha256": "d4f13a37e3384068200b16b993d0d9ebd96aa978410a41a988ef99e3fa463ac2",
+      "workdir": "/app/files/dc_model__hall_seed005_d100__mep_routing"
+    },
+    "division-26-specifications": {
+      "sha256": "8e36a367e1b1b3de12a690da077f0438da9338c01b1d639335850998ee2624e7",
+      "workdir": "/filesystem/final_batch4__electrical_task8_electrical_specs__blind"
+    },
+    "emergency-spillway-check": {
+      "sha256": "03184ab071431fa1f672fb3965e68b554feb7679fb654d5a3548f97aa35bed2b",
+      "workdir": "/filesystem"
+    },
+    "engineers-estimate-check": {
+      "sha256": "51e2741a4c57b4227d973c5511a1f709acbb8c68e6619d142e0e5da42af12b0c",
+      "workdir": "/filesystem"
+    },
+    "eor-review-corrections": {
+      "sha256": "914627c7d46203d4e0ab59d1a4c0841dbd4e4d60f582396bf3966d953b92bdef",
+      "workdir": "/filesystem/dc_structural__eor_revision__blind"
+    },
+    "fill-compaction-acceptance": {
+      "sha256": "ec09d392696c1aea4579747ff2c4b0dfecceaa2762513e1118856e1d7f77e13e",
+      "workdir": "/filesystem"
+    },
+    "fire-solve-convergence": {
+      "sha256": "2550c4d7c461013ffb5db9ae9a7269e943f77ca40da52944fc06eec3d060b2af",
+      "workdir": "/filesystem"
+    },
+    "fire-test-validation-memo": {
+      "sha256": "6febbf5d1835bc977bfa5501165fcac06cafe69d0f7c38a33d51e965557a4131",
+      "workdir": "/app/files"
+    },
+    "footing-settlement-verification": {
+      "sha256": "84667ac6d8fca9e2e49902cb7b4ebccf0599f563d9ad8cfa4b52f1e426f70c5f",
+      "workdir": "/filesystem"
+    },
+    "foundation-strategy": {
+      "sha256": "fb7fef12e5b01b256898075636b7c6f560c734281ac4b3ad4242484442229b72",
+      "workdir": "/filesystem/dc_structural__foundation_strategy__blind"
+    },
+    "frame-extension-method": {
+      "sha256": "2d3c3f433be858371200a5312d5fb4feded9872fc54b26971b77038415d9b8b3",
+      "workdir": "/filesystem/field_eng__constructability_4d__blind"
+    },
+    "heat-rejection-life-cycle-cost": {
+      "sha256": "4bafd36a124f62df88923548dd384b0d8d513197a4e1afccb212d9e9e9f2864b",
+      "workdir": "/filesystem/final_batch4__mechanical_task3_ct_heat_lcc__blind"
+    },
+    "landscape-sheet-revision": {
+      "sha256": "839c636e0c8d706fe98967be93629d235aced97f14eac2bb42fd4e3db4c891c9",
+      "workdir": "/app/files"
+    },
+    "les-mesh-resolution": {
+      "sha256": "a1904181685a9e544d29c63a06bc3242d93dedc8c56dd0457423a8d833ea9596",
+      "workdir": "/filesystem"
+    },
+    "lv-cable-sizing": {
+      "sha256": "0e749cf19e87dd21e08651caef3babd344b2c14c58a69d469cb8e91c83c50ddc",
+      "workdir": "/filesystem/electrical__lv_cable_sizing__blind"
+    },
+    "mv-conveyance-study": {
+      "sha256": "2e35d33324795f3c2ad358db13f1e398e44d2a7491578c12be65e0c289fb2004",
+      "workdir": "/filesystem/final_batch4__electrical_task12_conveyance_study__blind"
+    },
+    "permission-to-operate-memo": {
+      "sha256": "3e0b9ea1eead4e75c4e1b8e5a8a3893e0dcb3c02d44c55617ba107ee0524303c",
+      "workdir": "/app"
+    },
+    "pre-application-capacity-response": {
+      "sha256": "359aa0be4de8e3e7f750bb3f66e92bc75d1100183d817c1eabbf43c5e5ea667f",
+      "workdir": "/app"
+    },
+    "roof-deck-design": {
+      "sha256": "374814272e61519737ec439ec62a35f11633f98bda2edfbb985d0faa333ffdbd",
+      "workdir": "/filesystem/final_batch4__structural_task7_roof_deck_design__blind"
+    },
+    "seismic-diaphragm-shear": {
+      "sha256": "18c574b343c2eb0d4ad367864b3ef0d7bf3355d90deda74ff99616c117556e17",
+      "workdir": "/filesystem/final_batch4__structural_task6_seismic_diaphragm_shear__blind"
+    },
+    "shoring-design-verification": {
+      "sha256": "e3335fa5b580ca444edcbe06fa27b848acc91a811668f04b97214b547658fd7b",
+      "workdir": "/filesystem"
+    },
+    "solar-supplemental-review": {
+      "sha256": "ba31b30a6cc95ee2046d718fd636f70d201b28d946b652a66b43f69ff4897824",
+      "workdir": "/filesystem"
+    },
+    "solar-witness-test-package": {
+      "sha256": "728b80ae33444be3be5a686201cae01100c82348473c86cd744f3745acab673e",
+      "workdir": "/filesystem"
+    },
+    "wind-diaphragm-shear": {
+      "sha256": "d6990df3818fed0412b16cf420991978e7a0aac17fd06c7c7ae6954bc1089eca",
+      "workdir": "/filesystem/final_batch4__structural_task5_wind_diaphragm_shear__blind"
+    }
+  }
+}

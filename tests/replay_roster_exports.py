@@ -3,6 +3,7 @@
 This exercises the organizer's unscored artifact interface. Trials, receipts
 and the deliberate message loss exist only in the temporary directory.
 """
+import asyncio
 import io
 import json
 from pathlib import Path
@@ -14,9 +15,10 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from ship.check_artifact_provenance import evaluate_official
+from roster_tool_write_cancel import produce
 
 
-def replay(kit, scratch):
+async def replay(kit, scratch):
     sys.path.insert(0, str(kit))
     from kit import artifacts, capture, export
 
@@ -50,10 +52,12 @@ def replay(kit, scratch):
         trial = scratch / "trials" / task_id
         cap = trial / capture.FOLDER
         cap.mkdir(parents=True)
-        assert capture._save(io.BytesIO(payload), cap, target, [])
+        saved, message = await produce(task_id, target, payload, scratch / "live-writes")
+        with saved.open("rb") as source_file:
+            assert capture._save(source_file, cap, target, [])
         relative = target.lstrip("/")
         (cap / capture.INFO).write_text(json.dumps({"files": {relative: {"mode": "644"}}}))
-        (cap / artifacts.FINAL_MESSAGE).write_text(f"Unscored capture marker for {task_id}.\n")
+        (cap / artifacts.FINAL_MESSAGE).write_text(message, encoding="utf8")
         rows.append({"task": task_id, "trial": str(trial), "measured": True, "run": "capture-fixture"})
         witnesses[task_id] = (relative, artifacts.blob_id(payload))
 
@@ -81,10 +85,11 @@ def replay(kit, scratch):
     message.write_bytes(original)
     assert evaluate_official(entry, kit)["status"] == "fresh"
     print(json.dumps({"registered_tasks": len(roster), "cold_file_hashes": len(witnesses),
+                      "registered_writes_followed_by_cancel": len(rows),
                       "missing_message": focal, "raw_organizer_usable_after_deletion": 29,
                       "local_freshness": ["fresh", "stale", "fresh"]}))
 
 
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
-        replay(Path(sys.argv[1]).resolve(), Path(tmp))
+        asyncio.run(replay(Path(sys.argv[1]).resolve(), Path(tmp)))

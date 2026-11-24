@@ -58,6 +58,29 @@ class PassiveHXTests(unittest.TestCase):
             with self.subTest(kind=kind, inputs=bad):
                 self.assertFalse(solve_domain_problem(kind, bad)["dual_verified"])
 
+    def test_clean_coefficient_agrees_with_cylindrical_tube_model(self):
+        tube = dict(inner_diameter_m=0.015, outer_diameter_m=0.019, wall_k_W_mK=15.1,
+                    inner_h_W_m2K=800, outer_h_W_m2K=1200, inner_fouling_m2K_W=0.0004,
+                    outer_fouling_m2K_W=0.0001, total_length_m=1)
+        tube_rating = solve_domain_problem("heat_exchanger_ntu", dict(BASE, tube_resistance=tube))
+        self.assertTrue(tube_rating["dual_verified"], tube_rating)
+        reference = tube_rating["tube_resistance"]
+        for basis, diameter in (("inside", 0.015), ("outside", 0.019)):
+            with self.subTest(basis=basis):
+                area = math.pi * diameter
+                model = dict(area_basis=basis, U_clean_W_m2K=reference["clean_UA_W_K"] / area,
+                             outside_to_inside_area_ratio=0.019 / 0.015,
+                             R_inside_m2K_W=0.0004, R_outside_m2K_W=0.0001)
+                spec = dict(BASE, fouling=model, area_m2=area)
+                rated = solve_domain_problem("heat_exchanger_ntu", spec)
+                self.assertTrue(rated["dual_verified"], rated)
+                self.assertTrue(math.isclose(rated["UA_W_K"], reference["rated_UA_W_K"], rel_tol=1e-14))
+                self.assertTrue(math.isclose(rated["Q_duty_W"], tube_rating["Q_duty_W"], rel_tol=1e-14))
+                for kind in ("heat_exchanger_ntu", "heat_exchanger_lmtd"):
+                    mixed = solve_domain_problem(kind, dict(spec, tube_resistance=tube, Th_out_K=335))
+                    self.assertFalse(mixed["dual_verified"])
+                    self.assertIn("Choose one resistance model", mixed["reason"])
+
     def test_global_energy_closure_does_not_qualify_a_negative_area(self):
         r = sizing(270.)
         self.assertFalse(r["dual_verified"])
