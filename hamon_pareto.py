@@ -283,12 +283,15 @@ def _wave8_request(instruction):
     dimensional_jackets = [i for i, req in enumerate(requests)
                            if isinstance(req, dict) and req.get("mode") == "reactor_kinetics"
                            and isinstance(req.get("spec"), dict) and "heat_transfer" in req["spec"]]
-    if activity_requests or dimensional_jackets:
+    nozzle_requests = [i for i, req in enumerate(requests)
+                       if isinstance(req, dict) and req.get("mode") == "compressible_acoustics"
+                       and isinstance(req.get("spec"), dict) and req["spec"].get("subkind") == "cd_nozzle_shock"]
+    if activity_requests or dimensional_jackets or nozzle_requests:
         # The text is the source of the certificate. Refuse a numeric lexeme
         # rounded to a different decimal value by the ordinary JSON decoder.
         literal = json.loads(text, parse_float=Decimal)
         literal_requests = literal if isinstance(literal, list) else [literal]
-        for i in activity_requests + dimensional_jackets:
+        for i in activity_requests + dimensional_jackets + nozzle_requests:
             parsed = json.loads(json.dumps(requests[i], allow_nan=False), parse_float=Decimal)
             if parsed != literal_requests[i]:
                 return None
@@ -541,6 +544,9 @@ def _wave8_result(req):
     ):
         return None
     spec = req["spec"]
+    if req["mode"] == "compressible_acoustics":
+        from hamon_cd_nozzle_shock import presolve_result
+        return presolve_result(req, dispatch_ple_tool)
     if req["mode"] == "psychrometrics":
         return _coil_product_certificate(req)
     if req["mode"] == "reactor_kinetics":
