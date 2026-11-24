@@ -133,20 +133,31 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
     volumes = []
     for product, kind, args, reps, items, ring in bodies:
         if (len(reps) != 1 or str(reps[0].RepresentationIdentifier).upper() != "BODY"
+                or str(reps[0].RepresentationType).upper() != "SWEPTSOLID"
                 or len(items) != 1 or items[0].is_a() != "IfcExtrudedAreaSolid"):
             raise ValueError("Indexed-curve scenes require one direct extruded Body per product")
         item = items[0]
         if ring is not None:
             area = _indexed_area(ring)
         elif item.SweptArea.is_a() == "IfcRectangleProfileDef":
-            area = item.SweptArea.XDim * item.SweptArea.YDim
+            dims = item.SweptArea.XDim, item.SweptArea.YDim
+            if not all(math.isfinite(d) and d > 0 for d in dims):
+                raise ValueError("Invalid rectangular peer dimensions")
+            area = math.prod(dims)
         elif item.SweptArea.is_a() == "IfcCircleProfileDef":
+            if not math.isfinite(item.SweptArea.Radius) or item.SweptArea.Radius <= 0:
+                raise ValueError("Invalid circular peer radius")
             area = math.pi * item.SweptArea.Radius**2
         else:
             raise ValueError("Unqualified peer profile in indexed-curve scene")
         ratios = item.ExtrudedDirection.DirectionRatios
+        if (len(ratios) != 3 or not all(math.isfinite(v) for v in ratios) or ratios[2] == 0
+                or not math.isfinite(item.Depth) or item.Depth <= 0):
+            raise ValueError("Invalid indexed-scene extrusion depth or direction")
         expected = area * scale**2 * (item.Depth * scale) * abs(ratios[2]) / math.hypot(*ratios)
         element = geom.create_shape(settings, product, geometry_library="opencascade")
+        if element is None:
+            raise ValueError("OpenCASCADE could not construct the source Body")
         geometry = element.geometry
         if geometry.size() != 1 or geometry.item_id(0) != item.id():
             raise ValueError("BRep does not identify its single source Body item")
