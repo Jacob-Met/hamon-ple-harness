@@ -381,6 +381,37 @@ def delivery_process_env(env, session, steps, reserve, *, delivery=False, budget
   return {**env, "PLE_DELIVERY_BUDGET": json.dumps(config, separators=(",", ":"))}
 
 
+def _check_inline_deadline(session):
+  cancelled = getattr(session, "cancelled", None)
+  left = session.time_left()
+  if (cancelled is not None and cancelled.is_set()) or (left is not None and left <= 0):
+    raise taskbridge.Cancelled()
+
+
+async def _certified_inline_reply(session, inventory, delivery_targets):
+  """Compile an explicitly requested JSON answer before any model setup.
+
+  The ordinary certificate already requires an empty observed task context and
+  verifies every requested calculation. Run it off the event loop so the task
+  reader can process cancellation while the bounded calculation is running.
+  """
+  if not hamon_pareto.explicit_json_result_request(session.instruction):
+    return None, None
+  await asyncio.sleep(0)
+  _check_inline_deadline(session)
+  plan = await asyncio.to_thread(
+      hamon_pareto.route_from_intake_prompt,
+      inventory,
+      instruction=session.instruction,
+      mcp_server_count=len(getattr(session, "mcp_servers", None) or []),
+      deliverable_count=len(delivery_targets),
+      model_api=os.environ.get("MODEL_NAME", ""),
+  )
+  await asyncio.sleep(0)
+  _check_inline_deadline(session)
+  return plan, hamon_pareto.certified_json_reply(session.instruction, plan)
+
+
 async def solve(session: taskbridge.Session) -> str:
   """Runs Pi on a single task and returns the final response.
 
@@ -429,17 +460,13 @@ async def solve(session: taskbridge.Session) -> str:
       if working_copy:
         delivery_targets = [{"path": working_copy, "kind": "file"}]
       session.fallback_summary = terminal.summary
-      # The same MODEL_NAME configures Pi below. Check first whether the whole
-      # instruction already has its explicitly requested, verified JSON answer.
-      pareto_plan = hamon_pareto.route_from_intake_prompt(
-          engineering_inventory,
-          instruction=session.instruction,
-          mcp_server_count=len(getattr(session, "mcp_servers", None) or []),
-          deliverable_count=len(delivery_targets),
-          model_api=os.environ.get("MODEL_NAME", ""),
+      pareto_plan, inline_reply = await _certified_inline_reply(
+          session, engineering_inventory, delivery_targets
       )
-      if pareto_plan and pareto_plan.get("deliver_verified_json"):
-        return pareto_plan["presolve_result_json"]
+      if inline_reply is not None:
+        # The taskbridge session owns the sole terminal event. No model is
+        # needed to restate an exact, fully requested and verified JSON result.
+        return inline_reply
       engineering_cli_note = await engineering_intake.provision_engineering_cli(session)
       # Share one observation allowance before the participant starts. Later
       # delivery verification retains its own existing per-operation limits.
@@ -493,6 +520,14 @@ async def solve(session: taskbridge.Session) -> str:
       name, model = await asyncio.to_thread(
           configure, agent_dir, relay, session, env
       )
+      if pareto_plan is None:
+        pareto_plan = hamon_pareto.route_from_intake_prompt(
+            engineering_inventory,
+            instruction=session.instruction,
+            mcp_server_count=len(getattr(session, "mcp_servers", None) or []),
+            deliverable_count=len(delivery_targets),
+            model_api=model,
+        )
       if pareto_plan and "presolve_result_json" in pareto_plan:
         if "presolve_source_sha256" in pareto_plan:
           first_request += ("\n\nDeterministic presolve for instruction SHA-256 "
@@ -766,3 +801,4 @@ async def solve(session: taskbridge.Session) -> str:
 def resolve_wired_domain_tools(prompt: str = "", file_paths=()) -> list[str]:
     from hamon_pareto import select_domain_tools
     return list(select_domain_tools(prompt=prompt, file_paths=file_paths))
+

@@ -664,13 +664,31 @@ def _profile_polygons_2d(entities: Dict[int, Tuple[str, List[Any]]], pref: Any, 
             elif ctype == "IFCINDEXEDPOLYCURVE" and cargs:
                 lref = cargs[0]
                 if isinstance(lref, tuple) and lref[0] == "ref" and lref[1] in entities:
-                    _, largs = entities[lref[1]]
-                    if largs and isinstance(largs[0], list):
-                        pts = [[float(p[0]) * unit_scale, float(p[1]) * unit_scale] for p in largs[0] if len(p) >= 2]
-                        if len(pts) >= 2 and np.linalg.norm(np.array(pts[0]) - np.array(pts[-1])) < 1e-9:
-                            pts.pop()
-                        if len(pts) >= 3:
-                            return np.array(pts, dtype=np.float64), None, pos_mat
+                    list_type, largs = entities[lref[1]]
+                    if list_type != "IFCCARTESIANPOINTLIST2D" or not largs:
+                        raise UnresolvedSolidGeometry("Indexed profile needs an IFC 2D point list")
+                    if len(cargs) > 2 and cargs[2] is True:
+                        raise UnresolvedSolidGeometry("Self-intersecting IFC indexed profile")
+                    points = largs[0]
+                    if len(cargs) > 1 and cargs[1] is not None:
+                        from hamon_ifc_indexed_curves import ordered_segments
+                        try:
+                            edges = ordered_segments(points, cargs[1])
+                        except (TypeError, ValueError) as exc:
+                            raise UnresolvedSolidGeometry(str(exc)) from exc
+                        if any(len(edge) == 3 for edge in edges):
+                            raise UnresolvedSolidGeometry("Circular IFC profile requires the source BRep route")
+                        points = [edge[0] for edge in edges]
+                        from shapely import Polygon
+                        polygon = Polygon(points) if len(points) >= 3 else None
+                        if polygon is None or not polygon.is_valid or polygon.area == 0:
+                            raise UnresolvedSolidGeometry("Invalid straight indexed profile boundary")
+                    elif len(points) > 1 and points[0] == points[-1]:
+                        points = points[:-1]
+                    else:
+                        raise UnresolvedSolidGeometry("Unsegmented IFC indexed profile is not closed")
+                    if len(points) >= 3:
+                        return np.asarray(points, dtype=np.float64) * unit_scale, None, pos_mat
     return None, None, pos_mat
 
 
@@ -2001,6 +2019,15 @@ def detect_ifc_clashes(
     required_clearance_m: float = 0.0,
     cross_discipline_only: bool = False,
 ) -> Dict[str, Any]:
+    if "IFCARCINDEX" in ifc_text.upper():
+        from hamon_ifc_indexed_curves import curved_scene, has_direct_arc
+        entities = parse_ifc_entities(ifc_text)
+        if has_direct_arc(entities, _product_shapes(entities)):
+            try:
+                return curved_scene(ifc_text, _product_shapes(entities, strict=True),
+                                    required_clearance_m, cross_discipline_only, _infer_discipline)
+            except (ImportError, RuntimeError, ValueError, TypeError, AttributeError, IndexError, ArithmeticError) as exc:
+                raise UnresolvedSolidGeometry(f"Unresolved IFC curved Body: {exc}") from exc
     solids = load_ifc_solids(ifc_text)
     # Bounds can prove clearance and eliminate candidates for the minimum.
     # Only a narrow-phase result supplies an attainable distance and witness.

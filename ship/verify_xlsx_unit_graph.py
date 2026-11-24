@@ -46,7 +46,14 @@ def cases():
         "km": u.kilometer, "in": u.inch, "ft": u.foot, "yd": u.yard,
         "g": u.gram, "kg": u.kilogram, "lbm": u.pound,
         "sec": u.second, "hr": u.hour,
+        "N": u.newton, "kN": 1000*u.newton, "MN": 10**6*u.newton,
+        "Pa": u.pascal, "kPa": 1000*u.pascal, "MPa": 10**6*u.pascal,
+        "GPa": 10**9*u.pascal,
     }
+
+    lengths = ("m", "mm", "cm", "km", "in", "ft", "yd")
+    for token in lengths:
+        units[token + "2"] = units[token]**2
 
     def ratio(source, target):
         value = sp.simplify(convert_to(units[source], units[target]) / units[target])
@@ -71,12 +78,32 @@ def cases():
         ('CONVERT(Inputs!A1,"m","cm")+CONVERT(Inputs!A2,"cm","cm")', sp.Rational(7627,50)),
         ('CONVERT(A13,"cm","m")', sp.Rational(7627,5000)),
     ]
+    # Independent axial stress from 6 kN acting over 4 square centimetres.
+    stress = convert_to(6000*u.newton / (4*u.centimeter**2), u.pascal)
+    rows.extend([
+        ('CONVERT(Inputs!A3*Inputs!A4,"kN","N")', 6*ratio("kN", "N")),
+        ('CONVERT(Inputs!A3*2,"cm^2","m2")', 4*ratio("cm2", "m2")),
+        ('CONVERT(A15/A16,"Pa","MPa")', sp.simplify(stress / units["MPa"])),
+    ])
+    # Engineering LibreTexts, Strength of Materials, Ch. 5, Example 5.1.
+    # Use the published dimensions and concentration factor only in this qualification.
+    net_area = 15*u.millimeter*(100 - 20)*u.millimeter
+    average_mpa = sp.simplify(convert_to(50000*u.newton/net_area, u.pascal) / units["MPa"])
+    rows.extend([
+        ('CONVERT(50,"kN","N")', 50*ratio("kN", "N")),
+        ('CONVERT(CONVERT(15,"mm","mm")*(CONVERT(100,"mm","mm")-'
+         'CONVERT(20,"mm","mm")),"mm2","m^2")', sp.Rational(1200, 10**6)),
+        ('CONVERT(A18/A19,"Pa","MPa")', average_mpa),
+        ('A20*2.525', average_mpa*sp.Rational("2.525")),
+    ])
     # Independent reproduction of the pinned Calc 24.2 conversion table,
     # separate from SymPy's exact SI definition and the production evaluator.
     # https://github.com/LibreOffice/core/blob/libreoffice-24.2.7.2/scaddins/source/analysis/analysishelper.cxx
     legacy_lbm_per_kg = sp.Rational("2.20462291469134")
     legacy_expected = {"A5": sp.Rational(45,2)*legacy_lbm_per_kg}
-    for group in (("m","mm","cm","km","in","ft","yd"), ("g","kg","lbm"), ("sec","hr")):
+    groups = (lengths, ("g", "kg", "lbm"), ("sec", "hr"), ("N", "kN", "MN"),
+              ("Pa", "kPa", "MPa", "GPa"), tuple(token + "2" for token in lengths))
+    for group in groups:
         for source in group:
             for target in group:
                 rows.append((f'CONVERT(5/2,"{source}","{target}")',
@@ -88,7 +115,7 @@ def cases():
     # Independent quantities establish the composite unit frames as well as numbers.
     assert sp.simplify(convert_to(u.centimeter*u.meter/u.centimeter, u.meter)/u.meter) == 1
     assert sp.simplify(convert_to(u.inch*u.centimeter/u.inch, u.meter)/u.meter) == sp.Rational(1,100)
-    return rows, sp.__version__, legacy_expected
+    return rows, sp.__version__, legacy_expected, sum(len(group)**2 for group in groups)
 
 
 def sheet(rows, formulas):
@@ -138,7 +165,7 @@ def main():
     executable = shutil.which("soffice") or shutil.which("libreoffice")
     if executable is None:
         raise SystemExit("LibreOffice Calc is required; this gate does not skip a missing engine")
-    rows, sympy_version, legacy_expected = cases()
+    rows, sympy_version, legacy_expected, pair_count = cases()
     args.out.mkdir(parents=True, exist_ok=True)
     source, output = args.out/"source.xlsx", args.out/"recalculated"
     output.mkdir()
@@ -146,13 +173,15 @@ def main():
     before = xlsx_audit(source)
     assert sum(s["formulas_without_cached_values"] for s in before["sheets"]) == len(rows)
     # Calc evaluates the spreadsheet numbers even when the stated input unit
-    # contradicts a preceding conversion. Keep this control separate from the 76.
+    # contradicts a preceding conversion. Keep these controls separate from the fresh formulas.
     source_frames = args.out / "conversion-source-frames.xlsx"
     converted_cm = 'CONVERT(Inputs!A3,"m","cm")*2'
     controls = [
         (f'CONVERT({converted_cm},"m","mm")', 400000, "unit_scale_mismatch"),
         (f'CONVERT({converted_cm},"kg","g")', 400000, "dimension_mismatch"),
         (f'CONVERT({converted_cm},"cm","mm")', 4000, "matched"),
+        ('CONVERT(CONVERT(6,"kN","N")/CONVERT(4,"cm2","m^2"),"kPa","MPa")',
+         15000, "unit_scale_mismatch"),
     ]
     write_workbook(source_frames, [(formula, value) for formula, value, _ in controls])
     command = [executable, f"-env:UserInstallation={(args.out/'calc-profile').resolve().as_uri()}",
@@ -164,7 +193,7 @@ def main():
     frame_guard = audit_local_deliverable(frames_recalculated)
     assert not frame_guard["ok"], frame_guard
     frames = {r["cell"]: r for r in frame_audit["conversion_audit"]["examples"] if r["sheet"] == "Checks"}
-    assert set(frames) == {"A1", "A2", "A3"}
+    assert set(frames) == {f"A{i}" for i in range(1, len(controls)+1)}
     for index, (_, expected_value, expected_status) in enumerate(controls, 1):
         observed = frames[f"A{index}"]
         assert observed["cached"] == expected_value and observed["status"] == expected_status, observed
@@ -193,11 +222,19 @@ def main():
                                     "calc_legacy_exact":str(alternate), "calc_value":actual})
         comparisons.append({"cell":f"A{index}", "source_formula":formula,
                             "sympy_exact":str(expected), "calc_value":actual})
+    # The published average has one decimal place and the peak is rounded to whole MPa.
+    average, peak = (comparisons[i-1]["calc_value"] for i in (20, 21))
+    assert round(average, 1) == 41.7 and round(peak) == 105, (average, peak)
+    published_plate = {
+        "source": "https://eng.libretexts.org/Bookshelves/Mechanical_Engineering/Strength_of_Materials/05:_Axial_Loading",
+        "example": "5.1", "calc_average_MPa": average, "published_average_MPa": 41.7,
+        "calc_peak_MPa": peak, "published_peak_MPa": 105,
+    }
     matched = sum(audit[kind]["counts"]["matched"] for kind in ("arithmetic_audit","conversion_audit"))
     unverified = sum(audit[kind]["counts"]["unverified"] for kind in ("arithmetic_audit","conversion_audit"))
     assert matched+len(engine_variants) == len(rows) and unverified == len(engine_variants), audit
     # Alter only a separate control copy; preserve the engine-produced package unchanged.
-    stale_cells = ("A1","A5","A6","A9")
+    stale_cells = ("A1","A5","A6","A9","A17")
     for address in stale_cells:
         value = cells[address].find(f"{{{MAIN}}}v")
         value.text = str(float(value.text)*1.125)
@@ -215,11 +252,11 @@ def main():
     result = {
         "qualified":True, "effective_memory_gib":memory/1024**3,
         "libreoffice":subprocess.check_output([executable,"--version"],text=True).strip(),
-        "sympy":sympy_version, "independent_pair_conversions":62,
+        "sympy":sympy_version, "independent_pair_conversions":pair_count,
         "fresh_formulas_compared":len(rows), "fresh_formulas_matched":matched,
         "engine_specific_lbm_variants":engine_variants, "fresh_guard":guard["ok"],
         "stale_guard":stale_guard["ok"], "stale_mismatch_cells":mismatches,
-        "source_frame_controls":frames,
+        "source_frame_controls":frames, "published_plate":published_plate,
         "comparisons":comparisons,
     }
     (args.out/"report.json").write_text(json.dumps(result,indent=2)+"\n")
