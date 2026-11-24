@@ -169,6 +169,33 @@ def _solve_x(ctx, lam, target):
     raise ArithmeticError("lambert_iteration_budget")
 
 
+def _solve_multi_x(ctx, lam, target, count, branch, xmin, tmin):
+    if target < tmin:
+        raise ValueError("flight_time_below_multirevolution_minimum")
+    if target == tmin:
+        return xmin, 0, ctx.zero
+    lower = branch == "lower_energy"
+    edge = (xmin-1)/2 if lower else (xmin+1)/2
+    for _ in range(240):
+        if _time_of_flight(ctx, edge, lam, count) >= target:
+            break
+        edge = (edge-1)/2 if lower else (edge+1)/2
+    else:
+        raise ArithmeticError("multirevolution_branch_bracket_budget")
+    lo, hi = (edge, xmin) if lower else (xmin, edge)
+    for iteration in range(320):
+        x = (lo+hi)/2
+        elapsed = _time_of_flight(ctx, x, lam, count)
+        error = abs(elapsed-target)/target
+        if error <= ctx.mpf("1e-45"):
+            return x, iteration+1, error
+        if (elapsed > target) == lower:
+            lo = x
+        else:
+            hi = x
+    raise ArithmeticError("multirevolution_branch_iteration_budget")
+
+
 def solve_lambert_transfer(params):
     result = {"domain": "lagrangian_orbital", "subkind": "lambert_transfer",
               "model": "unperturbed_two_body_point_mass", "revolutions": 0,
@@ -176,7 +203,7 @@ def solve_lambert_transfer(params):
     ctx = mp.clone()
     ctx.dps = 90
     allowed = {"domain", "subkind", "mu", "r1_m", "r2_m", "tof_s",
-               "transfer_path", "plane_normal", "revolutions",
+               "transfer_path", "plane_normal", "revolutions", "solution_branch",
                "proposed_v1_m_s", "proposed_v2_m_s"}
     try:
         if not isinstance(params, Mapping):
@@ -184,8 +211,14 @@ def solve_lambert_transfer(params):
         if set(params)-allowed:
             raise ValueError("unsupported_lambert_parameters:"+",".join(sorted(set(params)-allowed)))
         count = params.get("revolutions", 0)
-        if type(count) is not int or count != 0:
-            raise ValueError("only_zero_revolution_transfers_supported")
+        if type(count) is not int or not 0 <= count <= 100:
+            raise ValueError("revolutions_must_be_an_integer_from_zero_to_100")
+        result["revolutions"] = count
+        branch = params.get("solution_branch")
+        if count and branch not in ("lower_energy", "higher_energy"):
+            raise ValueError("multirevolution_solution_branch_must_be_explicit")
+        if not count and branch is not None:
+            raise ValueError("solution_branch_only_applies_to_multiple_revolutions")
         mu, dt = (ctx.mpf(_finite(params[k])) for k in ("mu", "tof_s"))
         if mu <= 0 or dt <= 0:
             raise ValueError("mu_and_tof_must_be_positive")
