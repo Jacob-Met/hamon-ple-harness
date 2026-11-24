@@ -25,9 +25,13 @@ Method reference: U.S. Army Corps of Engineers, *Slope Stability*, EM 1110-2-190
 ## Numerical range and independent checks
 
 The geometry adapter uses one shared numerical core. It scales the force terms
-before the monotone root solve, retains the admissible side of every pole, and
+by an exactly representable binary power before the monotone root solve,
+retains the admissible side of every pole, and
 reconstructs both vertical force balance and the Mohr–Coulomb law on each slice.
-Nonzero loads that disappear in a width product or normalization are refused.
+Nonzero loads that disappear in a width product and any loss of input-force
+information during normalization are refused. Distinct adjacent loads cannot
+round to the same normalized force. Effective normal forces too close to zero
+to establish compressive contact at the working precision are also refused.
 Moments combine their binary exponents before conversion back to dimensional
 units, so an intermediate aggregate force cannot overflow when the final moment
 is representable. An unresolved near-pole denominator still withholds verification.

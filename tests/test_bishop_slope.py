@@ -132,6 +132,22 @@ class BishopSlices(unittest.TestCase):
                 self.assertFalse(result["equilibrium_verified"])
                 self.assertIn("width multiplication", result["reason"])
 
+    def test_adjacent_nonzero_contact_forces_cannot_round_to_equality(self):
+        weight = 7e-102
+        pressure = math.nextafter(weight, math.inf)
+        self.assertLess(weight, pressure)
+        # An arbitrary 1e200 scale rounds these distinct nonzero loads equal.
+        self.assertEqual(weight/1e200, pressure/1e200)
+        spec = specimen()
+        spec["slices"] = [
+            dict(width_m=1., weight_N_m=1e200, base_angle_deg=30., cohesion_Pa=0., phi_deg=35.),
+            dict(width_m=1., weight_N_m=weight, base_angle_deg=0., cohesion_Pa=0., phi_deg=0.,
+                 pore_pressure_Pa=pressure),
+        ]
+        result = verify_bishop_simplified(spec)
+        self.assertFalse(result["conservation_verified"], result)
+        self.assertIn("tensile", result["reason"])
+
     def test_published_geometry_with_frictional_control_matches_independent_reference(self):
         for count in (20, 80):
             with self.subTest(count=count):

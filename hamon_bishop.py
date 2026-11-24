@@ -131,12 +131,16 @@ def solve_bishop_simplified(spec):
     force_scale = max(max(r["weight_N_m"], r["cb"], r["ub"]) for r in rows)
     if force_scale == 0:
         raise ValueError("The slice table has no driving load or resistance")
+    # A binary power preserves distinct input forces; division by an arbitrary
+    # maximum can round adjacent forces to equality and erase a tensile contact.
+    scale_exponent = math.frexp(force_scale)[1] - 1
+    force_scale = math.ldexp(1., scale_exponent)
     coefficients = []
     for row in rows:
-        w, cb, ub = (row[key] / force_scale for key in ("weight_N_m", "cb", "ub"))
-        if any(row[key] != 0 and scaled == 0 for key, scaled in
+        w, cb, ub = (math.ldexp(row[key], -scale_exponent) for key in ("weight_N_m", "cb", "ub"))
+        if any(math.ldexp(scaled, scale_exponent) != row[key] for key, scaled in
                (("weight_N_m", w), ("cb", cb), ("ub", ub))):
-            raise ValueError("A nonzero slice force underflowed during normalization")
+            raise ValueError("A slice force lost information during normalization")
         a = math.fsum((cb, math.fsum((w, -ub)) * row["tangent"]))
         if not math.isfinite(a) or a < 0:
             raise ValueError(f"Slice {row['id']} cannot supply nonnegative resistance on the compressive branch")
@@ -161,6 +165,10 @@ def solve_bishop_simplified(spec):
         effective_normal = math.fsum((normal, -pore_force))
         if effective_normal < 0:
             raise ValueError(f"Slice {row['id']} requires a tensile effective normal force")
+        contact_scale = max(abs(normal), abs(pore_force), abs(row["w"] / c),
+                            abs(shear * row["sine"] / c))
+        if contact_scale and effective_normal <= 128 * math.ulp(1.) * contact_scale:
+            raise ValueError(f"Slice {row['id']} has unresolved compressive contact near zero effective normal")
         # Reconstruct the original force and strength equations, independently
         # of the rational scalar equation used to locate the root.
         vertical_terms = (normal * c, shear * row["sine"], -row["w"])
