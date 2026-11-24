@@ -1,0 +1,33 @@
+name: FZK volume-only opening admission evidence
+on:
+  push:
+    branches: ["p2/b1e9c66c-ifc-admission-evidence"]
+jobs:
+  admission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 024b209c22694087e6bde37f2829139b5bd1ff45
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --disable-pip-version-check -r requirements.txt
+      - name: Confirm issued union certificate and report both physical roles
+        run: |
+          PYTHONPATH=tests:. python - <<'PY'
+          import unittest
+          from test_ifc_volume_only_opening_admission import VolumeOnlyOpeningAdmissionTests, scene_with_opening
+          test = VolumeOnlyOpeningAdmissionTests("test_true_union_volume_with_unqualified_component_surfaces")
+          suite = unittest.TestSuite([test])
+          assert unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful()
+          for role in ("host", "cutter"):
+              try:
+                  mesh, = scene_with_opening(role).solids()
+                  print(role, "accepted", mesh.volume_m3(), mesh.metadata, flush=True)
+              except ValueError as exc:
+                  print(role, type(exc).__name__, str(exc), flush=True)
+          PY
+      - name: Run both boundary admission regression cases
+        run: python -m unittest discover -s tests -p test_ifc_volume_only_opening_admission.py -v
