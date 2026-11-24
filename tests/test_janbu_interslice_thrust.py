@@ -106,6 +106,20 @@ class OrderedJanbuTests(unittest.TestCase):
                     if face["sign"] == "tension":
                         self.assertLess(thrust, 0)
 
+    def test_near_vertical_reported_factor_must_agree_with_raw_replay(self):
+        # The binary radian conversion at this angle changes tan(phi) by 12%.
+        spec = table([(1, 45, math.nextafter(90., 0.), 0, 0)])
+        out = verify_janbu_slices(spec)
+        self.assertTrue(out["solution_found"])
+        self.assertFalse(out["factor_of_safety_replay_verified"])
+        self.assertFalse(out["verified"])
+        ctx = mp.clone()
+        ctx.dps = 100
+        exact = ctx.tan(ctx.radians(ctx.mpf(spec["slices"][0]["phi_deg"])))
+        lo, hi = out["factor_of_safety_interval"]
+        self.assertLessEqual(lo, exact)
+        self.assertGreaterEqual(hi, exact)
+
     def test_optional_order_threshold_and_invalid_inputs(self):
         spec = ibaraki(6)
         self.assertNotIn("interfaces", verify_janbu_slices(spec))
