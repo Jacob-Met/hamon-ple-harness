@@ -4,12 +4,15 @@ import base64
 import contextlib
 import json
 import os
+import sys
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+from websockets.exceptions import ConnectionClosed
 
 import harness
 import taskbridge
@@ -99,6 +102,8 @@ class FiniteTools:
         self.tools = set()
 
     def plan(self, request, index):
+        if self.mode == "preflight_inflight" and index == 1:
+            return False, [("check_deliverable_preflight", {"path": self.preflight_path})], ""
         if self.mode in ("inflight", "cancel_inflight") and index == 1:
             return False, [("bash", {"command": SLOW_COMMAND, "timeout": 90})], ""
         delivery = "DELIVERY_PHASE" in json.dumps(request["messages"])
@@ -217,6 +222,9 @@ class CooperativePi(unittest.IsolatedAsyncioTestCase):
     async def test_slow_inflight_bash_preserves_the_acknowledged_session(self):
         await self.exercise("inflight")
 
+    async def test_slow_registered_preflight_preserves_the_acknowledged_session(self):
+        await self.exercise("preflight_inflight")
+
     async def test_cancel_during_admitted_bash_never_restarts_delivery(self):
         await self.exercise("cancel_inflight")
 
@@ -231,7 +239,21 @@ class CooperativePi(unittest.IsolatedAsyncioTestCase):
             for directory in (task_dir, agent_dir, session_dir, work):
                 directory.mkdir()
             observed = {}
-            slow = mode in ("inflight", "cancel_inflight")
+            slow = mode in ("inflight", "cancel_inflight", "preflight_inflight")
+            remote_env = None
+            if mode == "preflight_inflight":
+                # Delay the real task-side interpreter, then run the unchanged
+                # registered preflight command against a valid existing file.
+                # This is a runtime latency control, not an engineering score.
+                source_file = task_dir / "existing.json"
+                source_file.write_text('{"source": "control"}\n')
+                stream.preflight_path = str(source_file)
+                wrappers = root / "delayed-interpreter"
+                wrappers.mkdir()
+                wrapper = wrappers / "python3"
+                wrapper.write_text("#!/bin/sh\n" + SLOW_COMMAND + "\nexec " + shlex.quote(sys.executable) + ' "$@"\n')
+                wrapper.chmod(0o755)
+                remote_env = {**os.environ, "PATH": str(wrappers) + os.pathsep + os.environ["PATH"]}
 
             async def run_handler(session):
                 async with taskbridge.Relay(session) as relay:
@@ -296,19 +318,30 @@ class CooperativePi(unittest.IsolatedAsyncioTestCase):
                                 async for frame in socket:
                                     msg = json.loads(frame)
                                     if msg.get("type") == "exec" and slow:
-                                        self.assertEqual(msg["command"].splitlines()[-1], SLOW_COMMAND)
+                                        if mode == "preflight_inflight":
+                                            self.assertTrue(msg["command"].startswith("python3 -I -c "), msg["command"])
+                                            self.assertNotIn("phase_deadline_ms", msg)
+                                        else:
+                                            self.assertEqual(msg["command"].splitlines()[-1], SLOW_COMMAND)
                                         self.assertNotIn("exec_timeout", observed)
                                         limit = observed["exec_timeout"] = msg["timeout_sec"]
                                         child = await asyncio.create_subprocess_exec(
-                                            "timeout", str(limit), "bash", "-c", msg["command"])
+                                            "timeout", str(limit), "bash", "-c", msg["command"],
+                                            cwd=task_dir, env=remote_env,
+                                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
                                         if mode == "cancel_inflight":
                                             await socket.send(json.dumps({"type":"cancel"}))
-                                        status = await child.wait()
+                                        raw_output, _ = await child.communicate()
+                                        status = child.returncode
+                                        observed["exec_output_bytes"] = len(raw_output)
                                         observed["exec_status"] = status
                                         if mode != "cancel_inflight":
-                                            await socket.send(json.dumps({"type":"result","id":msg["id"],
-                                                "ok":True,"exit_code":status,"output":"",
-                                                "truncated":False,"timed_out":status == 124}))
+                                            try:
+                                                await socket.send(json.dumps({"type":"result","id":msg["id"],
+                                                    "ok":True,"exit_code":status,"output":raw_output.decode("utf-8","replace"),
+                                                    "truncated":False,"timed_out":status == 124}))
+                                            except ConnectionClosed:
+                                                observed["result_after_session_closed"] = True
                                     elif msg.get("type") == "write_file":
                                         path = Path(msg["path"])
                                         self.assertTrue(path.is_relative_to(task_dir))
@@ -322,6 +355,11 @@ class CooperativePi(unittest.IsolatedAsyncioTestCase):
                                     elif "id" in msg:
                                         await socket.send(json.dumps({"type":"result","id":msg["id"],
                                                                       "ok":False,"error":"unsupported fixture action"}))
+            if mode == "preflight_inflight":
+                print(json.dumps({"course":mode,"observed":observed,
+                    "late_write":(task_dir/"late-write").exists(),
+                    "delivered":(task_dir/"delivery.json").exists(),
+                    "provider_requests":len(stream.requests)}),flush=True)
             self.assertEqual(stream.errors,[])
             self.assertNotIn("handler_error", observed, (observed,stream.errors,len(stream.requests)))
             if slow:
@@ -340,7 +378,10 @@ class CooperativePi(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(observed["requests_before_resume"], 1)
                 self.assertEqual(len(stream.requests), 3)
                 delivered_context = json.dumps(stream.requests[1]["messages"])
-                self.assertIn(f'Command timed out after {observed["exec_timeout"]} seconds', delivered_context)
+                if mode == "preflight_inflight":
+                    self.assertIn("Task preflight did not complete", delivered_context)
+                else:
+                    self.assertIn(f'Command timed out after {observed["exec_timeout"]} seconds', delivered_context)
                 self.assertEqual(json.loads((task_dir/"delivery.json").read_text()), {"completed":2})
                 self.assertEqual(observed["last"], "Delivered.")
                 return

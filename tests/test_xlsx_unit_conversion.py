@@ -59,3 +59,24 @@ class UnitConversionTests(TestCase):
             counts = xlsx_audit(str(path))["conversion_audit"]["counts"]
             self.assertEqual(counts, dict(matched=0, mismatch=2, dimension_mismatch=0, unverified=5))
             self.assertFalse(audit_local_deliverable(str(path))["ok"])
+
+    def test_force_over_area_reconstructs_stress_from_input_cells(self):
+        formulas = [
+            ('CONVERT(12,"kN","N")', 12000),
+            ('CONVERT(4,"cm^2","m2")', 0.0004),
+            ('CONVERT(A1/A2,"Pa","MPa")', 30),
+            ('CONVERT(A1/A2,"Pa","MPa")', 0.03),
+            ('CONVERT(A1/A2,"kPa","MPa")', 30000),
+            ('CONVERT(A1/A2,"N","kN")', 30000),
+            ('CONVERT(A1/A2,"pa","MPa")', 30),
+        ]
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "stress.xlsx"
+            workbook(path, formulas)
+            rows = xlsx_audit(path)["conversion_audit"]["examples"]
+            self.assertEqual([row["status"] for row in rows], [
+                "matched", "matched", "matched", "mismatch", "unit_scale_mismatch",
+                "dimension_mismatch", "unverified",
+            ])
+            self.assertEqual(rows[3]["expected"], 30)
+            self.assertFalse(audit_local_deliverable(path)["ok"])
