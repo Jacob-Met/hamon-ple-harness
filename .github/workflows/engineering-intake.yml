@@ -20,6 +20,13 @@ jobs:
           cache: npm
       - name: Install the actual registered tool runtime
         run: npm ci --no-fund --no-audit
+      - name: buildingSMART Annex E curved BRep with independently integrated volume
+        run: |
+          curl --fail --silent --show-error --location --retry 2 --max-time 30 \
+            https://raw.githubusercontent.com/buildingSMART/IFC4.x-specification-models/ef22440ec501551ccc9689309560bbc7e26aa9d7/models/advanced-geometric-shape/cube-advanced-brep/cube-advanced-brep.ifc \
+            --output "$RUNNER_TEMP/annex-e-twisted-cube.ifc"
+          test "$(git hash-object "$RUNNER_TEMP/annex-e-twisted-cube.ifc")" = 1f0e5b59bc1890d081350bc5d8fe692985f424b9
+          PLE_ANNEX_E_TWISTED_CUBE="$RUNNER_TEMP/annex-e-twisted-cube.ifc" python -m unittest discover -s tests -p test_ifc_advanced_brep.py -v
       - name: System PDF vector tools for real two-sheet drawing contract
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends poppler-utils
       - name: Independent stadium copper and task provisioning controls
