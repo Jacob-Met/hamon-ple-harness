@@ -46,6 +46,7 @@ def cases():
         "km": u.kilometer, "in": u.inch, "ft": u.foot, "yd": u.yard,
         "g": u.gram, "kg": u.kilogram, "lbm": u.pound,
         "sec": u.second, "hr": u.hour,
+        "Pa": u.pascal, "kPa": 1000*u.pascal, "MPa": 10**6*u.pascal,
     }
 
     def ratio(source, target):
@@ -76,7 +77,7 @@ def cases():
     # https://github.com/LibreOffice/core/blob/libreoffice-24.2.7.2/scaddins/source/analysis/analysishelper.cxx
     legacy_lbm_per_kg = sp.Rational("2.20462291469134")
     legacy_expected = {"A5": sp.Rational(45,2)*legacy_lbm_per_kg}
-    for group in (("m","mm","cm","km","in","ft","yd"), ("g","kg","lbm"), ("sec","hr")):
+    for group in (("m","mm","cm","km","in","ft","yd"), ("g","kg","lbm"), ("sec","hr"), ("Pa","kPa","MPa")):
         for source in group:
             for target in group:
                 rows.append((f'CONVERT(5/2,"{source}","{target}")',
@@ -85,6 +86,18 @@ def cases():
                     factors = {"g":sp.Rational(1,1000), "kg":sp.Rational(1),
                                "lbm":1/legacy_lbm_per_kg}
                     legacy_expected[f"A{len(rows)}"] = sp.Rational(5,2)*factors[source]/factors[target]
+    # NASA's worked value is rounded to 30.2 kPa. Compare the unrounded
+    # pressure with a dimensioned SymPy expression at the published inputs.
+    # https://www.nasa.gov/wp-content/uploads/2023/06/principles-of-flight-in-action-9-12.pdf
+    density = sp.Rational("0.74") * u.kilogram / u.meter**3
+    speed = sp.Rational("285.8") * u.meter / u.second
+    pressure = convert_to(density * speed**2 / 2, u.pascal) / (1000 * u.pascal)
+    rows.extend([
+        ('CONVERT((CONVERT(0.74,"kg","kg")/CONVERT(1,"m","m")^3)*'
+         '(CONVERT(285.8,"m","m")/CONVERT(1,"sec","sec"))^2/2,"Pa","kPa")', pressure),
+        ("-2^2", sp.Integer(4)), ("2^3^2", sp.Integer(64)),
+        ("2^(3^2)", sp.Integer(512)), ("4/2^-2", sp.Integer(16)),
+    ])
     # Independent quantities establish the composite unit frames as well as numbers.
     assert sp.simplify(convert_to(u.centimeter*u.meter/u.centimeter, u.meter)/u.meter) == 1
     assert sp.simplify(convert_to(u.inch*u.centimeter/u.inch, u.meter)/u.meter) == sp.Rational(1,100)
@@ -146,7 +159,7 @@ def main():
     before = xlsx_audit(source)
     assert sum(s["formulas_without_cached_values"] for s in before["sheets"]) == len(rows)
     # Calc evaluates the spreadsheet numbers even when the stated input unit
-    # contradicts a preceding conversion. Keep this control separate from the 76.
+    # contradicts a preceding conversion. Keep this control separate from the ordinary formulas.
     source_frames = args.out / "conversion-source-frames.xlsx"
     converted_cm = 'CONVERT(Inputs!A3,"m","cm")*2'
     controls = [
@@ -197,7 +210,7 @@ def main():
     unverified = sum(audit[kind]["counts"]["unverified"] for kind in ("arithmetic_audit","conversion_audit"))
     assert matched+len(engine_variants) == len(rows) and unverified == len(engine_variants), audit
     # Alter only a separate control copy; preserve the engine-produced package unchanged.
-    stale_cells = ("A1","A5","A6","A9")
+    stale_cells = ("A1","A5","A6","A9",f"A{len(rows)-4}")
     for address in stale_cells:
         value = cells[address].find(f"{{{MAIN}}}v")
         value.text = str(float(value.text)*1.125)
@@ -215,7 +228,7 @@ def main():
     result = {
         "qualified":True, "effective_memory_gib":memory/1024**3,
         "libreoffice":subprocess.check_output([executable,"--version"],text=True).strip(),
-        "sympy":sympy_version, "independent_pair_conversions":62,
+        "sympy":sympy_version, "independent_pair_conversions":71,
         "fresh_formulas_compared":len(rows), "fresh_formulas_matched":matched,
         "engine_specific_lbm_variants":engine_variants, "fresh_guard":guard["ok"],
         "stale_guard":stale_guard["ok"], "stale_mismatch_cells":mismatches,

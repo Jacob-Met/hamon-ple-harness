@@ -38,6 +38,38 @@ class UnitGraphTests(unittest.TestCase):
     def records(audit, kind):
         return {(row["sheet"], row["cell"]): row for row in audit[kind+"_audit"]["examples"]}
 
+    def test_dynamic_pressure_with_velocity_squared(self):
+        # NASA Principles of Flight in Action: 0.74 kg/m³ at 285.8 m/s.
+        density = 'CONVERT(0.74,"kg","kg")/CONVERT(1,"m","m")^3'
+        velocity = 'CONVERT(285.8,"m","m")/CONVERT(1,"sec","sec")'
+        audit, guard = self.evaluate([
+            ("A", density, .74), ("B", velocity, 285.8), ("C", "A1*B1^2/2", 30222.2068),
+            ("D", 'CONVERT(C1,"Pa","kPa")', 30.2222068),
+            ("E", 'CONVERT(C1,"kPa","Pa")', 30222206.8),
+            ("F", 'CONVERT(C1,"Pa","MPa")', .302222068),
+            ("G", 'CONVERT(A1*B1^3/2,"Pa","kPa")', None)])
+        arithmetic = self.records(audit, "arithmetic")
+        converted = self.records(audit, "conversion")
+        self.assertEqual(arithmetic["Results","C1"]["si_dimension"], [1,-1,-2,0,0])
+        self.assertEqual(converted["Results","D1"]["status"], "matched")
+        self.assertEqual(converted["Results","E1"]["status"], "unit_scale_mismatch")
+        self.assertEqual(converted["Results","F1"]["status"], "mismatch")
+        self.assertEqual(converted["Results","G1"]["status"], "dimension_mismatch")
+        self.assertFalse(guard["ok"])
+
+    def test_excel_power_precedence_and_bounded_domain(self):
+        audit, _ = self.evaluate([
+            ("A", "-2^2", 4), ("B", "2^3^2", 64), ("C", "2^(3^2)", 512),
+            ("D", "4/2^-2", 16), ("E", "0^0", 1), ("F", "2^13", 8192),
+            ("G", '(CONVERT(3,"m","cm"))^-2', 1/90000), ("H", "2^0.5", 1.414),
+            ("I", '2^CONVERT(2,"m","m")', 4), ("J", "0^-2", None)])
+        checked = self.records(audit, "arithmetic")
+        self.assertEqual([checked["Results",c+"1"]["status"] for c in "ABCD"], ["matched"]*4)
+        self.assertEqual(checked["Results","G1"]["unit_scale_si"], "10000")
+        self.assertEqual(checked["Results","G1"]["si_dimension"], [0,-2,0,0,0])
+        for c in "EFHIJ":
+            self.assertEqual(checked["Results",c+"1"]["status"], "unverified")
+
     def test_literal_unary_arithmetic_and_nested_convert(self):
         audit, guard = self.evaluate([
             ("A", 'CONVERT(-1,"m","cm")', -100),
