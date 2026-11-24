@@ -823,10 +823,10 @@ def _outlined_supplies(paths, wire_ink, pitch, wires, membership):
     letters, signal_strokes = outlined.letter_strokes(paths, wire_ink, pitch)
     grounded = {m["wire_index"] for m in marks}
     evidence = []
-    for glyph in candidates:
-        if glyph["shape"] != "supply_arrow" or not .9*pitch < math.dist(glyph["foot"], glyph["tip"]) < 1.1*pitch:
-            continue
-        word = outlined.anchored_voltage(glyph, letters)
+    arrows = [glyph for glyph in candidates if glyph["shape"] == "supply_arrow"
+              and .9*pitch < math.dist(glyph["foot"], glyph["tip"]) < 1.1*pitch]
+    components = [membership[min(endpoints.near(glyph["foot"]))] for glyph in arrows]
+    for glyph, word in zip(arrows, outlined.paired_voltages(arrows, letters, components), strict=True):
         if word:
             name, occurrence = word
             index = min(endpoints.near(glyph["foot"]))
