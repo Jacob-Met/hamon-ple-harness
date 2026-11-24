@@ -1303,7 +1303,7 @@ def _advanced_brep_mesh(model, step):
 
 def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, unit_scale: float,
                         mass_issues: Optional[List[str]] = None,
-                        active_items: frozenset = frozenset(), advanced_mesh=None) -> List[Tuple[np.ndarray, np.ndarray]]:
+                        active_items: frozenset = frozenset(), advanced_mesh=None, *, strict_geometry=False) -> List[Tuple[np.ndarray, np.ndarray]]:
     if not (isinstance(iref, tuple) and iref[0] == "ref" and iref[1] in entities):
         return []
     if iref[1] in active_items or len(active_items) >= 128:
@@ -1311,7 +1311,7 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
     active_items = active_items | {iref[1]}
     itype, args = entities[iref[1]]
     if itype == "IFCCSGSOLID" and len(args) == 1:
-        return _extract_solid_item(entities, args[0], unit_scale, mass_issues, active_items, advanced_mesh)
+        return _extract_solid_item(entities, args[0], unit_scale, mass_issues, active_items, advanced_mesh, strict_geometry=strict_geometry)
     if itype == "IFCBLOCK" and len(args) == 4:
         try:
             location, _, _ = _required_ifc_entity(entities, args[0], "IFCAXIS2PLACEMENT3D")
@@ -1338,7 +1338,7 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
                 second_kind, fields = entities.get(reference[1], (None, []))
                 if second_kind in ("IFCHALFSPACESOLID", "IFCPOLYGONALBOUNDEDHALFSPACE"):
                     return [_halfspace_difference(entities, second_kind, fields, unit_scale, operands[0])]
-            pieces = _extract_solid_item(entities, reference, unit_scale, issues, active_items, advanced_mesh)
+            pieces = _extract_solid_item(entities, reference, unit_scale, issues, active_items, advanced_mesh, strict_geometry=strict_geometry)
             if not pieces or issues:
                 raise UnresolvedSolidGeometry("unresolved physical Boolean operand")
             material = [piece for piece in pieces if len(piece[0])]
@@ -1352,6 +1352,8 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
                 return [operands[0]]
             raise UnresolvedSolidGeometry("Invalid Boolean operator")
         return [_boolean_meshes(operands, operator)]
+    if itype == "IFCEXTRUDEDAREASOLID" and strict_geometry:
+        return [_qualified_polygon_sweep(entities, iref, unit_scale)]
     if itype == "IFCEXTRUDEDAREASOLID" and len(args) >= 4:
         outer, inner, prof_mat = _profile_polygons_2d(entities, args[0], unit_scale)
         if outer is None:
@@ -1392,11 +1394,11 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
                     _, rargs = entities[rep_ref[1]]
                     if len(rargs) >= 4 and isinstance(rargs[3], list):
                         for sub in rargs[3]:
-                            sub_meshes = _extract_solid_item(entities, sub, unit_scale, mass_issues, active_items, advanced_mesh)
+                            sub_meshes = _extract_solid_item(entities, sub, unit_scale, mass_issues, active_items, advanced_mesh, strict_geometry=strict_geometry)
                             if not sub_meshes:
                                 raise UnresolvedSolidGeometry("unresolved physical item in mapped representation")
                             for (vv, ff) in sub_meshes:
-                                out_items.append((_apply_transform(vv, map_mat @ orig_mat), ff))
+                                out_items.append(_EMPTY_CLIP if vv is _EMPTY_CLIP[0] else (_apply_transform(vv, map_mat @ orig_mat), ff))
         return out_items
 
     if itype == "IFCTRIANGULATEDFACESET" and len(args) >= 4:
@@ -1677,7 +1679,7 @@ def _placed_product_frame(entities, placement, unit_scale):
     return frame
 
 
-def _require_single_swept_body(entities, step, *, mass_takeoff=False):
+def _opening_body_items(entities, step, *, mass_takeoff=False):
     """Refuse partial bodies and curves the vertex reader cannot certify."""
     def resolve(ref):
         if not isinstance(ref, tuple) or ref[0] != "ref" or ref[1] not in entities:
@@ -1704,7 +1706,18 @@ def _require_single_swept_body(entities, step, *, mass_takeoff=False):
             if not np.array_equal(_rigid_ifc_frame(entities, attrs[4], 1.), np.eye(4)):
                 raise ValueError("Only an identity IFC world coordinate system is qualified")
         items.extend(rep[3])
-    if len(items) != 1 or (mass_takeoff and body_count != 1):
+    if body_count != 1 or not items:
+        raise UnresolvedOpening("Expected one complete physical Body")
+    return items
+
+
+def _require_single_swept_body(entities, step, *, mass_takeoff=False):
+    items = _opening_body_items(entities, step, mass_takeoff=mass_takeoff)
+    def resolve(ref):
+        if not isinstance(ref, tuple) or ref[0] != "ref" or ref[1] not in entities:
+            raise UnresolvedOpening("Missing swept geometry")
+        return entities[ref[1]]
+    if len(items) != 1:
         raise UnresolvedOpening("expected one complete swept opening or host body")
     kind, solid = resolve(items[0])
     if kind != "IFCEXTRUDEDAREASOLID":
@@ -1734,23 +1747,42 @@ def _opening_relationships(entities):
     return related
 
 
-def _physical_occurrences(solids,entities,unit_scale,related):
-    by_step = {s.metadata["step_id"]:s for s in solids}
-    for host,openings in related.items():
-        if host not in by_step or any(i not in by_step or
-                by_step[i].ifc_type not in ("IFCOPENINGELEMENT","IFCOPENINGSTANDARDCASE")
-                for i in openings):
+def _physical_occurrences(solids, entities, unit_scale, related, empty=None):
+    empty = set() if empty is None else empty
+    by_step = {s.metadata["step_id"]: s for s in solids}
+    opening_types = ("IFCOPENINGELEMENT", "IFCOPENINGSTANDARDCASE")
+    for host, opening_steps in related.items():
+        if (host not in by_step and host not in empty) or any(
+                (i not in by_step and i not in empty) or entities.get(i, ("",))[0] not in opening_types
+                for i in opening_steps):
             raise UnresolvedOpening("missing or unsupported host/opening body")
-        frame = _resolve_local_placement(entities,entities[host][1][5],unit_scale)
-        by_step[host] = _subtract_opening_boxes(by_step[host],[by_step[i] for i in sorted(openings)],frame)
-    return [s for s in by_step.values() if s is not None and
-            s.ifc_type not in ("IFCOPENINGELEMENT","IFCOPENINGSTANDARDCASE")]
+        if host in empty:
+            continue
+        material = by_step[host]
+        openings = [by_step[i] for i in sorted(opening_steps) if i not in empty]
+        if not openings:
+            continue
+        if any("mass_issue" in s.metadata for s in [material, *openings]):
+            raise UnresolvedOpening("Unqualified compound host or opening material")
+        frame = _resolve_local_placement(entities, entities[host][1][5], unit_scale)
+        try:
+            for component in [material, *openings]:
+                local = (component.vertices - frame[:3, 3]) @ frame[:3, :3]
+                _box_bounds(local, component.faces)
+        except UnresolvedOpening:
+            meshes = [(s.vertices, s.faces) for s in [material, *openings]]
+            vertices, faces = _boolean_meshes(meshes, "DIFFERENCE", allow_empty=True)
+            by_step[host] = None if not len(faces) else SolidMesh3D(
+                material.element_id, material.ifc_type, material.name, material.discipline,
+                vertices, faces, {**material.metadata, "opening_ids": [o.element_id for o in openings]})
+        else:
+            by_step[host] = _subtract_opening_boxes(material, openings, frame)
+    return [s for s in by_step.values() if s is not None and s.ifc_type not in opening_types]
 
 
 def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
     entities = parse_ifc_entities(ifc_text)
     unit_scale = _detect_length_unit_scale(entities)
-    solids: List[SolidMesh3D] = []
     related = _opening_relationships(entities)
     participants = set(related).union(*related.values())
 
@@ -1766,13 +1798,29 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
     def advanced_mesh(step):
         return _advanced_brep_mesh(advanced_model(), step)
 
-    for eid, etype, args, rargs in _product_shapes(entities):
-        if eid in participants:
-            _require_single_swept_body(entities, eid)
+    solids, empty = _gross_ifc_solids(entities, unit_scale, participants, _product_shapes(entities), advanced_mesh)
+    return _physical_occurrences(solids, entities, unit_scale, related, empty)
+
+
+def _gross_ifc_solids(entities, unit_scale, participants, products, advanced_mesh=None, *, strict_geometry=False):
+    solids, empty = [], set()
+    for eid, etype, args, rargs in products:
+        if strict_geometry or eid in participants:
+            items = _opening_body_items(entities, eid, mass_takeoff=strict_geometry)
+            if eid in participants:
+                for item in items:
+                    kind = entities.get(item[1], ("",))[0] if isinstance(item, tuple) and item[0] == "ref" else ""
+                    if kind == "IFCEXTRUDEDAREASOLID":
+                        continue
+                    if etype.startswith("IFCOPENING") or kind != "IFCBOOLEANCLIPPINGRESULT":
+                        raise UnresolvedOpening("Expected a straight polygonal prism opening or a clipped prism host")
         global_id = str(args[0] or f"#{eid}")
         name = str(args[2] or f"{etype}_{eid}")
-        world_mat = _resolve_local_placement(entities, args[5], unit_scale)
-
+        if strict_geometry or (eid in participants and args[5] is not None):
+            world_mat = _placed_product_frame(entities, args[5], unit_scale)
+        else:
+            world_mat = _resolve_local_placement(entities, args[5], unit_scale)
+        has_empty = False
         mass_issues = []
         all_verts: List[np.ndarray] = []
         all_faces: List[np.ndarray] = []
@@ -1787,10 +1835,14 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
             if rep_ident in ("AXIS", "FOOTPRINT", "BOX"):
                 continue
             for item_ref in sr_args[3]:
-                item_meshes = _extract_solid_item(entities, item_ref, unit_scale, mass_issues, advanced_mesh=advanced_mesh)
+                item_meshes = _extract_solid_item(entities, item_ref, unit_scale, mass_issues, advanced_mesh=advanced_mesh,
+                                                 strict_geometry=strict_geometry or eid in participants)
                 if rep_ident == "BODY" and not item_meshes:
                     raise UnresolvedSolidGeometry(f"unsupported or empty physical Body item on #{eid}")
                 for (v_local, f_local) in item_meshes:
+                    if v_local is _EMPTY_CLIP[0]:
+                        has_empty = True
+                        continue
                     v_world = _apply_transform(v_local, world_mat)
                     all_verts.append(v_world)
                     all_faces.append(f_local + v_offset)
@@ -1824,7 +1876,9 @@ def load_ifc_solids(ifc_text: str) -> List[SolidMesh3D]:
                           **({"mass_issue": mass_issues[0]} if mass_issues else {})},
                 material_face_counts=tuple(len(faces) for faces in all_faces),
             ))
-    return _physical_occurrences(solids,entities,unit_scale,related)
+        elif has_empty:
+            empty.add(eid)
+    return solids, empty
 
 
 def parse_stl_mesh(data: bytes | str, element_id: str = "stl_0", name: str = "stl_part", scale_to_m: float = 1.0) -> SolidMesh3D:
