@@ -10,6 +10,8 @@ def verify_bishop_circle(spec):
                   tool="hamon_conservation_cad_verifier", ok=False, conservation_verified=False)
     try:
         fields = {"mode", "calculation", "circle", "slide_direction", "slices", "proposed_factor_of_safety"}
+        if spec.get("mode", "auto") not in ("auto", "civil", "geotech", "civil_geotech"):
+            raise ValueError("The slice assembly requires civil_geotech mode")
         if spec.keys() - fields:
             raise ValueError("Additional loads or material models are unsupported")
         circle = spec["circle"]
@@ -72,8 +74,11 @@ def verify_bishop_circle(spec):
         residual = 0.
         for x, sine, cosine, tangent, length, weight, cohesion, pore in rows:
             water = pore * length
-            normal = math.fsum((weight, -water*cosine, -cohesion*length*sine/factor)) / (
-                cosine + sine*tangent/factor)
+            friction_term = sine * tangent / factor
+            denominator = cosine + friction_term
+            if denominator <= 128 * math.ulp(1.) * (cosine + abs(friction_term)):
+                raise ValueError("Basal equilibrium is unresolved near a Bishop pole")
+            normal = math.fsum((weight, -water*cosine, -cohesion*length*sine/factor)) / denominator
             if normal < 0:
                 raise ValueError("An effective basal normal force is tensile")
             shear = (cohesion * length + normal * tangent) / factor
