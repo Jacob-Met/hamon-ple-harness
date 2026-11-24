@@ -2211,17 +2211,16 @@ def detect_ifc_clashes(
                                     required_clearance_m, cross_discipline_only, _infer_discipline)
             except (ImportError, RuntimeError, ValueError, TypeError, AttributeError, IndexError, ArithmeticError) as exc:
                 raise UnresolvedSolidGeometry(f"Unresolved IFC curved Body: {exc}") from exc
-    try:
-        solids = load_ifc_solids(ifc_text)
-    except UnresolvedSolidGeometry:
-        if "IFCADVANCEDBREP" in ifc_text.upper():
-            try:
-                takeoff = _single_advanced_brep_takeoff(ifc_text)
-            except (ImportError, RuntimeError, ValueError, TypeError, AttributeError):
-                takeoff = None
-            if takeoff is not None:
-                return takeoff
-        raise
+    # A single closed curved product needs no distance mesh. Preserve the
+    # native integral and its source identity before trying the mesh pipeline.
+    if "IFCADVANCEDBREP" in ifc_text.upper():
+        try:
+            takeoff = _single_advanced_brep_takeoff(ifc_text)
+        except (ImportError, RuntimeError, ValueError, TypeError, AttributeError):
+            takeoff = None
+        if takeoff is not None:
+            return takeoff
+    solids = load_ifc_solids(ifc_text)
     # Bounds can prove clearance and eliminate candidates for the minimum.
     # Only a narrow-phase result supplies an attainable distance and witness.
     use_broadphase = len(solids) > 25
