@@ -1170,6 +1170,7 @@ def _advanced_brep_mesh(model, step):
         if not 1 <= len(faces) <= 2048 or len({face.id() for face in faces}) != len(faces):
             raise UnresolvedSolidGeometry("invalid advanced BRep face inventory")
         edge_uses = Counter()
+        signed_uses = Counter()
         for face in faces:
             if not face.is_a("IfcAdvancedFace") or not face.Bounds:
                 raise UnresolvedSolidGeometry("unverified advanced BRep face")
@@ -1177,9 +1178,15 @@ def _advanced_brep_mesh(model, step):
                 loop = bound.Bound
                 if not loop.is_a("IfcEdgeLoop") or not loop.EdgeList:
                     raise UnresolvedSolidGeometry("unverified advanced BRep edge loop")
-                edge_uses.update(edge.EdgeElement.id() for edge in loop.EdgeList)
+                for use in loop.EdgeList:
+                    edge_id = use.EdgeElement.id()
+                    edge_uses[edge_id] += 1
+                    signed_uses[edge_id] += 1 if use.Orientation == bound.Orientation else -1
         if not edge_uses or any(count != 2 for count in edge_uses.values()):
             raise UnresolvedSolidGeometry("advanced BRep shell does not close on its source edges")
+        for edge_id, balance in signed_uses.items():
+            if balance:
+                raise UnresolvedSolidGeometry(f"advanced BRep uses source edge #{edge_id} twice in the same direction")
 
         settings = ifcopenshell.geom.settings()
         settings.set("iterator-output", wrapper.NATIVE)

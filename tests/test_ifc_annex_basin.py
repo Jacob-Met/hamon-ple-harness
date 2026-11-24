@@ -90,7 +90,16 @@ console.log(JSON.stringify(result.details));
                             samples.append({"deflection_m": deflection,
                                             "faces": len(triangulated.geometry.faces)//3,
                                             "volume_m3": get_volume(triangulated.geometry)})
+                        mesh_vertices = np.asarray(triangulated.geometry.verts).reshape(-1, 3)
+                        mesh_faces = np.asarray(triangulated.geometry.faces).reshape(-1, 3)
+                        tris = mesh_vertices[mesh_faces]
+                        cap_areas = {}
+                        for z in (0., -.084, -.094):
+                            selected = tris[np.all(np.isclose(tris[:, :, 2], z, atol=1.e-9, rtol=0), axis=1)]
+                            cap_areas[z] = np.cross(selected[:, 1] - selected[:, 0],
+                                                    selected[:, 2] - selected[:, 0])[:, 2].sum() / 2
                         print(json.dumps({"independent_spline_integral_m3": integrated,
+                                          "signed_mesh_cap_areas_m2": cap_areas,
                                           "source_side_volumes_m3": side_volumes,
                                           "kernel_volume_m3": kernel, "kernel_meshes": samples}))
                     out = subprocess.run(["node", "--experimental-strip-types", "--input-type=module",
@@ -100,6 +109,11 @@ console.log(JSON.stringify(result.details));
                     print(json.dumps({"exchange": kind, "native_volume_m3": kernel,
                                       "native_area_m2": native.area().to_double(),
                                       "native_faces": native.num_faces(), "result": reply}, sort_keys=True))
+                    if kind == "advanced-brep":
+                        self.assertFalse(reply["ok"], reply)
+                        self.assertIn("source edge #532 twice in the same direction", reply["reason"])
+                        self.assertIsNone(reply["total_solid_volume_m3"])
+                        continue
                     self.assertTrue(reply["ok"], reply)
                     self.assertEqual(reply["solid_count"], 1)
                     self.assertAlmostEqual(reply["total_solid_volume_m3"], kernel, delta=abs(kernel)*.002)
