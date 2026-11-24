@@ -1,0 +1,43 @@
+name: County detention basin through the registered Pi tool
+on:
+  pull_request:
+    paths:
+      - hamon_reservoir_routing.py
+      - tests/test_level_pool_routing.py
+      - ship/verify_level_pool_registered.py
+      - .github/workflows/level-pool-routing.yml
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [stock, candidate]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: probe
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.arm == 'stock' && '6fab909279fb3fb497f7df8c335c4a30a3a1bcbb' || github.event.pull_request.head.sha }}
+          path: work
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci --no-fund --no-audit && python -m pip install -r requirements.txt
+        working-directory: work
+      - if: matrix.arm == 'candidate'
+        run: python -m unittest discover -s tests -p test_level_pool_routing.py -v
+        working-directory: work
+      - run: python probe/ship/verify_level_pool_registered.py --root work ${{ matrix.arm == 'stock' && '--stock' || '' }} --output ${{ matrix.arm }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: level-pool-${{ matrix.arm }}
+          path: ${{ matrix.arm }}.json
