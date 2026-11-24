@@ -1267,7 +1267,9 @@ def _advanced_brep_mesh(model, step):
             raise UnresolvedSolidGeometry("expected one native advanced BRep")
         native = brep.item(0)
         native_count = native.num_faces()
-        if not native.is_manifold() or native_count != len(faces):
+        # OCC may retain coincident but separately indexed source seams. The
+        # tessellation below must independently close using exact positions.
+        if native_count != len(faces):
             raise UnresolvedSolidGeometry(
                 f"native advanced BRep has {native_count}/{len(faces)} faces, "
                 f"manifold={native.is_manifold()}, area={native.area().to_double()}, "
@@ -1290,7 +1292,11 @@ def _advanced_brep_mesh(model, step):
             raise UnresolvedSolidGeometry("invalid or oversized advanced BRep tessellation")
         seeds, closed, coherent = _closed_surface_components(vertices, triangles)
         if len(seeds) != 1 or len(closed) != len(triangles) or not coherent:
-            raise UnresolvedSolidGeometry("advanced BRep tessellation is not one closed oriented shell")
+            raise UnresolvedSolidGeometry(
+                f"advanced BRep tessellation has {len(seeds)} closed shells, "
+                f"{len(closed)}/{len(triangles)} closed faces, coherent={coherent}; "
+                f"native manifold={native.is_manifold()}, signed volume={exact_volume}"
+            )
         a, b, c = (vertices[triangles[:, i]] - vertices[triangles[0, 0]] for i in range(3))
         volume = float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6)
         area = float(np.linalg.norm(np.cross(b - a, c - a), axis=1).sum() / 2)
