@@ -34,8 +34,9 @@ sys.exit(int(exit_code))
 """
 
 
-class Session:
+class Session(taskbridge.Session):
     def __init__(self, budget):
+        super().__init__(None, {"instruction": "process lifecycle control"})
         self.budget = budget
         self.logs = []
 
@@ -48,6 +49,12 @@ class Session:
 
 @unittest.skipUnless(os.name == "posix", "the harness uses POSIX process groups")
 class ProcessExitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_already_cancelled_session_does_not_start_a_process(self):
+        session = Session(None)
+        session.cancelled.set()
+        with self.assertRaises(taskbridge.Cancelled):
+            await taskbridge.run_process(["does-not-exist"], session)
+
     async def run_group(self, stdout, stderr, code=0, delay=0, cancel=False):
         session = Session(1.0)
         ready = asyncio.Event()

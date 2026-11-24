@@ -684,6 +684,44 @@ def _wave8_certificate(instruction, inventory, mcp_server_count, deliverable_cou
         return None
 
 
+def explicit_json_result_request(instruction):
+    """Only the existing complete JSON-result covers authorize a direct reply.
+
+    A bare JSON specification can guide a model turn without defining the
+    requested answer. Extra prose is rejected by the certificate parser.
+    """
+    if not isinstance(instruction, str):
+        return False
+    lines = instruction.strip().splitlines()
+    return bool(lines and lines[0] in _WAVE8_COVERS)
+
+
+def certified_json_reply(instruction, plan):
+    """Return a complete, instruction-bound certificate without rewriting it."""
+    if (not explicit_json_result_request(instruction) or not isinstance(plan, dict)
+            or plan.get("presolve_verified") is not True
+            or plan.get("presolve_source_sha256") != hashlib.sha256(instruction.encode()).hexdigest()):
+        return None
+    encoded = plan.get("presolve_result_json")
+    if not isinstance(encoded, str) or len(encoded) > 12000:
+        return None
+    try:
+        requested = _wave8_request(instruction)
+        value = json.loads(encoded, object_pairs_hook=_unique_keys)
+        if isinstance(requested, list):
+            if (not isinstance(value, list) or len(value) != len(requested)
+                    or not all(isinstance(row, dict) for row in value)):
+                return None
+        elif not isinstance(requested, dict) or not isinstance(value, dict):
+            return None
+        # Reject nonfinite output even if an internal caller hands us a broken
+        # plan. Production certificates have already used allow_nan=False.
+        json.dumps(value, allow_nan=False)
+    except (ArithmeticError, TypeError, ValueError, RecursionError):
+        return None
+    return encoded
+
+
 def route_from_intake_prompt(
     engineering_inventory: str,
     *,
@@ -727,9 +765,9 @@ def route_from_intake_prompt(
             if certificate is not None:
                 plan["presolve_result_json"] = certificate
                 plan["presolve_source_sha256"] = hashlib.sha256(instruction.encode()).hexdigest()
-                # The certified parser consumed the entire instruction, including
-                # the cover. A bare calculation still belongs to the participant.
-                if instruction.strip().splitlines()[0] in _WAVE8_COVERS:
+                # Keep the exported completion flag and the harness reply on
+                # the same complete, instruction-bound JSON contract.
+                if certified_json_reply(instruction, plan) is not None:
                     plan["deliver_verified_json"] = True
             elif fin_request:
                 plan["presolve_abstention"] = abstention
@@ -801,4 +839,5 @@ from hamon_wave7_engineering_verifiers import (
     dispatch_wave7_verifier,
     infer_wave7_domain,
 )
+
 

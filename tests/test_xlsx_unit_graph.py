@@ -170,7 +170,7 @@ class UnitGraphTests(unittest.TestCase):
         self.assertEqual(arithmetic["Results","C1"]["reason"], "engine_specific_lbm_scale")
         self.assertFalse(guard["ok"])
 
-    def test_unsupported_and_inconsistent_unit_dependencies_remain_unverified(self):
+    def test_unsupported_units_are_unverified_and_contradictory_sources_fail(self):
         audit, guard = self.evaluate([
             ("A", 'CONVERT(\'Ratings 2026\'!B1,"m","cm")', 300),
             ("B", 'CONVERT(\'Ratings 2026\'!C1,"cm","m")', .03),
@@ -178,6 +178,7 @@ class UnitGraphTests(unittest.TestCase):
                 ("A", None, 3), ("B", "SUM(1,2)", 3),
                 ("C", 'CONVERT(A1,"m","m")', 3)])
         rows = self.records(audit, "conversion")
-        self.assertTrue(all(rows["Results", cell]["status"] == "unverified" for cell in ("A1","B1","C1")))
+        self.assertTrue(all(rows["Results", cell]["status"] == "unverified" for cell in ("A1","C1")))
         self.assertEqual(rows["Results", "B1"]["reason"], "upstream_unit_disagrees")
-        self.assertTrue(guard["ok"], guard)
+        self.assertEqual(rows["Results", "B1"]["status"], "unit_scale_mismatch")
+        self.assertFalse(guard["ok"], guard)

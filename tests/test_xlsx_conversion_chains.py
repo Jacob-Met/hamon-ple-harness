@@ -56,7 +56,7 @@ class ConversionChains(TestCase):
             ("A", f'CONVERT({ref},"cm","mm")', 254), ("C", 'CONVERT(A1,"mm","in")', 10),
             ("D", 'CONVERT(A1,"mm","m")', .254), ("E", 'CONVERT(A1,"m","in")', 10000)],
             [("A", None, 10), ("B", 'CONVERT(A1,"in","cm")', 25.4)])
-        self.assertEqual((counts["matched"], counts["unverified"]), (4, 1))
+        self.assertEqual((counts["matched"], counts["unit_scale_mismatch"], counts["unverified"]), (4, 1, 0))
         self.assertEqual((result["C1"]["root_sheet"], result["C1"]["root_cell"]), ("Ratings 2026", "A1"))
         self.assertEqual(result["D1"]["conversion_depth"], 3)
         self.assertEqual(result["E1"]["reason"], "upstream_unit_disagrees")
