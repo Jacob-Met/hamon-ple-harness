@@ -1,0 +1,73 @@
+name: Public IFC native qualification
+on:
+  pull_request:
+    paths:
+      - 'hamon_ifc*.py'
+      - 'hamon_rectilinear_boolean.py'
+      - 'task-tools.ts'
+      - 'tests/*ifc*'
+      - 'qualification/fzk_source_native/**'
+      - '.github/workflows/ifc-source-qualification.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source-native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Isolate independent importer and solid kernel
+        run: |
+          python -m venv "$RUNNER_TEMP/ifc-native"
+          python -m venv "$RUNNER_TEMP/occt-native"
+          "$RUNNER_TEMP/ifc-native/bin/pip" install --disable-pip-version-check ifcopenshell==0.8.3.post2
+          "$RUNNER_TEMP/occt-native/bin/pip" install --disable-pip-version-check cadquery-ocp==7.8.1.1.post1
+      - name: Download original pinned public exchange model
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/fzk-source-native"
+          curl --fail --silent --show-error --location --retry 4 --retry-all-errors --max-time 60 \
+            https://raw.githubusercontent.com/IfcOpenShell/IfcOpenShell/90c840c68fb35a54e1a61505c6417ab854f826a5/docs/ifcopenshell-cpp/models/AC20-FZK-Haus.ifc \
+            --output "$RUNNER_TEMP/AC20-FZK-Haus.ifc"
+          python - "$RUNNER_TEMP/AC20-FZK-Haus.ifc" <<'PY'
+          import hashlib, pathlib, sys
+          assert hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() == "ea6f04eaf92fac4d7ad0038bc3d2dfea4c094dd3f516ecc33c50bf1835ca108d"
+          PY
+      - name: Export authored geometry through independent importer
+        run: |
+          "$RUNNER_TEMP/ifc-native/bin/python" qualification/fzk_source_native/oracle.py extract \
+            "$RUNNER_TEMP/AC20-FZK-Haus.ifc" "$RUNNER_TEMP/fzk-source-native"
+      - name: Integrate closed native solids and material unions
+        run: |
+          "$RUNNER_TEMP/occt-native/bin/python" qualification/fzk_source_native/oracle.py measure \
+            "$RUNNER_TEMP/AC20-FZK-Haus.ifc" "$RUNNER_TEMP/fzk-source-native"
+      - name: Install candidate runtime
+        run: pip install --disable-pip-version-check -r requirements.txt 'pytest>=8,<10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install the registered tool runtime
+        run: npm ci --ignore-scripts
+      - name: Exercise finite halfspaces and malformed source controls
+        run: python -m pytest -q tests/test_ifc_finite_halfspace_openings.py
+      - name: Measure the intact original through the registered task file reader
+        run: |
+          python qualification/fzk_source_native/check_reader.py \
+            "$RUNNER_TEMP/AC20-FZK-Haus.ifc" "$RUNNER_TEMP/fzk-source-native"
+      - name: Preserve machine-readable native evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fzk-native-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            ${{ runner.temp }}/fzk-source-native/manifest.json
+            ${{ runner.temp }}/fzk-source-native/native-results.json
+            ${{ runner.temp }}/fzk-source-native/registered-reader.*
+            ${{ runner.temp }}/fzk-source-native/source-comparison.json
+          if-no-files-found: error
