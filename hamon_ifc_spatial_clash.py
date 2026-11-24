@@ -1250,7 +1250,19 @@ def _advanced_brep_mesh(model, step):
 
         settings = ifcopenshell.geom.settings()
         settings.set("iterator-output", wrapper.NATIVE)
-        brep = ifcopenshell.geom.create_shape(settings, item)
+        # Native iterator output is exposed on product elements. Isolate this
+        # exact item from siblings, placements and opening relationships.
+        contexts = [ctx for ctx in model.by_type("IfcGeometricRepresentationContext", False)
+                    if ctx.CoordinateSpaceDimension == 3]
+        if len(contexts) != 1:
+            raise UnresolvedSolidGeometry("advanced BRep needs one 3D model context")
+        rep = model.create_entity("IfcShapeRepresentation", contexts[0], "Body", "AdvancedBrep", (item,))
+        definition = model.create_entity("IfcProductDefinitionShape", Representations=(rep,))
+        import ifcopenshell.guid
+        proxy = model.create_entity("IfcBuildingElementProxy", GlobalId=ifcopenshell.guid.new(),
+                                    Representation=definition)
+        native_element = ifcopenshell.geom.create_shape(settings, proxy)
+        brep = native_element.geometry
         if brep.size() != 1:
             raise UnresolvedSolidGeometry("expected one native advanced BRep")
         native = brep.item(0)
@@ -1265,7 +1277,8 @@ def _advanced_brep_mesh(model, step):
         # A dimensionless scale relative to V/A keeps mm and metre models comparable.
         settings.set("mesher-linear-deflection", .0005 * exact_volume / exact_area)
         settings.set("mesher-angular-deflection", .1)
-        mesh = ifcopenshell.geom.create_shape(settings, item)
+        mesh_element = ifcopenshell.geom.create_shape(settings, proxy)
+        mesh = mesh_element.geometry
         vertices = np.asarray(mesh.verts, dtype=float).reshape(-1, 3)
         triangles = np.asarray(mesh.faces, dtype=np.int32).reshape(-1, 3)
         if not (0 < len(triangles) <= 250000 and np.isfinite(vertices).all()):
