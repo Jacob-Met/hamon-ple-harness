@@ -254,8 +254,17 @@ _CONVERT_UNITS = {
     key: UNITS[name] for key, name in {
         "m": "m", "mm": "mm", "cm": "cm", "km": "km", "in": "inch", "ft": "ft",
         "yd": "yd", "g": "g", "kg": "kg", "lbm": "lbm", "sec": "s", "hr": "hr",
+        "N": "N", "kN": "kN", "MN": "MN",
+        "Pa": "Pa", "kPa": "kPa", "MPa": "MPa", "GPa": "GPa",
     }.items()
 }
+# Excel permits both m2 and m^2. Prefixes apply to the length before squaring.
+for _length_token in ("m", "mm", "cm", "km", "in", "ft", "yd"):
+    _length_unit = _CONVERT_UNITS[_length_token]
+    for _suffix in ("2", "^2"):
+        _CONVERT_UNITS[_length_token + _suffix] = _length_unit * _length_unit
+
+
 def _grid_position(address):
     match = re.fullmatch(r"([A-Z]{1,3})([1-9][0-9]{0,6})", address.replace("$", "").upper())
     if match is None:
@@ -456,7 +465,7 @@ def _verify_lookup(sheet, formula, cached, literals):
 _ARITHMETIC_TOKEN = re.compile(
     rf"(?P<convert>CONVERT)(?=\s*\()|{_local_reference('ref')}|"
     r"(?P<number>(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:E[+-]?[0-9]+)?)"
-    r'|(?P<unit>"[A-Z]+")|(?P<operator>[(),+*/-])|(?P<space>\s+)',
+    r'|(?P<unit>"[A-Z]+(?:\^?2)?")|(?P<operator>[(),+*/-])|(?P<space>\s+)',
     re.I | re.ASCII)
 
 _COEFFICIENT = object()
