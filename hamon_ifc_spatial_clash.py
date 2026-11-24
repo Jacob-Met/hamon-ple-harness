@@ -135,6 +135,7 @@ class ClashResult:
     required_clearance_m: float = 0.0
     distance_lower_bound_m: Optional[float] = None
     closest_points_m: Optional[Tuple[Tuple[float, ...], Tuple[float, ...]]] = None
+    contact_evidence: Optional[str] = None
 
 
 
@@ -1333,12 +1334,19 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
             raise UnresolvedSolidGeometry("IFC clipping result must use DIFFERENCE")
         operands = []
         issues = []
+        operand_ref = args[2]
+        operand_kind = entities.get(operand_ref[1], ("",))[0] if isinstance(operand_ref, tuple) and operand_ref[0] == "ref" else ""
+        plane_clip = operator == "DIFFERENCE" and operand_kind in ("IFCHALFSPACESOLID", "IFCPOLYGONALBOUNDEDHALFSPACE")
         for reference in args[1:]:
             if operands and operator == "DIFFERENCE" and isinstance(reference, tuple) and reference[0] == "ref":
                 second_kind, fields = entities.get(reference[1], (None, []))
                 if second_kind in ("IFCHALFSPACESOLID", "IFCPOLYGONALBOUNDEDHALFSPACE"):
-                    return [_halfspace_difference(entities, second_kind, fields, unit_scale, operands[0])]
-            pieces = _extract_solid_item(entities, reference, unit_scale, issues, active_items, advanced_mesh, strict_geometry=strict_geometry)
+                    try:
+                        return [_halfspace_difference(entities, second_kind, fields, unit_scale, operands[0])]
+                    except (TypeError, ValueError, ArithmeticError, IndexError) as exc:
+                        raise UnresolvedSolidGeometry(f"Unresolved IFC plane clipping: {exc}") from exc
+            pieces = _extract_solid_item(entities, reference, unit_scale, issues, active_items, advanced_mesh,
+                                         strict_geometry=strict_geometry or plane_clip)
             if not pieces or issues:
                 raise UnresolvedSolidGeometry("unresolved physical Boolean operand")
             material = [piece for piece in pieces if len(piece[0])]
@@ -1353,7 +1361,10 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
             raise UnresolvedSolidGeometry("Invalid Boolean operator")
         return [_boolean_meshes(operands, operator)]
     if itype == "IFCEXTRUDEDAREASOLID" and strict_geometry:
-        return [_qualified_polygon_sweep(entities, iref, unit_scale)]
+        try:
+            return [_qualified_polygon_sweep(entities, iref, unit_scale)]
+        except (ValueError, TypeError, ArithmeticError, IndexError) as exc:
+            raise UnresolvedSolidGeometry(f"Unresolved source extrusion: {exc}") from exc
     if itype == "IFCEXTRUDEDAREASOLID" and len(args) >= 4:
         outer, inner, prof_mat = _profile_polygons_2d(entities, args[0], unit_scale)
         if outer is None:
@@ -1835,8 +1846,13 @@ def _gross_ifc_solids(entities, unit_scale, participants, products, advanced_mes
             if rep_ident in ("AXIS", "FOOTPRINT", "BOX"):
                 continue
             for item_ref in sr_args[3]:
-                item_meshes = _extract_solid_item(entities, item_ref, unit_scale, mass_issues, advanced_mesh=advanced_mesh,
-                                                 strict_geometry=strict_geometry or eid in participants)
+                try:
+                    item_meshes = _extract_solid_item(entities, item_ref, unit_scale, mass_issues, advanced_mesh=advanced_mesh,
+                                                     strict_geometry=strict_geometry or eid in participants)
+                except (ValueError, TypeError, ArithmeticError, IndexError) as exc:
+                    if eid in participants:
+                        raise UnresolvedOpening(f"Unresolved source opening or host #{eid}: {exc}") from exc
+                    raise
                 if rep_ident == "BODY" and not item_meshes:
                     raise UnresolvedSolidGeometry(f"unsupported or empty physical Body item on #{eid}")
                 for (v_local, f_local) in item_meshes:
@@ -2249,6 +2265,7 @@ def evaluate_pair_clash(mesh_a: SolidMesh3D, mesh_b: SolidMesh3D, required_clear
                         overlap_aabb_volume_m3=ov_vol,
                         witness_point_m=tuple(map(float, hit)),
                         closest_points_m=(tuple(map(float, hit)),) * 2,
+                        contact_evidence="triangle_boundary_intersection",
                         required_clearance_m=required_clearance_m,
                     )
         a_parts = _material_boundaries(mesh_a)
@@ -2268,6 +2285,7 @@ def evaluate_pair_clash(mesh_a: SolidMesh3D, mesh_b: SolidMesh3D, required_clear
                             overlap_aabb_volume_m3=ov_vol,
                             witness_point_m=witness,
                             closest_points_m=(witness, witness),
+                            contact_evidence="containment_witness",
                             required_clearance_m=required_clearance_m,
                         )
 
@@ -2306,6 +2324,7 @@ def evaluate_pair_clash(mesh_a: SolidMesh3D, mesh_b: SolidMesh3D, required_clear
         element_b=mesh_b.element_id,
         status=status,
         min_distance_m=float(best_dist),
+        contact_evidence="surface_distance_within_tolerance" if status == "hard_clash" else None,
         overlap_aabb_volume_m3=ov_vol if status == "hard_clash" else 0.0,
         witness_point_m=tuple(map(float, 0.5 * (best_a + best_b))),
         closest_points_m=(tuple(map(float, best_a)), tuple(map(float, best_b))),
@@ -2425,7 +2444,10 @@ def detect_ifc_clashes(
             takeoff = None
         if takeoff is not None:
             return takeoff
-    solids = load_ifc_solids(ifc_text)
+    return _clashes_for_solids(load_ifc_solids(ifc_text), required_clearance_m, cross_discipline_only)
+
+
+def _clashes_for_solids(solids, required_clearance_m, cross_discipline_only, *, include_quantity=True):
     # Bounds can prove clearance and eliminate candidates for the minimum.
     # Only a narrow-phase result supplies an attainable distance and witness.
     use_broadphase = len(solids) > 25
@@ -2460,11 +2482,12 @@ def detect_ifc_clashes(
 
     hard = [r for r in results if r.status == "hard_clash"]
     violations = [r for r in results if r.status == "clearance_violation"]
-    try:
-        quantity = {"total_solid_volume_m3": float(sum(s.volume_m3() for s in solids))}
-    except UnresolvedMeshMass as exc:
-        quantity = {"total_solid_volume_m3": None, "volume_status": "unresolved",
-                    "volume_reason": str(exc)}
+    quantity = {}
+    if include_quantity:
+        try:
+            quantity["total_solid_volume_m3"] = float(sum(s.volume_m3() for s in solids))
+        except UnresolvedMeshMass as exc:
+            quantity.update(total_solid_volume_m3=None, volume_status="unresolved", volume_reason=str(exc))
     return {
         "solid_count": len(solids),
         "pair_count": len(results),
