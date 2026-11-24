@@ -258,7 +258,23 @@ def solve_lambert_transfer(params):
         if path == "long":
             lam = -lam
         target = dt*ctx.sqrt(2*mu/semiperimeter**3)
-        x, iterations, time_residual = _solve_x(ctx, lam, target)
+        if count:
+            xmin, tmin, minimum_iterations = _minimum_time(ctx, lam, count)
+            dimensional_minimum = tmin/ctx.sqrt(2*mu/semiperimeter**3)
+            minimum_float = float(dimensional_minimum)
+            result.update(solution_branch=branch, minimum_time_iterations=minimum_iterations,
+                          minimum_tof_s=minimum_float if math.isfinite(minimum_float) else None)
+            if math.isfinite(minimum_float) and minimum_float > 0:
+                lower, upper = minimum_float, minimum_float
+                if ctx.mpf(lower) >= dimensional_minimum:
+                    lower = math.nextafter(lower, 0.)
+                if ctx.mpf(upper) <= dimensional_minimum:
+                    upper = math.nextafter(upper, math.inf)
+                if math.isfinite(upper):
+                    result["minimum_tof_bracket_s"] = [lower, upper]
+            x, iterations, time_residual = _solve_multi_x(ctx, lam, target, count, branch, xmin, tmin)
+        else:
+            x, iterations, time_residual = _solve_x(ctx, lam, target)
         y = ctx.sqrt(1-lam*lam*(1-x*x))
         rho = (a-b)/chord
         sigma_squared = (1-rho)*(1+rho)
@@ -295,8 +311,17 @@ def solve_lambert_transfer(params):
         energy2 = _dot(ctx, vv2, vv2)/2-a/b
         energy_scale = max(ctx.one, a/b, _dot(ctx, vv1, vv1)/2, _dot(ctx, vv2, vv2)/2)
         energy_error = abs(energy1-energy2)/energy_scale
+        # Recount complete periods from the published velocity, independently
+        # of the Lambert branch variable and its time-of-flight equation.
+        inverse_axis = 2-_dot(ctx, vv1, vv1)
+        if inverse_axis > 0:
+            period = 2*ctx.pi/inverse_axis**ctx.mpf("1.5")
+            replay_revolutions = int(ctx.floor(normalized_dt/period))
+        else:
+            replay_revolutions = 0
+        revolution_match = replay_revolutions == count and (count == 0 or inverse_axis > 0)
         residual = max(time_residual, kepler_residual, endpoint_error, velocity_error, angular_error, energy_error)
-        certificate = residual < ctx.mpf("1e-10")
+        certificate = residual < ctx.mpf("1e-10") and revolution_match
         evec = [v-u for v, u in zip(_cross(vv1, h1), rr1)]
         eccentricity = _norm(ctx, evec)
         pericenter = a*hnorm*hnorm/(1+eccentricity)
@@ -304,6 +329,9 @@ def solve_lambert_transfer(params):
             transfer_path=path, v1_m_s=v1, v2_m_s=v2,
             tof_s=float(dt), transfer_angle_rad=publish(
                 short_angle if path == "short" else 2*ctx.pi-short_angle),
+            total_transfer_angle_rad=publish(
+                (short_angle if path == "short" else 2*ctx.pi-short_angle)+2*ctx.pi*count),
+            replay_revolutions=replay_revolutions, revolutions_verified=bool(revolution_match),
             eccentricity=publish(eccentricity), conic_periapsis_m=publish(pericenter),
             residual=publish(residual), endpoint_relative_error=publish(endpoint_error),
             arrival_velocity_relative_error=publish(velocity_error),
@@ -313,6 +341,8 @@ def solve_lambert_transfer(params):
             kepler_time_relative_error=publish(kepler_residual), iterations=iterations,
             endpoint_verified=bool(certificate), verified=bool(certificate),
         )
+        if count and inverse_axis > 0:
+            result["semimajor_axis_m"] = publish(a/inverse_axis)
         claims = {}
         for field, expected in (("proposed_v1_m_s", v1), ("proposed_v2_m_s", v2)):
             if field in params:
@@ -325,7 +355,8 @@ def solve_lambert_transfer(params):
             result["claims"] = claims
             result["verified"] = bool(certificate and all(c["passed"] for c in claims.values()))
         if not certificate:
-            result["error"] = "published_velocity_does_not_close_transfer"
+            result["error"] = ("published_velocity_revolution_count_mismatch" if not revolution_match
+                               else "published_velocity_does_not_close_transfer")
     except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
         result.update(verified=False, error=str(exc))
     return result
