@@ -1266,8 +1266,13 @@ def _advanced_brep_mesh(model, step):
         if brep.size() != 1:
             raise UnresolvedSolidGeometry("expected one native advanced BRep")
         native = brep.item(0)
-        if not native.is_manifold() or native.num_faces() != len(faces):
-            raise UnresolvedSolidGeometry("native advanced BRep lost source faces or manifold topology")
+        native_count = native.num_faces()
+        if not native.is_manifold() or native_count != len(faces):
+            raise UnresolvedSolidGeometry(
+                f"native advanced BRep has {native_count}/{len(faces)} faces, "
+                f"manifold={native.is_manifold()}, area={native.area().to_double()}, "
+                f"signed volume={native.volume().to_double()}"
+            )
         exact_volume = native.volume().to_double()
         exact_area = native.area().to_double()
         if not (0 < exact_volume < math.inf and 0 < exact_area < math.inf):
