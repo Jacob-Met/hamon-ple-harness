@@ -11,10 +11,13 @@ For direct numeric VLOOKUP and HLOOKUP formulas with explicit exact match, the
 column of a literal table. It records the source sheet, source cell, expected
 number and cached number. Only direct cell-reference keys and A1 ranges in
 this workbook qualify. A missing or nonnumeric cache, an ambiguous key before
-the match, or a formula-derived dependency yields `unverified`. Lookup
+the match, or a formula-derived table key or selected table value yields `unverified`. Lookup
 counts cover top-level VLOOKUP, HLOOKUP and INDEX calls. The verifier checks up to
 256 formulas and 2,048 key cells per formula. Above 100,000 workbook cells it
 keeps the inventory and reports all lookups as unverified.
+
+
+An exact lookup may supply the needle for another exact lookup or feed an arithmetic/CONVERT formula. The graph reads the selected literal cell even when the lookup’s numeric cache is stale or missing. A missing numeric cache remains unverified for the lookup itself. The lookup audit reports the selected worksheet and cell. Units come from explicit conversions or other grounded arithmetic. Lookup keys may depend on other reconstructed lookups; scanned table keys and returned cells must remain numeric literals. Cyclic keys, unsupported keys preceding the first match, and overlapping array/data-table outputs remain unresolved. These derived paths are disabled for workbooks that request precision as displayed.
 
 Array-formula and data-table result ranges are formula-derived even when a follower has no formula element. Such cells cannot qualify as literal lookup inputs. Missing, malformed, out-of-grid or inconsistent master ranges, and more than 128 ranges on one sheet, make dependencies from that sheet unverified. Valid disjoint ranges and unrelated sheets retain their literal inputs. Range containment never expands the worksheet grid.
 
@@ -55,3 +58,4 @@ A sum or difference of two independently grounded, incompatible dimensions has s
 `python ship/verify_xlsx_unit_graph.py --out OUTPUT_DIR --min-memory-gib 4` writes 162 uncached formulas, invokes LibreOffice Calc, and compares the saved values with SymPy’s unit definitions. The workbook covers 136 ordered pairs across length, mass, time, force, pressure and area, plus nested conversions and arithmetic. One stress calculation reconstructs 6 kN divided by 4 cm² and checks the saved result of 15 MPa. A separate perforated-plate calculation checks the average and maximum stresses against the published 41.7 and 105 MPa in [Strength of Materials, Example 5.1](https://eng.libretexts.org/Bookshelves/Mechanical_Engineering/Strength_of_Materials/05:_Axial_Loading). It reconstructs the reduced cross-section before applying the published concentration factor. The NASA dynamic-pressure example reconstructs 30.2222068 kPa from 0.74 kg/m³ and 285.8 m/s. The corrupted copy changes six caches, including the stress and dynamic-pressure results. The report identifies any Calc-specific pound-scale variants separately.
 
 A second workbook checks five source-unit declarations against Calc’s saved numbers. It includes a physically inconsistent stress conversion that declares N/m² as kPa. Calc saves 15,000 MPa and the guard reports a scale mismatch. A fifth control raises an unlabelled nonzero value to zero. Its dimensionless result contradicts a Pa source declaration, even though Calc saves 0.001. The unaltered source, engine-produced workbooks, corrupted copy and JSON report are retained separately. These qualification workbooks exercise the verifier and do not measure a PLE task score.
+

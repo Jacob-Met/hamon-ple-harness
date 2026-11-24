@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import ast
 import csv
-from collections import Counter
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, getcontext
 from fractions import Fraction
@@ -330,12 +330,19 @@ _INDEX_MATCH = re.compile(
     r"\s*,\s*0\s*\)\s*\)", re.I | re.ASCII)
 
 
-def _verify_index_match(sheet, formula, cached, literals):
+def _selected_lookup(sheet, address, expected, cached):
+    result = {"source_sheet": sheet, "source_cell": address, "expected": expected, "cached": cached}
+    if cached is None:
+        result.update(status="unverified", reason="missing_numeric_cache")
+    else:
+        result["status"] = "matched" if cached == expected else "mismatch"
+    return result
+
+
+def _verify_index_match(sheet, formula, cached, literals, needle_value):
     match = _INDEX_MATCH.fullmatch(formula)
     if match is None:
         return {"status": "unverified", "reason": "requires_vertical_INDEX_and_exact_MATCH_0"}
-    if cached is None:
-        return {"status": "unverified", "reason": "missing_numeric_cache"}
     resolved = {}
     for field in ("needle", "keys", "values"):
         name = match[field + "_sheet"] or sheet
@@ -357,7 +364,7 @@ def _verify_index_match(sheet, formula, cached, literals):
     if (key_x != key_end_x or val_x != val_end_x or length != val_end_y - val_y + 1
             or not 1 <= length <= 2048):
         return {"status": "unverified", "reason": "requires_equal_bounded_vertical_vectors"}
-    needle = literals[resolved["needle"]].get(needle_cell)
+    needle = needle_value((resolved["needle"], needle_cell))
     if needle is None:
         return {"status": "unverified", "reason": "requires_literal_numeric_lookup_key"}
     for offset in range(length):
@@ -369,17 +376,15 @@ def _verify_index_match(sheet, formula, cached, literals):
             expected = literals[resolved["values"]].get(address)
             if expected is None:
                 return {"status": "unverified", "reason": "requires_literal_numeric_return_cell"}
-            return {"status": "matched" if cached == expected else "mismatch",
-                    "source_sheet": resolved["values"], "source_cell": address,
-                    "expected": expected, "cached": cached}
+            return _selected_lookup(resolved["values"], address, expected, cached)
     return {"status": "unverified", "reason": "no_exact_numeric_match"}
 
 
-def _verify_lookup(sheet, formula, cached, literals):
+def _verify_lookup(sheet, formula, cached, literals, needle_value):
     if formula.upper().startswith("INDEX("):
-        return _verify_index_match(sheet, formula, cached, literals)
+        return _verify_index_match(sheet, formula, cached, literals, needle_value)
     match = _EXACT_LOOKUP.fullmatch(formula)
-    if match is None or cached is None:
+    if match is None:
         return {"status": "unverified"}
     table = match["sheet"] or sheet
     if table.startswith("'"):
@@ -387,7 +392,7 @@ def _verify_lookup(sheet, formula, cached, literals):
     # Require the exact declared sheet name. No external, named, or implicit ranges.
     if table not in literals or sheet not in literals:
         return {"status": "unverified"}
-    needle = literals[sheet].get(match["key"].replace("$", "").upper())
+    needle = needle_value((sheet, match["key"].replace("$", "").upper()))
     try:
         _grid_position(match["key"])
         x1, y1 = _grid_position(match["start"])
@@ -410,12 +415,36 @@ def _verify_lookup(sheet, formula, cached, literals):
             address = _address(x+index-1, y) if vertical else _address(x, y+index-1)
             expected = cells.get(address)
             if expected is not None:
-                return {"status": "matched" if cached == expected else "mismatch",
-                        "source_sheet": table, "source_cell": address,
-                        "expected": expected, "cached": cached}
+                return _selected_lookup(table, address, expected, cached)
             break
     return {"status": "unverified"}
 
+
+
+def _resolve_lookups(lookups, literals, full_precision):
+    formulas = {(sheet, cell): (expr, cached) for sheet, cell, expr, cached in lookups}
+    results = {}
+    queue = deque(formulas)
+    waiting = defaultdict(list)
+
+    def needle_value(ref):
+        if full_precision and ref in formulas:
+            # Only a reconstructed selection may become the next lookup's key.
+            # A deliberately missing entry suspends the dependent until ready.
+            return results[ref].get("expected")
+        return literals[ref[0]].get(ref[1])
+
+    while queue:
+        key = queue.popleft()
+        expression, cached = formulas[key]
+        try:
+            results[key] = _verify_lookup(key[0], expression, cached, literals, needle_value)
+        except KeyError as exc:
+            waiting[exc.args[0]].append(key)
+        else:
+            queue.extend(waiting.pop(key, []))
+    return {key: results.get(key, {"status": "unverified", "reason": "cyclic_lookup_dependency"})
+            for key in formulas}
 
 
 _ARITHMETIC_TOKEN = re.compile(
@@ -1071,11 +1100,12 @@ def xlsx_audit(filename: str):
     examples = []
     lookup_sources = {}
     if complete_index:
-        for name, address, expression, cached in lookups:
-            result = _verify_lookup(name, expression, cached, literals)
+        results = _resolve_lookups(lookups, literals, full_precision)
+        for (name, address), result in results.items():
             if result["status"] != "unverified":
                 counts["unverified"] -= 1
                 counts[result["status"]] += 1
+            if "source_cell" in result:
                 lookup_sources[(name, address)] = (result["source_sheet"], result["source_cell"])
             examples.append({"sheet": name, "cell": address, **result})
     manifest["lookup_audit"] = {"counts": counts, "examples": examples}
