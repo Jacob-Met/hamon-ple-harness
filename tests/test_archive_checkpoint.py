@@ -192,6 +192,49 @@ archive_checkpoint.publish(Path(stage), Path(target), names)
             self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), good_sha)
 
 class ArchiveRoute(unittest.IsolatedAsyncioTestCase):
+    async def test_relative_foundation_writes_publish_only_after_all_six_acknowledgements(self):
+        names = archive_contract.member_names(public_task("foundation-strategy"))
+        self.assertEqual(len(names), 6)
+        workbook = (ROOT / "artifacts/fill-compaction-acceptance/files/filesystem"
+                    / "Fill_Placement_Records_BlockA_SlabOnGrade.xlsx").read_bytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stage = root / "stage"
+            target = root / "output/submission.zip"
+            target.parent.mkdir()
+            async def execute(command, timeout_sec):
+                self.assertEqual(command, "publish --from-output")
+                archive_checkpoint.publish_loose(stage, target, names)
+                return {"exit_code": 0}
+            session = SimpleNamespace(workdir=str(root), exec=mock.AsyncMock(side_effect=execute),
+                                      log=mock.AsyncMock())
+            watcher = archive_contract.FirstPublication((str(stage), "publish"),
+                                                        target=str(target), members=names)
+            async def observed(path, call, *, tool="write", result_tool=None, failed=False):
+                await watcher.observe(session, {"type": "tool_execution_start", "toolCallId": call,
+                                                "toolName": tool, "args": {"path": path}})
+                await watcher.observe(session, {"type": "message_end", "message": {"role": "toolResult",
+                    "toolCallId": call, "toolName": result_tool or tool, "isError": failed}})
+            for i, name in enumerate(names):
+                payload = (workbook if name.endswith(".xlsx") else
+                           b'{"fixture":true}' if name.endswith(".json") else b"# Format fixture")
+                (target.parent / name).write_bytes(payload)
+                if i < len(names) - 1:
+                    await observed("output/" + name, str(i), tool="edit" if i % 2 else "write")
+            last = names[-1]
+            await observed("another/output/" + last, "wrong-directory")
+            await observed("output/" + last, "wrong-tool", result_tool="edit")
+            await observed("output/" + last, "failed", failed=True)
+            session.exec.assert_not_awaited()
+            self.assertFalse(target.exists())
+            await observed("./output/" + last, "completed", tool="edit")
+            archive_checkpoint.verify(target, names)
+            with zipfile.ZipFile(target) as archive:
+                for name in names:
+                    self.assertEqual(archive.read(name), (target.parent / name).read_bytes())
+            await observed("output/" + last, "duplicate")
+            session.exec.assert_awaited_once()
+
     async def test_acknowledged_loose_members_publish_before_task_cutoff(self):
         names = ["result.json", "basis.md"]
         with tempfile.TemporaryDirectory() as tmp:

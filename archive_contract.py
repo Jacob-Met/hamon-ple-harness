@@ -266,9 +266,14 @@ class FirstPublication:
             call_id = event.get("toolCallId")
             args = event.get("args") or {}
             tool = event.get("toolName")
-            if (isinstance(call_id, str) and isinstance(args, dict) and tool in {"write", "edit"}
-                    and isinstance(args.get("path"), str) and args["path"] in self.required_outputs):
-                self.pending_outputs[call_id] = (tool, args["path"])
+            if (self.required_outputs and isinstance(call_id, str) and isinstance(args, dict)
+                    and tool in {"write", "edit"}
+                    and isinstance(args.get("path"), str)):
+                path = Path(args["path"])
+                if not path.is_absolute() and getattr(session, "workdir", None):
+                    path = Path(session.workdir) / path
+                if str(path) in self.required_outputs:
+                    self.pending_outputs[call_id] = (tool, str(path))
             if (isinstance(call_id, str) and isinstance(args, dict)
                     and event.get("toolName") in {"write", "edit", "bash"}
                     and any(isinstance(arg, str) and self.stage in arg for arg in args.values())):
