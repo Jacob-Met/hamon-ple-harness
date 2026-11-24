@@ -14,20 +14,49 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install --disable-pip-version-check -r requirements.txt
-      - name: Confirm issued union certificate and report both physical roles
+      - name: Explore source topology and two authentic role counterfactuals
         run: |
+          curl -fsSL --retry 3 --max-time 45 https://raw.githubusercontent.com/IfcOpenShell/IfcOpenShell/90c840c68fb35a54e1a61505c6417ab854f826a5/docs/ifcopenshell-cpp/models/AC20-FZK-Haus.ifc -o "$RUNNER_TEMP/fzk.ifc"
           PYTHONPATH=tests:. python - <<'PY'
-          import unittest
-          from test_ifc_volume_only_opening_admission import VolumeOnlyOpeningAdmissionTests, scene_with_opening
-          test = VolumeOnlyOpeningAdmissionTests("test_true_union_volume_with_unqualified_component_surfaces")
-          suite = unittest.TestSuite([test])
-          assert unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful()
-          for role in ("host", "cutter"):
+          import os, pathlib, hashlib
+          from dataclasses import replace
+          from test_ifc_volume_only_opening_admission import triangle
+          from test_ifc_finite_halfspace_openings import Source
+          import hamon_ifc_spatial_clash as r
+          import hamon_ifc_partial as h
+          a=[(0.,0.),(2.,0.),(0.,2.)]
+          c=[(.25,.25),(.75,.25),(.25,.75)]
+          for name,b in {
+            'hyp-mid':[(1.,1.),(2.,1.),(1.,2.)],
+            'shared-out':[(2.,0.),(3.,0.),(3.,-1.)],
+            'shared-overlap':[(2.,0.),(3.,1.),(1.,1.)],
+            'zero-opposite':[(0.,0.),(-1.,0.),(0.,-1.)],
+            'zero-overlap-aabb':[(0.,0.),(-2.,1.),(-1.,-1.)],
+          }.items():
+              scene=Source()
+              tri=[triangle(scene,a),triangle(scene,b),triangle(scene,c,.5,1.)]
+              scene.product('IFCWALL',tri)
               try:
-                  mesh, = scene_with_opening(role).solids()
-                  print(role, "accepted", mesh.volume_m3(), mesh.metadata, flush=True)
-              except ValueError as exc:
-                  print(role, type(exc).__name__, str(exc), flush=True)
+                  m,=scene.solids()
+                  print(name,m.certified_union_volume_m3,m.volume_m3(),m.material_face_counts,m.metadata,flush=True)
+              except Exception as e:
+                  print(name,type(e).__name__,str(e),flush=True)
+          source=pathlib.Path(os.environ['RUNNER_TEMP'],'fzk.ifc').read_bytes()
+          assert hashlib.sha256(source).hexdigest()=='ea6f04eaf92fac4d7ad0038bc3d2dfea4c094dd3f516ecc33c50bf1835ca108d'
+          rows,meshes,*_=h._inventory(source.decode())
+          for step in [66459,74280]:
+              m=meshes[step]
+              print('window',step,m.certified_union_volume_m3,m.material_face_counts,m.volume_m3(),flush=True)
+              # Keep the authored window unchanged. Pair with a disjoint original
+              # wall for a role counterfactual specific to boundary admission.
+              plain=meshes[60012 if step==74280 else 67828]
+              for role in ('host','cutter'):
+                  a,b=(m,plain) if role=='host' else (plain,m)
+                  a=replace(a,metadata={'step_id':1},ifc_type='IFCWALL')
+                  b=replace(b,metadata={'step_id':2},ifc_type='IFCOPENINGELEMENT')
+                  try:
+                      out=r._physical_occurrences([a,b],{1:('IFCWALL',[None]*6),2:('IFCOPENINGELEMENT',[None]*6)},1.,{1:{2}})
+                      print('role',step,role,'accepted',[(z.volume_m3(),z.metadata) for z in out],flush=True)
+                  except ValueError as exc:
+                      print('role',step,role,type(exc).__name__,str(exc),flush=True)
           PY
-      - name: Run both boundary admission regression cases
-        run: python -m unittest discover -s tests -p test_ifc_volume_only_opening_admission.py -v
