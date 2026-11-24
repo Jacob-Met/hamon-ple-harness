@@ -822,23 +822,31 @@ def _outlined_supplies(paths, wire_ink, pitch, wires, membership):
                           "foot": foot, "tip": tip, "label_source": "outlined_GND_strokes"})
     letters, signal_strokes = outlined.letter_strokes(paths, wire_ink, pitch)
     grounded = {m["wire_index"] for m in marks}
-    evidence = []
-    for glyph in candidates:
-        if glyph["shape"] != "supply_arrow" or not .9*pitch < math.dist(glyph["foot"], glyph["tip"]) < 1.1*pitch:
-            continue
-        word = outlined.anchored_voltage(glyph, letters)
-        if word:
-            name, occurrence = word
-            index = min(endpoints.near(glyph["foot"]))
-            mark = {"wire_index": index, "name": name, "shape": "supply_arrow", "foot": glyph["foot"],
-                    "tip": glyph["tip"], "label_source": "outlined_supply_strokes"}
-            evidence.append((index, name, occurrence, mark))
+    readings, placements = [], []
+    arrows = [glyph for glyph in candidates if glyph["shape"] == "supply_arrow"
+              and .9*pitch < math.dist(glyph["foot"], glyph["tip"]) < 1.1*pitch]
+    for glyph in arrows:
+        readings.append(outlined.voltage_candidates(glyph, letters))
+        placements.append((min(endpoints.near(glyph["foot"])), glyph))
 
     for index, name, occurrence in outlined.wire_words(wires, signal_strokes, pitch):
         if ((name == "GND" or not _GROUND_NAME.fullmatch(name))
-                and not _POWER_NAME.fullmatch(name)
+                and (not _POWER_NAME.fullmatch(name) or name.startswith(("+", "-")))
                 and not re.fullmatch(r"(?:R|C|L|Q|U|J)[0-9]+", name)):
-            evidence.append((index, name, occurrence, None))
+            # Signed words have an actual wire-end witness from wire_words.
+            # Use their physical strokes in the same ambiguity check as arrows.
+            readings.append({(name, occurrence, frozenset())})
+            placements.append((index, None))
+
+    evidence = []
+    resolved = outlined.resolve_word_ink(readings, [membership[index] for index, _ in placements])
+    for (index, glyph), word in zip(placements, resolved, strict=True):
+        if word:
+            name, occurrence = word
+            mark = None if glyph is None else {
+                "wire_index": index, "name": name, "shape": "supply_arrow", "foot": glyph["foot"],
+                "tip": glyph["tip"], "label_source": "outlined_supply_strokes"}
+            evidence.append((index, name, occurrence, mark))
 
     occurrence_roots, names = defaultdict(set), defaultdict(set)
     for index in grounded:

@@ -92,3 +92,38 @@ class OutlinedWireLabelTests(unittest.TestCase):
         groups, _, anchors = connect(wires, paths)
         self.assertEqual(groups, [0, 1, 2])
         self.assertEqual(anchors, {"TX": [2]})
+
+
+class OutlinedSignedSupplyLabelTests(unittest.TestCase):
+    def test_signed_supply_requires_an_actual_wire_endpoint(self):
+        from test_eagle_outlined_voltages import THREE_V_THREE
+        for vertical in (False, True):
+            wires = [[(0, y), (40, y)] for y in (0, 20)]
+            if vertical:
+                wires = [[(y, -x) for x, y in wire] for wire in wires]
+            for origin, expected in ((.3, [0, 0]), (2.3, [0, 1]), (10.3, [0, 1])):
+                with self.subTest(vertical=vertical, origin=origin):
+                    paths = (lettering(THREE_V_THREE, origin, 0, vertical=vertical)
+                             + lettering(THREE_V_THREE, .3, 20, vertical=vertical))
+                    groups, _, _ = connect(wires, paths)
+                    self.assertEqual(groups, expected)
+
+    def test_signed_word_cannot_belong_to_an_arrow_and_another_wire(self):
+        from test_eagle_outlined_voltages import THREE_V_THREE
+        for vertical in (False, True):
+            with self.subTest(vertical=vertical):
+                wires = [[(0, 0), (40, 0)], [(12.4, 13), (12.4, 33)], [(0, 50), (40, 50)]]
+                paths = (lettering(THREE_V_THREE, .3, 0, vertical=vertical)
+                         + lettering(THREE_V_THREE, .3, 50, vertical=vertical))
+                arrow = [((12.4, 13), (12.4, 3)), ((12.4, 3), (7.4, 10.5)),
+                         ((12.4, 3), (17.4, 10.5))]
+                if vertical:
+                    wires = [[(y, -x) for x, y in wire] for wire in wires]
+                    arrow = [tuple((y, -x) for x, y in edge) for edge in arrow]
+                for (x0, y0), (x1, y1) in arrow:
+                    element = Element("path", {"d": f"M {x0} {y0} L {x1} {y1}", "stroke-width": ".66"})
+                    paths.append((element, (1, 0, 0, 1, 0, 0)))
+                groups, marks, anchors = connect(wires, paths)
+                self.assertEqual(groups, [0, 1, 2])
+                self.assertEqual(anchors, {"+3V3": [2]})
+                self.assertEqual(marks, [])

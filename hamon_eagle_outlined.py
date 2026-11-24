@@ -155,7 +155,7 @@ def _decode_signal_grid(edges, left, baseline, step_x, step_y):
             return None
         word.append(letter)
     name = "".join(word)
-    return name if re.fullmatch(r"[A-Z0-9][A-Z0-9_+/().-]{1,23}", name) and re.search("[A-Z]", name) else None
+    return name if re.fullmatch(r"[+-]?[A-Z0-9][A-Z0-9_+/().-]{1,23}", name) and re.search("[A-Z]", name) else None
 
 
 def wire_words(wires, segments, pitch):
@@ -164,6 +164,8 @@ def wire_words(wires, segments, pitch):
     Baseline, size and pen width identify signal lettering. Its position along
     a wire is continuous. A word mostly beyond a short wire must instead align
     with an actual endpoint; an interior grid step is not an attachment.
+    Signed supply words always require this endpoint evidence. Their complete
+    stroke occurrence uses page coordinates, shared with arrow-word decoding.
     """
     for vertical in (False, True):
         def project(p):
@@ -209,7 +211,10 @@ def wire_words(wires, segments, pitch):
                         continue
                     name = _signal_word(edges, scan_y-.03*pitch, pitch)
                     if name:
-                        occurrence = tuple(sorted(tuple(sorted(line)) for line in edges))
+                        def unproject(point):
+                            return (point[1], -point[0]) if vertical else point
+
+                        occurrence = tuple(sorted(tuple(sorted(map(unproject, line))) for line in edges))
                         # Overhanging text may be left- or right-end aligned.
                         offsets = []
                         if left-.08*pitch < start < right+.08*pitch:
@@ -217,11 +222,13 @@ def wire_words(wires, segments, pitch):
                         if left-.08*pitch < end < right+.08*pitch:
                             offsets.append((right-end)/pitch-.03)
                         endpoint = any(abs(v) < .025 for v in offsets)
+                        if name.startswith(("+", "-")) and not endpoint:
+                            continue
                         if overlap >= .60*(end-start) or endpoint:
-                            yield index, name, (vertical, occurrence)
+                            yield index, name, occurrence
 
 def _fit_voltage(nearby, center, direction, units, name):
-    """Compare the entire word and both adjacent-cell margins to the exact font."""
+    """Separate a complete font word from all other ink in its cell margins."""
     dx, dy = direction
     sx, sy = units
     extent = 6*len(name)-2
@@ -229,23 +236,28 @@ def _fit_voltage(nearby, center, direction, units, name):
         tuple((6*i+x, y) for x, y in edge)
         for i, letter in enumerate(name) for edge in _edges(_GLYPHS[letter])
     }
-    physical, actual = [], []
+    physical, actual, extra = [], [], []
     for a, b in nearby:
         edge = []
         for point in (a, b):
             x, y = point[0]-center[0], point[1]-center[1]
             edge.append((2+(dx*x+dy*y)/sx, 3+(dy*x-dx*y)/sy))
-        if not any(-2.4 < x < extent+2.4 and -.32 < y < 6.32 for x, y in edge):
+        # Include the entire previous and following character cell. A lone
+        # surviving stroke of a damaged suffix must also remain unexplained.
+        if not any(-6.4 < x < extent+6.4 and -.32 < y < 6.32 for x, y in edge):
             continue
-        if any(abs(v-round(v)) > .32 for p in edge for v in p):
-            return None
-        actual.append(tuple(sorted((round(x), round(y)) for x, y in edge)))
-        physical.append(tuple(sorted((a, b))))
+        stroke = tuple(sorted((a, b)))
+        rounded = tuple(sorted((round(x), round(y)) for x, y in edge))
+        if all(abs(v-round(v)) <= .32 for p in edge for v in p) and rounded in expected:
+            actual.append(rounded)
+            physical.append(stroke)
+        else:
+            extra.append(stroke)
     if len(actual) == len(expected) and set(actual) == expected:
-        return tuple(sorted(physical))
+        return tuple(sorted(physical)), frozenset(extra)
 
 
-def anchored_voltage(mark, lettering):
+def voltage_candidates(mark, lettering):
     """Two perpendicular strokes of a printed plus fix the font origin and scale."""
     foot, tip = mark["foot"], mark["tip"]
     stem = math.dist(foot, tip)
@@ -278,8 +290,48 @@ def anchored_voltage(mark, lettering):
                     else:
                         placed = -.90 < forward < .55 and .85 < abs(across) < 1.90
                     if placed:
-                        occurrence = _fit_voltage(nearby, center, (dx, dy), (sx, sy), name)
-                        if occurrence:
-                            matches.add((name, occurrence))
-    return matches.pop() if len(matches) == 1 else None
+                        fit = _fit_voltage(nearby, center, (dx, dy), (sx, sy), name)
+                        if fit:
+                            occurrence, extra = fit
+                            matches.add((name, occurrence, extra))
+    return matches
+
+
+def resolve_word_ink(candidates, components):
+    """Assign complete words to physical components without discarding extra ink.
+
+    Packed labels can enter each other's adjacent-cell margins. Every such
+    stroke must belong to another complete word with a unique physical
+    attachment. All possible readings take part in the ownership check,
+    including ambiguous arrows. Distinct words or disconnected components
+    cannot share strokes. Losing one word removes dependent interpretations.
+    """
+    unique = {i: next(iter(words)) for i, words in enumerate(candidates) if len(words) == 1}
+    owners = defaultdict(set)
+    for words, component in zip(candidates, components, strict=True):
+        for name, occurrence, _ in words:
+            for stroke in occurrence:
+                owners[stroke].add((name, occurrence, component))
+    active = {i for i, (_, occurrence, _) in unique.items()
+              if all(len(owners[stroke]) == 1 for stroke in occurrence)}
+    while active:
+        explained = {stroke for i in active for stroke in unique[i][1]}
+        admitted = {i for i in active if unique[i][2] <= explained}
+        if admitted == active:
+            break
+        active = admitted
+    return [unique[i][:2] if i in active else None for i in range(len(candidates))]
+
+
+def anchored_voltages(marks, lettering, components=None):
+    """Read arrow words jointly; unspecified arrows count as distinct components."""
+    candidates = [voltage_candidates(mark, lettering) for mark in marks]
+    if components is None:
+        components = range(len(candidates))
+    return resolve_word_ink(candidates, components)
+
+
+def anchored_voltage(mark, lettering):
+    """Recognize one arrow when its complete word has no unexplained nearby ink."""
+    return anchored_voltages([mark], lettering)[0]
 
