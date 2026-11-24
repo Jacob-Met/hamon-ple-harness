@@ -327,15 +327,18 @@ class CooperativePi(unittest.IsolatedAsyncioTestCase):
                                         limit = observed["exec_timeout"] = msg["timeout_sec"]
                                         child = await asyncio.create_subprocess_exec(
                                             "timeout", str(limit), "bash", "-c", msg["command"],
-                                            cwd=task_dir, env=remote_env)
+                                            cwd=task_dir, env=remote_env,
+                                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
                                         if mode == "cancel_inflight":
                                             await socket.send(json.dumps({"type":"cancel"}))
-                                        status = await child.wait()
+                                        raw_output, _ = await child.communicate()
+                                        status = child.returncode
+                                        observed["exec_output_bytes"] = len(raw_output)
                                         observed["exec_status"] = status
                                         if mode != "cancel_inflight":
                                             try:
                                                 await socket.send(json.dumps({"type":"result","id":msg["id"],
-                                                    "ok":True,"exit_code":status,"output":"",
+                                                    "ok":True,"exit_code":status,"output":raw_output.decode("utf-8","replace"),
                                                     "truncated":False,"timed_out":status == 124}))
                                             except ConnectionClosed:
                                                 observed["result_after_session_closed"] = True

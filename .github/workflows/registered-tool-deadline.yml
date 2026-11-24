@@ -25,6 +25,7 @@ jobs:
         run: |
           pip install --disable-pip-version-check -r requirements.txt
           npm ci --no-fund --no-audit
+          test -x node_modules/.bin/pi
       - name: Real registered tools and delayed task interpreter
         env:
           PYTHONPATH: .:tests

@@ -30,13 +30,15 @@ try {
   register({registerTool(tool){tools.set(tool.name,tool)},on(){}});
   await tools.get('compile_witness_package').execute('w', {spec_path:'/fixture/source.json'});
   await tools.get('check_deliverable_preflight').execute('p', {path:'/fixture/receipt.json'});
-  assert.equal(seen.length, 2);
-  for (const r of seen) {
-    assert.equal(r.route, '/exec');
-    assert.equal(r.body.timeout_sec, 120);
-    assert.equal(r.body.phase_deadline_ms, budget?.phase_deadline_ms);
-  }
-  console.log(JSON.stringify({phase:budget?.phase??null, calls:seen.length}));
+  const observed = seen.map((r,i)=>({
+    tool:['compile_witness_package','check_deliverable_preflight'][i],
+    route:r.route, timeout_sec:r.body.timeout_sec,
+    phase_deadline_ms:r.body.phase_deadline_ms??null
+  }));
+  console.log(JSON.stringify({phase:budget?.phase??null,observed}));
+  assert.deepEqual(observed, ['compile_witness_package','check_deliverable_preflight'].map(tool=>({
+    tool,route:'/exec',timeout_sec:120,phase_deadline_ms:budget?.phase_deadline_ms??null
+  })));
 } finally {
   await new Promise(resolve => server.close(resolve));
 }
