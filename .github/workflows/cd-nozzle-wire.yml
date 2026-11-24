@@ -1,0 +1,61 @@
+name: CD nozzle physical and paired participant receipts
+on:
+  pull_request:
+    paths:
+      - hamon_cd_nozzle_shock.py
+      - tests/test_cd_nozzle_shock.py
+      - ship/measure_cd_nozzle_wire.py
+      - .github/workflows/cd-nozzle-wire.yml
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [stock, candidate]
+        shard: [0, 1]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: probe
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.arm == 'stock' && '053dd5f0ff394063ffb5723b63962394150ad5f8' || github.event.pull_request.head.sha }}
+          path: work
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m pip install -r requirements.txt && npm ci --no-fund --no-audit
+        working-directory: work
+      - if: matrix.arm == 'candidate' && matrix.shard == 0
+        run: make verify-cd-nozzle-shock
+        working-directory: work
+      - run: python probe/ship/measure_cd_nozzle_wire.py --root work --shard "${{ matrix.shard }}" --output "${{ matrix.arm }}-${{ matrix.shard }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cd-nozzle-${{ matrix.arm }}-${{ matrix.shard }}
+          path: ${{ matrix.arm }}-${{ matrix.shard }}.json
+  compare:
+    needs: measure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cd-nozzle-*
+          path: rows
+          merge-multiple: true
+      - run: python3 ship/measure_cd_nozzle_wire.py --compare rows --output cd-nozzle-comparison.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cd-nozzle-comparison
+          path: cd-nozzle-comparison.json

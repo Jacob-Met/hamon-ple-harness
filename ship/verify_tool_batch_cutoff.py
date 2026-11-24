@@ -71,6 +71,7 @@ def main():
         and new.get("read_requests") == 1 and new.get("work_requests") == 1
         and new.get("results_recorded") == 1 and new.get("history_verified") is True
         and new.get("delivered") is True and new.get("total_model_requests") == 3
+        and new.get("boundary_markers") == 1 and new.get("empty_abort_tail") is True
     )
     report = {"scope": "real Pi and task protocol with deterministic loopback provider; no PLE grade",
               "baseline_commit": args.baseline, "candidate_commit": candidate,

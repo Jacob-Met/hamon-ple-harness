@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import re
 import secrets
 import subprocess
@@ -49,8 +50,9 @@ class ClockSession:
 @unittest.skipUnless(os.name == "posix", "uses POSIX process groups")
 class BatchProcessDeadline(unittest.IsolatedAsyncioTestCase):
     async def exercise(self, delay, pending=True, cancel=False, reserve=.05):
-        session = ClockSession(2)
+        session = ClockSession(8 if cancel else 2)
         started = asyncio.Event()
+        soft_cutoff = asyncio.Event()
         received = []
         active = False
 
@@ -66,16 +68,23 @@ class BatchProcessDeadline(unittest.IsolatedAsyncioTestCase):
         code = ("import sys,time; print('started',flush=True); "
                 "time.sleep(float(sys.argv[1])); print('result',flush=True); "
                 "time.sleep(.05); print('flushed',flush=True)")
+        def pending_at_boundary():
+            soft_cutoff.set()
+            return active and pending
+
         options = {}
         if "tool_batch_pending" in inspect.signature(taskbridge.run_process).parameters:
-            options = {"tool_batch_pending": lambda: active and pending,
+            options = {"tool_batch_pending": pending_at_boundary,
                        "tool_batch_reserve_sec": reserve}
         began = time.monotonic()
         task = asyncio.create_task(taskbridge.run_process(
             [sys.executable, "-c", code, str(delay)], session,
-            on_line=observe, stop_before_sec=1, **options))
+            on_line=observe, stop_before_sec=6 if cancel else 1, **options))
         if cancel:
             await asyncio.wait_for(started.wait(), 1)
+            if options:
+                await asyncio.wait_for(soft_cutoff.wait(), 7)
+            began = time.monotonic()
             session.cancelled.set()
             with self.assertRaises(taskbridge.Cancelled):
                 await asyncio.wait_for(task, 1)
@@ -110,6 +119,25 @@ class BatchProcessDeadline(unittest.IsolatedAsyncioTestCase):
         _, received, elapsed = await self.exercise(30, cancel=True)
         self.assertEqual(received, ["started"])
         self.assertLess(elapsed, 1)
+
+
+class BatchEligibility(unittest.IsolatedAsyncioTestCase):
+    async def test_malformed_result_cannot_extend_the_deadline(self):
+        for bad in (["read"], {"id": "read"}, None, 1, "other"):
+            with self.subTest(tool_call_id=bad):
+                session = SimpleNamespace(final_message="", log=mock.AsyncMock(),
+                                          usage=mock.AsyncMock())
+                run = harness.Run(session, "fixture", budgeted=True)
+                await run.on_event({"type": "session", "version": 3, "id": "fixture"})
+                await run.on_event({"type": "message_end", "message": {
+                    "role": "assistant", "stopReason": "toolUse",
+                    "content": [{"type": "toolCall", "id": "read",
+                                 "name": "read", "arguments": {"path": "input.json"}}]}})
+                await run.on_event({"type": "message_end", "message": {
+                    "role": "toolResult", "toolCallId": bad, "content": []}})
+                self.assertTrue(run.invalid_tail)
+                if hasattr(run, "pending_tool_batch"):
+                    self.assertFalse(run.pending_tool_batch())
 
 
 def strings(value):
@@ -205,6 +233,13 @@ class RegisteredReadBoundary(unittest.IsolatedAsyncioTestCase):
                             session_dir, run.tool_turn, run.observed_results,
                             run.expected_calls, run.history, budget_id=run.budget_id)
                         observed["history_verified"] = matched is not None
+                        records = [json.loads(line) for file in session_dir.glob("*.jsonl")
+                                   for line in file.read_text().splitlines()]
+                        markers = [entry for entry in records if entry.get("type") == "custom"
+                                   and entry.get("customType") == "ple_delivery_boundary"]
+                        observed["boundary_markers"] = len(markers)
+                        observed["empty_abort_tail"] = bool(
+                            records and harness.empty_budget_abort(records[-1].get("message", {})))
                         if matched is not None:
                             await taskbridge.run_process(
                                 [*argv, "--session", str(matched)], session,
@@ -266,6 +301,8 @@ class RegisteredReadBoundary(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(read_count, 1)
             self.assertEqual(observed["work_requests"], 1, observed)
             self.assertTrue(observed["history_verified"], observed)
+            self.assertEqual(observed["boundary_markers"], 1, observed)
+            self.assertTrue(observed["empty_abort_tail"], observed)
             self.assertTrue(observed["delivered"], observed)
             self.assertEqual(json.loads((task_dir / "receipt.json").read_text()),
                              {"nonce": payload["nonce"], "total": sum(payload["values"])})

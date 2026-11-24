@@ -6,6 +6,7 @@ on:
       - taskbridge.py
       - delivery-budget.ts
       - tests/test_tool_batch_cutoff.py
+      - tests/test_tool_batch_solve.py
       - ship/verify_tool_batch_cutoff.py
       - .github/workflows/delivery-tool-boundary.yml
 jobs:
@@ -31,6 +32,13 @@ jobs:
           python ship/verify_tool_batch_cutoff.py \
             --baseline 053dd5f0ff394063ffb5723b63962394150ad5f8 \
             --out "$RUNNER_TEMP/delivery-tool-boundary"
+      - name: Normal solve entry and actual delivery snapshots
+        run: |
+          sudo mkdir -p /filesystem
+          sudo chmod 1777 /filesystem
+          python -m unittest discover -s tests -p 'test_tool_batch_solve.py' -v \
+            > "$RUNNER_TEMP/delivery-tool-boundary/normal-solve.log" 2>&1
+          cat "$RUNNER_TEMP/delivery-tool-boundary/normal-solve.log"
       - name: Preserve raw observations from both arms
         if: always()
         uses: actions/upload-artifact@v4
