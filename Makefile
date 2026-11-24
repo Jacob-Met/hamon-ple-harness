@@ -47,3 +47,7 @@ verify-workbook-units:
 verify-xlsx-unit-graph:
 	@set -eu; output=$$(mktemp -d); trap 'rm -rf -- "$$output"' EXIT; \
 	$(PYTHON) ship/verify_xlsx_unit_graph.py --out "$$output" --min-memory-gib 4
+
+.PHONY: verify-sequence-faults
+verify-sequence-faults:
+	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m pytest -q tests/test_symmetrical_components.py

@@ -158,3 +158,66 @@ def test_three_phase_fault_rejects_a_singular_terminal_mode(mode):
     spec["fault_impedance_pu"] = z(0, 0.25)
     spec["sequence_impedances_pu"][mode] = z(0, -0.25)
     assert not verify_symmetrical_fault(spec)["conservation_verified"]
+
+
+@pytest.mark.parametrize("fault,phases", [
+    ("3PH","ABC"), ("SLG","A"), ("SLG","B"), ("SLG","C"),
+    ("LL","AB"), ("LL","CA"), ("LL","BC"),
+    ("DLG","AB"), ("DLG","CA"), ("DLG","BC"),
+])
+def test_unbalanced_prefault_source_against_independent_phase_branches(fault, phases):
+    # Equal sequence impedances give three independent phase branches. Solve
+    # each circuit directly at its terminals, including a shared DLG junction.
+    phase_emf = [1+.3j,-.6+.4j,.15-.7j]
+    alpha = complex(-.5,math.sqrt(3)/2)
+    e0 = sum(phase_emf)/3
+    e1 = (phase_emf[0]+alpha*phase_emf[1]+alpha.conjugate()*phase_emf[2])/3
+    e2 = (phase_emf[0]+alpha.conjugate()*phase_emf[1]+alpha*phase_emf[2])/3
+    def pack(x):
+        return z(x.real,x.imag)
+    impedance, ground = .2+.4j, .07+.13j
+    spec = dict(source(fault), faulted_phases=list(phases),fault_impedance_pu=pack(ground),
+                prefault_positive_voltage_pu=pack(e1),prefault_negative_voltage_pu=pack(e2),
+                prefault_zero_voltage_pu=pack(e0),
+                sequence_impedances_pu={k:pack(impedance) for k in ("zero","positive","negative")})
+    current = [0j,0j,0j]
+    selected = ["ABC".index(p) for p in phases]
+    if fault in ("SLG","3PH"):
+        for i in selected:
+            current[i]=phase_emf[i]/(impedance+ground)
+    elif fault=="LL":
+        b,c = selected
+        current[b]=(phase_emf[b]-phase_emf[c])/(2*impedance+ground)
+        current[c]=-current[b]
+    else:
+        b,c=selected
+        junction=ground*(phase_emf[b]+phase_emf[c])/(impedance+2*ground)
+        for i in selected:
+            current[i]=(phase_emf[i]-junction)/impedance
+    spec["proposed_phase_currents_pu"]=dict(zip("ABC",map(pack,current)))
+    got=verify_symmetrical_fault(spec)
+    assert got["conservation_verified"], got
+    for i,p in enumerate("ABC"):
+        assert as_complex(got["phase_currents_pu"][p])==pytest.approx(current[i],abs=1e-12)
+        assert as_complex(got["phase_voltages_pu"][p])==pytest.approx(phase_emf[i]-impedance*current[i])
+
+
+def test_cancelling_prefault_sequences_reject_the_old_one_pu_claim():
+    spec=dict(source("SLG"),sequence_impedances_pu={k:z(1,0) for k in ("zero","positive","negative")},
+              prefault_negative_voltage_pu=z(-1,0))
+    claim={"A":z(1,0),"B":z(0,0),"C":z(0,0)}
+    assert not verify_symmetrical_fault(dict(spec,proposed_phase_currents_pu=claim))["conservation_verified"]
+    answer=verify_symmetrical_fault(spec)
+    assert answer["conservation_verified"]
+    assert all(as_complex(value)==0 for value in answer["phase_currents_pu"].values())
+    assert not verify_symmetrical_fault(dict(spec,prefault_other_voltage_pu=z(1,0)))["ok"]
+    assert not verify_symmetrical_fault(dict(spec,prefault_zero_voltage_pu=3))["ok"]
+
+
+def test_negative_sequence_only_solid_three_phase_fault():
+    spec=dict(source("3PH"),prefault_positive_voltage_pu=z(0,0),prefault_negative_voltage_pu=z(.3,-.2))
+    ans=verify_symmetrical_fault(spec)
+    assert ans["conservation_verified"]
+    assert as_complex(ans["sequence_currents_pu"]["negative"])==pytest.approx((.3-.2j)/(1j/15))
+    assert as_complex(ans["sequence_currents_pu"]["zero"])==0
+    assert as_complex(ans["sequence_currents_pu"]["positive"])==0
