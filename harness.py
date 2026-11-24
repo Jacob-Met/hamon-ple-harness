@@ -37,6 +37,8 @@ import hashlib
 import json
 import os
 import pathlib
+import re
+import shlex
 import secrets
 import subprocess
 import tempfile
@@ -400,14 +402,14 @@ def _check_inline_deadline(session):
     raise taskbridge.Cancelled()
 
 
-async def _route_session_budget(session, inventory, delivery_targets, model):
+async def _route_session_budget(session, inventory, delivery_targets, model, *, instruction=None):
   """Keep the task reader responsive during either kind of physical presolve."""
   await asyncio.sleep(0)
   _check_inline_deadline(session)
   plan = await asyncio.to_thread(
       hamon_pareto.route_from_intake_prompt,
       inventory,
-      instruction=session.instruction,
+      instruction=session.instruction if instruction is None else instruction,
       mcp_server_count=len(getattr(session, "mcp_servers", None) or []),
       deliverable_count=len(delivery_targets),
       model_api=model,
@@ -415,6 +417,66 @@ async def _route_session_budget(session, inventory, delivery_targets, model):
   await asyncio.sleep(0)
   _check_inline_deadline(session)
   return plan
+
+
+# The target is published only if absent. All bytes are written under its
+# directory before linking, so a failure cannot replace existing work.
+_NEW_JSON_RESULT = """import os, sys, tempfile
+from pathlib import Path
+root, target = Path(sys.argv[1]).resolve(), Path(sys.argv[2])
+if not target.parent.resolve().is_relative_to(root):
+    sys.exit(2)
+target.parent.mkdir(parents=True, exist_ok=True)
+with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as stage:
+    try:
+        stage.write(sys.argv[3].encode("utf8"))
+        stage.flush()
+        os.fsync(stage.fileno())
+        try:
+            os.link(stage.name, target)
+        except FileExistsError:
+            print("exists")
+        else:
+            print("published")
+    finally:
+        os.unlink(stage.name)
+"""
+
+
+async def _certified_json_file(session, inventory, targets):
+  """Admit one explicit calculator result file after an independent task-container read."""
+  header, newline, body = session.instruction.strip().partition("\n")
+  match = re.fullmatch(r"Run the calculation below and write its JSON result to `([A-Za-z0-9_./+-]+\.json)`\.", header)
+  if not match or not newline or len(targets) != 1 or targets[0].get("kind") != "file":
+    return None
+  raw_path = match.group(1)
+  if any(part in (".", "..") for part in pathlib.PurePosixPath(raw_path).parts):
+    return None
+  path = pathlib.PurePosixPath(session.workdir) / raw_path
+  if str(path) != targets[0]["path"] or not path.is_relative_to(session.workdir):
+    return None
+  # Only this recognized output obligation is handled by the new-file
+  # publisher. The existing solver still checks the full body, inventory, MCP
+  # count and numerical certificate before returning any bytes.
+  inline = "Run the calculation below and return its JSON result.\n" + body
+  plan = await _route_session_budget(session, inventory, [], os.environ.get("MODEL_NAME", ""),
+                                     instruction=inline)
+  encoded = hamon_pareto.certified_json_reply(inline, plan)
+  if encoded is None:
+    return None
+  payload = encoded + "\n"
+  try:
+    _check_inline_deadline(session)
+    result = await session.exec(shlex.join(["python3", "-c", _NEW_JSON_RESULT, session.workdir, str(path), payload]),
+                                timeout_sec=10)
+    if result.get("exit_code") != 0 or result.get("output", "").strip() != "published":
+      return None
+    if await session.read_file(str(path)) != payload.encode():
+      return None
+  except taskbridge.TaskError:
+    return None
+  _check_inline_deadline(session)
+  return f"Saved and verified {path} (SHA-256 {hashlib.sha256(payload.encode()).hexdigest()})."
 
 
 async def _certified_inline_reply(session, inventory, delivery_targets):
@@ -480,6 +542,9 @@ async def solve(session: taskbridge.Session) -> str:
       if working_copy:
         delivery_targets = [{"path": working_copy, "kind": "file"}]
       session.fallback_summary = terminal.summary
+      file_receipt = await _certified_json_file(session, engineering_inventory, delivery_targets)
+      if file_receipt is not None:
+        return file_receipt
       pareto_plan, inline_reply = await _certified_inline_reply(
           session, engineering_inventory, delivery_targets
       )
