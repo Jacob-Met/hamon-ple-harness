@@ -73,6 +73,47 @@ class PolygonClipTests(unittest.TestCase):
                         removed = (2. if bounded else 4.) * (.5 if below else 1.5)
                         self.assertAlmostEqual(solid.volume_m3(), 8. - removed, places=10)
 
+    def test_translated_inclined_plane(self):
+        # Retained height above z = 1.5 - x varies from 0 to 1.5 m
+        # across x in [-0.5, 1]. The extruded triangular area is 2.25 m³.
+        for flag, expected in ((".T.", 2.25), (".F.", 5.75)):
+            scene = Source()
+            host = scene.box()
+            origin = scene.add("IFCCARTESIANPOINT((0.5,0.,1.))")
+            normal = scene.add("IFCDIRECTION((1.,0.,1.))")
+            tangent = scene.add("IFCDIRECTION((0.,1.,0.))")
+            frame = scene.add(f"IFCAXIS2PLACEMENT3D(#{origin},#{normal},#{tangent})")
+            plane = scene.add(f"IFCPLANE(#{frame})")
+            cutter = scene.add(f"IFCHALFSPACESOLID(#{plane},{flag})")
+            clip = scene.add(f"IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#{host},#{cutter})")
+            scene.product("IFCWALL", [clip])
+            solid, = scene.solids()
+            self.assertAlmostEqual(solid.volume_m3(), expected, places=9)
+
+    def test_footprint_placed_independently_of_plane(self):
+        scene = Source()
+        host = scene.box()
+        plane = scene.add(f"IFCPLANE(#{scene.frame_at(1.)})")
+        origin = scene.add("IFCCARTESIANPOINT((0.25,0.,20.))")
+        normal = scene.add("IFCDIRECTION((0.,0.,1.))")
+        rotated = scene.add("IFCDIRECTION((0.,1.,0.))")
+        position = scene.add(f"IFCAXIS2PLACEMENT3D(#{origin},#{normal},#{rotated})")
+        ring = scene.ring([(-2., 0.), (2., 0.), (2., 1.), (-2., 1.)])
+        cutter = scene.add(f"IFCPOLYGONALBOUNDEDHALFSPACE(#{plane},.T.,#{position},#{ring})")
+        clip = scene.add(f"IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#{host},#{cutter})")
+        scene.product("IFCWALL", [clip])
+        solid, = scene.solids()
+        self.assertAlmostEqual(solid.volume_m3(), 6., places=10)
+
+    def test_clipped_opening_can_be_empty_or_partly_cut(self):
+        for height, expected in ((3.,8.), (1.,4.)):
+            scene = Source()
+            wall = scene.product("IFCWALL", [scene.box()])
+            cutter = scene.product("IFCOPENINGELEMENT", [scene.clip(height, 1, ".T.")])
+            scene.void(wall, cutter)
+            solid, = scene.solids()
+            self.assertAlmostEqual(solid.volume_m3(), expected, places=10)
+
     def test_full_removal_and_disjoint_plane(self):
         for height, expected in ((-1., 8.), (3., 0.)):
             scene = Source()
