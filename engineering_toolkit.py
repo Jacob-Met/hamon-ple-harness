@@ -1337,6 +1337,9 @@ def run(argv=None):
     wp.add_argument("file", nargs="?")
     wp.add_argument("--example", action="store_true", help="print a constructed input template")
     wp.add_argument("--output", help="new DOCX path, written only on an exact schedule match")
+    draft=sub.add_parser("materialize-draft",help="Export a fresh participant-authored Word or archive draft")
+    for name in ("source", "target", "fingerprint", "members"):
+        draft.add_argument(name)
     q=sub.add_parser("quantity",help="Convert a dimension-safe arithmetic expression")
     q.add_argument("expression");q.add_argument("--to",required=True)
     e=sub.add_parser("check",help="Assert two physical quantities match under relative tolerance")
@@ -1413,6 +1416,9 @@ def run(argv=None):
     try:
         if args.cmd=="witness-equipment":
             out=witness_equipment(args.pdf,args.catalog,args.edition,args.sheet,args.title_sheet,args.equipment_type)
+        elif args.cmd=="materialize-draft":
+            from hamon_delivery_draft import render
+            out=render(args.source,args.target,json.loads(args.members),args.fingerprint)
         elif args.cmd=="witness-package":
             import hamon_witness_package
             if args.example and args.file is None and args.output is None:

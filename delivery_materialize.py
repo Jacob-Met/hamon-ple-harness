@@ -39,7 +39,7 @@ def _safe_absolute(path: Any) -> bool:
     )
 
 
-def candidates(targets: list[dict[str, str]]) -> list[dict[str, Any]]:
+def candidates(targets: list[dict[str, str]], *, archive_members=(), witness=False) -> list[dict[str, Any]]:
     """One execution candidate per (output directory, generator convention).
 
     Prefer .ifc (the published cold failure), then other exact target formats.
@@ -72,7 +72,33 @@ def candidates(targets: list[dict[str, str]]) -> list[dict[str, Any]]:
                 "script": posixpath.join(folder, name),
                 "target": outputs[0], "outputs": outputs,
             })
+    if len(targets) == 1 and groups and len(result) < 24:
+        target = targets[0]["path"]
+        supported = {".json", ".md", ".txt", ".csv", ".xlsx"}
+        archive = archive_members and all(
+            posixpath.splitext(name)[1].lower() in supported for name in archive_members
+        )
+        if (archive and target.lower().endswith(".zip")) or (witness and target.lower().endswith(".docx")):
+            result.append({"script": target + ".draft.json", "target": target,
+                           "outputs": [target], "draft_members": list(archive_members)})
     return result
+
+
+def draft_note(items):
+    draft = next((item for item in items if "draft_members" in item), None)
+    if not draft:
+        return ""
+    prefix = ("\\nFor interrupted delivery, you may save the completed project data to "
+              + draft["script"] + ". ")
+    if not draft["draft_members"]:
+        return prefix + ("Use the witness-package JSON fields for the actual dated roster, "
+                         "decisions, source references and standing case items. The controller "
+                         "can export a reconciled record to the local Word working copy.")
+    return prefix + ('Use {"members":{...}} keyed by every required root filename. '
+                     'For JSON use {"json": value}, for text use {"text": "contents"}, '
+                     'and for XLSX use {"template": "/filesystem/.../owner.xlsx", '
+                     '"cells": {"Actual sheet": {"B3": 12.5}}}. Use your project-derived '
+                     'values and the supplied workbook templates.')
 
 
 def snapshot_targets(items: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -123,7 +149,7 @@ def plan(items: list[dict[str, Any]], issues: list[dict[str, str]],
         fingerprint = latest.get("fingerprint") if isinstance(latest, dict) else None
         if (newly_written(before, after, script)
                 and (attempted is None or (script, fingerprint) not in attempted)):
-            chosen.append(item)
+            chosen.append({**item, "fingerprint": fingerprint} if "draft_members" in item else item)
             folders.add(folder)
         if len(chosen) >= MAX_GENERATORS:
             break
@@ -244,8 +270,13 @@ async def materialize(session: Any, selected: list[dict[str, Any]], *,
             break
         spec = {"script": item["script"], "target": item["target"],
                 "timeout": timeout}
-        command = ("python3 -c " + shlex.quote(REMOTE_MATERIALIZE)
-                   + " " + shlex.quote(json.dumps(spec, separators=(",",":"))))
+        if "draft_members" in item:
+            command = shlex.join(["python3", "/tmp/hamon-engineering-toolkit.py",
+                                  "materialize-draft", item["script"], item["target"],
+                                  item["fingerprint"], json.dumps(item["draft_members"])])
+        else:
+            command = ("python3 -c " + shlex.quote(REMOTE_MATERIALIZE)
+                       + " " + shlex.quote(json.dumps(spec, separators=(",",":"))))
         try:
             reply = await asyncio.wait_for(
                 session.exec(command, timeout_sec=timeout + 8),
