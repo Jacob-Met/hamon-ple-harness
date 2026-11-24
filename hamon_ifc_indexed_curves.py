@@ -123,6 +123,24 @@ def has_direct_arc(entities, product_rows, *, include_revolutions=False):
     return False
 
 
+def _full_sweep_mesh_genus(product):
+    """Determine genus on the closed emitted surface when a native seam count disagrees."""
+    import ifcopenshell.geom as geom
+    import numpy as np
+    from hamon_shell_relations import certify_exterior_shell
+    settings = geom.settings()
+    element = geom.create_shape(settings, product, geometry_library="opencascade")
+    mesh = element.geometry
+    points = np.asarray(mesh.verts, dtype=float).reshape(-1, 3)
+    triangles = np.asarray(mesh.faces, dtype=np.int32).reshape(-1, 3)
+    certify_exterior_shell(points, triangles)
+    # Every edge of the certified closed connected triangle manifold has two uses.
+    vertices = len(np.unique(points[triangles.ravel()], axis=0))
+    faces = len(triangles)
+    edges = 3 * faces // 2
+    return (2 - vertices + edges - faces) // 2
+
+
 def _revolved_measure(item, scale, angle_scale):
     """Pappus volume for a symmetric section revolved around a disjoint in-plane axis."""
     profile = item.SweptArea
@@ -245,10 +263,13 @@ def curved_scene(ifc_text, product_rows, required_clearance, cross_only, discipl
             raise ValueError("BRep does not identify its single source Body item")
         shape = geometry.item(0)
         volume = shape.volume().to_double()
-        if (not shape.is_manifold() or shape.surface_genus() != genus or not math.isfinite(volume)
+        measured_genus = shape.surface_genus()
+        if genus == 1 and measured_genus != genus and shape.is_manifold():
+            measured_genus = _full_sweep_mesh_genus(product)
+        if (not shape.is_manifold() or measured_genus != genus or not math.isfinite(volume)
                 or volume <= 0 or not math.isclose(volume, expected, rel_tol=1e-9, abs_tol=0)):
             raise ValueError(f"Curved sweep BRep manifold={shape.is_manifold()}, "
-                             f"genus={shape.surface_genus()} (expected {genus}), "
+                             f"genus={measured_genus} (expected {genus}), "
                              f"volume={volume:.16g} m³ (source {expected:.16g})")
         volumes.append(volume)
         tree = geom.tree()

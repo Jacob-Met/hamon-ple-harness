@@ -60,6 +60,31 @@ console.log(JSON.stringify(result.details));
                     self.assertTrue(out["ok"], out)
                     self.assertAlmostEqual(out["total_solid_volume_m3"], area*7.25*radians, places=8)
 
+    def test_enclosed_duct_and_empty_rotation_axis_have_different_material(self):
+        # Put the probes in the beam's local frame; its world placement rotates all three.
+        theta, radius = .75, 7.25
+        for x, z, touches in ((radius*(1-math.cos(theta)), radius*math.sin(theta), True),
+                              (radius, 0., False)):
+            with self.subTest(touches=touches):
+                records = (
+                    f"#900=IFCCARTESIANPOINT(({x},0.,{z-.001}));\n"
+                    "#901=IFCAXIS2PLACEMENT3D(#900,$,$);\n"
+                    "#902=IFCLOCALPLACEMENT(#73,#901);\n"
+                    "#903=IFCRECTANGLEPROFILEDEF(.AREA.,'probe',$,.002,.002);\n"
+                    "#904=IFCEXTRUDEDAREASOLID(#903,$,#10,.002);\n"
+                    "#905=IFCSHAPEREPRESENTATION(#18,'Body','SweptSolid',(#904));\n"
+                    "#906=IFCPRODUCTDEFINITIONSHAPE($,$,(#905));\n"
+                    "#907=IFCDUCTSEGMENT('0AzR0sseD4bBOcPJ50wSE9',$,'probe',$,$,#902,#906,$,$);\n"
+                )
+                end = self.text.rindex("ENDSEC;")
+                source = self.text[:end] + records + self.text[end:]
+                result = run_router_ifc_clash({"ifc_text": source, "required_clearance_m": .05})
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["pair_count"], 1, result)
+                self.assertEqual(result["hard_clash_count"], int(touches), result)
+                if not touches:
+                    self.assertGreater(result["min_clearance_m"], 7.)
+
     def test_degree_conversion_and_profile_axis_shift(self):
         angle_unit = ("#22= IFCCONVERSIONBASEDUNIT(#920,.PLANEANGLEUNIT.,'DEGREE',#921);\n"
                       "#920=IFCDIMENSIONALEXPONENTS(0,0,0,0,0,0,0);\n"
