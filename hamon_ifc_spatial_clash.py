@@ -744,7 +744,66 @@ class UnresolvedSolidGeometry(ValueError):
     """A physical Body was present but could not supply verified solid geometry."""
 
 
-def _boolean_meshes(meshes, operator="UNION"):
+_EMPTY_CLIP = (np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.int32))
+
+
+def _covering_interval(values):
+    """Strictly bracket the host projections, including the last representable ulp."""
+    lo, hi = float(np.min(values)), float(np.max(values))
+    pad = max(hi - lo, 16 * math.ulp(max(abs(lo), abs(hi))))
+    lower, upper = lo - pad, hi + pad
+    if not (math.isfinite(lower) and math.isfinite(upper) and lower < lo <= hi < upper):
+        raise UnresolvedSolidGeometry("Cannot bracket the finite clipping host")
+    return lower, upper
+
+
+def _finite_prism(frame, ring, bottom, top):
+    if not (np.isfinite(ring).all() and math.isfinite(top-bottom) and bottom < top):
+        raise UnresolvedSolidGeometry("Invalid clipping prism")
+    vertices, faces = _extrude_polygon_2d(ring, np.array([0., 0., top - bottom]))
+    vertices[:, 2] += bottom
+    vertices = _apply_transform(vertices, frame)
+    if not np.isfinite(vertices).all():
+        raise UnresolvedSolidGeometry("Nonfinite IFC half-space or footprint")
+    return vertices, faces
+
+
+def _halfspace_difference(entities, kind, args, unit_scale, host):
+    """Bound a half-space and its directed polygonal footprint on the finite first operand."""
+    bounded = kind == "IFCPOLYGONALBOUNDEDHALFSPACE"
+    if len(args) != (4 if bounded else 2) or type(args[1]) is not bool:
+        raise UnresolvedSolidGeometry("Invalid IFC half-space agreement or attributes")
+    plane, = _required_ifc_entity(entities, args[0], "IFCPLANE")
+    frame = _rigid_ifc_frame(entities, plane, unit_scale)
+    if bounded:
+        footprint_frame = _rigid_ifc_frame(entities, args[2], unit_scale)
+        boundary = _closed_polyline(entities, args[3], unit_scale)
+    if not len(host[0]):
+        return _EMPTY_CLIP
+    vertices = host[0]
+    local = (vertices - frame[:3, 3]) @ frame[:3, :3]
+    if not np.isfinite(local).all():
+        raise UnresolvedSolidGeometry("Nonfinite host projections")
+    material_z = -local[:, 2] if args[1] else local[:, 2]
+    if np.max(material_z) <= 0:
+        return host
+    if not bounded and np.min(material_z) >= 0:
+        return _EMPTY_CLIP
+    x0, x1 = _covering_interval(local[:, 0])
+    y0, y1 = _covering_interval(local[:, 1])
+    z0, z1 = _covering_interval(local[:, 2])
+    rectangle = np.array([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+    cutter = _finite_prism(frame, rectangle, z0 if args[1] else 0., 0. if args[1] else z1)
+    if bounded:
+        heights = (vertices - footprint_frame[:3, 3]) @ footprint_frame[:3, 2]
+        footprint = _finite_prism(footprint_frame, boundary, *_covering_interval(heights))
+        cutter = _boolean_meshes([cutter, footprint], "INTERSECTION", allow_empty=True)
+        if not len(cutter[0]):
+            return host
+    return _boolean_meshes([host, cutter], "DIFFERENCE", allow_empty=True)
+
+
+def _boolean_meshes(meshes, operator="UNION", *, allow_empty=False):
     """Combine closed material, retaining exact rectilinear source planes.
 
     Input triangles are the geometry being combined. A polygonal approximation
@@ -767,11 +826,13 @@ def _boolean_meshes(meshes, operator="UNION"):
             raise UnresolvedSolidGeometry("Boolean operand is not closed and consistently oriented")
     from hamon_rectilinear_boolean import rectilinear_boolean
     try:
-        exact = rectilinear_boolean(meshes, operator)
+        exact = rectilinear_boolean(meshes, operator, allow_empty=allow_empty)
     except ValueError as exc:
         raise UnresolvedSolidGeometry(str(exc)) from exc
     if exact is not None:
         vertices, faces = exact
+        if allow_empty and not len(vertices):
+            return _EMPTY_CLIP
         _, closed, coherent = _closed_surface_components(vertices, faces)
         if len(closed) != len(faces) or not coherent:
             raise UnresolvedSolidGeometry("rectilinear Boolean has a nonmanifold material contact")
@@ -809,6 +870,8 @@ def _boolean_meshes(meshes, operator="UNION"):
                 raise UnresolvedSolidGeometry("Boolean operand is not a valid oriented manifold")
             operands.append(solid)
         result = manifold3d.Manifold.batch_boolean(operands, operations[operator])
+        if allow_empty and result.status() == manifold3d.Error.NoError and result.is_empty():
+            return _EMPTY_CLIP
         if result.status() != manifold3d.Error.NoError or result.is_empty():
             raise UnresolvedSolidGeometry("Boolean produced no qualified bounded solid")
         output = result.to_mesh64()
@@ -1271,10 +1334,23 @@ def _extract_solid_item(entities: Dict[int, Tuple[str, List[Any]]], iref: Any, u
         operands = []
         issues = []
         for reference in args[1:]:
+            if operands and operator == "DIFFERENCE" and isinstance(reference, tuple) and reference[0] == "ref":
+                second_kind, fields = entities.get(reference[1], (None, []))
+                if second_kind in ("IFCHALFSPACESOLID", "IFCPOLYGONALBOUNDEDHALFSPACE"):
+                    return [_halfspace_difference(entities, second_kind, fields, unit_scale, operands[0])]
             pieces = _extract_solid_item(entities, reference, unit_scale, issues, active_items, advanced_mesh)
             if not pieces or issues:
                 raise UnresolvedSolidGeometry("unresolved physical Boolean operand")
-            operands.append(_boolean_meshes(pieces) if len(pieces) > 1 else pieces[0])
+            material = [piece for piece in pieces if len(piece[0])]
+            operands.append(_boolean_meshes(material) if len(material) > 1 else material[0] if material else _EMPTY_CLIP)
+        if any(not len(mesh[0]) for mesh in operands):
+            if operator == "UNION":
+                return [next((mesh for mesh in operands if len(mesh[0])), _EMPTY_CLIP)]
+            if operator == "INTERSECTION":
+                return [_EMPTY_CLIP]
+            if operator == "DIFFERENCE":
+                return [operands[0]]
+            raise UnresolvedSolidGeometry("Invalid Boolean operator")
         return [_boolean_meshes(operands, operator)]
     if itype == "IFCEXTRUDEDAREASOLID" and len(args) >= 4:
         outer, inner, prof_mat = _profile_polygons_2d(entities, args[0], unit_scale)
