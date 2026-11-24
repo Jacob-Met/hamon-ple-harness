@@ -20,6 +20,19 @@ jobs:
           cache: npm
       - name: Install the actual registered tool runtime
         run: npm ci --no-fund --no-audit
+      - name: Compare buildingSMART mapped washbasin exchanges in millimetres
+        run: |
+          base="https://raw.githubusercontent.com/buildingSMART/IFC4.x-specification-models/ef22440ec501551ccc9689309560bbc7e26aa9d7/models/advanced-geometric-shape"
+          dir="$RUNNER_TEMP/basins"
+          mkdir -p "$dir"
+          for kind in advanced-brep faceted-brep tessellation; do
+            curl --fail --silent --show-error --location --retry 2 --max-time 30 \
+              "$base/basin-$kind/basin-$kind.ifc" --output "$dir/basin-$kind.ifc"
+          done
+          test "$(git hash-object "$dir/basin-advanced-brep.ifc")" = becc55dc6fba01ac0f18fd255e5da5690818905e
+          test "$(git hash-object "$dir/basin-faceted-brep.ifc")" = 76ca071903af7e07e428e5ab57304e4c75dcc984
+          test "$(git hash-object "$dir/basin-tessellation.ifc")" = f1e80e0d8452eb9d63f3f3fc8438f0d0a5e3c76d
+          PLE_ANNEX_E_BASINS="$dir" python -m unittest discover -s tests -p test_ifc_annex_basin.py -v
       - name: buildingSMART Annex E curved BRep with independently integrated volume
         run: |
           curl --fail --silent --show-error --location --retry 2 --max-time 30 \
