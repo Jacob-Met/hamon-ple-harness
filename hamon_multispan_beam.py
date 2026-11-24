@@ -150,6 +150,12 @@ def _certify(x, loads, rigidities, levels, active, bilateral, v, rotations, reac
 
 
 def solve_multispan(spec):
+    inputs = {"spans_m", "udl_N_m", "span_EI_Nm2", "point_loads", "support_conditions", "support_settlements_m"}
+    unexpected = spec.keys() - inputs - {"mode", "calculation"}
+    if unexpected:
+        raise ValueError("unexpected multi-span fields: " + ", ".join(sorted(unexpected)))
+    if spec.get("calculation", "continuous_beam_multispan") != "continuous_beam_multispan":
+        raise ValueError("conflicting multi-span calculation")
     for name in ("spans_m","udl_N_m","span_EI_Nm2"):
         if not isinstance(spec.get(name), list):
             raise ValueError(f"{name} must be a per-span array")

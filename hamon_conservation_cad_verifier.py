@@ -1347,9 +1347,6 @@ def verify_structural_mechanics(spec: Dict[str, Any]) -> Dict[str, Any]:
         return unsupported("this calculation cannot apply these support specifications")
     if calculation in ("diaphragm_membrane", "continuous_beam_2span", "continuous_beam_multispan"):
         if calculation == "continuous_beam_multispan":
-            allowed = multispan_fields | {"mode", "calculation", "support_conditions", "support_settlements_m"}
-            if spec.keys() - allowed:
-                return unsupported("unexpected multi-span fields: " + ", ".join(sorted(spec.keys() - allowed)))
             from hamon_multispan_beam import solve_multispan as solve
         elif calculation == "diaphragm_membrane":
             from hamon_diaphragm import solve_diaphragm as solve

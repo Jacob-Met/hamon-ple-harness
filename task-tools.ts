@@ -369,7 +369,7 @@ function _registerPleWave3DomainTools(pi: any) {
         if (Object.keys(params).some((key) => key !== "mode")) {
           throw new Error("Request the engineering reference with mode alone.");
         }
-        return { content: [{ type: "text", text: engineeringSolver.description }], details: { mode: "reference" } };
+        return { content: [{ type: "text", text: engineeringSolver.description + " The FEM family also accepts spec.mode=continuous_beam_multispan with the same signed loads, seats and settlements." }], details: { mode: "reference" } };
       }
       return engineeringSolver.execute(id, params);
     },
