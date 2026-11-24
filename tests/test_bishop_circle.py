@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 
 from hamon_bishop_circle import verify_bishop_circle
@@ -89,6 +90,20 @@ class BishopTests(unittest.TestCase):
         self.assertLess(out[1]["factor_of_safety"], out[0]["factor_of_safety"])
         self.assertTrue(out[3]["ok"])
         self.assertFalse(out[3]["conservation_verified"])
+
+    def test_real_dual_verify_cli(self):
+        spec = circle([slice_data(-6, -4, 1000, 120, 30, 95)])
+        with tempfile.TemporaryDirectory() as temp:
+            file = Path(temp) / "slope.json"
+            for proposed, expected in ((1.299, False), (None, True)):
+                inputs = dict(spec)
+                if proposed is not None:
+                    inputs["proposed_factor_of_safety"] = proposed
+                file.write_text(json.dumps(dict(kind="bishop_slip_circle", spec=inputs)))
+                proc = subprocess.run([sys.executable, str(ROOT/"engineering_toolkit.py"), "dual-verify", str(file)],
+                                      capture_output=True, text=True, cwd=ROOT, timeout=60)
+                result = json.loads(proc.stdout)
+                self.assertEqual(result["dual_verified"], expected, result)
 
     def test_signed_forces_and_moments_across_uphill_toe(self):
         factor = 1.37
