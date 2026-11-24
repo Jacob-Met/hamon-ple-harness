@@ -1,62 +1,42 @@
-name: Cold specified Bishop circle
+name: Link the completed Bishop verification
 on:
   push:
     branches: ["dfab0b0b/cold-bishop-475"]
 permissions:
   contents: read
+  actions: read
+  statuses: write
 jobs:
-  registered-equilibrium:
+  publish-result:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
-    env:
-      OPENBLAS_NUM_THREADS: "1"
-      OMP_NUM_THREADS: "1"
+    timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: fda29d601c55a7705f814784e64d4d553d4c5800
-          fetch-depth: 2
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Install locked Pi runtime and compare stock and candidate endpoints
+      - name: Link the original cold run to its tested source
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git worktree add --detach "$RUNNER_TEMP/stock" ea1039b479abf763cd3e623d0690697c78699d5f
-          cmp package-lock.json "$RUNNER_TEMP/stock/package-lock.json"
-          npm ci --no-fund --no-audit
-          ln -s "$PWD/node_modules" "$RUNNER_TEMP/stock/node_modules"
-          python -m pip install -q -r requirements.txt
-          python -m unittest discover -v -s tests -p test_bishop_circle.py
-          export STOCK_DIR="$RUNNER_TEMP/stock"
-          PYTHONPATH="$PWD/tests:$PWD" python - <<'PY'
-          from pathlib import Path
-          import json, math, os
-          import test_bishop_circle as b
-          dry = b.circle([b.slice_data(-6,-4,1000,120,30,0)])
-          wet = b.circle([b.slice_data(-6,-4,1000,120,30,95)])
-          pole=1/math.sqrt(3)
-          specs=[dry, wet, b.manufactured(1.37)[0],
-                 b.manufactured(pole+1e-5,True)[0], b.manufactured(pole+1e-15,True)[0],
-                 b.circle([b.slice_data(-6,-4,1000,300,30,500)]), b.circle(dry['slices'],'left'),
-                 dict(wet,proposed_factor_of_safety=1.70)]
-          payloads=[dict(mode='civil_geotech',spec=s) for s in specs]
-          current=b.registered(payloads)
-          b.ROOT=Path(os.environ['STOCK_DIR'])
-          old=b.registered(payloads[:1])
-          assert not old[0]['ok'] and not old[0]['conservation_verified'],old
-          assert [x['conservation_verified'] for x in current]==[True,True,True,True,False,False,False,False],current
-          data=dict(base='ea1039b479abf763cd3e623d0690697c78699d5f', source='fda29d601c55a7705f814784e64d4d553d4c5800', cases=payloads,
-                    baseline=old,candidate=current)
-          Path('bishop-evidence.json').write_text(json.dumps(data,allow_nan=False))
-          for x in old+current:
-              print({k:v for k,v in x.items() if k in ('ok','conservation_verified','factor_of_safety','equilibrium_rel_residual','reason')})
+          python3 - <<'PY'
+          import json, os, time, urllib.request
+          api="https://api.github.com/repos/Jacob-Met/hamon-ple-harness"
+          headers={"Authorization":"Bearer "+os.environ["GH_TOKEN"],"Accept":"application/vnd.github+json"}
+          def request(path,payload=None):
+              raw=None if payload is None else json.dumps(payload).encode()
+              req=urllib.request.Request(api+path,data=raw,headers=headers)
+              with urllib.request.urlopen(req,timeout=15) as response:
+                  return json.load(response)
+          for _ in range(12):
+              rows=request("/actions/runs?head_sha=338dab3e7874cae1364d2fb61217bbfa0218aa6e")["workflow_runs"]
+              matches=[r for r in rows if r["name"]=="Cold specified Bishop circle" and r["head_sha"]=="338dab3e7874cae1364d2fb61217bbfa0218aa6e"]
+              if len(matches)==1 and matches[0]["status"]=="completed":
+                  break
+              time.sleep(6)
+          else:
+              raise RuntimeError("Original source verification has not completed")
+          run=matches[0]
+          state="success" if run["conclusion"]=="success" else "failure"
+          request("/statuses/fda29d601c55a7705f814784e64d4d553d4c5800",dict(state=state,context="Bishop / pinned cold reconstruction",
+                  description="Original stock-versus-candidate registered-tool and force-equilibrium course",
+                  target_url=run["html_url"]))
+          print(run["html_url"],run["conclusion"])
           PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: specified-circle-registered-evidence
-          path: bishop-evidence.json
