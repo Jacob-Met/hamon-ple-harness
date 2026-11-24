@@ -810,8 +810,12 @@ def _fin_presolve(instruction, inventory, mcp_server_count, deliverable_count):
     if len(instruction) > 12000 or len(lines) < 3 or lines[0] != "```wave5_spec" or lines[-1] != "```":
         return None, "expected one complete wave5_spec fence"
     try:
-        spec = json.loads("\n".join(lines[1:-1]), object_pairs_hook=_unique_keys)
-        if not isinstance(spec, dict) or spec.get("mode") != "convective_fin_1d":
+        source_spec = json.loads("\n".join(lines[1:-1]), parse_float=Decimal, object_pairs_hook=_unique_keys)
+        if not isinstance(source_spec, dict):
+            return None, "unsupported structured calculation"
+        spec = {key: float(value) if isinstance(value, Decimal) else value
+                for key, value in source_spec.items()}
+        if spec.get("mode") != "convective_fin_1d":
             return None, "unsupported structured calculation"
         if spec.get("tip_bc") not in ("adiabatic", "convective"):
             return None, "unsupported or missing fin tip boundary"
@@ -825,13 +829,32 @@ def _fin_presolve(instruction, inventory, mcp_server_count, deliverable_count):
                 return None, "expected finite numeric fin inputs"
         if not 0 <= spec.get("x_eval_m", spec["length_m"]) <= spec["length_m"]:
             return None, "evaluation point outside fin"
-        result = verify_wave5_engineering(spec)
+        # Heat flow is driven by a temperature difference, not the absolute
+        # temperature datum. Preserve the decimal subtraction in the request,
+        # then round its difference once for the physical solver.
+        temperatures = [source_spec[k] for k in ("t_base_c", "t_inf_c")]
+        if any(value and float(value) == 0.0 for value in temperatures):
+            return None, "source temperature outside the finite solver range"
+        base, ambient = map(Fraction, temperatures)
+        exact_drive = base - ambient
+        drive = float(exact_drive)
+        if not math.isfinite(drive) or (exact_drive and drive == 0.0):
+            return None, "source temperature difference outside the finite solver range"
+        recenter = drive != float(spec["t_base_c"]) - float(spec["t_inf_c"])
+        physical = {**spec, "t_base_c": drive, "t_inf_c": 0.0} if recenter else spec
+        result = verify_wave5_engineering(physical)
         if result.get("passed") is not True:
             return None, "physical solver or finite-volume cross-check refused"
         q, fv = result["q_fin_w"], result["q_fvm_w"]
         # Do not normalize tiny fluxes by the verifier's absolute near-zero floor.
-        if not math.isclose(q, fv, rel_tol=1e-3, abs_tol=0.0):
+        if (exact_drive and (q == 0.0 or fv == 0.0)) or not math.isclose(q, fv, rel_tol=1e-3, abs_tol=0.0):
             return None, "analytic and finite-volume flux disagree"
+        if recenter:
+            # Only the two absolute temperature outputs need their datum back.
+            result = dict(result)
+            for key in ("t_eval_c", "t_tip_c"):
+                result[key] = float(ambient + Fraction(result[key]))
+            result["source_temperature_difference_K"] = str(exact_drive)
         return json.dumps(result, allow_nan=False, separators=(",", ":")), None
     except (ArithmeticError, ValueError, KeyError, TypeError, RecursionError):
         return None, "malformed or numerically unverifiable fin request"
