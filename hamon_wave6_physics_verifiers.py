@@ -653,6 +653,76 @@ def _passive_acoustic_interface(params: Mapping[str, Any]) -> Dict[str, Any]:
         return {**result, "error": str(exc)}
 
 
+def _unchoked_cd_nozzle(params, gamma, r_gas):
+    """Match exit static pressure, then conserve mass along the subsonic branch."""
+    out = {"domain": "compressible_acoustics", "subkind": "cd_nozzle_subsonic", "verified": False}
+    allowed = {"domain", "subkind", "gamma", "R", "cp", "exit_to_throat_area",
+               "back_to_total_pressure", "station_areas_over_throat"}
+
+    def number(value):
+        if type(value) not in (float, int) or not math.isfinite(value) or value <= 0:
+            raise ValueError("Require positive finite JSON numbers")
+        return Decimal(value)
+
+    try:
+        if params.keys() - allowed:
+            raise ValueError("Unexpected unchoked nozzle inputs")
+        for key in ("gamma", "R", "cp"):
+            if key in params:
+                number(params[key])
+        gas_gamma, _, _ = _ideal_gas_constants(params, gamma, r_gas, "Subsonic CD nozzle")
+        area = number(params["exit_to_throat_area"])
+        back = number(params["back_to_total_pressure"])
+        stations = params.get("station_areas_over_throat", [])
+        if not isinstance(stations, list):
+            raise ValueError("station_areas_over_throat must be an array")
+        stations = [number(station) for station in stations]
+        if area <= 1 or back >= 1 or any(station < 1 for station in stations):
+            raise ValueError("Require an expanded exit, areas at least the throat, and back pressure below reservoir")
+
+        with localcontext() as ctx:
+            ctx.prec = 85
+            g = Decimal(gas_gamma.numerator) / Decimal(gas_gamma.denominator)
+            half = (g - 1) / 2
+            k = g / (g - 1)
+            exit_mach_squared = ((-back.ln() / k).exp() - 1) / half
+            if exit_mach_squared >= 1:
+                return dict(out, regime="no_strictly_subsonic_solution")
+            me = exit_mach_squared.sqrt()
+            # A* is the virtual sonic area for this mass flow. Setting it to
+            # the physical throat would incorrectly impose choking.
+            star = area * (-_isentropic_log_area(me, g)).exp()
+            if star >= 1:
+                return dict(out, regime="no_strictly_subsonic_solution")
+            if not 0 < float(star) < 1:
+                return dict(out, regime="unresolved_boundary")
+            reference_flux = area * back * me * (1 + half * me**2).sqrt()
+            residual = Decimal(0)
+            rows = {}
+            for ratio in dict.fromkeys([Decimal(1), area, *stations]):
+                mach = _nozzle_area_mach(ratio / star, g, "subsonic")
+                if not 0 < mach < 1:
+                    return dict(out, regime="unresolved_boundary")
+                m = Decimal.from_float(mach)
+                t = float(1 / (1 + half * m**2))
+                p = float((-k * (1 + half * m**2).ln()).exp())
+                if t <= 0 or p <= 0:
+                    return dict(out, regime="unrepresentable_state")
+                temp, press = Decimal(t), Decimal(p)
+                mass = ratio * press * m / temp.sqrt()
+                residual = max(residual, abs(mass / reference_flux - 1),
+                               abs(temp * (1 + half * m**2) - 1),
+                               abs(press / (temp.ln() * k).exp() - 1))
+                rows[ratio] = {"area_over_throat": float(ratio), "mach": mach,
+                               "p_over_total": p, "T_over_total": t}
+            residual = max(residual, abs(Decimal(rows[area]["p_over_total"]) / back - 1))
+            return dict(out, regime="unchoked_subsonic", verified=residual < Decimal("1e-10"),
+                        virtual_sonic_area_over_throat=float(star), throat=rows[1], exit=rows[area],
+                        stations=[rows[station] for station in stations], residual=float(residual))
+    except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
+        return dict(out, error=str(exc))
+
+
 def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any]:
     """Deterministic solver for 1D compressible gas dynamics & acoustic systems."""
     subkind = str(params.get("subkind", "isentropic")).strip().lower()
@@ -661,6 +731,9 @@ def solve_compressible_gas_acoustics(params: Mapping[str, Any]) -> Dict[str, Any
 
     if subkind == "isentropic":
         return _isentropic_nozzle(params, gamma, r_gas)
+
+    if subkind == "cd_nozzle_subsonic":
+        return _unchoked_cd_nozzle(params, gamma, r_gas)
 
     if subkind == "cd_nozzle_shock":
         from hamon_cd_nozzle_shock import internal_shock
