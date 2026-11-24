@@ -26,3 +26,7 @@ verify-pipe-meshes:
 .PHONY: verify-drainage-front
 verify-drainage-front:
 	OPENBLAS_NUM_THREADS=1 $(PYTHON) -m pytest -q tests/test_consolidation_front.py tests/test_layered_consolidation_transient.py
+
+.PHONY: verify-workbook-units
+verify-workbook-units:
+	$(PYTHON) -m unittest discover -s tests -p 'test_xlsx*.py' -v
