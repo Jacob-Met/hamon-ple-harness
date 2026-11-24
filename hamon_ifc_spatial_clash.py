@@ -1834,7 +1834,17 @@ def _physical_occurrences(solids, entities, unit_scale, related, empty=None):
                 local = (component.vertices - frame[:3, 3]) @ frame[:3, :3]
                 _box_bounds(local, component.faces)
         except UnresolvedOpening:
-            meshes = [(s.vertices, s.faces) for s in [material, *openings]]
+            meshes = [(material.vertices, material.faces)]
+            for opening in openings:
+                counts = opening.material_face_counts or (len(opening.faces),)
+                if any(count <= 0 for count in counts) or sum(counts) != len(opening.faces):
+                    raise UnresolvedOpening("Incomplete opening Body item boundaries")
+                start = 0
+                for count in counts:
+                    faces = opening.faces[start:start + count]
+                    indices, local = np.unique(faces, return_inverse=True)
+                    meshes.append((opening.vertices[indices], local.reshape(faces.shape)))
+                    start += count
             vertices, faces = _boolean_meshes(meshes, "DIFFERENCE", allow_empty=True)
             by_step[host] = None if not len(faces) else SolidMesh3D(
                 material.element_id, material.ifc_type, material.name, material.discipline,

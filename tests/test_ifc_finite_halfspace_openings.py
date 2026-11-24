@@ -130,6 +130,18 @@ class PolygonClipTests(unittest.TestCase):
         solid, = scene.solids()
         self.assertAlmostEqual(solid.volume_m3(), 8. - .5 * 1.6**2 * 2., places=10)
 
+    def test_face_sharing_items_in_one_opening_are_distinct_cutters(self):
+        scene = Source()
+        host = scene.product("IFCWALL", [scene.box()])
+        cutters = []
+        for left, right in ((-.8, 0.), (0., .8)):
+            ring = scene.ring([(left, -.5), (right, -.5), (right, .5), (left, .5)])
+            profile = scene.add(f"IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#{ring})")
+            cutters.append(scene.prism(profile, 1.))
+        scene.void(host, scene.product("IFCOPENINGELEMENT", cutters))
+        wall, = scene.solids()
+        self.assertAlmostEqual(wall.volume_m3(), 6.4, places=10)
+
     def test_open_and_nonnumeric_opening_inputs_refuse_the_host(self):
         for damage in ("open-ring", "ring-coordinate", "depth", "direction", "dimension"):
             for invalid in (".T.", "'1.'"):
