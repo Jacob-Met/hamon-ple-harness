@@ -209,7 +209,12 @@ def _interslice_thrust(rows, details, spec, seed):
             indeterminate.append(ids)
         faces.append(dict(between_slice_ids=ids, total_thrust_N_m=force, sign=sign,
                           sign_tolerance_N_m=tolerance, total_thrust_interval_N_m=[lo, hi]))
-    return dict(slice_order=order, factor_of_safety_interval=root, interfaces=faces,
+    # A separately enclosed root also qualifies the published binary64 factor.
+    # Fraction keeps this comparison meaningful for subnormal factors.
+    stated = Fraction(seed)
+    root_agrees = all(abs(stated-Fraction(bound)) <= Fraction(1e-10)*stated for bound in root)
+    return dict(slice_order=order, factor_of_safety_interval=root,
+                factor_of_safety_replay_verified=root_agrees, interfaces=faces,
                 tensile_interfaces=tensile, indeterminate_interfaces=indeterminate,
                 max_relative_interslice_replay_error=max_error,
                 interslice_force_balance_verified=max_error <= 1e-10,
@@ -317,7 +322,12 @@ def _solve(spec):
             out.update(slice_order=spec["slice_order"], interfaces=[], tensile_interfaces=[],
                        indeterminate_interfaces=[], interslice_force_balance_verified=False,
                        interslice_compression_verified=False, interval_replay_error=str(exc))
-        verified = verified and out["interslice_compression_verified"]
+        if "proposed_factor_of_safety" in spec and "factor_of_safety_interval" in out:
+            consistent = consistent and all(math.isclose(spec["proposed_factor_of_safety"], bound, rel_tol=1e-7)
+                                            for bound in out["factor_of_safety_interval"])
+            out["proposed_factor_consistent"] = consistent
+        verified = (verified and consistent and out["interslice_compression_verified"]
+                    and out.get("factor_of_safety_replay_verified", False))
         out["scope"] = ("Specified ordered slice table, free ends, total horizontal interslice forces, "
                         "and uncorrected simplified Janbu. Effective side pressure, thrust-line "
                         "location, moment equilibrium, geometry and critical surface remain unverified.")
@@ -333,6 +343,8 @@ def _solve(spec):
         out["reason"] = "Proposed factor does not match the computed factor"
     elif "slice_order" in spec and not out["interslice_force_balance_verified"]:
         out["reason"] = out.get("interval_replay_error", "Opposite free-body reconstructions disagree")
+    elif out.get("factor_of_safety_replay_verified") is False:
+        out["reason"] = "The ordinary safety factor disagrees with the independently enclosed root"
     elif out.get("tensile_interfaces"):
         out["reason"] = "Ordered slices require tensile total interslice thrust"
     elif out.get("indeterminate_interfaces"):
